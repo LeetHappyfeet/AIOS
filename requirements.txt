@@ -3,3 +3,8 @@ uvicorn[standard]==0.32.1
 asyncpg==0.30.0
 pydantic==2.10.3
 python-dotenv==1.0.1
+requests
+selenium
+beautifulsoup4
+lxml
+gradio

@@ -1,6 +1,4 @@
-# =================================================
-# dag.py — timeline + DAG helpers (FIXED)
-# =================================================
+# aios/dag.py
 
 from uuid import UUID
 from typing import Optional, Dict, Any, Tuple
@@ -15,6 +13,7 @@ from .db import Database
 async def get_or_create_timeline(
     db: Database,
     *,
+    world_id: UUID,
     session_id: UUID,
     character_id: str,
     user_name: Optional[str],
@@ -22,7 +21,7 @@ async def get_or_create_timeline(
     meta: Optional[Dict[str, Any]] = None,
 ) -> UUID:
     """
-    One timeline per (session, character, user, scope).
+    One timeline per (world, session, character, user, scope).
     """
 
     meta_json = json.dumps(meta or {})
@@ -31,13 +30,15 @@ async def get_or_create_timeline(
         """
         SELECT timeline_id
         FROM aios.timeline
-        WHERE session_id = $1
-          AND character_id = $2
-          AND user_name IS NOT DISTINCT FROM $3
-          AND scope_key = $4
+        WHERE world_id = $1
+          AND session_id = $2
+          AND character_id = $3
+          AND user_name IS NOT DISTINCT FROM $4
+          AND scope_key = $5
         ORDER BY created_at DESC
         LIMIT 1
         """,
+        world_id,
         session_id,
         character_id,
         user_name,
@@ -50,15 +51,17 @@ async def get_or_create_timeline(
     created = await db.execute_returning_row(
         """
         INSERT INTO aios.timeline (
+            world_id,
             session_id,
             character_id,
             user_name,
             scope_key,
             meta
         )
-        VALUES ($1, $2, $3, $4, $5::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb)
         RETURNING timeline_id
         """,
+        world_id,
         session_id,
         character_id,
         user_name,
@@ -72,10 +75,7 @@ async def get_or_create_timeline(
 # DAG node helpers
 # -------------------------------------------------
 
-async def get_last_node_id(
-    db: Database,
-    timeline_id: UUID,
-) -> Optional[UUID]:
+async def get_last_node_id(db: Database, timeline_id: UUID) -> Optional[UUID]:
     row = await db.fetchrow(
         """
         SELECT node_id
@@ -86,7 +86,6 @@ async def get_last_node_id(
         """,
         timeline_id,
     )
-
     return row["node_id"] if row else None
 
 
@@ -103,12 +102,7 @@ async def add_node_and_edge(
     payload: Dict[str, Any],
     edge_type: str = "next",
 ) -> Tuple[UUID, Optional[UUID]]:
-    """
-    Insert a DAG node and sequential edge.
-    """
-
     payload_json = json.dumps(payload or {})
-
     parent_node_id = await get_last_node_id(db, timeline_id)
 
     node_row = await db.execute_returning_row(

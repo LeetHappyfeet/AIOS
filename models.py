@@ -3,7 +3,12 @@ from typing import Any, Dict, List, Optional, Literal
 from uuid import UUID
 
 
+# -------------------------------------------------
+# Enums / Literals
+# -------------------------------------------------
+
 ActorType = Literal["user", "character", "agent", "system", "tool"]
+
 EventKind = Literal[
     "chat_message",
     "heartbeat",
@@ -15,6 +20,10 @@ EventKind = Literal[
     "other",
 ]
 
+
+# -------------------------------------------------
+# Session models
+# -------------------------------------------------
 
 class SessionCreate(BaseModel):
     topic: str = ""
@@ -28,8 +37,13 @@ class SessionOut(BaseModel):
     topic: str
 
 
+# -------------------------------------------------
+# Ingest models
+# -------------------------------------------------
+
 class IngestIn(BaseModel):
     session_id: UUID
+
     speaker_id: Optional[str] = None
     speaker_type: Optional[ActorType] = None
     recipient_id: Optional[str] = None
@@ -40,10 +54,10 @@ class IngestIn(BaseModel):
     text: str
     kind: Optional[EventKind] = "chat_message"
 
-    # raw "extra" fields; you can pass anything here and it lands in payload jsonb
+    # raw "extra" fields; lands in payload jsonb
     payload: Dict[str, Any] = Field(default_factory=dict)
 
-    # optional for stable dedupe (recommended)
+    # optional for stable dedupe
     dedupe_key: Optional[str] = None
 
     # optional: group chat, world instance, etc.
@@ -53,9 +67,13 @@ class IngestIn(BaseModel):
 class IngestOut(BaseModel):
     ok: bool
     event_id: int
-    node_id: int
+    node_id: UUID          # ✅ FIXED
     timeline_id: UUID
 
+
+# -------------------------------------------------
+# Memory models
+# -------------------------------------------------
 
 class MemoryMatch(BaseModel):
     content: str

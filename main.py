@@ -1,23 +1,28 @@
-from fastapi import FastAPI, HTTPException
-from typing import Optional, Dict, Any
-from fastapi.middleware.cors import CORSMiddleware
+# aios_app/main.py
+
+from __future__ import annotations
+
 import json
+import logging
+from typing import Optional, Dict, Any
+
+import anyio
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .db import Database
-from .models import (
-    SessionCreate, SessionOut,
-    IngestIn, IngestOut,
-    MemoryOut,
-)
+from .models import SessionCreate, SessionOut, IngestIn, IngestOut, MemoryOut
 from .dag import get_or_create_timeline, add_node_and_edge
 from .memory import recent_nodes_as_memory, pick_latest_timeline_for_character
 
+from .rdf.fuseki import FusekiClient
+from .rdf.character_writer import CharacterWriteContext, write_character_event
+
+logger = logging.getLogger("aios.main")
+
 app = FastAPI(title="AIOS MemoryVault", version="0.1.0")
 
-# -------------------------------------------------
-# CORS (browser + SillyTavern safe)
-# -------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,27 +33,48 @@ app.add_middleware(
 
 db = Database(settings.db_dsn)
 
-# -------------------------------------------------
-# Lifecycle
-# -------------------------------------------------
+fuseki = FusekiClient(
+    settings.fuseki_url,
+    timeout=settings.fuseki_timeout,
+    retries=settings.fuseki_retries,
+)
+
+
+async def get_or_create_world_id(world_key: str):
+    row = await db.fetchrow(
+        "SELECT world_id FROM aios.world WHERE world_key = $1",
+        world_key,
+    )
+    if row:
+        return row["world_id"]
+
+    created = await db.execute_returning_row(
+        """
+        INSERT INTO aios.world (world_key, meta)
+        VALUES ($1, $2::jsonb)
+        RETURNING world_id
+        """,
+        world_key,
+        json.dumps({"type": "auto", "description": "Auto-created world stub"}),
+    )
+    return created["world_id"]
+
+
 @app.on_event("startup")
 async def startup() -> None:
     await db.connect()
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
     await db.close()
 
-# -------------------------------------------------
-# Health
-# -------------------------------------------------
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
 
-# -------------------------------------------------
-# Session
-# -------------------------------------------------
+
 @app.post("/session", response_model=SessionOut)
 async def create_session(req: SessionCreate) -> SessionOut:
     source = req.source or settings.source_name
@@ -64,38 +90,28 @@ async def create_session(req: SessionCreate) -> SessionOut:
         req.topic,
         json.dumps(req.meta or {}),
     )
+    return SessionOut(session_id=row["session_id"], topic=row["topic"])
 
-    return SessionOut(
-        session_id=row["session_id"],
-        topic=row["topic"],
-    )
 
-# -------------------------------------------------
-# Ingest
-# -------------------------------------------------
 @app.post("/ingest", response_model=IngestOut)
 async def ingest(req: IngestIn) -> IngestOut:
     scope_key = req.scope_key or settings.default_scope
 
-    # ✅ Normalize message text (CRITICAL FIX)
-    if isinstance(req.text, dict):
-        message_text = json.dumps(req.text)
-    else:
-        message_text = str(req.text)
+    message_text = json.dumps(req.text) if isinstance(req.text, dict) else str(req.text)
 
-    # Build payload (raw, lossless)
     payload: Dict[str, Any] = dict(req.payload or {})
-    payload.update({
-        "text": req.text,
-        "character_id": req.character_id,
-        "user_name": req.user_name,
-        "speaker_type": req.speaker_type,
-        "speaker_id": req.speaker_id,
-        "recipient_id": req.recipient_id,
-        "scope_key": scope_key,
-    })
+    payload.update(
+        {
+            "text": req.text,
+            "character_id": req.character_id,
+            "user_name": req.user_name,
+            "speaker_type": req.speaker_type,
+            "speaker_id": req.speaker_id,
+            "recipient_id": req.recipient_id,
+            "scope_key": scope_key,
+        }
+    )
 
-    # Dedupe key
     dedupe_key = req.dedupe_key or f"{req.session_id}::{req.speaker_type}::{hash(message_text)}"
 
     try:
@@ -137,26 +153,31 @@ async def ingest(req: IngestIn) -> IngestOut:
             req.recipient_id,
             req.character_id,
             req.user_name,
-            message_text,                 # ✅ string
-            json.dumps(payload),          # ✅ jsonb
+            message_text,
+            json.dumps(payload),
             dedupe_key,
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Insert ingest_event failed: {e}",
-        )
+        raise HTTPException(status_code=400, detail=f"Insert ingest_event failed: {e}")
 
     event_id = int(ev["event_id"])
 
-    # Timeline
+    # World resolution
+    world_key = payload.get("world_key") or settings.default_world_key
+    try:
+        world_id = await get_or_create_world_id(world_key)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"World resolution failed: {e}")
+
+    # Timeline (conflict-safe; name derived from character/user/scope)
     timeline_id = await get_or_create_timeline(
         db,
+        world_id=world_id,
         session_id=req.session_id,
         character_id=req.character_id,
         user_name=req.user_name,
         scope_key=scope_key,
-        meta={"source": settings.source_name},
+        meta={"source": settings.source_name, "world_key": world_key},
     )
 
     # DAG node
@@ -185,16 +206,31 @@ async def ingest(req: IngestIn) -> IngestOut:
         event_id,
     )
 
-    return IngestOut(
-        ok=True,
-        event_id=event_id,
-        node_id=node_id,
+    # RDF write (non-fatal) – run in worker thread so we never block the loop
+    ctx = CharacterWriteContext(
+        dataset=settings.fuseki_character_dataset,
+        character_id=req.character_id,
+        world_id=world_id,
         timeline_id=timeline_id,
+        node_id=node_id,
+        event_id=event_id,
+        speaker_type=req.speaker_type,
+        speaker_id=req.speaker_id,
+        recipient_id=req.recipient_id,
+        message_text=message_text,
+        payload=payload,
     )
 
-# -------------------------------------------------
-# Memory
-# -------------------------------------------------
+    try:
+        ok = await anyio.to_thread.run_sync(write_character_event, fuseki, ctx)
+        if not ok:
+            logger.warning("RDF write failed (non-fatal); janitor can repair later")
+    except Exception:
+        logger.warning("RDF write raised unexpectedly (non-fatal)", exc_info=True)
+
+    return IngestOut(ok=True, event_id=event_id, node_id=node_id, timeline_id=timeline_id)
+
+
 @app.get("/memory", response_model=MemoryOut)
 async def memory(
     character: str,
@@ -215,13 +251,5 @@ async def memory(
     if not timeline_id:
         return MemoryOut(timeline_id=None, vector_matches=[])
 
-    matches = await recent_nodes_as_memory(
-        db,
-        timeline_id=timeline_id,
-        limit=limit,
-    )
-
-    return MemoryOut(
-        timeline_id=timeline_id,
-        vector_matches=matches,
-    )
+    matches = await recent_nodes_as_memory(db, timeline_id=timeline_id, limit=limit)
+    return MemoryOut(timeline_id=timeline_id, vector_matches=matches)
