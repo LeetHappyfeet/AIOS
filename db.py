@@ -1,3 +1,4 @@
+import json
 import asyncpg
 from typing import Optional, Any, Dict, List
 from uuid import UUID
@@ -36,3 +37,55 @@ class Database:
         assert self.pool
         async with self.pool.acquire() as con:
             return await con.fetchrow(sql, *args)
+
+    async def create_ingest_event(
+        self,
+        *,
+        source: str,
+        source_event_id: str,
+        kind: str,
+        payload: Optional[Dict[str, Any]] = None,
+        dedupe_key: Optional[str] = None,
+    ) -> int:
+        payload = payload or {}
+        dedupe_key = dedupe_key or f"{source}:{source_event_id}:{kind}"
+
+        row = await self.execute_returning_row(
+            """
+            INSERT INTO aios.ingest_event (
+                source,
+                source_event_id,
+                kind,
+                session_id,
+                speaker_id,
+                speaker_role,
+                recipient_id,
+                character_id,
+                user_name,
+                message_text,
+                payload,
+                dedupe_key
+            )
+            VALUES (
+                $1,
+                $2,
+                $3::aios.event_kind,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                $4::jsonb,
+                $5
+            )
+            RETURNING event_id
+            """,
+            source,
+            source_event_id,
+            kind,
+            json.dumps(payload),
+            dedupe_key,
+        )
+        return int(row["event_id"])
