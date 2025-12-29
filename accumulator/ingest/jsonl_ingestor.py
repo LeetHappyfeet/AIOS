@@ -68,7 +68,7 @@ class JSONLDAGIngestor:
 
         document_id = uuid4()
 
-        self.db.execute_sync(
+        await self.db.execute(
             """
             INSERT INTO aios.source_document (
                 document_id,
@@ -110,10 +110,16 @@ class JSONLDAGIngestor:
         # Insert document node
         # -------------------------------------------------
 
+        doc_event_id = await self._create_ingest_event(
+            record,
+            kind="document",
+            url=url,
+        )
+
         doc_node_id, _ = await add_node_and_edge(
             self.db,
             timeline_id=timeline_id,
-            event_id=self._event_id(),
+            event_id=doc_event_id,
             kind="document",
             speaker_id=None,
             speaker_role=None,
@@ -132,10 +138,17 @@ class JSONLDAGIngestor:
 
         parent = doc_node_id
         for idx, text in enumerate(paragraphs):
+            paragraph_sha = self._sha(text)
+            paragraph_event_id = await self._create_ingest_event(
+                record,
+                kind="paragraph",
+                url=url,
+                suffix=f"paragraph:{idx}:{paragraph_sha}",
+            )
             node_id, _ = await add_node_and_edge(
                 self.db,
                 timeline_id=timeline_id,
-                event_id=self._event_id(),
+                event_id=paragraph_event_id,
                 kind="paragraph",
                 speaker_id=None,
                 speaker_role=None,
@@ -144,7 +157,7 @@ class JSONLDAGIngestor:
                 payload={
                     "document_id": str(document_id),
                     "paragraph_index": idx,
-                    "paragraph_sha256": self._sha(text),
+                    "paragraph_sha256": paragraph_sha,
                 },
             )
             parent = node_id
@@ -165,8 +178,29 @@ class JSONLDAGIngestor:
     def _sha(self, text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def _event_id(self) -> int:
-        return self.db.next_event_id_sync()
+    async def _create_ingest_event(
+        self,
+        record: dict,
+        *,
+        kind: str,
+        url: str,
+        suffix: str | None = None,
+    ) -> int:
+        source = f"accumulator:{record['accumulator_id']}"
+        base_id = f"{record['raw']['text_sha256']}:{url}"
+        source_event_id = f"{base_id}:{suffix}" if suffix else f"{base_id}:{kind}"
+        payload = {
+            "accumulator_id": record["accumulator_id"],
+            "jsonl_sha256": record["raw"]["text_sha256"],
+            "source_url": url,
+        }
+        return await self.db.create_ingest_event(
+            source=source,
+            source_event_id=source_event_id,
+            kind=kind,
+            payload=payload,
+            dedupe_key=source_event_id,
+        )
 
     def _world_uuid(self, record: dict) -> UUID:
         # Placeholder: can map fandoms / universes later
