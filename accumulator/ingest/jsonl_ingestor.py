@@ -9,8 +9,8 @@ from pathlib import Path
 from uuid import uuid4, UUID
 from typing import Iterable
 
-from aios_app.db import Database
-from aios_app.dag import get_or_create_timeline, add_node_and_edge
+from ...db import Database
+from ...dag import get_or_create_timeline, add_node_and_edge
 
 logger = logging.getLogger("accumulator.ingest.jsonl")
 
@@ -35,19 +35,24 @@ class JSONLDAGIngestor:
         logger.info("Found %d jsonl files", len(files))
 
         for path in files:
-            await self._ingest_file(path)
+            await self.ingest_file(path)
+
+    async def ingest_file(self, path: Path, *, start_at: int = 0) -> int:
+        logger.info("Ingesting %s from offset %s", path, start_at)
+
+        with path.open("r", encoding="utf-8") as f:
+            if start_at:
+                f.seek(start_at)
+            for line in f:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                await self._ingest_record(record)
+            return f.tell()
 
     # -------------------------------------------------
     # File ingestion
     # -------------------------------------------------
-
-    async def _ingest_file(self, path: Path) -> None:
-        logger.info("Ingesting %s", path)
-
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                record = json.loads(line)
-                await self._ingest_record(record)
 
     # -------------------------------------------------
     # Record ingestion
