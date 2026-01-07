@@ -53,6 +53,16 @@ class Settings(BaseModel):
     )
 
     # -------------------------------------------------
+    # Supervisor
+    # -------------------------------------------------
+    supervisor_poll_interval: float = float(
+        os.getenv("AIOS_SUPERVISOR_POLL_INTERVAL", "2.0")
+    )
+    supervisor_batch_size: int = int(
+        os.getenv("AIOS_SUPERVISOR_BATCH_SIZE", "25")
+    )
+
+    # -------------------------------------------------
     # RDF datasets
     # -------------------------------------------------
     fuseki_world_dataset: str = os.getenv(
