@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 9FOWWj0NOHk4SkTXBVRqYcgHD9zrYeWR3Fo95w8hIegVGKdlbXGWXQtJO3KPQTc
+\restrict WVSVwXxTz9spkBGfNiQAumW59qyGFHU1tqW0uo7gyyMebLBkflY9FDXRrf1xsih
 
 -- Dumped from database version 16.11 (Debian 16.11-1.pgdg13+1)
 -- Dumped by pg_dump version 16.11 (Ubuntu 16.11-1.pgdg22.04+1)
@@ -70,6 +70,18 @@ CREATE TYPE aios.event_kind AS ENUM (
     'other',
     'document',
     'paragraph'
+);
+
+
+--
+-- Name: node_origin; Type: TYPE; Schema: aios; Owner: -
+--
+
+CREATE TYPE aios.node_origin AS ENUM (
+    'agent_action',
+    'agent_utterance',
+    'system_event',
+    'informational_ingest'
 );
 
 
@@ -162,6 +174,20 @@ CREATE TABLE aios.claim_world_assignment (
 
 
 --
+-- Name: claims_normalized; Type: VIEW; Schema: aios; Owner: -
+--
+
+CREATE VIEW aios.claims_normalized AS
+ SELECT claim_id,
+    lower(TRIM(BOTH FROM subject)) AS norm_subject,
+    lower(TRIM(BOTH FROM predicate)) AS norm_predicate,
+    lower(TRIM(BOTH FROM object)) AS norm_object,
+    raw_text,
+    sentence_id
+   FROM aios.claim_candidate cc;
+
+
+--
 -- Name: dag_edge; Type: TABLE; Schema: aios; Owner: -
 --
 
@@ -192,7 +218,8 @@ CREATE TABLE aios.dag_node (
     speaker_role aios.actor_type,
     recipient_id text,
     message_text text,
-    payload jsonb DEFAULT '{}'::jsonb NOT NULL
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    origin aios.node_origin DEFAULT 'agent_action'::aios.node_origin NOT NULL
 );
 
 
@@ -202,10 +229,11 @@ CREATE TABLE aios.dag_node (
 
 CREATE TABLE aios.document_section (
     section_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    document_id uuid NOT NULL,
+    document_id uuid,
     section_path text NOT NULL,
     section_order integer NOT NULL,
-    content text NOT NULL
+    content text NOT NULL,
+    node_id uuid
 );
 
 
@@ -319,6 +347,19 @@ CREATE TABLE aios.pipeline_job (
     last_error text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: pipeline_stage_config; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.pipeline_stage_config (
+    stage_name text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    max_batch integer,
+    world_key text,
+    character_id text
 );
 
 
@@ -501,6 +542,14 @@ ALTER TABLE ONLY aios.dag_node
 
 
 --
+-- Name: document_section document_section_node_id_unique; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.document_section
+    ADD CONSTRAINT document_section_node_id_unique UNIQUE (node_id);
+
+
+--
 -- Name: document_section document_section_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
 --
 
@@ -538,6 +587,14 @@ ALTER TABLE ONLY aios.memory_item
 
 ALTER TABLE ONLY aios.pipeline_job
     ADD CONSTRAINT pipeline_job_pkey PRIMARY KEY (job_id);
+
+
+--
+-- Name: pipeline_stage_config pipeline_stage_config_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.pipeline_stage_config
+    ADD CONSTRAINT pipeline_stage_config_pkey PRIMARY KEY (stage_name);
 
 
 --
@@ -945,6 +1002,14 @@ ALTER TABLE ONLY aios.document_section
 
 
 --
+-- Name: document_section document_section_node_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.document_section
+    ADD CONSTRAINT document_section_node_fkey FOREIGN KEY (node_id) REFERENCES aios.dag_node(node_id) ON DELETE CASCADE;
+
+
+--
 -- Name: extracted_sentence extracted_sentence_section_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
 --
 
@@ -1028,5 +1093,5 @@ ALTER TABLE ONLY aios.world
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 9FOWWj0NOHk4SkTXBVRqYcgHD9zrYeWR3Fo95w8hIegVGKdlbXGWXQtJO3KPQTc
+\unrestrict WVSVwXxTz9spkBGfNiQAumW59qyGFHU1tqW0uo7gyyMebLBkflY9FDXRrf1xsih
 
