@@ -20,11 +20,11 @@ AIOS sets out to be an operating system for language models. Rather than integra
    └───────┬────────┘
            │
    ┌───────▼────────┐
-   │  Text UI Bus   │   ← THIS
+   │  Text UI Bus   │  
    └───────┬────────┘
            │
    ┌───────▼────────┐
-   │      LLM       │
+   │                │
    │ (user process) │
    └────────────────┘
    ```
