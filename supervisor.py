@@ -13,7 +13,6 @@ from .pipeline.jobs import enqueue_job
 
 logger = logging.getLogger("aios.supervisor")
 
-
 # -------------------------------------------------
 # Stage definition
 # -------------------------------------------------
@@ -25,117 +24,103 @@ class Stage:
     eligibility_sql: str
     payload_builder: Callable[[Dict[str, object]], Dict[str, object]]
 
+# -------------------------------------------------
+# Payload builders
+# -------------------------------------------------
 
-def _document_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+def document_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"document_id": str(row["document_id"])}
 
+def node_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {"node_id": str(row["node_id"])}
+
+def section_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {"section_id": str(row["section_id"])}
+
+def sentence_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {"sentence_id": str(row["sentence_id"])}
 
 # -------------------------------------------------
-# Declarative stages
+# Declarative DAG-hinged pipeline
 # -------------------------------------------------
 
 STAGES: List[Stage] = [
-    # -------------------------------------------------
-    # Split source documents into document sections
-    # -------------------------------------------------
+
+    # =================================================
+    # 1. source_document → DAG (hinge already handled
+    #    by accumulator / chat ingestion)
+    # =================================================
+    # ⚠️ Intentionally omitted here
+    # Supervisor begins AFTER DAG exists
+
+    # =================================================
+    # 2. DAG paragraph nodes → document_section
+    # =================================================
     Stage(
-        name="split_sections",
-        job_type="split_sections",
+        name="dag_to_document_section",
+        job_type="dag_to_document_section",
         eligibility_sql="""
-        SELECT sd.document_id
-        FROM aios.source_document sd
-        LEFT JOIN aios.pipeline_job pj_done
-          ON pj_done.job_type = 'split_sections'
-         AND pj_done.status = 'completed'
-         AND pj_done.payload->>'document_id' = sd.document_id::text
-        WHERE pj_done.job_id IS NULL
+        SELECT dn.node_id
+        FROM aios.dag_node dn
+        WHERE dn.kind = 'paragraph'
           AND NOT EXISTS (
-            SELECT 1
-            FROM aios.pipeline_job pj_active
-            WHERE pj_active.job_type = $1
-              AND pj_active.status IN ('queued', 'running')
-              AND pj_active.payload->>'document_id' = sd.document_id::text
+              SELECT 1
+              FROM aios.document_section ds
+              WHERE ds.node_id = dn.node_id
           )
-        ORDER BY sd.retrieved_at ASC
-        LIMIT $2
+        ORDER BY dn.created_at
+        LIMIT $1
         """,
-        payload_builder=_document_id_payload,
+        payload_builder=node_id_payload,
     ),
 
-    # -------------------------------------------------
-    # Split document sections into sentences
-    # -------------------------------------------------
+    # =================================================
+    # 3. document_section → extracted_sentence
+    #    (canonical sentence store)
+    # =================================================
     Stage(
-        name="split_sentences",
-        job_type="split_sentences",
+        name="extract_sentences",
+        job_type="extract_sentences",
         eligibility_sql="""
-        SELECT DISTINCT sd.document_id
+        SELECT ds.section_id
         FROM aios.document_section ds
-        JOIN aios.dag_node dn
-          ON dn.node_id = ds.node_id
-        JOIN aios.source_document sd
-          ON sd.document_id = (dn.payload->>'document_id')::uuid
-        LEFT JOIN aios.pipeline_job pj_done
-          ON pj_done.job_type = 'split_sentences'
-         AND pj_done.status = 'completed'
-         AND pj_done.payload->>'document_id' = sd.document_id::text
-        WHERE pj_done.job_id IS NULL
-          AND NOT EXISTS (
+        WHERE NOT EXISTS (
             SELECT 1
-            FROM aios.pipeline_job pj_active
-            WHERE pj_active.job_type = $1
-              AND pj_active.status IN ('queued', 'running')
-              AND pj_active.payload->>'document_id' = sd.document_id::text
-          )
-        ORDER BY sd.document_id
-        LIMIT $2
+            FROM aios.extracted_sentence es
+            WHERE es.section_id = ds.section_id
+        )
+        ORDER BY ds.section_order
+        LIMIT $1
         """,
-        payload_builder=_document_id_payload,
+        payload_builder=section_id_payload,
     ),
 
-    # -------------------------------------------------
-    # Extract claims from sentences
-    # -------------------------------------------------
+    # =================================================
+    # 4. extracted_sentence → claim_candidate
+    # =================================================
     Stage(
         name="extract_claims",
         job_type="extract_claims",
         eligibility_sql="""
-        SELECT DISTINCT sd.document_id
+        SELECT es.sentence_id
         FROM aios.extracted_sentence es
-        JOIN aios.document_section ds
-          ON ds.section_id = es.section_id
-        JOIN aios.dag_node dn
-          ON dn.node_id = ds.node_id
-        JOIN aios.source_document sd
-          ON sd.document_id = (dn.payload->>'document_id')::uuid
-        LEFT JOIN aios.claim_candidate cc
-          ON cc.sentence_id = es.sentence_id
-        LEFT JOIN aios.pipeline_job pj_done
-          ON pj_done.job_type = 'extract_claims'
-         AND pj_done.status = 'completed'
-         AND pj_done.payload->>'document_id' = sd.document_id::text
-        WHERE cc.claim_id IS NULL
-          AND pj_done.job_id IS NULL
-          AND NOT EXISTS (
+        WHERE NOT EXISTS (
             SELECT 1
-            FROM aios.pipeline_job pj_active
-            WHERE pj_active.job_type = $1
-              AND pj_active.status IN ('queued', 'running')
-              AND pj_active.payload->>'document_id' = sd.document_id::text
-          )
-        ORDER BY sd.document_id
-        LIMIT $2
+            FROM aios.claim_candidate cc
+            WHERE cc.sentence_id = es.sentence_id
+        )
+        ORDER BY es.sentence_id
+        LIMIT $1
         """,
-        payload_builder=_document_id_payload,
+        payload_builder=sentence_id_payload,
     ),
 ]
-
 
 # -------------------------------------------------
 # Supervisor internals
 # -------------------------------------------------
 
-async def _enqueue_stage_jobs(
+async def enqueue_stage_jobs(
     db: Database,
     stage: Stage,
     *,
@@ -143,22 +128,23 @@ async def _enqueue_stage_jobs(
 ) -> int:
     rows: Iterable[Dict[str, object]] = await db.fetch(
         stage.eligibility_sql,
-        stage.job_type,
         batch_size,
     )
 
     count = 0
-
     for row in rows:
         payload = stage.payload_builder(dict(row))
-        await enqueue_job(db, job_type=stage.job_type, payload=payload)
+        await enqueue_job(
+            db,
+            job_type=stage.job_type,
+            payload=payload,
+        )
         count += 1
 
     if count:
         logger.info("Enqueued %d %s jobs", count, stage.name)
 
     return count
-
 
 # -------------------------------------------------
 # Supervisor entrypoint
@@ -177,7 +163,8 @@ async def run_supervisor(
     await db.connect()
 
     logger.info(
-        "AIOS supervisor started (poll_interval=%s batch_size=%s max_jobs_per_cycle=%s)",
+        "AIOS supervisor started "
+        "(poll_interval=%s batch_size=%s max_jobs_per_cycle=%s)",
         poll_interval,
         batch_size,
         max_jobs_per_cycle,
@@ -192,16 +179,18 @@ async def run_supervisor(
                     break
 
                 try:
-                    scheduled += await _enqueue_stage_jobs(
+                    scheduled += await enqueue_stage_jobs(
                         db,
                         stage,
-                        batch_size=min(batch_size, max_jobs_per_cycle - scheduled),
+                        batch_size=min(
+                            batch_size,
+                            max_jobs_per_cycle - scheduled,
+                        ),
                     )
-                except Exception as exc:
+                except Exception:
                     logger.exception(
-                        "Stage %s failed to enqueue jobs: %s",
+                        "Stage %s failed during enqueue",
                         stage.name,
-                        exc,
                     )
 
             if scheduled == 0:
@@ -210,6 +199,9 @@ async def run_supervisor(
     finally:
         await db.close()
 
+# -------------------------------------------------
+# CLI
+# -------------------------------------------------
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

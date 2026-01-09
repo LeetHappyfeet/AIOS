@@ -58,21 +58,16 @@ class Settings(BaseModel):
     supervisor_poll_interval: float = float(
         os.getenv("AIOS_SUPERVISOR_POLL_INTERVAL", "2.0")
     )
+
     supervisor_batch_size: int = int(
         os.getenv("AIOS_SUPERVISOR_BATCH_SIZE", "25")
     )
 
-    # -------------------------------------------------
-    # RDF datasets
-    # -------------------------------------------------
-    fuseki_world_dataset: str = os.getenv(
-        "AIOS_FUSEKI_WORLD_DATASET",
-        "world",
+    supervisor_max_jobs_per_cycle: int = int(
+        os.getenv("AIOS_SUPERVISOR_MAX_JOBS_PER_CYCLE", "50")
     )
-
-    fuseki_character_dataset: str = os.getenv(
-        "AIOS_FUSEKI_CHARACTER_DATASET",
-        "char",
+    runner_poll_interval: float = float(
+        os.getenv("AIOS_RUNNER_POLL_INTERVAL", "1.0")
     )
 
 
