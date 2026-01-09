@@ -1,5 +1,5 @@
 # AIOS
-AIOS sets out to be an operating system for language models. Rather than integrating AI into everything we make an easy to use API for interfacing with LLMs directly. This operating system also includes a fully function vector memory and RAG. 
+AIOS sets out to be an operating system for language models. Rather than integrating AI into everything we make an easy to use API for interfacing with LLMs directly. This operating system also includes a fully function vector memory and RAG. AIOS proudly does not rely on LLM or current AI architecture. In fact most of what we do is the opposite of what conventions are. 
 
 
 
