@@ -17,8 +17,8 @@ class FusekiClient:
         self,
         base_url: str,
         *,
-        timeout: float = 5.0,
-        retries: int = 1,
+        timeout: float = 30.0,
+        retries: int = 2,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
