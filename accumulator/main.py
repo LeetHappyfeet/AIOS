@@ -13,8 +13,8 @@ from typing import Dict
 from .ingest.jsonl_ingestor import JSONLDAGIngestor
 from .web.config import OUTPUT_DIR
 from .web.gradio_ui import demo
-from ..config import settings
-from ..db import Database
+from aios_app.config import settings
+from aios_app.db import Database
 
 logger = logging.getLogger("accumulator.main")
 
