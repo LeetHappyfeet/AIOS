@@ -1,0 +1,72 @@
+@prefix aios: <urn:aios:> .
+@prefix world: <urn:aios:world#> .
+@prefix prov:  <http://www.w3.org/ns/prov#> .
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+#################################################################
+# Asserted World Extension
+#################################################################
+
+aios:World a owl:Class ;
+    rdfs:label "Asserted World" ;
+    rdfs:comment
+        "An internally consistent world composed of promoted claims." .
+
+aios:Claim a owl:Class ;
+    rdfs:label "Asserted Claim" ;
+    rdfs:comment
+        "A claim that has been promoted from liminal observation into an asserted world." .
+
+#################################################################
+# World Membership
+#################################################################
+
+aios:aboutWorld a owl:ObjectProperty ;
+    rdfs:domain aios:Claim ;
+    rdfs:range aios:World ;
+    rdfs:label "about world" ;
+    rdfs:comment
+        "Links a promoted claim to the asserted world it belongs to." .
+
+#################################################################
+# Promotion Metadata
+#################################################################
+
+aios:promotedBy a owl:DatatypeProperty ;
+    rdfs:domain aios:Claim ;
+    rdfs:range xsd:string ;
+    rdfs:label "promoted by" ;
+    rdfs:comment
+        "Agent or system that promoted the claim (worker, janitor, manual)." .
+
+aios:promotionVersion a owl:DatatypeProperty ;
+    rdfs:domain aios:Claim ;
+    rdfs:range xsd:string ;
+    rdfs:label "promotion version" ;
+    rdfs:comment
+        "Version of the promotion policy that asserted this claim." .
+
+#################################################################
+# Core Claim Structure (asserted)
+#################################################################
+
+aios:subject a owl:ObjectProperty ;
+    rdfs:domain aios:Claim ;
+    rdfs:label "subject" .
+
+aios:predicate a owl:ObjectProperty ;
+    rdfs:domain aios:Claim ;
+    rdfs:label "predicate" .
+
+aios:object a owl:ObjectProperty ;
+    rdfs:domain aios:Claim ;
+    rdfs:label "object" .
+
+aios:confidence a owl:DatatypeProperty ;
+    rdfs:domain aios:Claim ;
+    rdfs:range xsd:float ;
+    rdfs:label "confidence" .
+
+#############################################
