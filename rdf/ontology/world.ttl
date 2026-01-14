@@ -1,0 +1,192 @@
+@prefix world: <urn:aios:world#> .
+@prefix prov:  <http://www.w3.org/ns/prov#> .
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+#################################################################
+# Ontology
+#################################################################
+
+world:WorldOntology a owl:Ontology ;
+  rdfs:label "AIOS World Observation Ontology" ;
+  rdfs:comment "Defines observed claims and epistemic world tracks. Claims represent observations, not assertions of truth." .
+
+#################################################################
+# World Tracks (Explicit Epistemic Paths)
+#################################################################
+
+world:WorldTrack a owl:Class ;
+  rdfs:label "World Track" ;
+  rdfs:comment "An epistemic track defining how a claim is treated." .
+
+world:liminal a world:WorldTrack , owl:NamedIndividual ;
+  rdfs:label "Liminal (Observed)" ;
+  rdfs:comment "Raw observations extracted from text or events. Not truth." .
+
+world:asserted a world:WorldTrack , owl:NamedIndividual ;
+  rdfs:label "Asserted World" ;
+  rdfs:comment "Claims promoted into an internally consistent world." .
+
+#################################################################
+# Core Class: Claim
+#################################################################
+
+world:Claim a owl:Class ;
+  rdfs:label "Observed Claim" ;
+  rdfs:comment "A structured observation extracted from text or events; not an assertion of truth." .
+
+#################################################################
+# Claim Identity
+#################################################################
+
+world:claimId a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Stable identifier for the claim (UUID from SQL claim_candidate)." .
+
+#################################################################
+# Claim Status (Mirrors SQL Lifecycle)
+#################################################################
+
+world:claimStatus a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Processing status (pending, promoted, rejected, superseded)." .
+
+#################################################################
+# Surface Form (Lexical, Non-Ontological)
+#################################################################
+
+world:subject a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Lexical subject extracted from text." .
+
+world:predicate a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Lexical predicate extracted from text." .
+
+world:object a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Lexical object extracted from text." .
+
+world:rawText a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Authoritative raw sentence or utterance text." .
+
+#################################################################
+# Track Assignment
+#################################################################
+
+world:track a owl:ObjectProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range world:WorldTrack ;
+  rdfs:comment "Epistemic track this claim belongs to." .
+
+#################################################################
+# Extraction Metadata
+#################################################################
+
+world:extractionRule a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Rule or method used to extract the claim." .
+
+world:extractionVersion a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Version of extraction logic." .
+
+world:confidence a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:float ;
+  rdfs:comment "Extractor confidence score (not truth)." .
+
+#################################################################
+# Temporal Anchoring
+#################################################################
+
+world:observedAt a owl:DatatypeProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range xsd:dateTime ;
+  rdfs:comment "Timestamp when the claim was observed or recorded." .
+
+#################################################################
+# Provenance (DAG / Source Traceability)
+#################################################################
+
+prov:wasDerivedFrom a owl:ObjectProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range prov:Entity ;
+  rdfs:comment "Link to DAG node, sentence, or event from which the claim was derived." .
+
+world:SourceDocument a owl:Class ;
+  rdfs:label "Source Document" ;
+  rdfs:comment "External document from which observations were extracted." .
+
+world:sourceDocument a owl:ObjectProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range world:SourceDocument ;
+  rdfs:comment "Source document associated with the claim." .
+
+#################################################################
+# Optional Semantic Resolution (Future Promotion Layer)
+#################################################################
+
+world:resolvedSubject a owl:ObjectProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:comment "Resolved entity corresponding to the lexical subject (if any)." .
+
+world:resolvedPredicate a owl:ObjectProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:comment "Resolved predicate corresponding to the lexical predicate (if any)." .
+
+world:resolvedObject a owl:ObjectProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:comment "Resolved entity corresponding to the lexical object (if any)." .
+
+#################################################################
+# Asserted World (Track B)
+#################################################################
+
+world:World a owl:Class ;
+  rdfs:label "Asserted World" ;
+  rdfs:comment "An internally consistent world composed of promoted claims." .
+
+world:memberOfWorld a owl:ObjectProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range world:World ;
+  rdfs:comment "Indicates that a claim has been promoted into an asserted world." .
+
+#################################################################
+# World Transitions (Explicit Elasticity)
+#################################################################
+
+world:WorldTransition a owl:Class ;
+  rdfs:label "World Transition" ;
+  rdfs:comment "Explicit transition between worlds due to contradiction, revision, or divergence." .
+
+world:fromWorld a owl:ObjectProperty ;
+  rdfs:domain world:WorldTransition ;
+  rdfs:range world:World .
+
+world:toWorld a owl:ObjectProperty ;
+  rdfs:domain world:WorldTransition ;
+  rdfs:range world:World .
+
+world:triggeredByClaim a owl:ObjectProperty ;
+  rdfs:domain world:WorldTransition ;
+  rdfs:range world:Claim .
+
+world:transitionTime a owl:DatatypeProperty ;
+  rdfs:domain world:WorldTransition ;
+  rdfs:range xsd:dateTime .
+
+world:transitionReason a owl:DatatypeProperty ;
+  rdfs:domain world:WorldTransition ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Reason for world transition (contradiction, revision, fork, retraction)." .

@@ -1,0 +1,51 @@
+@prefix world: <urn:aios:world#> .
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+#################################################################
+# Liminal Content Classification Extension
+#################################################################
+
+world:contentKind a owl:DatatypeProperty ;
+    rdfs:domain world:Claim ;
+    rdfs:range xsd:string ;
+    rdfs:label "content kind" ;
+    rdfs:comment
+        "Structural classification of a liminal claim (e.g. content, navigation, footer, boilerplate). This is not a truth judgment." .
+
+#################################################################
+# Optional: controlled vocabulary (non-restrictive)
+#################################################################
+
+world:ContentKind a owl:Class ;
+    rdfs:label "Content Kind" ;
+    rdfs:comment
+        "Conceptual categories for classifying the structural role of observed claims." .
+
+world:content a world:ContentKind ;
+    rdfs:label "content" .
+
+world:navigation a world:ContentKind ;
+    rdfs:label "navigation" .
+
+world:footer a world:ContentKind ;
+    rdfs:label "footer" .
+
+world:boilerplate a world:ContentKind ;
+    rdfs:label "boilerplate" .
+
+world:copyright a world:ContentKind ;
+    rdfs:label "copyright" .
+
+world:pronounHeavy a world:ContentKind ;
+    rdfs:label "pronoun-heavy" .
+
+world:unknown a world:ContentKind ;
+    rdfs:label "unknown" .
+
+world:reference a world:ContentKind ;
+    rdfs:label "reference" ;
+    rdfs:comment
+        "Bibliographic, citation, or reference material (dates, ISBNs, publisher names, retrieval notes). Not propositional content." .
+
