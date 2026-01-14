@@ -4,7 +4,7 @@
 </p>
 
 AIOS is an operating system for language models, designed around observation, memory, and epistemic discipline rather than immediate answer generation. Instead of embedding AI logic into every application, AIOS provides a stable API and pipeline for ingesting, organizing, and reasoning over language-model interactions and external observations. The system includes first-class support for vector memory and retrieval-augmented generation (RAG), but treats them as downstream tools rather than the foundation of truth.
-
+```
 External Observation (Accumulator)        Interactive Observation (Chat API)
         │                                          │
         └──────────────┬───────────────────────────┘
@@ -39,7 +39,7 @@ External Observation (Accumulator)        Interactive Observation (Chat API)
 
 
 1/13/2026
-
+```
 
 
 
