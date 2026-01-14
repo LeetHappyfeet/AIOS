@@ -1,3 +1,84 @@
+#Good Morning Campers!
+# Welcome to Alpha development branch
+
+#Changes
+/ui. 
+A primative gradio UI has been added that will greatly improve your life if you wanted to try creating a character or add web pages from the accumulator. This is in early development but now does a lot of things right. 
+
+/characters 
+
+```
+aiosdb=# \d
+                   List of relations
+ Schema |           Name            |   Type   | Owner
+--------+---------------------------+----------+-------
+ aios   | character_alias           | table    | aios
+ aios   | character_identity        | table    | aios
+ aios   | character_instance        | table    | aios
+ aios   | claim_candidate           | table    | aios
+ aios   | claim_candidate_full_spo  | view     | aios
+ aios   | claim_provenance          | table    | aios
+ aios   | claim_world_assignment    | table    | aios
+ aios   | claims_normalized         | view     | aios
+ aios   | dag_edge                  | table    | aios
+ aios   | dag_node                  | table    | aios
+ aios   | document_section          | table    | aios
+ aios   | extracted_sentence        | table    | aios
+ aios   | ingest_event              | table    | aios
+ aios   | ingest_event_event_id_seq | sequence | aios
+ aios   | memory_item               | table    | aios
+ aios   | memory_item_memory_id_seq | sequence | aios
+ aios   | pipeline_job              | table    | aios
+ aios   | pipeline_stage_config     | table    | aios
+ aios   | rdf_promotion_log         | table    | aios
+ aios   | session                   | table    | aios
+ aios   | source_document           | table    | aios
+ aios   | timeline                  | table    | aios
+ aios   | user_identity             | table    | aios
+ aios   | world                     | table    | aios
+(24 rows)
+aiosdb=# \d character_identity
+                             Table "aios.character_identity"
+      Column       |           Type           | Collation | Nullable |      Default
+-------------------+--------------------------+-----------+----------+-------------------
+ character_id      | text                     |           | not null |
+ created_at        | timestamp with time zone |           | not null | now()
+ meta              | jsonb                    |           | not null | '{}'::jsonb
+ home_world_id     | uuid                     |           |          |
+ process_ontology  | boolean                  |           | not null | false
+ canonical_name    | text                     |           |          |
+ display_name      | text                     |           |          |
+ canon             | text                     |           |          |
+ franchise         | text                     |           |          |
+ entity_type       | text                     |           | not null | 'character'::text
+ species           | text                     |           |          |
+ gender            | text                     |           |          |
+ age_descriptor    | text                     |           |          |
+ visual_summary    | text                     |           |          |
+ primary_role      | text                     |           |          |
+ archetype         | text                     |           |          |
+ default_tone      | text[]                   |           |          |
+ speech_style      | text                     |           |          |
+ content_rating    | text                     |           |          | 'PG'::text
+ moral_constraints | text[]                   |           |          |
+ is_canonical      | boolean                  |           |          | true
+ is_mutable        | boolean                  |           |          | false
+ created_from      | text                     |           |          |
+ updated_at        | timestamp with time zone |           |          | now()
+Indexes:
+    "character_identity_pkey" PRIMARY KEY, btree (character_id)
+    "idx_character_identity_canon" btree (canon)
+    "idx_character_identity_franchise" btree (franchise)
+Foreign-key constraints:
+    "character_identity_home_world_id_fkey" FOREIGN KEY (home_world_id) REFERENCES world(world_id) ON DELETE SET NULL
+Referenced by:
+    TABLE "character_alias" CONSTRAINT "character_alias_character_id_fkey" FOREIGN KEY (character_id) REFERENCES character_identity(character_id) ON DELETE CASCADE
+    TABLE "character_instance" CONSTRAINT "character_instance_character_id_fkey" FOREIGN KEY (character_id) REFERENCES character_identity(character_id) ON DELETE CASCADE
+
+
+A new table has been added which contains static character information and a new folder called /char has been created because while the character pipeline is very similar to the existing /world pipeline that writes to world/liminal in RDF, character memory is a lot more nuanced and segmented, yet it steals claims from /world. This separation of /world and /char memory is a new paradigm.
+```
+
 # AIOS
 <p align="center">
   <img src="screenshot.png" alt="AIOS Screenshot" width="800">
