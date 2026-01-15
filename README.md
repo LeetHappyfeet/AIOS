@@ -88,7 +88,7 @@ Finally, even in its current state, this architecture gives you something most A
 ## Requirements
 - PostgreSQL 14+
 - Apache Jena Fuseki (Create /char and /world datasets and don't forget to load the ontology folder .ttl files)
-(Soon) Qdrant.
+(New) Qdrant.
 
 ## Create database
 createdb aiosdb
