@@ -1,0 +1,21 @@
+
+
+```
+
+
+
+               ┌──────────────────────────┐
+               │     Vector RAG Service   │
+               │  (similarity oracle only)│
+               └──────────┬───────────────┘
+                          │
+                          │ pointers (IDs)
+                          ▼
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│ document     │ → │ extracted    │ → │ claim        │ → RDF
+│ (paragraphs) │   │ sentences    │   │ candidates   │
+└──────────────┘   └──────────────┘   └──────────────┘
+        ▲                    ▲                    ▲
+        │                    │                    │
+        └────────────── DAG / TIME / IDENTITY ────┘
+```
