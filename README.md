@@ -2,6 +2,27 @@
 # Welcome to Alpha development branch
 
 #Changes
+/rag
+Yes, it's finally happening. We are doing RAG 2.0 but this is a sidecar process. There will be a lot of logic in queries in data processing but here is the basic layout. A weak version is being shared to get started.
+
+```
+               ┌──────────────────────────┐
+               │     Vector RAG Service    │
+               │  (similarity oracle only)│
+               └──────────┬───────────────┘
+                          │
+                          │ pointers (IDs)
+                          ▼
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│ document     │ → │ extracted    │ → │ claim        │ → RDF
+│ (paragraphs) │   │ sentences    │   │ candidates   │
+└──────────────┘   └──────────────┘   └──────────────┘
+        ▲                    ▲                    ▲
+        │                    │                    │
+        └────────────── DAG / TIME / IDENTITY ────┘
+
+```
+
 /ui. 
 A primative gradio UI has been added that will greatly improve your life if you wanted to try creating a character or add web pages from the accumulator. This is in early development but now does a lot of things right. 
 
