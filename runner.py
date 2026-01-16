@@ -1,10 +1,11 @@
-# aios_app/pipeline/runner.py
+# aios_app/runner.py
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from typing import Callable, Awaitable, Dict, Any
+from uuid import UUID
 
 from aios_app.config import settings
 from aios_app.db import Database
@@ -16,14 +17,11 @@ from aios_app.pipeline.jobs import (
 )
 
 # -------------------------------------------------
-# Import worker entrypoints
+# Import NEW worker entrypoints (payload-scoped)
 # -------------------------------------------------
 
+from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
 from aios_app.pipeline.worker import run_claim_extraction_worker
-from aios_app.extract.sentences import run_sentence_extraction_worker
-from aios_app.pipeline.dag_to_document_section_worker import (
-    run_dag_to_document_section_worker,
-)
 
 logger = logging.getLogger("aios.pipeline.runner")
 
@@ -38,24 +36,21 @@ JOB_HANDLERS: Dict[str, Callable[[Database, Dict[str, Any]], Awaitable[None]]] =
 # Handlers
 # -------------------------------------------------
 
-async def _handle_dag_to_document_section(
+async def handle_dag_to_document_section(
     db: Database,
     job: Dict[str, Any],
 ) -> None:
-    await run_dag_to_document_section_worker(db)
+    node_id = UUID(job["payload"]["node_id"])
+    await run_dag_to_document_section(db, node_id=node_id)
 
 
-async def _handle_extract_sentences(
+async def handle_extract_claims(
     db: Database,
     job: Dict[str, Any],
 ) -> None:
-    await run_sentence_extraction_worker(db)
-
-
-async def _handle_extract_claims(
-    db: Database,
-    job: Dict[str, Any],
-) -> None:
+    # NOTE:
+    # claim extraction is section-scoped internally,
+    # so we just let it run deterministically
     await run_claim_extraction_worker(db)
 
 
@@ -64,9 +59,8 @@ async def _handle_extract_claims(
 # -------------------------------------------------
 
 JOB_HANDLERS.update({
-    "dag_to_document_section": _handle_dag_to_document_section,
-    "extract_sentences": _handle_extract_sentences,
-    "extract_claims": _handle_extract_claims,
+    "dag_to_document_section": handle_dag_to_document_section,
+    "extract_claims": handle_extract_claims,
 })
 
 
@@ -121,5 +115,4 @@ if __name__ == "__main__":
         run_runner(
             poll_interval=settings.runner_poll_interval
         )
-    )           
-
+    )
