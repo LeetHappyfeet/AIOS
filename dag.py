@@ -1,5 +1,3 @@
-# aios/dag.py
-
 from __future__ import annotations
 
 from uuid import UUID
@@ -9,13 +7,66 @@ import json
 from .db import Database
 
 # -------------------------------------------------
+# World helpers
+# -------------------------------------------------
+
+async def get_or_create_world(
+    db: Database,
+    *,
+    world_key: str,
+) -> UUID:
+    """
+    Resolve a symbolic world_key (e.g. 'liminal') to a concrete world_id.
+    Worlds are singleton by key.
+    """
+
+    # 1. Fetch if exists
+    row = await db.fetchrow(
+        """
+        SELECT world_id
+        FROM aios.world
+        WHERE world_key = $1
+        LIMIT 1
+        """,
+        world_key,
+    )
+    if row:
+        return row["world_id"]
+
+    # 2. Insert if missing (race-safe)
+    row = await db.execute_returning_row(
+        """
+        INSERT INTO aios.world (world_key, meta)
+        VALUES ($1, '{}'::jsonb)
+        ON CONFLICT (world_key) DO NOTHING
+        RETURNING world_id
+        """,
+        world_key,
+    )
+    if row:
+        return row["world_id"]
+
+    # 3. Fetch again if race lost
+    row = await db.fetchrow(
+        """
+        SELECT world_id
+        FROM aios.world
+        WHERE world_key = $1
+        LIMIT 1
+        """,
+        world_key,
+    )
+    return row["world_id"]
+
+
+# -------------------------------------------------
 # Timeline helpers
 # -------------------------------------------------
 
 async def get_or_create_timeline(
     db: Database,
     *,
-    world_id: UUID,
+    world_key: str,
     session_id: Optional[UUID],
     character_id: Optional[str],
     user_name: Optional[str],
@@ -30,7 +81,10 @@ async def get_or_create_timeline(
 
     meta_json = json.dumps(meta or {})
 
-    # 1. Fetch if exists (fast path)
+    # Resolve world_id safely
+    world_id = await get_or_create_world(db, world_key=world_key)
+
+    # 1. Fetch if exists
     row = await db.fetchrow(
         """
         SELECT timeline_id
@@ -41,7 +95,6 @@ async def get_or_create_timeline(
         """,
         world_id,
     )
-
     if row:
         return row["timeline_id"]
 
@@ -68,11 +121,10 @@ async def get_or_create_timeline(
         scope_key,
         meta_json,
     )
-
     if row:
         return row["timeline_id"]
 
-    # 3. Fetch again if another process won the race
+    # 3. Fetch again if another process won
     row = await db.fetchrow(
         """
         SELECT timeline_id
@@ -83,7 +135,6 @@ async def get_or_create_timeline(
         """,
         world_id,
     )
-
     return row["timeline_id"]
 
 
@@ -130,7 +181,7 @@ async def add_node_and_edge(
     Insert a DAG node and optionally attach it to a parent.
 
     Structural rules:
-    - document nodes are ALWAYS roots (no parent)
+    - document nodes are ALWAYS roots
     - paragraph / sentence nodes REQUIRE explicit parent
     - chat nodes chain to the previous node if no parent supplied
     """
@@ -196,17 +247,16 @@ async def add_node_and_edge(
     parent: Optional[UUID] = None
 
     if kind == "document":
-        parent = None  # documents are absolute roots
+        parent = None
 
     elif parent_node_id is not None:
-        parent = parent_node_id  # explicit structural parent
+        parent = parent_node_id
 
     else:
-        # chat-style chaining only
         parent = await get_last_node_id(db, timeline_id)
 
     # -------------------------------------------------
-    # 3. Insert edge (if valid)
+    # 3. Insert edge
     # -------------------------------------------------
     if parent and parent != node_id:
         await db.execute(

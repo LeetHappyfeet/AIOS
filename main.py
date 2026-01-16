@@ -92,7 +92,9 @@ async def ingest(req: IngestIn) -> IngestOut:
     Ingest raw text into:
       ingest_event → dag_node
 
-    Everything else happens asynchronously via supervisor + workers.
+    Epistemic rule:
+      - ALL chat / agent ingests are assigned to the LIMINAL world
+      - World promotion happens later via logic, not user claims
     """
 
     message_text = (
@@ -171,15 +173,22 @@ async def ingest(req: IngestIn) -> IngestOut:
     # -------------------------------------------------
     # Timeline resolution (STRUCTURAL ONLY)
     # -------------------------------------------------
+    # Epistemic rule:
+    #   Chat cannot assert world state.
+    #   All ingests default to the LIMINAL world.
+    # -------------------------------------------------
 
     timeline_id = await get_or_create_timeline(
         db,
-        world_id=settings.default_world_id,
+        world_key="liminal",
         session_id=req.session_id,
         character_id=req.character_id,
         user_name=req.user_name,
         scope_key=req.scope_key or settings.default_scope,
-        meta={"source": settings.source_name},
+        meta={
+            "source": settings.source_name,
+            "world_assignment": "default_liminal",
+        },
     )
 
     # -------------------------------------------------

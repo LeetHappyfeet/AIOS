@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 9FOWWj0NOHk4SkTXBVRqYcgHD9zrYeWR3Fo95w8hIegVGKdlbXGWXQtJO3KPQTc
+\restrict gV7nZjisAboGbrwS60UdaIImCBPclchBurTszcDdugu1lgacMD7g5iCuXqnTxIl
 
 -- Dumped from database version 16.11 (Debian 16.11-1.pgdg13+1)
 -- Dumped by pg_dump version 16.11 (Ubuntu 16.11-1.pgdg22.04+1)
@@ -74,6 +74,18 @@ CREATE TYPE aios.event_kind AS ENUM (
 
 
 --
+-- Name: node_origin; Type: TYPE; Schema: aios; Owner: -
+--
+
+CREATE TYPE aios.node_origin AS ENUM (
+    'agent_action',
+    'agent_utterance',
+    'system_event',
+    'informational_ingest'
+);
+
+
+--
 -- Name: process_status; Type: TYPE; Schema: aios; Owner: -
 --
 
@@ -90,6 +102,19 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
+-- Name: character_alias; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.character_alias (
+    alias text NOT NULL,
+    character_id text NOT NULL,
+    is_primary boolean DEFAULT false NOT NULL,
+    source text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: character_identity; Type: TABLE; Schema: aios; Owner: -
 --
 
@@ -98,7 +123,26 @@ CREATE TABLE aios.character_identity (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     meta jsonb DEFAULT '{}'::jsonb NOT NULL,
     home_world_id uuid,
-    default_world_id uuid
+    process_ontology boolean DEFAULT false NOT NULL,
+    canonical_name text,
+    display_name text,
+    canon text,
+    franchise text,
+    entity_type text DEFAULT 'character'::text NOT NULL,
+    species text,
+    gender text,
+    age_descriptor text,
+    visual_summary text,
+    primary_role text,
+    archetype text,
+    default_tone text[],
+    speech_style text,
+    content_rating text DEFAULT 'PG'::text,
+    moral_constraints text[],
+    is_canonical boolean DEFAULT true,
+    is_mutable boolean DEFAULT false,
+    created_from text,
+    updated_at timestamp with time zone DEFAULT now()
 );
 
 
@@ -137,6 +181,26 @@ CREATE TABLE aios.claim_candidate (
 
 
 --
+-- Name: claim_candidate_full_spo; Type: VIEW; Schema: aios; Owner: -
+--
+
+CREATE VIEW aios.claim_candidate_full_spo AS
+ SELECT claim_id,
+    sentence_id,
+    subject,
+    predicate,
+    object,
+    raw_text,
+    confidence,
+    extraction_rule,
+    extraction_ver,
+    status,
+    created_at
+   FROM aios.claim_candidate
+  WHERE ((subject IS NOT NULL) AND (predicate IS NOT NULL) AND (object IS NOT NULL));
+
+
+--
 -- Name: claim_provenance; Type: TABLE; Schema: aios; Owner: -
 --
 
@@ -159,6 +223,20 @@ CREATE TABLE aios.claim_world_assignment (
     assigned_by text NOT NULL,
     assigned_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: claims_normalized; Type: VIEW; Schema: aios; Owner: -
+--
+
+CREATE VIEW aios.claims_normalized AS
+ SELECT claim_id,
+    lower(TRIM(BOTH FROM subject)) AS norm_subject,
+    lower(TRIM(BOTH FROM predicate)) AS norm_predicate,
+    lower(TRIM(BOTH FROM object)) AS norm_object,
+    raw_text,
+    sentence_id
+   FROM aios.claim_candidate cc;
 
 
 --
@@ -192,7 +270,8 @@ CREATE TABLE aios.dag_node (
     speaker_role aios.actor_type,
     recipient_id text,
     message_text text,
-    payload jsonb DEFAULT '{}'::jsonb NOT NULL
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    origin aios.node_origin DEFAULT 'agent_action'::aios.node_origin NOT NULL
 );
 
 
@@ -202,10 +281,11 @@ CREATE TABLE aios.dag_node (
 
 CREATE TABLE aios.document_section (
     section_id uuid DEFAULT gen_random_uuid() NOT NULL,
-    document_id uuid NOT NULL,
+    document_id uuid,
     section_path text NOT NULL,
     section_order integer NOT NULL,
-    content text NOT NULL
+    content text NOT NULL,
+    node_id uuid
 );
 
 
@@ -323,6 +403,19 @@ CREATE TABLE aios.pipeline_job (
 
 
 --
+-- Name: pipeline_stage_config; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.pipeline_stage_config (
+    stage_name text NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    max_batch integer,
+    world_key text,
+    character_id text
+);
+
+
+--
 -- Name: rdf_promotion_log; Type: TABLE; Schema: aios; Owner: -
 --
 
@@ -337,6 +430,18 @@ CREATE TABLE aios.rdf_promotion_log (
     promoted_at timestamp with time zone DEFAULT now() NOT NULL,
     promoted_by text NOT NULL,
     promotion_meta jsonb DEFAULT '{}'::jsonb NOT NULL
+);
+
+
+--
+-- Name: section_cluster_assignment; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.section_cluster_assignment (
+    split_id uuid NOT NULL,
+    section_id uuid NOT NULL,
+    cluster_label text NOT NULL,
+    score_to_centroid double precision
 );
 
 
@@ -400,6 +505,21 @@ CREATE TABLE aios.user_identity (
 
 
 --
+-- Name: vector_index_state; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.vector_index_state (
+    section_id uuid NOT NULL,
+    qdrant_collection text NOT NULL,
+    indexed_at timestamp with time zone DEFAULT now() NOT NULL,
+    embedding_model text NOT NULL,
+    embedding_version text NOT NULL,
+    vector_hash text,
+    last_error text
+);
+
+
+--
 -- Name: world; Type: TABLE; Schema: aios; Owner: -
 --
 
@@ -415,6 +535,24 @@ CREATE TABLE aios.world (
 
 
 --
+-- Name: world_split_candidate; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.world_split_candidate (
+    split_id uuid NOT NULL,
+    seed_section_id uuid NOT NULL,
+    window_start timestamp with time zone NOT NULL,
+    window_end timestamp with time zone NOT NULL,
+    cluster_count integer NOT NULL,
+    cluster_a jsonb NOT NULL,
+    cluster_b jsonb NOT NULL,
+    centroid_distance double precision NOT NULL,
+    boundary_pairs jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: ingest_event event_id; Type: DEFAULT; Schema: aios; Owner: -
 --
 
@@ -426,6 +564,14 @@ ALTER TABLE ONLY aios.ingest_event ALTER COLUMN event_id SET DEFAULT nextval('ai
 --
 
 ALTER TABLE ONLY aios.memory_item ALTER COLUMN memory_id SET DEFAULT nextval('aios.memory_item_memory_id_seq'::regclass);
+
+
+--
+-- Name: character_alias character_alias_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.character_alias
+    ADD CONSTRAINT character_alias_pkey PRIMARY KEY (alias);
 
 
 --
@@ -501,6 +647,14 @@ ALTER TABLE ONLY aios.dag_node
 
 
 --
+-- Name: document_section document_section_node_id_unique; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.document_section
+    ADD CONSTRAINT document_section_node_id_unique UNIQUE (node_id);
+
+
+--
 -- Name: document_section document_section_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
 --
 
@@ -541,11 +695,27 @@ ALTER TABLE ONLY aios.pipeline_job
 
 
 --
+-- Name: pipeline_stage_config pipeline_stage_config_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.pipeline_stage_config
+    ADD CONSTRAINT pipeline_stage_config_pkey PRIMARY KEY (stage_name);
+
+
+--
 -- Name: rdf_promotion_log rdf_promotion_log_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
 --
 
 ALTER TABLE ONLY aios.rdf_promotion_log
     ADD CONSTRAINT rdf_promotion_log_pkey PRIMARY KEY (promotion_id);
+
+
+--
+-- Name: section_cluster_assignment section_cluster_assignment_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.section_cluster_assignment
+    ADD CONSTRAINT section_cluster_assignment_pkey PRIMARY KEY (split_id, section_id);
 
 
 --
@@ -605,11 +775,27 @@ ALTER TABLE ONLY aios.ingest_event
 
 
 --
+-- Name: vector_index_state vector_index_state_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.vector_index_state
+    ADD CONSTRAINT vector_index_state_pkey PRIMARY KEY (section_id);
+
+
+--
 -- Name: world world_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
 --
 
 ALTER TABLE ONLY aios.world
     ADD CONSTRAINT world_pkey PRIMARY KEY (world_id);
+
+
+--
+-- Name: world_split_candidate world_split_candidate_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.world_split_candidate
+    ADD CONSTRAINT world_split_candidate_pkey PRIMARY KEY (split_id);
 
 
 --
@@ -625,6 +811,27 @@ ALTER TABLE ONLY aios.world
 --
 
 CREATE INDEX idx_char_instance_lookup ON aios.character_instance USING btree (character_id, world_id, owner_user_id);
+
+
+--
+-- Name: idx_character_alias_character; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_character_alias_character ON aios.character_alias USING btree (character_id);
+
+
+--
+-- Name: idx_character_identity_canon; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_character_identity_canon ON aios.character_identity USING btree (canon);
+
+
+--
+-- Name: idx_character_identity_franchise; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_character_identity_franchise ON aios.character_identity USING btree (franchise);
 
 
 --
@@ -660,6 +867,13 @@ CREATE INDEX idx_dag_edge_parent ON aios.dag_edge USING btree (timeline_id, pare
 --
 
 CREATE INDEX idx_dag_node_character ON aios.dag_node USING btree (character_id, created_at DESC);
+
+
+--
+-- Name: idx_dag_node_kind_created; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_dag_node_kind_created ON aios.dag_node USING btree (kind, created_at);
 
 
 --
@@ -796,6 +1010,13 @@ CREATE INDEX idx_timeline_world ON aios.timeline USING btree (world_id);
 
 
 --
+-- Name: idx_vector_index_state_collection; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_vector_index_state_collection ON aios.vector_index_state USING btree (qdrant_collection);
+
+
+--
 -- Name: idx_world_canon; Type: INDEX; Schema: aios; Owner: -
 --
 
@@ -817,11 +1038,11 @@ CREATE INDEX idx_world_type ON aios.world USING btree (world_type);
 
 
 --
--- Name: character_identity character_identity_default_world_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+-- Name: character_alias character_alias_character_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
 --
 
-ALTER TABLE ONLY aios.character_identity
-    ADD CONSTRAINT character_identity_default_world_id_fkey FOREIGN KEY (default_world_id) REFERENCES aios.world(world_id) ON DELETE SET NULL;
+ALTER TABLE ONLY aios.character_alias
+    ADD CONSTRAINT character_alias_character_id_fkey FOREIGN KEY (character_id) REFERENCES aios.character_identity(character_id) ON DELETE CASCADE;
 
 
 --
@@ -945,6 +1166,14 @@ ALTER TABLE ONLY aios.document_section
 
 
 --
+-- Name: document_section document_section_node_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.document_section
+    ADD CONSTRAINT document_section_node_fkey FOREIGN KEY (node_id) REFERENCES aios.dag_node(node_id) ON DELETE CASCADE;
+
+
+--
 -- Name: extracted_sentence extracted_sentence_section_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
 --
 
@@ -1028,5 +1257,5 @@ ALTER TABLE ONLY aios.world
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 9FOWWj0NOHk4SkTXBVRqYcgHD9zrYeWR3Fo95w8hIegVGKdlbXGWXQtJO3KPQTc
+\unrestrict gV7nZjisAboGbrwS60UdaIImCBPclchBurTszcDdugu1lgacMD7g5iCuXqnTxIl
 
