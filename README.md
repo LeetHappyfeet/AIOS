@@ -201,16 +201,3 @@ Your API endpoint is at http://localhost:8000 for ingestion and UI.
 ## Requirements
 - PostgreSQL 14+
 - Apache Jena Fuseki (Create /char and /world datasets and don't forget to load the ontology folder .ttl files)
-- Qdrant.
-
-## Create database
-createdb aiosdb
-
-## Load schema
-psql aiosdb < aios_schema.sql
-For your convenience we include the critical schema file that allows your database to work.
-
-## Notes
-- Schema name: aios
-- No seed data is included
-- Application will auto-populate tables on first run
