@@ -1,6 +1,5 @@
-# aios_app/rag/query_api.py
-
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -11,6 +10,34 @@ from .embeddings import Embedder
 from .qdrant_store import QdrantStore
 
 
+# ============================================================
+# Process-local singletons (query side)
+# ============================================================
+
+_QUERY_EMBEDDER: Embedder | None = None
+_QUERY_STORE: QdrantStore | None = None
+
+
+def _get_query_embedder(cfg: RagConfig) -> Embedder:
+    global _QUERY_EMBEDDER
+    if _QUERY_EMBEDDER is None:
+        _QUERY_EMBEDDER = Embedder(cfg.embedding_model, device=cfg.embedding_device)
+    return _QUERY_EMBEDDER
+
+
+def _get_query_store(cfg: RagConfig, *, vector_dim: int) -> QdrantStore:
+    global _QUERY_STORE
+    if _QUERY_STORE is None:
+        _QUERY_STORE = QdrantStore(
+            url=cfg.qdrant_url,
+            api_key=cfg.qdrant_api_key,
+            collection=cfg.qdrant_collection,
+            vector_dim=vector_dim,
+        )
+        _QUERY_STORE.ensure_collection()
+    return _QUERY_STORE
+
+
 @dataclass
 class RagFilters:
     source_type: str | None = None
@@ -18,9 +45,8 @@ class RagFilters:
     timeline_id: str | None = None
     world_id: str | None = None
     source_domain: str | None = None
-
-    created_at_gte: str | None = None  # ISO datetime string
-    created_at_lte: str | None = None  # ISO datetime string
+    created_at_gte: str | None = None
+    created_at_lte: str | None = None
 
 
 def to_qdrant_filter(f: RagFilters) -> Optional[qm.Filter]:
@@ -41,10 +67,7 @@ def to_qdrant_filter(f: RagFilters) -> Optional[qm.Filter]:
         must.append(
             qm.FieldCondition(
                 key="created_at",
-                range=qm.DatetimeRange(
-                    gte=f.created_at_gte,
-                    lte=f.created_at_lte,
-                ),
+                range=qm.DatetimeRange(gte=f.created_at_gte, lte=f.created_at_lte),
             )
         )
 
@@ -54,16 +77,16 @@ def to_qdrant_filter(f: RagFilters) -> Optional[qm.Filter]:
 
 
 class RagQueryService:
+    """
+    Thin query wrapper around the same embedder + store your ingest worker uses.
+
+    Key property: does NOT reload SentenceTransformer repeatedly.
+    """
+
     def __init__(self, cfg: RagConfig):
         self.cfg = cfg
-        self.embedder = Embedder(cfg.embedding_model, device=cfg.embedding_device)
-        self.store = QdrantStore(
-            url=cfg.qdrant_url,
-            api_key=cfg.qdrant_api_key,
-            collection=cfg.qdrant_collection,
-            vector_dim=self.embedder.dim,
-        )
-        self.store.ensure_collection()
+        self.embedder = _get_query_embedder(cfg)
+        self.store = _get_query_store(cfg, vector_dim=self.embedder.dim)
 
     def search_text(
         self,
