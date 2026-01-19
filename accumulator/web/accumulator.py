@@ -82,9 +82,10 @@ class WebAccumulator:
         # -------------------------------------------------
         # 4. Fallback: naive visible-text extraction
         # -------------------------------------------------
-        if not body.get("extracted"):
-            body = clean_html(html)
-            body["extracted"] = False
+        if not body["extracted"]:
+            fallback = clean_html(html)
+            fallback["extracted"] = False
+            body = fallback
 
         # -------------------------------------------------
         # 5. Emit immutable accumulator record
