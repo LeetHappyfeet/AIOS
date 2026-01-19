@@ -16,57 +16,35 @@ from aios_app.pipeline.jobs import (
     mark_failed,
 )
 
-# -------------------------------------------------
-# Import NEW worker entrypoints (payload-scoped)
-# -------------------------------------------------
-
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
-from aios_app.pipeline.worker import run_claim_extraction_worker
+from aios_app.pipeline.worker import run_claim_extraction_for_section
 
 logger = logging.getLogger("aios.pipeline.runner")
-
-# -------------------------------------------------
-# Job handler registry
-# -------------------------------------------------
 
 JOB_HANDLERS: Dict[str, Callable[[Database, Dict[str, Any]], Awaitable[None]]] = {}
 
 
-# -------------------------------------------------
-# Handlers
-# -------------------------------------------------
-
-async def handle_dag_to_document_section(
-    db: Database,
-    job: Dict[str, Any],
-) -> None:
+async def handle_dag_to_document_section(db: Database, job: Dict[str, Any]) -> None:
     node_id = UUID(job["payload"]["node_id"])
     await run_dag_to_document_section(db, node_id=node_id)
 
 
-async def handle_extract_claims(
-    db: Database,
-    job: Dict[str, Any],
-) -> None:
-    # NOTE:
-    # claim extraction is section-scoped internally,
-    # so we just let it run deterministically
-    await run_claim_extraction_worker(db)
+async def handle_extract_claims(db: Database, job: Dict[str, Any]) -> None:
+    """
+    SECTION-SCOPED claim extraction.
+    Payload MUST contain section_id.
+    """
+    section_id = UUID(job["payload"]["section_id"])
+    await run_claim_extraction_for_section(db, section_id=section_id)
 
 
-# -------------------------------------------------
-# Register handlers
-# -------------------------------------------------
+JOB_HANDLERS.update(
+    {
+        "dag_to_document_section": handle_dag_to_document_section,
+        "extract_claims": handle_extract_claims,
+    }
+)
 
-JOB_HANDLERS.update({
-    "dag_to_document_section": handle_dag_to_document_section,
-    "extract_claims": handle_extract_claims,
-})
-
-
-# -------------------------------------------------
-# Runner loop
-# -------------------------------------------------
 
 async def run_runner(poll_interval: float = 1.0) -> None:
     db = Database(settings.db_dsn)
@@ -86,11 +64,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
             handler = JOB_HANDLERS.get(job_type)
 
             if not handler:
-                await mark_failed(
-                    db,
-                    job_id,
-                    f"No handler registered for job_type={job_type!r}",
-                )
+                await mark_failed(db, job_id, f"No handler registered for job_type={job_type!r}")
                 continue
 
             try:
@@ -98,11 +72,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
                 await handler(db, job)
                 await mark_done(db, job_id)
             except Exception as exc:
-                logger.exception(
-                    "Job %s (%s) failed",
-                    job_id,
-                    job_type,
-                )
+                logger.exception("Job %s (%s) failed", job_id, job_type)
                 await mark_failed(db, job_id, repr(exc))
 
     finally:
@@ -111,8 +81,4 @@ async def run_runner(poll_interval: float = 1.0) -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(
-        run_runner(
-            poll_interval=settings.runner_poll_interval
-        )
-    )
+    asyncio.run(run_runner(poll_interval=settings.runner_poll_interval))

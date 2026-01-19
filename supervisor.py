@@ -45,15 +45,13 @@ class Stage:
 def node_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"node_id": str(row["node_id"])}
 
+
 def section_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"section_id": str(row["section_id"])}
 
-def sentence_id_payload(row: Dict[str, object]) -> Dict[str, object]:
-    return {"sentence_id": str(row["sentence_id"])}
-
 
 # =================================================
-# Pipeline stages (STRUCTURAL, NOT SEMANTIC)
+# Pipeline stages (STRUCTURAL ONLY)
 # =================================================
 
 STAGES: List[Stage] = [
@@ -69,14 +67,12 @@ STAGES: List[Stage] = [
         FROM aios.dag_node n
         WHERE n.message_text IS NOT NULL
           AND (
-              -- Web/doc paragraphs must have required payload fields
               (
                   n.kind = 'paragraph'
                   AND n.payload ? 'document_id'
                   AND n.payload ? 'paragraph_index'
               )
               OR
-              -- Chat messages must have an event_id (used for ordering / section_path)
               (
                   n.kind = 'chat_message'
                   AND n.event_id IS NOT NULL
@@ -100,32 +96,28 @@ STAGES: List[Stage] = [
         payload_builder=node_id_payload,
     ),
 
-
     # -------------------------------------------------
-    # 2) document_section → claim_candidate
+    # 2) document_section → claim_candidate (TERMINAL)
     # -------------------------------------------------
     Stage(
         name="extract_claims",
         job_type="extract_claims",
         eligibility_sql="""
-        SELECT es.sentence_id
-        FROM aios.extracted_sentence es
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM aios.claim_candidate cc
-            WHERE cc.sentence_id = es.sentence_id
-        )
+        SELECT
+            ds.section_id
+        FROM aios.document_section ds
+        WHERE ds.claims_extracted_at IS NULL
           AND NOT EXISTS (
               SELECT 1
               FROM aios.pipeline_job pj
               WHERE pj.job_type = 'extract_claims'
                 AND pj.status IN ('queued', 'running')
-                AND (pj.payload->>'sentence_id') = es.sentence_id::text
+                AND (pj.payload->>'section_id') = ds.section_id::text
           )
-        ORDER BY es.sentence_id
+        ORDER BY ds.section_id
         LIMIT $1
         """,
-        payload_builder=sentence_id_payload,
+        payload_builder=section_id_payload,
     ),
 ]
 
@@ -175,10 +167,10 @@ async def run_supervisor(
     """
     Long-running orchestration loop.
 
-    Fixes enqueue spam by:
-      - excluding already queued/running jobs in each stage eligibility_sql
-      - applying global backpressure (max queued backlog)
-      - emitting one summary log line per cycle
+    Guarantees:
+      - no enqueue spam
+      - global backpressure
+      - deterministic convergence
     """
     poll_interval = poll_interval or settings.supervisor_poll_interval
     batch_size = batch_size or settings.supervisor_batch_size
