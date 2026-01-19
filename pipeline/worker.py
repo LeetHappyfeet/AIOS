@@ -42,124 +42,78 @@ def extract_spo(sentence: str) -> Tuple[Optional[str], Optional[str], Optional[s
     subject = predicate = obj = None
     root = doc[:].root
 
-    # ---------------------------------
-    # Case 1: Normal verbal predicate
-    # ---------------------------------
     if root.pos_ == "VERB":
         predicate = root.lemma_
 
         for tok in doc:
             if subject is None and tok.dep_ in ("nsubj", "nsubjpass"):
                 subject = tok.text
-
             if obj is None and tok.dep_ in ("dobj", "pobj", "attr"):
                 obj = tok.text
 
         return subject, predicate, obj
 
-    # ---------------------------------
-    # Case 2: Copula clause (definition)
-    # ---------------------------------
     has_copula = any(child.dep_ == "cop" for child in root.children)
-
     if has_copula:
         for tok in doc:
             if tok.dep_ in ("nsubj", "nsubjpass"):
                 subject = tok.text
                 break
 
-        complement_tokens = [root] + list(root.subtree)
-        complement_tokens = sorted(set(complement_tokens), key=lambda t: t.i)
+        complement_tokens = sorted(set(root.subtree), key=lambda t: t.i)
         obj = " ".join(tok.text for tok in complement_tokens)
-
         predicate = "be_definition_of"
+
         return subject, predicate, obj
 
     return None, None, None
 
 
 # =================================================
-# Worker
+# Worker entrypoint
 # =================================================
 
-async def run_claim_extraction_worker(db: Database) -> None:
-    """
-    document_section → (ensure extracted_sentence) → claim_candidate (+ provenance/assignment)
-
-    IMPORTANT:
-    - This worker no longer gates on extracted_sentence being absent.
-    - It gates on missing claim_candidate rows.
-    """
-
-    logger.info("Starting claim extraction worker (claim-gated)")
-
-    # -------------------------------------------------
-    # Find sections that still have work:
-    #   at least one extracted_sentence WITHOUT a claim_candidate
-    #   OR no extracted_sentences at all yet
-    # -------------------------------------------------
-    rows = await db.fetch(
-        """
-        SELECT
-            ds.section_id,
-            ds.document_id,
-            ds.node_id,
-            ds.section_order,
-            ds.content,
-            COUNT(es.sentence_id) AS sentence_count,
-            COUNT(cc.claim_id)    AS claim_count
-        FROM aios.document_section ds
-        LEFT JOIN aios.extracted_sentence es
-          ON es.section_id = ds.section_id
-        LEFT JOIN aios.claim_candidate cc
-          ON cc.sentence_id = es.sentence_id
-        GROUP BY
-            ds.section_id, ds.document_id, ds.node_id, ds.section_order, ds.content
-        HAVING
-            COUNT(es.sentence_id) = 0
-            OR COUNT(cc.claim_id) < COUNT(es.sentence_id)
-        ORDER BY ds.section_order
-        """
-    )
-
-    logger.info("Found %d sections needing claim extraction", len(rows))
-
-    for row in rows:
-        section_id: UUID = row["section_id"]
-        try:
-            await _process_section(
-                db=db,
-                section_id=section_id,
-                document_id=row["document_id"],
-                node_id=row["node_id"],
-                content=row["content"],
-            )
-        except Exception:
-            logger.exception("Failed processing section %s", section_id)
-
-    logger.info("Claim extraction worker complete")
-
-
-# =================================================
-# Section processing
-# =================================================
-
-async def _process_section(
-    *,
+async def run_claim_extraction_for_section(
     db: Database,
+    *,
     section_id: UUID,
-    document_id: Optional[UUID],
-    node_id: Optional[UUID],
-    content: str,
 ) -> None:
     """
-    Ensure extracted_sentence exists for this section, then create missing claim_candidate
-    rows for those sentences only.
+    Section-scoped claim extraction.
+    Guarantees:
+      - extracted_sentence rows exist
+      - claim_candidate rows exist
+      - claims_extracted_at is set exactly once
     """
 
+    row = await db.fetchrow(
+        """
+        SELECT
+            section_id,
+            document_id,
+            content,
+            claims_extracted_at
+        FROM aios.document_section
+        WHERE section_id = $1
+        """,
+        section_id,
+    )
+
+    if not row:
+        logger.warning("Section %s not found", section_id)
+        return
+
+    if row["claims_extracted_at"] is not None:
+        logger.debug("Section %s already completed; skipping", section_id)
+        return
+
+    document_id: Optional[UUID] = row["document_id"]
+    content: str = row["content"]
+
     # -------------------------------------------------
-    # 0) Load existing extracted sentences (if any)
+    # 1) Load or create extracted_sentence rows
     # -------------------------------------------------
+
     existing = await db.fetch(
         """
         SELECT sentence_id, sentence_index, sentence_text
@@ -171,26 +125,16 @@ async def _process_section(
     )
 
     if existing:
-        sentences = [(r["sentence_id"], int(r["sentence_index"]), r["sentence_text"]) for r in existing]
-        logger.debug(
-            "Section %s already has %d extracted_sentence rows",
-            section_id,
-            len(sentences),
-        )
+        sentences = [
+            (r["sentence_id"], int(r["sentence_index"]), r["sentence_text"])
+            for r in existing
+        ]
     else:
-        # -------------------------------------------------
-        # 0b) If none exist, create them from content
-        # -------------------------------------------------
         text_sentences = split_sentences(content)
-        logger.debug(
-            "Section %s had no extracted sentences; splitting content into %d sentences",
-            section_id,
-            len(text_sentences),
-        )
-
         sentences = []
+
         for idx, sent in enumerate(text_sentences):
-            sentence_row = await db.execute_returning_row(
+            r = await db.execute_returning_row(
                 """
                 INSERT INTO aios.extracted_sentence (
                     section_id,
@@ -204,21 +148,20 @@ async def _process_section(
                 idx,
                 sent,
             )
-            sentences.append((sentence_row["sentence_id"], idx, sent))
+            sentences.append((r["sentence_id"], idx, sent))
 
     # -------------------------------------------------
-    # 1) For each sentence, create claim only if missing
+    # 2) Insert missing claim_candidate rows
     # -------------------------------------------------
-    inserted_claims = 0
+
+    inserted = 0
 
     for sentence_id, idx, sentence in sentences:
-        # Does a claim already exist for this sentence?
         exists = await db.fetchrow(
             """
             SELECT 1
             FROM aios.claim_candidate
             WHERE sentence_id = $1
-            LIMIT 1
             """,
             sentence_id,
         )
@@ -227,7 +170,7 @@ async def _process_section(
 
         subject, predicate, obj = extract_spo(sentence)
 
-        claim_row = await db.execute_returning_row(
+        r = await db.execute_returning_row(
             """
             INSERT INTO aios.claim_candidate (
                 sentence_id,
@@ -257,10 +200,10 @@ async def _process_section(
             sentence,
             WORKER_VERSION,
         )
-        claim_id: UUID = claim_row["claim_id"]
-        inserted_claims += 1
 
-        # claim_world_assignment
+        claim_id = r["claim_id"]
+        inserted += 1
+
         await db.execute(
             """
             INSERT INTO aios.claim_world_assignment (
@@ -278,8 +221,7 @@ async def _process_section(
             WORKER_NAME,
         )
 
-        # claim_provenance
-        if document_id is not None:
+        if document_id:
             await db.execute(
                 """
                 INSERT INTO aios.claim_provenance (
@@ -296,26 +238,22 @@ async def _process_section(
                 f"document_section:{section_id}:sentence_index:{idx}",
             )
 
-    logger.info(
-        "Section %s: inserted %d new claims",
+    # -------------------------------------------------
+    # 3) Mark section complete (terminal latch)
+    # -------------------------------------------------
+
+    await db.execute(
+        """
+        UPDATE aios.document_section
+        SET claims_extracted_at = now()
+        WHERE section_id = $1
+          AND claims_extracted_at IS NULL
+        """,
         section_id,
-        inserted_claims,
     )
 
-
-# =================================================
-# CLI
-# =================================================
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    async def main() -> None:
-        db = Database(settings.db_dsn)
-        await db.connect()
-        try:
-            await run_claim_extraction_worker(db)
-        finally:
-            await db.close()
-
-    asyncio.run(main())
+    logger.info(
+        "Section %s: inserted %d new claims; marked complete",
+        section_id,
+        inserted,
+    )
