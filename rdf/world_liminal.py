@@ -1,4 +1,3 @@
-# aios_app/rdf/world_liminal.py
 from __future__ import annotations
 
 import logging
@@ -10,7 +9,7 @@ from .fuseki import FusekiClient
 
 logger = logging.getLogger("aios.rdf.world_liminal")
 
-DATASET = "world"                 # Fuseki dataset name
+DATASET = "world"
 GRAPH_IRI = "urn:aios:world:liminal"
 
 
@@ -25,11 +24,12 @@ async def promote_liminal_claims(
     batch_size: int = 100,
 ) -> int:
     """
-    Promote claim_candidate → RDF /world/liminal (BATCHED)
+    Promote claim_candidate → RDF /world/liminal
 
-    - Reads SQL
-    - Writes RDF in ONE SPARQL UPDATE
-    - Records rdf_promotion_log per claim
+    Semantics:
+    - Liminal is NOT a world
+    - Claims here are observational only
+    - No truth, belief, or world membership is asserted
     """
 
     rows = await _fetch_claims(db, batch_size)
@@ -43,7 +43,6 @@ async def promote_liminal_claims(
         logger.exception("Failed batch promotion to /world/liminal")
         return 0
 
-    # Log promotions AFTER successful RDF write
     for row in rows:
         await _log_promotion(db, row["claim_id"])
 
@@ -124,7 +123,11 @@ def _write_claims_rdf_batch(
     rows: Iterable[dict],
 ) -> None:
     """
-    Write multiple claims into /world/liminal in a single SPARQL update.
+    Writes observational claim nodes into /world/liminal.
+
+    No world membership.
+    No belief assertion.
+    No contradiction resolution.
     """
 
     blocks: list[str] = []
@@ -135,13 +138,12 @@ def _write_claims_rdf_batch(
         triples: list[str] = [
             f"<{claim_iri}> a world:Claim ;",
             f'  world:claimId "{row["claim_id"]}" ;',
-            f"  world:track world:liminal ;",
+            f"  world:epistemicState world:Liminal ;",
             f'  world:claimStatus "pending" ;',
             f"  world:rawText {sparql_str(row['raw_text'])} ;",
-            f'  world:confidence "{row["confidence"]}"^^xsd:float ;',
+            f'  world:extractionConfidence "{row["confidence"]}"^^xsd:float ;',
         ]
 
-        # Optional extraction metadata
         if row.get("extraction_rule"):
             triples.append(
                 f"  world:extractionRule {sparql_str(row['extraction_rule'])} ;"
@@ -152,28 +154,23 @@ def _write_claims_rdf_batch(
                 f"  world:extractionVersion {sparql_str(row['extraction_ver'])} ;"
             )
 
-        # Timestamp (always present)
         triples.append(
             f'  world:observedAt "{row["created_at"].isoformat()}"^^xsd:dateTime ;'
         )
 
-        # Optional lexical surface form
         if row.get("subject"):
-            triples.append(f"  world:subject {sparql_str(row['subject'])} ;")
+            triples.append(f"  world:surfaceSubject {sparql_str(row['subject'])} ;")
         if row.get("predicate"):
-            triples.append(f"  world:predicate {sparql_str(row['predicate'])} ;")
+            triples.append(f"  world:surfacePredicate {sparql_str(row['predicate'])} ;")
         if row.get("object"):
-            triples.append(f"  world:object {sparql_str(row['object'])} ;")
+            triples.append(f"  world:surfaceObject {sparql_str(row['object'])} ;")
 
-        # Optional provenance
         if row.get("document_id"):
             doc_iri = f"urn:aios:document:{row['document_id']}"
             triples.append(f"  prov:wasDerivedFrom <{doc_iri}> ;")
             triples.append(f"  world:sourceDocument <{doc_iri}> ;")
 
-        # Replace final semicolon with period
         triples[-1] = triples[-1].rstrip(" ;") + " ."
-
         blocks.append("\n".join(triples))
 
     sparql = f"""
