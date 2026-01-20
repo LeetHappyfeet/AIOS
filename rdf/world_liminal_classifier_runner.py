@@ -105,12 +105,13 @@ def _write_classification(
 PREFIX world: <urn:aios:world#>
 
 INSERT DATA {{
-  GRAPH <{GRAPH_IRI}> {{
+  GRAPH <urn:aios:world:liminal> {{
     <{claim_iri}> world:contentKind "{kind}" .
   }}
 }}
 """
-    fuseki.update(DATASET, sparql)
+    fuseki.update("world", sparql)
+
 
 
 # -------------------------------------------------

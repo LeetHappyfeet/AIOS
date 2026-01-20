@@ -17,7 +17,7 @@ aios:World a owl:Class ;
 aios:Claim a owl:Class ;
     rdfs:label "Asserted Claim" ;
     rdfs:comment
-        "A claim that has been promoted from liminal observation into an asserted world." .
+        "A claim that has been explicitly promoted from liminal observation into an asserted world." .
 
 #################################################################
 # World Membership
@@ -64,9 +64,11 @@ aios:object a owl:ObjectProperty ;
     rdfs:domain aios:Claim ;
     rdfs:label "object" .
 
+# IMPORTANT: asserted confidence is *promotion/belief confidence* within a world,
+# not extractor confidence. Extractor confidence lives in /world/liminal as
+# world:extractionConfidence.
 aios:confidence a owl:DatatypeProperty ;
     rdfs:domain aios:Claim ;
     rdfs:range xsd:float ;
-    rdfs:label "confidence" .
-
-#############################################
+    rdfs:label "confidence" ;
+    rdfs:comment "Promotion/belief confidence assigned by explicit promotion policy." .

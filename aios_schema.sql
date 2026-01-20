@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict gV7nZjisAboGbrwS60UdaIImCBPclchBurTszcDdugu1lgacMD7g5iCuXqnTxIl
+\restrict JcesQyCNrUy9M1awaOwDept8pQXqefTW6DaE1PPGwukbpzQKOmwwEkT4g8GU0V8
 
 -- Dumped from database version 16.11 (Debian 16.11-1.pgdg13+1)
 -- Dumped by pg_dump version 16.11 (Ubuntu 16.11-1.pgdg22.04+1)
@@ -285,7 +285,8 @@ CREATE TABLE aios.document_section (
     section_path text NOT NULL,
     section_order integer NOT NULL,
     content text NOT NULL,
-    node_id uuid
+    node_id uuid,
+    claims_extracted_at timestamp with time zone
 );
 
 
@@ -443,6 +444,21 @@ CREATE TABLE aios.section_cluster_assignment (
     cluster_label text NOT NULL,
     score_to_centroid double precision
 );
+
+
+--
+-- Name: section_progress; Type: VIEW; Schema: aios; Owner: -
+--
+
+CREATE VIEW aios.section_progress AS
+ SELECT ds.section_id,
+    ds.document_id,
+    ds.claims_extracted_at,
+    count(cc.claim_id) AS claim_count
+   FROM ((aios.document_section ds
+     LEFT JOIN aios.extracted_sentence es ON ((es.section_id = ds.section_id)))
+     LEFT JOIN aios.claim_candidate cc ON ((cc.sentence_id = es.sentence_id)))
+  GROUP BY ds.section_id, ds.document_id, ds.claims_extracted_at;
 
 
 --
@@ -779,7 +795,7 @@ ALTER TABLE ONLY aios.ingest_event
 --
 
 ALTER TABLE ONLY aios.vector_index_state
-    ADD CONSTRAINT vector_index_state_pkey PRIMARY KEY (section_id);
+    ADD CONSTRAINT vector_index_state_pkey PRIMARY KEY (section_id, qdrant_collection, embedding_model, embedding_version);
 
 
 --
@@ -1017,6 +1033,13 @@ CREATE INDEX idx_vector_index_state_collection ON aios.vector_index_state USING 
 
 
 --
+-- Name: idx_vis_lookup; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_vis_lookup ON aios.vector_index_state USING btree (section_id, qdrant_collection, embedding_model, embedding_version);
+
+
+--
 -- Name: idx_world_canon; Type: INDEX; Schema: aios; Owner: -
 --
 
@@ -1035,6 +1058,13 @@ CREATE INDEX idx_world_parent ON aios.world USING btree (parent_world_id);
 --
 
 CREATE INDEX idx_world_type ON aios.world USING btree (world_type);
+
+
+--
+-- Name: uniq_pipeline_job_identity; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE UNIQUE INDEX uniq_pipeline_job_identity ON aios.pipeline_job USING btree (job_type, ((payload ->> 'node_id'::text)), status) WHERE (status = ANY (ARRAY['queued'::text, 'running'::text]));
 
 
 --
@@ -1257,5 +1287,5 @@ ALTER TABLE ONLY aios.world
 -- PostgreSQL database dump complete
 --
 
-\unrestrict gV7nZjisAboGbrwS60UdaIImCBPclchBurTszcDdugu1lgacMD7g5iCuXqnTxIl
+\unrestrict JcesQyCNrUy9M1awaOwDept8pQXqefTW6DaE1PPGwukbpzQKOmwwEkT4g8GU0V8
 

@@ -7,12 +7,15 @@
 # Liminal Content Classification Extension
 #################################################################
 
+# NOTE: contentKind is descriptive metadata about the discourse/structural role
+# of an observed claim. It MUST NOT be used as belief strength, truth value,
+# epistemic confidence, or world membership.
 world:contentKind a owl:DatatypeProperty ;
     rdfs:domain world:Claim ;
     rdfs:range xsd:string ;
     rdfs:label "content kind" ;
     rdfs:comment
-        "Structural classification of a liminal claim (e.g. content, navigation, footer, boilerplate). This is not a truth judgment." .
+        "Structural classification of a liminal claim (e.g. content, navigation, footer, reference). This is not a truth judgment and must not be used to assert or deny truth." .
 
 #################################################################
 # Optional: controlled vocabulary (non-restrictive)
@@ -21,7 +24,7 @@ world:contentKind a owl:DatatypeProperty ;
 world:ContentKind a owl:Class ;
     rdfs:label "Content Kind" ;
     rdfs:comment
-        "Conceptual categories for classifying the structural role of observed claims." .
+        "Describes the discourse or structural role of a claim's content. ContentKind does NOT express belief strength, truth value, epistemic confidence, or world membership. It must never be used to assert or deny truth." .
 
 world:content a world:ContentKind ;
     rdfs:label "content" .
@@ -48,4 +51,3 @@ world:reference a world:ContentKind ;
     rdfs:label "reference" ;
     rdfs:comment
         "Bibliographic, citation, or reference material (dates, ISBNs, publisher names, retrieval notes). Not propositional content." .
-
