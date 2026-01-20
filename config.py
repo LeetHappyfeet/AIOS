@@ -31,8 +31,8 @@ class Settings(BaseModel):
     # -------------------------------------------------
     # RDF / Fuseki
     # -------------------------------------------------
-    fuseki_url: str = os.getenv(
-        "AIOS_FUSEKI_URL",
+    fuseki_base_url: str = os.getenv(
+        "AIOS_FUSEKI_BASE_URL",
         "http://127.0.0.1:3030",
     )
 
@@ -66,6 +66,7 @@ class Settings(BaseModel):
     supervisor_max_jobs_per_cycle: int = int(
         os.getenv("AIOS_SUPERVISOR_MAX_JOBS_PER_CYCLE", "50")
     )
+
     runner_poll_interval: float = float(
         os.getenv("AIOS_RUNNER_POLL_INTERVAL", "1.0")
     )

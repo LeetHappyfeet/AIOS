@@ -23,14 +23,8 @@ class Stage:
     """
     Declarative description of a pipeline stage.
 
-    The supervisor:
-      - runs eligibility_sql (must EXCLUDE already queued/running jobs)
-      - enqueues jobs of job_type
-      - passes payload built from each row
-
-    IMPORTANT:
-      eligibility_sql MUST include a NOT EXISTS against pipeline_job
-      to prevent infinite enqueue spam.
+    eligibility_sql MUST exclude already queued/running jobs.
+    Payload is passed verbatim to the runner.
     """
     name: str
     job_type: str
@@ -50,14 +44,18 @@ def section_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"section_id": str(row["section_id"])}
 
 
+def empty_payload(_: Dict[str, object]) -> Dict[str, object]:
+    return {}
+
+
 # =================================================
-# Pipeline stages (STRUCTURAL ONLY)
+# Pipeline stages
 # =================================================
 
 STAGES: List[Stage] = [
 
     # -------------------------------------------------
-    # 1) DAG node → document_section
+    # 1) DAG → document_section
     # -------------------------------------------------
     Stage(
         name="dag_to_document_section",
@@ -97,14 +95,13 @@ STAGES: List[Stage] = [
     ),
 
     # -------------------------------------------------
-    # 2) document_section → claim_candidate (TERMINAL)
+    # 2) document_section → claim_candidate
     # -------------------------------------------------
     Stage(
         name="extract_claims",
         job_type="extract_claims",
         eligibility_sql="""
-        SELECT
-            ds.section_id
+        SELECT ds.section_id
         FROM aios.document_section ds
         WHERE ds.claims_extracted_at IS NULL
           AND NOT EXISTS (
@@ -118,6 +115,66 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=section_id_payload,
+    ),
+
+    # -------------------------------------------------
+    # 3) claim_candidate → RDF /world/liminal
+    # -------------------------------------------------
+    Stage(
+        name="rdf_liminal_promote",
+        job_type="rdf_liminal_promote",
+        eligibility_sql="""
+        SELECT 1
+        WHERE EXISTS (
+            SELECT 1
+            FROM aios.claim_candidate cc
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM aios.rdf_promotion_log rpl
+                WHERE rpl.claim_id = cc.claim_id
+                  AND rpl.rdf_dataset = 'world'
+                  AND rpl.rdf_graph = 'urn:aios:world:liminal'
+            )
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM aios.pipeline_job pj
+            WHERE pj.job_type = 'rdf_liminal_promote'
+              AND pj.status IN ('queued', 'running')
+        )
+        LIMIT $1
+        """,
+        payload_builder=empty_payload,
+    ),
+
+    # -------------------------------------------------
+    # 4) classify liminal RDF claims
+    # -------------------------------------------------
+    Stage(
+        name="rdf_liminal_classify",
+        job_type="rdf_liminal_classify",
+        eligibility_sql="""
+        SELECT 1
+        WHERE EXISTS (
+            SELECT 1
+            FROM aios.rdf_promotion_log rpl
+            WHERE rpl.rdf_dataset = 'world'
+              AND rpl.rdf_graph = 'urn:aios:world:liminal'
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM aios.rdf_promotion_log rpl2
+            WHERE rpl2.rdf_predicate = 'world:contentKind'
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM aios.pipeline_job pj
+            WHERE pj.job_type = 'rdf_liminal_classify'
+              AND pj.status IN ('queued', 'running')
+        )
+        LIMIT $1
+        """,
+        payload_builder=empty_payload,
     ),
 ]
 
@@ -158,87 +215,48 @@ async def enqueue_stage_jobs(
 # Supervisor loop
 # =================================================
 
-async def run_supervisor(
-    poll_interval: Optional[float] = None,
-    batch_size: Optional[int] = None,
-    max_jobs_per_cycle: Optional[int] = None,
-    max_queued_backlog: Optional[int] = None,
-) -> None:
-    """
-    Long-running orchestration loop.
-
-    Guarantees:
-      - no enqueue spam
-      - global backpressure
-      - deterministic convergence
-    """
-    poll_interval = poll_interval or settings.supervisor_poll_interval
-    batch_size = batch_size or settings.supervisor_batch_size
-    max_jobs_per_cycle = max_jobs_per_cycle or settings.supervisor_max_jobs_per_cycle
-
-    if max_queued_backlog is None:
-        max_queued_backlog = getattr(settings, "supervisor_max_queued_backlog", 500)
+async def run_supervisor() -> None:
+    poll_interval = settings.supervisor_poll_interval
+    batch_size = settings.supervisor_batch_size
+    max_jobs_per_cycle = settings.supervisor_max_jobs_per_cycle
+    max_queued_backlog = getattr(settings, "supervisor_max_queued_backlog", 500)
 
     db = Database(settings.db_dsn)
     await db.connect()
 
-    logger.info(
-        "AIOS supervisor started "
-        "(poll_interval=%s batch_size=%s max_jobs_per_cycle=%s max_queued_backlog=%s)",
-        poll_interval,
-        batch_size,
-        max_jobs_per_cycle,
-        max_queued_backlog,
-    )
+    logger.info("AIOS supervisor started")
 
     try:
         while True:
             qcnt = await queued_job_count(db)
             if qcnt >= max_queued_backlog:
-                logger.info(
-                    "Backpressure: queued=%d >= max_queued_backlog=%d (sleeping %ss)",
-                    qcnt,
-                    max_queued_backlog,
-                    poll_interval,
-                )
                 await asyncio.sleep(poll_interval)
                 continue
 
-            scheduled_total = 0
-            scheduled_by_stage: Dict[str, int] = {}
-            remaining_budget = max_jobs_per_cycle
+            remaining = max_jobs_per_cycle
+            scheduled = 0
 
             for stage in STAGES:
-                if remaining_budget <= 0:
+                if remaining <= 0:
                     break
 
                 try:
                     n = await enqueue_stage_jobs(
                         db,
                         stage,
-                        batch_size=min(batch_size, remaining_budget),
+                        batch_size=min(batch_size, remaining),
                     )
-                    if n:
-                        scheduled_by_stage[stage.name] = n
-                    scheduled_total += n
-                    remaining_budget -= n
+                    scheduled += n
+                    remaining -= n
                 except Exception:
-                    logger.exception("Stage '%s' failed during enqueue", stage.name)
+                    logger.exception("Stage '%s' enqueue failed", stage.name)
 
-            if scheduled_total:
-                parts = ", ".join(f"{k}={v}" for k, v in scheduled_by_stage.items())
-                logger.info("Scheduled %d jobs (%s)", scheduled_total, parts)
-                continue
-
-            await asyncio.sleep(poll_interval)
+            if scheduled == 0:
+                await asyncio.sleep(poll_interval)
 
     finally:
         await db.close()
 
-
-# =================================================
-# CLI entrypoint
-# =================================================
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
