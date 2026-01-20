@@ -1,5 +1,5 @@
-# Good Morning Campers!
-# Welcome to Alpha development branch
+
+# Welcome to Main release branch
 
 # Changes
 /rag
