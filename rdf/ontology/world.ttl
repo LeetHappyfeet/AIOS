@@ -10,23 +10,21 @@
 
 world:WorldOntology a owl:Ontology ;
   rdfs:label "AIOS World Observation Ontology" ;
-  rdfs:comment "Defines observed claims and epistemic world tracks. Claims represent observations, not assertions of truth." .
+  rdfs:comment "Defines observational claims and epistemic states. Claims represent observations, not assertions of truth." .
 
 #################################################################
-# World Tracks (Explicit Epistemic Paths)
+# Epistemic States
 #################################################################
 
-world:WorldTrack a owl:Class ;
-  rdfs:label "World Track" ;
-  rdfs:comment "An epistemic track defining how a claim is treated." .
+world:EpistemicState a owl:Class ;
+  rdfs:label "Epistemic State" ;
+  rdfs:comment "Represents how a claim is epistemically treated. Epistemic states are not worlds." .
 
-world:liminal a world:WorldTrack , owl:NamedIndividual ;
-  rdfs:label "Liminal (Observed)" ;
-  rdfs:comment "Raw observations extracted from text or events. Not truth." .
-
-world:asserted a world:WorldTrack , owl:NamedIndividual ;
-  rdfs:label "Asserted World" ;
-  rdfs:comment "Claims promoted into an internally consistent world." .
+# Liminal is a holding state for unverified observations.
+# Claims in this state are NOT members of any asserted world.
+world:Liminal a world:EpistemicState , owl:NamedIndividual ;
+  rdfs:label "Liminal" ;
+  rdfs:comment "Provisional epistemic state for observational claims. Not world membership; not truth." .
 
 #################################################################
 # Core Class: Claim
@@ -46,6 +44,15 @@ world:claimId a owl:DatatypeProperty ;
   rdfs:comment "Stable identifier for the claim (UUID from SQL claim_candidate)." .
 
 #################################################################
+# Epistemic State Assignment (NOT world membership)
+#################################################################
+
+world:epistemicState a owl:ObjectProperty ;
+  rdfs:domain world:Claim ;
+  rdfs:range world:EpistemicState ;
+  rdfs:comment "Epistemic treatment of this claim (e.g., Liminal). Does not imply truth or world membership." .
+
+#################################################################
 # Claim Status (Mirrors SQL Lifecycle)
 #################################################################
 
@@ -58,34 +65,25 @@ world:claimStatus a owl:DatatypeProperty ;
 # Surface Form (Lexical, Non-Ontological)
 #################################################################
 
-world:subject a owl:DatatypeProperty ;
+world:surfaceSubject a owl:DatatypeProperty ;
   rdfs:domain world:Claim ;
   rdfs:range xsd:string ;
-  rdfs:comment "Lexical subject extracted from text." .
+  rdfs:comment "Lexical subject extracted from source text." .
 
-world:predicate a owl:DatatypeProperty ;
+world:surfacePredicate a owl:DatatypeProperty ;
   rdfs:domain world:Claim ;
   rdfs:range xsd:string ;
-  rdfs:comment "Lexical predicate extracted from text." .
+  rdfs:comment "Lexical predicate extracted from source text." .
 
-world:object a owl:DatatypeProperty ;
+world:surfaceObject a owl:DatatypeProperty ;
   rdfs:domain world:Claim ;
   rdfs:range xsd:string ;
-  rdfs:comment "Lexical object extracted from text." .
+  rdfs:comment "Lexical object extracted from source text." .
 
 world:rawText a owl:DatatypeProperty ;
   rdfs:domain world:Claim ;
   rdfs:range xsd:string ;
   rdfs:comment "Authoritative raw sentence or utterance text." .
-
-#################################################################
-# Track Assignment
-#################################################################
-
-world:track a owl:ObjectProperty ;
-  rdfs:domain world:Claim ;
-  rdfs:range world:WorldTrack ;
-  rdfs:comment "Epistemic track this claim belongs to." .
 
 #################################################################
 # Extraction Metadata
@@ -101,10 +99,11 @@ world:extractionVersion a owl:DatatypeProperty ;
   rdfs:range xsd:string ;
   rdfs:comment "Version of extraction logic." .
 
-world:confidence a owl:DatatypeProperty ;
+# IMPORTANT: this is extraction confidence only (not belief strength / truth confidence).
+world:extractionConfidence a owl:DatatypeProperty ;
   rdfs:domain world:Claim ;
   rdfs:range xsd:float ;
-  rdfs:comment "Extractor confidence score (not truth)." .
+  rdfs:comment "Extractor confidence score (not truth confidence)." .
 
 #################################################################
 # Temporal Anchoring
@@ -150,17 +149,17 @@ world:resolvedObject a owl:ObjectProperty ;
   rdfs:comment "Resolved entity corresponding to the lexical object (if any)." .
 
 #################################################################
-# Asserted World (Track B)
+# Asserted Worlds (defined elsewhere; referenced here for linkage)
 #################################################################
 
 world:World a owl:Class ;
-  rdfs:label "Asserted World" ;
+  rdfs:label "World" ;
   rdfs:comment "An internally consistent world composed of promoted claims." .
 
 world:memberOfWorld a owl:ObjectProperty ;
   rdfs:domain world:Claim ;
   rdfs:range world:World ;
-  rdfs:comment "Indicates that a claim has been promoted into an asserted world." .
+  rdfs:comment "Indicates that a claim has been promoted into an asserted world (explicit promotion only)." .
 
 #################################################################
 # World Transitions (Explicit Elasticity)
