@@ -18,8 +18,9 @@ async def run_worker(
     """
     Project ONE DAG node into document_section.
 
-    Supervisor guarantees eligibility.
-    This worker executes unconditionally.
+    The DAG node remains the temporal anchor. document_section is a linguistic
+    projection used by sentence/claim extraction. On success, the originating
+    ingest_event receives its section_processed_at stage latch.
     """
 
     row = await db.fetchrow(
@@ -29,7 +30,7 @@ async def run_worker(
             n.kind,
             n.event_id,
             n.message_text AS content,
-            (n.payload->>'document_id')::uuid    AS document_id,
+            (n.payload->>'document_id')::uuid     AS document_id,
             (n.payload->>'paragraph_index')::int AS paragraph_index
         FROM aios.dag_node n
         WHERE n.node_id = $1
@@ -38,7 +39,6 @@ async def run_worker(
     )
 
     if not row:
-        # Node was deleted or race condition — safe to ignore
         logger.warning("Node %s disappeared before projection", node_id)
         return
 
@@ -53,12 +53,11 @@ async def run_worker(
         document_id = None
 
     else:
-        # Supervisor should never schedule this
         raise RuntimeError(
             f"Unsupported dag_node.kind {row['kind']!r} for node {node_id}"
         )
 
-    await db.execute(
+    section = await db.execute_returning_row(
         """
         INSERT INTO aios.document_section (
             document_id,
@@ -68,7 +67,9 @@ async def run_worker(
             content
         )
         VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (node_id) DO NOTHING
+        ON CONFLICT (node_id) DO UPDATE
+        SET node_id = EXCLUDED.node_id
+        RETURNING section_id
         """,
         document_id,
         row["node_id"],
@@ -77,8 +78,26 @@ async def run_worker(
         row["content"],
     )
 
+    if not section:
+        raise RuntimeError(f"Could not create or resolve document_section for {node_id}")
+
+    await db.execute(
+        """
+        UPDATE aios.ingest_event
+        SET section_processed_at = COALESCE(section_processed_at, now()),
+            process_status = CASE
+                WHEN rdf_processed_at IS NOT NULL THEN 'done'::aios.process_status
+                ELSE 'processing'::aios.process_status
+            END,
+            process_error = NULL
+        WHERE event_id = $1
+        """,
+        row["event_id"],
+    )
+
     logger.debug(
-        "Projected %s node %s → document_section",
+        "Projected %s node %s → document_section %s",
         row["kind"],
         node_id,
+        section["section_id"],
     )
