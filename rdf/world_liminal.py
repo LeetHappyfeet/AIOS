@@ -14,17 +14,23 @@ GRAPH_IRI = "urn:aios:world:liminal"
 
 
 # -------------------------------------------------
-# Public entrypoint (BATCHED)
+# Public entrypoint (SECTION-SCOPED, BATCHED)
 # -------------------------------------------------
 
 async def promote_liminal_claims(
     db: Database,
     fuseki: FusekiClient,
     *,
+    section_id: UUID,
     batch_size: int = 100,
 ) -> int:
     """
-    Promote claim_candidate → RDF /world/liminal
+    Promote one document_section's claim set into RDF /world/liminal.
+
+    The section is the completion boundary for a stored message. A successful
+    RDF write is acknowledged in rdf_promotion_log per claim. Only after every
+    claim belonging to the section has a receipt is the originating
+    ingest_event marked rdf_processed_at/process_status='done'.
 
     Semantics:
     - Liminal is NOT a world
@@ -32,21 +38,34 @@ async def promote_liminal_claims(
     - No truth, belief, or world membership is asserted
     """
 
-    rows = await _fetch_claims(db, batch_size)
+    rows = list(await _fetch_claims(db, section_id, batch_size))
 
     if not rows:
+        await _finalize_section_if_complete(db, section_id)
         return 0
 
     try:
         _write_claims_rdf_batch(fuseki, rows)
-    except Exception:
-        logger.exception("Failed batch promotion to /world/liminal")
-        return 0
 
-    for row in rows:
-        await _log_promotion(db, row["claim_id"])
+        for row in rows:
+            await _log_promotion(db, row["claim_id"], section_id)
 
-    logger.info("Promoted %d claims into /world/liminal", len(rows))
+        await _finalize_section_if_complete(db, section_id)
+    except Exception as exc:
+        await _mark_section_rdf_error(db, section_id, exc)
+        logger.exception(
+            "Failed RDF promotion for section %s to /world/liminal",
+            section_id,
+        )
+        # Do not swallow RDF failures. The runner must mark the pipeline job
+        # failed so the supervisor can safely retry it.
+        raise
+
+    logger.info(
+        "Promoted %d claims from section %s into /world/liminal",
+        len(rows),
+        section_id,
+    )
     return len(rows)
 
 
@@ -54,7 +73,11 @@ async def promote_liminal_claims(
 # SQL
 # -------------------------------------------------
 
-async def _fetch_claims(db: Database, limit: int) -> Iterable[dict]:
+async def _fetch_claims(
+    db: Database,
+    section_id: UUID,
+    limit: int,
+) -> Iterable[dict]:
     return await db.fetch(
         """
         SELECT
@@ -69,23 +92,33 @@ async def _fetch_claims(db: Database, limit: int) -> Iterable[dict]:
             cc.created_at,
             cp.document_id
         FROM aios.claim_candidate cc
+        JOIN aios.extracted_sentence es
+          ON es.sentence_id = cc.sentence_id
         LEFT JOIN aios.claim_provenance cp
           ON cp.claim_id = cc.claim_id
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM aios.rdf_promotion_log rpl
-            WHERE rpl.claim_id = cc.claim_id
-              AND rpl.rdf_dataset = 'world'
-              AND rpl.rdf_graph = 'urn:aios:world:liminal'
-        )
-        ORDER BY cc.created_at
-        LIMIT $1
+        WHERE es.section_id = $1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.rdf_promotion_log rpl
+              WHERE rpl.claim_id = cc.claim_id
+                AND rpl.rdf_dataset = $2
+                AND rpl.rdf_graph = $3
+          )
+        ORDER BY es.sentence_index, cc.created_at
+        LIMIT $4
         """,
+        section_id,
+        DATASET,
+        GRAPH_IRI,
         limit,
     )
 
 
-async def _log_promotion(db: Database, claim_id: UUID) -> None:
+async def _log_promotion(
+    db: Database,
+    claim_id: UUID,
+    section_id: UUID,
+) -> None:
     await db.execute(
         """
         INSERT INTO aios.rdf_promotion_log (
@@ -96,21 +129,109 @@ async def _log_promotion(db: Database, claim_id: UUID) -> None:
             rdf_predicate,
             rdf_object,
             promoted_by,
-            promoted_at
+            promoted_at,
+            promotion_meta
         )
         VALUES (
             $1::uuid,
-            'world',
-            'urn:aios:world:liminal',
+            $2,
+            $3,
             'urn:aios:world:claim:' || $1::text,
             'rdf:type',
             'world:Claim',
             'world_liminal_writer',
-            now()
+            now(),
+            jsonb_build_object('section_id', $4::text)
         )
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (claim_id, rdf_dataset, rdf_graph) DO NOTHING
         """,
         claim_id,
+        DATASET,
+        GRAPH_IRI,
+        section_id,
+    )
+
+
+async def _finalize_section_if_complete(
+    db: Database,
+    section_id: UUID,
+) -> bool:
+    """
+    Mark the source ingest event done iff no unacknowledged claims remain.
+
+    Sections containing no extracted sentences/claims are terminal too: there
+    is no RDF content to write, but all eligible RDF work is complete.
+    """
+
+    row = await db.fetchrow(
+        """
+        SELECT
+            n.event_id,
+            EXISTS (
+                SELECT 1
+                FROM aios.claim_candidate cc
+                JOIN aios.extracted_sentence es
+                  ON es.sentence_id = cc.sentence_id
+                WHERE es.section_id = ds.section_id
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM aios.rdf_promotion_log rpl
+                      WHERE rpl.claim_id = cc.claim_id
+                        AND rpl.rdf_dataset = $2
+                        AND rpl.rdf_graph = $3
+                  )
+            ) AS has_unpromoted_claims
+        FROM aios.document_section ds
+        JOIN aios.dag_node n
+          ON n.node_id = ds.node_id
+        WHERE ds.section_id = $1
+        """,
+        section_id,
+        DATASET,
+        GRAPH_IRI,
+    )
+
+    if not row:
+        raise RuntimeError(f"Cannot finalize missing section {section_id}")
+
+    if row["has_unpromoted_claims"]:
+        return False
+
+    await db.execute(
+        """
+        UPDATE aios.ingest_event
+        SET rdf_processed_at = COALESCE(rdf_processed_at, now()),
+            process_status = 'done',
+            processed_at = COALESCE(processed_at, now()),
+            process_error = NULL,
+            rdf_error = NULL
+        WHERE event_id = $1
+        """,
+        row["event_id"],
+    )
+    return True
+
+
+async def _mark_section_rdf_error(
+    db: Database,
+    section_id: UUID,
+    exc: Exception,
+) -> None:
+    await db.execute(
+        """
+        UPDATE aios.ingest_event ie
+        SET process_status = 'error',
+            process_error = $2,
+            rdf_error = $2,
+            processed_at = NULL
+        FROM aios.document_section ds
+        JOIN aios.dag_node n
+          ON n.node_id = ds.node_id
+        WHERE ds.section_id = $1
+          AND ie.event_id = n.event_id
+        """,
+        section_id,
+        repr(exc)[:2000],
     )
 
 
@@ -138,8 +259,8 @@ def _write_claims_rdf_batch(
         triples: list[str] = [
             f"<{claim_iri}> a world:Claim ;",
             f'  world:claimId "{row["claim_id"]}" ;',
-            f"  world:epistemicState world:Liminal ;",
-            f'  world:claimStatus "pending" ;',
+            "  world:epistemicState world:Liminal ;",
+            '  world:claimStatus "pending" ;',
             f"  world:rawText {sparql_str(row['raw_text'])} ;",
             f'  world:extractionConfidence "{row["confidence"]}"^^xsd:float ;',
         ]
@@ -194,4 +315,4 @@ INSERT DATA {{
 
 def sparql_str(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f"\"\"\"{escaped}\"\"\""
+    return f'"""{escaped}"""'
