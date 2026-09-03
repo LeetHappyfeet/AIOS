@@ -43,12 +43,18 @@ async def handle_extract_claims(db: Database, job: Dict[str, Any]) -> None:
 
 
 # -------------------------------------------------
-# NEW: RDF handlers
+# RDF handlers
 # -------------------------------------------------
 
 async def handle_rdf_liminal_promote(db: Database, job: Dict[str, Any]) -> None:
+    section_id = UUID(job["payload"]["section_id"])
     fuseki = FusekiClient(settings.fuseki_base_url)
-    await promote_liminal_claims(db, fuseki, batch_size=500)
+    await promote_liminal_claims(
+        db,
+        fuseki,
+        section_id=section_id,
+        batch_size=500,
+    )
 
 
 async def handle_rdf_liminal_classify(db: Database, job: Dict[str, Any]) -> None:
@@ -64,6 +70,54 @@ JOB_HANDLERS.update(
         "rdf_liminal_classify": handle_rdf_liminal_classify,
     }
 )
+
+
+async def _mark_origin_event_error(
+    db: Database,
+    *,
+    job_type: str,
+    payload: Dict[str, Any],
+    error: str,
+) -> None:
+    """Propagate downstream worker failure to the source ingest_event."""
+
+    if job_type == "dag_to_document_section" and payload.get("node_id"):
+        await db.execute(
+            """
+            UPDATE aios.ingest_event ie
+            SET process_status = 'error',
+                process_error = $2,
+                processed_at = NULL
+            FROM aios.dag_node n
+            WHERE n.node_id = $1::uuid
+              AND ie.event_id = n.event_id
+            """,
+            payload["node_id"],
+            error[:2000],
+        )
+        return
+
+    if job_type in {"extract_claims", "rdf_liminal_promote"} and payload.get("section_id"):
+        await db.execute(
+            """
+            UPDATE aios.ingest_event ie
+            SET process_status = 'error',
+                process_error = $2,
+                rdf_error = CASE
+                    WHEN $3 = 'rdf_liminal_promote' THEN $2
+                    ELSE rdf_error
+                END,
+                processed_at = NULL
+            FROM aios.document_section ds
+            JOIN aios.dag_node n
+              ON n.node_id = ds.node_id
+            WHERE ds.section_id = $1::uuid
+              AND ie.event_id = n.event_id
+            """,
+            payload["section_id"],
+            error[:2000],
+            job_type,
+        )
 
 
 # -------------------------------------------------
@@ -97,7 +151,20 @@ async def run_runner(poll_interval: float = 1.0) -> None:
                 await mark_done(db, job_id)
             except Exception as exc:
                 logger.exception("Job %s (%s) failed", job_id, job_type)
-                await mark_failed(db, job_id, repr(exc))
+                error = repr(exc)
+                try:
+                    await _mark_origin_event_error(
+                        db,
+                        job_type=job_type,
+                        payload=job.get("payload") or {},
+                        error=error,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to propagate job %s error to originating ingest_event",
+                        job_id,
+                    )
+                await mark_failed(db, job_id, error)
 
     finally:
         await db.close()
