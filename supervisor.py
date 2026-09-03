@@ -150,8 +150,11 @@ STAGES: List[Stage] = [
     ),
 
     # -------------------------------------------------
-    # 4) classify liminal RDF claims
+    # 4) classify promoted liminal RDF claims
     # -------------------------------------------------
+    # The old gate stopped scheduling forever after ANY contentKind receipt
+    # existed. Keep scheduling while at least one base-promoted claim lacks its
+    # own classification receipt.
     Stage(
         name="rdf_liminal_classify",
         job_type="rdf_liminal_classify",
@@ -159,14 +162,24 @@ STAGES: List[Stage] = [
         SELECT 1
         WHERE EXISTS (
             SELECT 1
-            FROM aios.rdf_promotion_log rpl
-            WHERE rpl.rdf_dataset = 'world'
-              AND rpl.rdf_graph = 'urn:aios:world:liminal'
-        )
-        AND NOT EXISTS (
-            SELECT 1
-            FROM aios.rdf_promotion_log rpl2
-            WHERE rpl2.rdf_predicate = 'world:contentKind'
+            FROM aios.claim_candidate cc
+            WHERE EXISTS (
+                SELECT 1
+                FROM aios.rdf_promotion_log base
+                WHERE base.claim_id = cc.claim_id
+                  AND base.rdf_dataset = 'world'
+                  AND base.rdf_graph = 'urn:aios:world:liminal'
+                  AND base.rdf_predicate = 'rdf:type'
+                  AND base.rdf_object = 'world:Claim'
+            )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM aios.rdf_promotion_log cls
+                  WHERE cls.claim_id = cc.claim_id
+                    AND cls.rdf_dataset = 'world'
+                    AND cls.rdf_graph = 'urn:aios:world:liminal'
+                    AND cls.rdf_predicate = 'world:contentKind'
+              )
         )
         AND NOT EXISTS (
             SELECT 1
