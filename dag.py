@@ -278,22 +278,26 @@ async def add_node_and_edge(
             edge_type,
         )
 
-    # DAG persistence is the first pipeline latch. A document root has no
-    # direct RDF content of its own, so its own event is terminal here; its
-    # paragraph events continue independently through the downstream stages.
+    # DAG persistence is the first pipeline latch. Idempotent replay must not
+    # reopen an event that already completed RDF processing.
     await db.execute(
         """
         UPDATE aios.ingest_event
         SET dag_processed_at = COALESCE(dag_processed_at, now()),
             process_status = CASE
+                WHEN rdf_processed_at IS NOT NULL THEN 'done'::aios.process_status
                 WHEN $2::aios.event_kind = 'document' THEN 'done'::aios.process_status
                 ELSE 'processing'::aios.process_status
             END,
             processed_at = CASE
+                WHEN rdf_processed_at IS NOT NULL THEN processed_at
                 WHEN $2::aios.event_kind = 'document' THEN COALESCE(processed_at, now())
                 ELSE processed_at
             END,
-            process_error = NULL
+            process_error = CASE
+                WHEN rdf_processed_at IS NOT NULL THEN process_error
+                ELSE NULL
+            END
         WHERE event_id = $1
         """,
         event_id,
