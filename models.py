@@ -18,6 +18,8 @@ EventKind = Literal[
     "memory_inject",
     "system",
     "other",
+    "document",
+    "paragraph",
 ]
 
 
@@ -45,14 +47,14 @@ class IngestIn(BaseModel):
     session_id: UUID
 
     speaker_id: Optional[str] = None
-    speaker_type: Optional[ActorType] = None
+    speaker_type: ActorType = "user"
     recipient_id: Optional[str] = None
 
     character_id: str
     user_name: str
 
     text: str
-    kind: Optional[EventKind] = "chat_message"
+    kind: EventKind = "chat_message"
 
     # raw "extra" fields; lands in payload jsonb
     payload: Dict[str, Any] = Field(default_factory=dict)
@@ -67,7 +69,7 @@ class IngestIn(BaseModel):
 class IngestOut(BaseModel):
     ok: bool
     event_id: int
-    node_id: UUID          # ✅ FIXED
+    node_id: UUID
     timeline_id: UUID
 
 
