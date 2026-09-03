@@ -40,8 +40,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_timeline_identity
     ) NULLS NOT DISTINCT;
 
 -- rdf_promotion_log is a promotion receipt: one successful receipt per
--- claim/dataset/graph. This makes ON CONFLICT meaningful and prevents
--- duplicate SQL acknowledgements of the same RDF promotion.
+-- claim/dataset/graph. Remove any historical duplicate receipts before
+-- enforcing that identity so this migration remains safe on a used database.
+WITH ranked_receipts AS (
+    SELECT
+        promotion_id,
+        row_number() OVER (
+            PARTITION BY claim_id, rdf_dataset, rdf_graph
+            ORDER BY promoted_at, promotion_id
+        ) AS rn
+    FROM aios.rdf_promotion_log
+)
+DELETE FROM aios.rdf_promotion_log rpl
+USING ranked_receipts rr
+WHERE rpl.promotion_id = rr.promotion_id
+  AND rr.rn > 1;
+
 CREATE UNIQUE INDEX IF NOT EXISTS ux_rdf_promotion_claim_dataset_graph
     ON aios.rdf_promotion_log (claim_id, rdf_dataset, rdf_graph);
 
