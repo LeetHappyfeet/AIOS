@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import List, Optional, Tuple
 from uuid import UUID
@@ -10,7 +9,6 @@ from uuid import UUID
 import spacy
 
 from aios_app.db import Database
-from aios_app.config import settings
 
 logger = logging.getLogger("aios.pipeline.worker")
 
@@ -80,21 +78,30 @@ async def run_claim_extraction_for_section(
 ) -> None:
     """
     Section-scoped claim extraction.
+
     Guarantees:
       - extracted_sentence rows exist
       - claim_candidate rows exist
       - claims_extracted_at is set exactly once
+      - the originating ingest_event receives claims_processed_at
+
+    A claim_candidate is still created when shallow SPO extraction cannot
+    identify all three terms. That preserves the sentence as an observational
+    RDF claim and keeps the ingestion lineage complete.
     """
 
     row = await db.fetchrow(
         """
         SELECT
-            section_id,
-            document_id,
-            content,
-            claims_extracted_at
-        FROM aios.document_section
-        WHERE section_id = $1
+            ds.section_id,
+            ds.document_id,
+            ds.content,
+            ds.claims_extracted_at,
+            n.event_id
+        FROM aios.document_section ds
+        JOIN aios.dag_node n
+          ON n.node_id = ds.node_id
+        WHERE ds.section_id = $1
         """,
         section_id,
     )
@@ -103,8 +110,11 @@ async def run_claim_extraction_for_section(
         logger.warning("Section %s not found", section_id)
         return
 
+    event_id = int(row["event_id"])
+
     if row["claims_extracted_at"] is not None:
-        logger.debug("Section %s already completed; skipping", section_id)
+        await _mark_claim_stage_complete(db, event_id)
+        logger.debug("Section %s already completed; refreshed event latch", section_id)
         return
 
     document_id: Optional[UUID] = row["document_id"]
@@ -239,7 +249,7 @@ async def run_claim_extraction_for_section(
             )
 
     # -------------------------------------------------
-    # 3) Mark section complete (terminal latch)
+    # 3) Mark section and originating event complete for this stage
     # -------------------------------------------------
 
     await db.execute(
@@ -252,8 +262,26 @@ async def run_claim_extraction_for_section(
         section_id,
     )
 
+    await _mark_claim_stage_complete(db, event_id)
+
     logger.info(
-        "Section %s: inserted %d new claims; marked complete",
+        "Section %s: inserted %d new claims; marked claim stage complete",
         section_id,
         inserted,
+    )
+
+
+async def _mark_claim_stage_complete(db: Database, event_id: int) -> None:
+    await db.execute(
+        """
+        UPDATE aios.ingest_event
+        SET claims_processed_at = COALESCE(claims_processed_at, now()),
+            process_status = CASE
+                WHEN rdf_processed_at IS NOT NULL THEN 'done'::aios.process_status
+                ELSE 'processing'::aios.process_status
+            END,
+            process_error = NULL
+        WHERE event_id = $1
+        """,
+        event_id,
     )
