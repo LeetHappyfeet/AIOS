@@ -39,14 +39,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_timeline_identity
         scope_key
     ) NULLS NOT DISTINCT;
 
--- rdf_promotion_log is a promotion receipt: one successful receipt per
--- claim/dataset/graph. Remove any historical duplicate receipts before
--- enforcing that identity so this migration remains safe on a used database.
+-- rdf_promotion_log records multiple RDF actions for a claim (for example the
+-- base rdf:type promotion and later world:contentKind classification). The
+-- stable receipt identity is therefore claim + dataset + graph + predicate.
+-- Remove historical duplicates of the SAME action before enforcing it.
 WITH ranked_receipts AS (
     SELECT
         promotion_id,
         row_number() OVER (
-            PARTITION BY claim_id, rdf_dataset, rdf_graph
+            PARTITION BY claim_id, rdf_dataset, rdf_graph, rdf_predicate
             ORDER BY promoted_at, promotion_id
         ) AS rn
     FROM aios.rdf_promotion_log
@@ -56,8 +57,15 @@ USING ranked_receipts rr
 WHERE rpl.promotion_id = rr.promotion_id
   AND rr.rn > 1;
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_rdf_promotion_claim_dataset_graph
-    ON aios.rdf_promotion_log (claim_id, rdf_dataset, rdf_graph);
+DROP INDEX IF EXISTS aios.ux_rdf_promotion_claim_dataset_graph;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_rdf_promotion_claim_graph_predicate
+    ON aios.rdf_promotion_log (
+        claim_id,
+        rdf_dataset,
+        rdf_graph,
+        rdf_predicate
+    );
 
 CREATE INDEX IF NOT EXISTS idx_dag_node_timeline_event
     ON aios.dag_node (timeline_id, event_id DESC);
