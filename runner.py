@@ -11,7 +11,6 @@ from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.pipeline.jobs import (
     fetch_next_job,
-    mark_running,
     mark_done,
     mark_failed,
 )
@@ -132,6 +131,8 @@ async def run_runner(poll_interval: float = 1.0) -> None:
 
     try:
         while True:
+            # fetch_next_job() atomically moves queued → running, so there is no
+            # lock gap between selecting and claiming a job.
             job = await fetch_next_job(db)
             if not job:
                 await asyncio.sleep(poll_interval)
@@ -146,7 +147,6 @@ async def run_runner(poll_interval: float = 1.0) -> None:
                 continue
 
             try:
-                await mark_running(db, job_id)
                 await handler(db, job)
                 await mark_done(db, job_id)
             except Exception as exc:
