@@ -20,7 +20,6 @@ async def get_or_create_world(
     Worlds are singleton by key.
     """
 
-    # 1. Fetch if exists
     row = await db.fetchrow(
         """
         SELECT world_id
@@ -33,7 +32,6 @@ async def get_or_create_world(
     if row:
         return row["world_id"]
 
-    # 2. Insert if missing (race-safe)
     row = await db.execute_returning_row(
         """
         INSERT INTO aios.world (world_key, meta)
@@ -46,7 +44,6 @@ async def get_or_create_world(
     if row:
         return row["world_id"]
 
-    # 3. Fetch again if race lost
     row = await db.fetchrow(
         """
         SELECT world_id
@@ -80,11 +77,8 @@ async def get_or_create_timeline(
     """
 
     meta_json = json.dumps(meta or {})
-
-    # Resolve world_id safely
     world_id = await get_or_create_world(db, world_key=world_key)
 
-    # 1. Fetch if exists
     row = await db.fetchrow(
         """
         SELECT timeline_id
@@ -98,7 +92,6 @@ async def get_or_create_timeline(
     if row:
         return row["timeline_id"]
 
-    # 2. Attempt insert (race-safe)
     row = await db.execute_returning_row(
         """
         INSERT INTO aios.timeline (
@@ -124,7 +117,6 @@ async def get_or_create_timeline(
     if row:
         return row["timeline_id"]
 
-    # 3. Fetch again if another process won
     row = await db.fetchrow(
         """
         SELECT timeline_id
@@ -142,23 +134,29 @@ async def get_or_create_timeline(
 # DAG node helpers
 # -------------------------------------------------
 
-async def get_last_node_id(
+async def get_previous_node_id(
     db: Database,
+    *,
     timeline_id: UUID,
+    event_id: int,
 ) -> Optional[UUID]:
     """
-    Returns the most recent node in the timeline.
-    Used only for chat-style chaining.
+    Return the most recent DAG node whose ingest event precedes event_id.
+
+    event_id, rather than created_at, is the deterministic ingestion-order
+    anchor. The node's event_time preserves the source/arrival timestamp.
     """
     row = await db.fetchrow(
         """
         SELECT node_id
         FROM aios.dag_node
         WHERE timeline_id = $1
-        ORDER BY created_at DESC
+          AND event_id < $2
+        ORDER BY event_id DESC
         LIMIT 1
         """,
         timeline_id,
+        event_id,
     )
     return row["node_id"] if row else None
 
@@ -181,21 +179,35 @@ async def add_node_and_edge(
     Insert a DAG node and optionally attach it to a parent.
 
     Structural rules:
-    - document nodes are ALWAYS roots
-    - paragraph / sentence nodes REQUIRE explicit parent
-    - chat nodes chain to the previous node if no parent supplied
+    - document nodes are roots
+    - explicit parents are honored for document-derived child nodes
+    - chat nodes chain to the preceding ingest event in the timeline
+    - event_time is copied from ingest_event and is the temporal timestamp
     """
 
     payload_json = json.dumps(payload or {})
 
-    # -------------------------------------------------
-    # 1. Insert node (idempotent)
-    # -------------------------------------------------
+    # Resolve the implicit parent BEFORE relying on the newly inserted node.
+    # Using event_id < current event_id prevents the old self-parent bug even
+    # if timestamps collide.
+    parent: Optional[UUID]
+    if kind == "document":
+        parent = None
+    elif parent_node_id is not None:
+        parent = parent_node_id
+    else:
+        parent = await get_previous_node_id(
+            db,
+            timeline_id=timeline_id,
+            event_id=event_id,
+        )
+
     row = await db.execute_returning_row(
         """
         INSERT INTO aios.dag_node (
             timeline_id,
             event_id,
+            event_time,
             kind,
             speaker_id,
             speaker_role,
@@ -203,16 +215,18 @@ async def add_node_and_edge(
             message_text,
             payload
         )
-        VALUES (
+        SELECT
             $1,
             $2,
+            COALESCE(ie.event_time, ie.created_at),
             $3::aios.event_kind,
             $4,
             $5::aios.actor_type,
             $6,
             $7,
             $8::jsonb
-        )
+        FROM aios.ingest_event ie
+        WHERE ie.event_id = $2
         ON CONFLICT (timeline_id, event_id) DO NOTHING
         RETURNING node_id
         """,
@@ -239,25 +253,12 @@ async def add_node_and_edge(
             timeline_id,
             event_id,
         )
+        if not row:
+            raise RuntimeError(
+                f"DAG node could not be inserted or resolved for event_id={event_id}"
+            )
         node_id = row["node_id"]
 
-    # -------------------------------------------------
-    # 2. Determine parent
-    # -------------------------------------------------
-    parent: Optional[UUID] = None
-
-    if kind == "document":
-        parent = None
-
-    elif parent_node_id is not None:
-        parent = parent_node_id
-
-    else:
-        parent = await get_last_node_id(db, timeline_id)
-
-    # -------------------------------------------------
-    # 3. Insert edge
-    # -------------------------------------------------
     if parent and parent != node_id:
         await db.execute(
             """
@@ -276,5 +277,31 @@ async def add_node_and_edge(
             node_id,
             edge_type,
         )
+
+    # DAG persistence is the first pipeline latch. Idempotent replay must not
+    # reopen an event that already completed RDF processing.
+    await db.execute(
+        """
+        UPDATE aios.ingest_event
+        SET dag_processed_at = COALESCE(dag_processed_at, now()),
+            process_status = CASE
+                WHEN rdf_processed_at IS NOT NULL THEN 'done'::aios.process_status
+                WHEN $2::aios.event_kind = 'document' THEN 'done'::aios.process_status
+                ELSE 'processing'::aios.process_status
+            END,
+            processed_at = CASE
+                WHEN rdf_processed_at IS NOT NULL THEN processed_at
+                WHEN $2::aios.event_kind = 'document' THEN COALESCE(processed_at, now())
+                ELSE processed_at
+            END,
+            process_error = CASE
+                WHEN rdf_processed_at IS NOT NULL THEN process_error
+                ELSE NULL
+            END
+        WHERE event_id = $1
+        """,
+        event_id,
+        kind,
+    )
 
     return node_id, parent

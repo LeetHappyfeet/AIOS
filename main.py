@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Optional, Dict, Any
@@ -46,10 +47,12 @@ async def startup() -> None:
     await db.connect()
     logger.info("Database connected")
 
+
 @app.on_event("shutdown")
 async def shutdown() -> None:
     await db.close()
     logger.info("Database closed")
+
 
 # =================================================
 # Health
@@ -58,6 +61,7 @@ async def shutdown() -> None:
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
 
 # =================================================
 # Session management
@@ -82,24 +86,29 @@ async def create_session(req: SessionCreate) -> SessionOut:
         topic=row["topic"],
     )
 
+
 # =================================================
-# Ingest (UNSTRUCTURED → DAG)
+# Ingest (UNSTRUCTURED → DAG → downstream pipeline)
 # =================================================
 
 @app.post("/ingest", response_model=IngestOut)
 async def ingest(req: IngestIn) -> IngestOut:
     """
-    Ingest raw text into:
-      ingest_event → dag_node
+    Persist raw message content and anchor it to the temporal DAG.
+
+    Successful HTTP ingestion means the durable SQL event and DAG node exist.
+    It does NOT mean downstream RDF processing is finished. The supervisor and
+    runner advance the same ingest_event through section, claim, and RDF stage
+    latches; process_status becomes 'done' only after RDF acknowledgement.
 
     Epistemic rule:
       - ALL chat / agent ingests are assigned to the LIMINAL world
       - World promotion happens later via logic, not user claims
     """
 
-    message_text = (
-        json.dumps(req.text) if isinstance(req.text, dict) else str(req.text)
-    )
+    # IngestIn.text is intentionally canonical linguistic content. Structured
+    # transport/application metadata belongs in payload, not message_text.
+    message_text = req.text
 
     payload: Dict[str, Any] = dict(req.payload or {})
     payload.update(
@@ -114,15 +123,19 @@ async def ingest(req: IngestIn) -> IngestOut:
         }
     )
 
-    dedupe_key = (
-        req.dedupe_key
-        or f"{req.session_id}::{req.speaker_type}::{hash(message_text)}"
+    # Python's built-in hash() is process-randomized and therefore unsuitable
+    # for persistent dedupe keys. SHA-256 gives stable identity across restarts.
+    text_digest = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+    dedupe_key = req.dedupe_key or (
+        f"{req.session_id}::{req.kind or 'other'}::{req.speaker_type}::"
+        f"{req.speaker_id or ''}::{text_digest}"
     )
 
     try:
         ev = await db.execute_returning_row(
             """
             INSERT INTO aios.ingest_event (
+                event_time,
                 source,
                 kind,
                 session_id,
@@ -136,6 +149,7 @@ async def ingest(req: IngestIn) -> IngestOut:
                 dedupe_key
             )
             VALUES (
+                now(),
                 $1,
                 $2::aios.event_kind,
                 $3,
@@ -148,6 +162,8 @@ async def ingest(req: IngestIn) -> IngestOut:
                 $10::jsonb,
                 $11
             )
+            ON CONFLICT (dedupe_key) DO UPDATE
+            SET dedupe_key = EXCLUDED.dedupe_key
             RETURNING event_id
             """,
             settings.source_name,
@@ -162,66 +178,64 @@ async def ingest(req: IngestIn) -> IngestOut:
             json.dumps(payload),
             dedupe_key,
         )
-    except Exception as e:
+    except Exception as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Insert ingest_event failed: {e}",
-        )
+            detail=f"Insert ingest_event failed: {exc}",
+        ) from exc
 
     event_id = int(ev["event_id"])
 
-    # -------------------------------------------------
-    # Timeline resolution (STRUCTURAL ONLY)
-    # -------------------------------------------------
-    # Epistemic rule:
-    #   Chat cannot assert world state.
-    #   All ingests default to the LIMINAL world.
-    # -------------------------------------------------
+    try:
+        # -------------------------------------------------
+        # Timeline resolution (STRUCTURAL ONLY)
+        # -------------------------------------------------
+        timeline_id = await get_or_create_timeline(
+            db,
+            world_key="liminal",
+            session_id=req.session_id,
+            character_id=req.character_id,
+            user_name=req.user_name,
+            scope_key=req.scope_key or settings.default_scope,
+            meta={
+                "source": settings.source_name,
+                "world_assignment": "default_liminal",
+            },
+        )
 
-    timeline_id = await get_or_create_timeline(
-        db,
-        world_key="liminal",
-        session_id=req.session_id,
-        character_id=req.character_id,
-        user_name=req.user_name,
-        scope_key=req.scope_key or settings.default_scope,
-        meta={
-            "source": settings.source_name,
-            "world_assignment": "default_liminal",
-        },
-    )
-
-    # -------------------------------------------------
-    # DAG append
-    # -------------------------------------------------
-
-    node_id, _ = await add_node_and_edge(
-        db,
-        timeline_id=timeline_id,
-        event_id=event_id,
-        kind=req.kind or "other",
-        speaker_id=req.speaker_id,
-        speaker_role=req.speaker_type,
-        recipient_id=req.recipient_id,
-        message_text=message_text,
-        payload=payload,
-        edge_type="next",
-    )
-
-    # -------------------------------------------------
-    # Mark ingest_event complete
-    # -------------------------------------------------
-
-    await db.execute(
-        """
-        UPDATE aios.ingest_event
-        SET process_status = 'done',
-            processed_at = now(),
-            process_error = NULL
-        WHERE event_id = $1
-        """,
-        event_id,
-    )
+        # -------------------------------------------------
+        # DAG append
+        # -------------------------------------------------
+        # add_node_and_edge also flips the durable DAG stage latch on the
+        # originating ingest_event.
+        node_id, _ = await add_node_and_edge(
+            db,
+            timeline_id=timeline_id,
+            event_id=event_id,
+            kind=req.kind or "other",
+            speaker_id=req.speaker_id,
+            speaker_role=req.speaker_type,
+            recipient_id=req.recipient_id,
+            message_text=message_text,
+            payload=payload,
+            edge_type="next",
+        )
+    except Exception as exc:
+        await db.execute(
+            """
+            UPDATE aios.ingest_event
+            SET process_status = 'error',
+                process_error = $2,
+                processed_at = NULL
+            WHERE event_id = $1
+            """,
+            event_id,
+            repr(exc)[:2000],
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"DAG ingestion failed for event_id={event_id}: {exc}",
+        ) from exc
 
     return IngestOut(
         ok=True,
@@ -229,6 +243,7 @@ async def ingest(req: IngestIn) -> IngestOut:
         node_id=node_id,
         timeline_id=timeline_id,
     )
+
 
 # =================================================
 # Memory read (READ-ONLY)

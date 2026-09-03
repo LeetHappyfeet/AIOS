@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List
 
 from aios_app.config import settings
 from aios_app.db import Database
@@ -88,7 +88,7 @@ STAGES: List[Stage] = [
                 AND pj.status IN ('queued', 'running')
                 AND (pj.payload->>'node_id') = n.node_id::text
           )
-        ORDER BY n.created_at
+        ORDER BY n.event_id
         LIMIT $1
         """,
         payload_builder=node_id_payload,
@@ -103,6 +103,8 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT ds.section_id
         FROM aios.document_section ds
+        JOIN aios.dag_node n
+          ON n.node_id = ds.node_id
         WHERE ds.claims_extracted_at IS NULL
           AND NOT EXISTS (
               SELECT 1
@@ -111,40 +113,40 @@ STAGES: List[Stage] = [
                 AND pj.status IN ('queued', 'running')
                 AND (pj.payload->>'section_id') = ds.section_id::text
           )
-        ORDER BY ds.section_id
+        ORDER BY n.event_id
         LIMIT $1
         """,
         payload_builder=section_id_payload,
     ),
 
     # -------------------------------------------------
-    # 3) claim_candidate → RDF /world/liminal
+    # 3) section claim set → RDF /world/liminal
     # -------------------------------------------------
+    # One job owns one section. This preserves the lineage boundary:
+    # ingest_event → dag_node → document_section → claims → RDF receipts.
     Stage(
         name="rdf_liminal_promote",
         job_type="rdf_liminal_promote",
         eligibility_sql="""
-        SELECT 1
-        WHERE EXISTS (
-            SELECT 1
-            FROM aios.claim_candidate cc
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM aios.rdf_promotion_log rpl
-                WHERE rpl.claim_id = cc.claim_id
-                  AND rpl.rdf_dataset = 'world'
-                  AND rpl.rdf_graph = 'urn:aios:world:liminal'
-            )
-        )
-        AND NOT EXISTS (
-            SELECT 1
-            FROM aios.pipeline_job pj
-            WHERE pj.job_type = 'rdf_liminal_promote'
-              AND pj.status IN ('queued', 'running')
-        )
+        SELECT ds.section_id
+        FROM aios.document_section ds
+        JOIN aios.dag_node n
+          ON n.node_id = ds.node_id
+        JOIN aios.ingest_event ie
+          ON ie.event_id = n.event_id
+        WHERE ds.claims_extracted_at IS NOT NULL
+          AND ie.rdf_processed_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.pipeline_job pj
+              WHERE pj.job_type = 'rdf_liminal_promote'
+                AND pj.status IN ('queued', 'running')
+                AND (pj.payload->>'section_id') = ds.section_id::text
+          )
+        ORDER BY n.event_id
         LIMIT $1
         """,
-        payload_builder=empty_payload,
+        payload_builder=section_id_payload,
     ),
 
     # -------------------------------------------------
