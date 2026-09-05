@@ -183,3 +183,38 @@ class WorldObservedFactIn(BaseModel):
     claim_id: Optional[UUID] = None
     confidence: float = 0.7
     reason: str = "explicit world bootstrap/import"
+
+
+class LongDocumentIn(BaseModel):
+    text: str
+    source_type: str = "document"
+    source_uri: Optional[str] = None
+    title: Optional[str] = None
+    source_name: str = "long_document"
+
+
+class CharacterEpistemicProfileIn(BaseModel):
+    skepticism: float = 0.5
+    curiosity: float = 0.5
+    authority_trust: float = 0.5
+    novelty_seeking: float = 0.5
+    emotional_reactivity: float = 0.5
+    retention: float = 0.7
+    source_trust: Dict[str, float] = Field(default_factory=dict)
+    topic_interest: Dict[str, float] = Field(default_factory=dict)
+    domain_expertise: Dict[str, float] = Field(default_factory=dict)
+    trait_weights: Dict[str, float] = Field(default_factory=dict)
+
+
+class DocumentAcquireIn(BaseModel):
+    acquisition_mode: str = "read_document"
+    epistemic_status: str = "observed"
+    confidence: Optional[float] = None
+
+
+class EpistemicSearchIn(BaseModel):
+    query: str
+    limit: int = 25
+    instance_id: Optional[UUID] = None
+    source_key: Optional[str] = None
+    include_conflicts: bool = True
