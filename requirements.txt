@@ -11,3 +11,4 @@ gradio
 qdrant-client
 sentence-transformers
 numpy
+spacy>=3.7,<4
