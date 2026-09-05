@@ -100,8 +100,7 @@ def split_long_document(text: str) -> list[Unit]:
 def derive_metadata(text: str, *, supplied_title: Optional[str] = None) -> list[dict]:
     """Extract only metadata actually observable in the document itself."""
     observations: list[dict] = []
-    sample = text[:12000]
-    lines = [ln.strip() for ln in sample.splitlines() if ln.strip()]
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
     if supplied_title:
         observations.append({
@@ -128,13 +127,13 @@ def derive_metadata(text: str, *, supplied_title: Optional[str] = None) -> list[
         ("author", re.compile(r"^(?:by|author[:\s]+)\s*(.{2,120})$", re.I), 0.75),
         ("isbn", re.compile(r"\bISBN(?:-1[03])?\s*:?\s*([0-9Xx\- ]{10,25})\b", re.I), 0.9),
         ("doi", re.compile(r"\b(10\.\d{4,9}/[-._;()/:A-Z0-9]+)\b", re.I), 0.9),
-        ("publication_year", re.compile(r"\b((?:18|19|20)\d{2})\b"), 0.45),
+        ("publication_year", re.compile(r"(?:copyright|©|published)\D{0,20}((?:18|19|20)\d{2})", re.I), 0.7),
         ("publisher", re.compile(r"^(?:publisher[:\s]+|published by\s+)(.{2,160})$", re.I), 0.7),
         ("edition", re.compile(r"\b(\d+(?:st|nd|rd|th)\s+edition|revised edition|second edition|third edition)\b", re.I), 0.7),
     ]
 
     seen: set[tuple[str, str]] = set()
-    for idx, line in enumerate(lines[:200]):
+    for idx, line in enumerate(lines):
         for field_type, pattern, confidence in patterns:
             match = pattern.search(line)
             if not match:
