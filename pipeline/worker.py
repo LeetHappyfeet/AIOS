@@ -102,7 +102,9 @@ async def run_claim_extraction_for_section(
             n.speaker_id,
             n.speaker_role::text AS speaker_role,
             n.recipient_id,
-            NULLIF(n.payload->>'viewpoint_id', '') AS explicit_viewpoint_id
+            n.character_id,
+            NULLIF(n.payload->>'viewpoint_id', '') AS explicit_viewpoint_id,
+            COALESCE(NULLIF(n.payload->>'identity_ruleset', ''), 'character-id-v1') AS identity_ruleset
         FROM aios.document_section ds
         JOIN aios.dag_node n
           ON n.node_id = ds.node_id
@@ -186,9 +188,12 @@ async def run_claim_extraction_for_section(
         subject, predicate, obj = extract_spo(sentence)
         pivot = resolve_subject_pivot(
             subject,
-            speaker_id=row["explicit_viewpoint_id"] or row["speaker_id"],
+            character_id=row["character_id"],
+            speaker_id=row["speaker_id"],
             speaker_role=row["speaker_role"],
             recipient_id=row["recipient_id"],
+            viewpoint_id=row["explicit_viewpoint_id"],
+            ruleset_id=row["identity_ruleset"],
         )
         subject = pivot.subject
 
@@ -221,7 +226,7 @@ async def run_claim_extraction_for_section(
             obj,
             sentence,
             WORKER_VERSION,
-            "spacy-dep+pivot-v1" if pivot.resolved else "spacy-dep",
+            "spacy-dep+character-pivot-v1" if pivot.resolved else "spacy-dep",
         )
 
         claim_id = r["claim_id"]
