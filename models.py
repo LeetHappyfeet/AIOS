@@ -220,6 +220,7 @@ class DocumentAcquireIn(BaseModel):
 class EpistemicSearchIn(BaseModel):
     query: str
     limit: int = 25
+    character_id: Optional[str] = None
     instance_id: Optional[UUID] = None
     source_key: Optional[str] = None
     include_conflicts: bool = True
