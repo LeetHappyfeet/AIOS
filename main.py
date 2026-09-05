@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from typing import Optional, Dict, Any
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
