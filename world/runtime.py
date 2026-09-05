@@ -241,12 +241,25 @@ class WorldRuntimeService:
         )
         knowledge = await self.db.fetch(
             """
-            SELECT ck.epistemic_status, ck.confidence, cc.raw_text
-            FROM aios.character_knowledge ck
-            JOIN aios.claim_candidate cc ON cc.claim_id=ck.claim_id
+            SELECT
+                ck.epistemic_status,
+                ck.confidence,
+                ck.acquisition_mode,
+                ck.source_entity_id,
+                ck.updated_at,
+                p.proposition_id,
+                p.topic_key,
+                p.canonical_text,
+                p.subject_norm,
+                p.predicate_norm,
+                p.object_norm,
+                p.polarity,
+                p.modality
+            FROM aios.character_proposition_knowledge ck
+            JOIN aios.proposition p ON p.proposition_id=ck.proposition_id
             WHERE ck.instance_id=$1
             ORDER BY ck.updated_at DESC
-            LIMIT 40
+            LIMIT 60
             """,
             instance_id,
         )
@@ -357,7 +370,8 @@ class WorldRuntimeService:
             lines.append("\nRelevant knowledge:")
             for fact in frame["knowledge"][:20]:
                 lines.append(
-                    f"- [{fact['epistemic_status']}] {fact['raw_text']}"
+                    f"- [{fact['epistemic_status']}/{fact.get('acquisition_mode','unknown')}] "
+                    f"{fact['canonical_text']}"
                 )
 
         if frame["recent_events"]:
@@ -456,6 +470,7 @@ class WorldRuntimeService:
             "action_type": action_type,
         }
         message_text = text or f"[action:{action_type}]"
+        event_kind = "chat_message" if action_type == "speak" and text else "other"
         ev = await self.db.execute_returning_row(
             """
             INSERT INTO aios.ingest_event (
@@ -463,7 +478,7 @@ class WorldRuntimeService:
                 recipient_id, character_id, user_name, message_text, payload,
                 dedupe_key
             )
-            SELECT now(), 'world_runtime', 'other', t.session_id,
+            SELECT now(), 'world_runtime', $8::aios.event_kind, t.session_id,
                    $1, $7::aios.actor_type, $2, ci.character_id, t.user_name, $3,
                    $4::jsonb, $5
             FROM aios.character_runtime_state rs
@@ -479,6 +494,7 @@ class WorldRuntimeService:
             f"runtime::{instance_id}::{expected_state_version}::{action_type}",
             instance_id,
             speaker_role,
+            event_kind,
         )
         event_id = int(ev["event_id"])
 
@@ -487,7 +503,7 @@ class WorldRuntimeService:
             timeline_id=state["timeline_id"],
             event_id=event_id,
             character_id=state["character_id"],
-            kind="other",
+            kind=event_kind,
             speaker_id=str(state["entity_id"]),
             speaker_role=speaker_role,
             recipient_id=str(target_entity_id) if target_entity_id else None,
