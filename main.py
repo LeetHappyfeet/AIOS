@@ -651,6 +651,7 @@ async def search_epistemic(req: EpistemicSearchIn):
         db,
         query=req.query,
         limit=max(1, min(req.limit, 200)),
+        character_id=req.character_id,
         instance_id=req.instance_id,
         source_key=req.source_key,
         include_conflicts=req.include_conflicts,
