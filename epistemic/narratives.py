@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import hashlib
 from collections import defaultdict
 from uuid import UUID
@@ -61,7 +62,7 @@ async def assign_narratives_once(db: Database, *, limit: int = 500) -> int:
             nkey,
             row["canonical_text"][:160],
             row["canonical_text"],
-            {"clusterer": NARRATIVE_VERSION},
+            json.dumps({"clusterer": NARRATIVE_VERSION}),
         )
         narrative_id = cluster["narrative_id"]
         touched.add(narrative_id)
