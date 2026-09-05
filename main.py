@@ -27,12 +27,16 @@ from aios_app.models import (
     EntityControllerIn,
     KnowledgeAcquireIn,
     GeneratedFactIn,
+    WorldObservedFactIn,
 )
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.memory import recent_nodes_as_memory, pick_latest_timeline_for_character
 from aios_app.world.runtime import WorldRuntimeService, RuntimeConflict, RuntimeNotFound
 from aios_app.epistemic.knowledge import record_acquisition
-from aios_app.epistemic.generated import create_generated_fact
+from aios_app.epistemic.generated import (
+    create_generated_fact,
+    assert_claim_or_proposition_in_world,
+)
 from aios_app.epistemic.query import proposition_context, world_epistemic_state
 
 logger = logging.getLogger("aios.main")
@@ -520,3 +524,25 @@ async def get_world_epistemic_state(world_id: UUID):
         return await world_epistemic_state(db, world_id=world_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/fact/observed")
+async def import_observed_world_fact(world_id: UUID, req: WorldObservedFactIn):
+    """
+    Promote an already-normalized RP/web observation into this concrete world.
+
+    This is explicit world bootstrap, not automatic truth promotion from a
+    scraped source.
+    """
+    try:
+        assertion_id = await assert_claim_or_proposition_in_world(
+            db,
+            world_id=world_id,
+            proposition_id=req.proposition_id,
+            claim_id=req.claim_id,
+            confidence=req.confidence,
+            reason=req.reason,
+        )
+        return {"ok": True, "assertion_id": assertion_id}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
