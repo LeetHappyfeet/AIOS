@@ -154,3 +154,25 @@ class EntityControllerIn(BaseModel):
     controller_type: ControllerType
     controller_ref: str
     authority: str = "primary"
+
+
+class KnowledgeAcquireIn(BaseModel):
+    proposition_id: Optional[UUID] = None
+    claim_id: Optional[UUID] = None
+    acquisition_mode: str
+    epistemic_status: str = "observed"
+    confidence: Optional[float] = None
+    source_entity_id: Optional[UUID] = None
+    dag_node_id: Optional[UUID] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GeneratedFactIn(BaseModel):
+    subject: Optional[str] = None
+    predicate: Optional[str] = None
+    object: Optional[str] = None
+    raw_text: str
+    confidence: float = 0.35
+    generated_at_node_id: Optional[UUID] = None
+    reason: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
