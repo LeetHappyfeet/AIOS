@@ -66,7 +66,7 @@ async def promote_liminal_claims(
     logger.info(
         "Promoted %d claims from section %s into /world/liminal",
         len(rows),
-        section_id,
+        str(section_id),
     )
     return len(rows)
 
