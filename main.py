@@ -16,9 +16,16 @@ from aios_app.models import (
     IngestIn,
     IngestOut,
     MemoryOut,
+    CharacterActivateIn,
+    CharacterActivateOut,
+    WorldEntityCreateIn,
+    WorldRelationCreateIn,
+    WorldRulePutIn,
+    WorldActionIn,
 )
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.memory import recent_nodes_as_memory, pick_latest_timeline_for_character
+from aios_app.world.runtime import WorldRuntimeService, RuntimeConflict, RuntimeNotFound
 
 logger = logging.getLogger("aios.main")
 
@@ -37,6 +44,7 @@ app.add_middleware(
 )
 
 db = Database(settings.db_dsn)
+world_runtime = WorldRuntimeService(db)
 
 # =================================================
 # Lifecycle
@@ -212,6 +220,7 @@ async def ingest(req: IngestIn) -> IngestOut:
             db,
             timeline_id=timeline_id,
             event_id=event_id,
+            character_id=req.character_id,
             kind=req.kind or "other",
             speaker_id=req.speaker_id,
             speaker_role=req.speaker_type,
@@ -276,4 +285,114 @@ async def memory(
     return MemoryOut(
         timeline_id=timeline_id,
         vector_matches=matches,
+    )
+
+
+# =================================================
+# Shared concrete world runtime
+# =================================================
+
+@app.post("/character/{character_id}/activate", response_model=CharacterActivateOut)
+async def activate_character(character_id: str, req: CharacterActivateIn) -> CharacterActivateOut:
+    """
+    Materialize or resume one experiential character instance in a concrete world.
+
+    controller_type distinguishes live humans from LLM agents/scripts without
+    changing the world/entity model seen by the simulation.
+    """
+    try:
+        result = await world_runtime.activate_character(
+            character_id=character_id,
+            user_name=req.user_name,
+            session_id=req.session_id,
+            scope_key=req.scope_key,
+            world_id=req.world_id,
+            world_key=req.world_key,
+            controller_type=req.controller_type,
+            controller_ref=req.controller_ref,
+        )
+        return CharacterActivateOut(**result.__dict__)
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/instance/{instance_id}/state")
+async def get_instance_state(instance_id: UUID):
+    try:
+        return await world_runtime.get_state(instance_id)
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/instance/{instance_id}/frame")
+async def get_instance_frame(instance_id: UUID, recent_limit: int = 12):
+    """
+    Build the decision-ready frame used by either an LLM agent or a debug/text UI.
+    """
+    try:
+        return await world_runtime.build_frame(instance_id, recent_limit=recent_limit)
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/instance/{instance_id}/action")
+async def apply_instance_action(instance_id: UUID, req: WorldActionIn):
+    try:
+        return await world_runtime.apply_action(
+            instance_id=instance_id,
+            expected_state_version=req.expected_state_version,
+            action_type=req.action_type,
+            target_entity_id=req.target_entity_id,
+            text=req.text,
+            payload=req.payload,
+        )
+    except RuntimeConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/entity")
+async def create_world_entity(world_id: UUID, req: WorldEntityCreateIn):
+    try:
+        return await world_runtime.create_entity(
+            world_id=world_id,
+            entity_key=req.entity_key,
+            entity_type=req.entity_type,
+            display_name=req.display_name,
+            meta=req.meta,
+        )
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/relation")
+async def create_world_relation(world_id: UUID, req: WorldRelationCreateIn):
+    """
+    Express composable relations such as hosted_on, wearing, riding,
+    attached_to, controlling, inside, or observes_through.
+    """
+    try:
+        return await world_runtime.relate_entities(
+            world_id=world_id,
+            subject_entity_id=req.subject_entity_id,
+            relation_type=req.relation_type,
+            object_entity_id=req.object_entity_id,
+            meta=req.meta,
+        )
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/world/{world_id}/rule/{rule_key}")
+async def put_world_rule(world_id: UUID, rule_key: str, req: WorldRulePutIn):
+    return await world_runtime.upsert_rule(
+        world_id=world_id,
+        rule_key=rule_key,
+        rule_type=req.rule_type,
+        enabled=req.enabled,
+        priority=req.priority,
+        rule_data=req.rule_data,
     )
