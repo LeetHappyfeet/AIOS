@@ -177,3 +177,61 @@ async def calculate_weights(
         "effective_confidence": effective,
         "profile_character_id": row["character_id"],
     }
+
+
+async def reweight_character_knowledge(
+    db: Database,
+    *,
+    character_id: str,
+) -> int:
+    rows = await db.fetch(
+        """
+        SELECT
+            cpk.instance_id,
+            cpk.proposition_id,
+            cpk.acquisition_mode,
+            COALESCE(cpk.base_confidence, cpk.confidence, 0.5) AS base_confidence,
+            cpk.meta->>'source_key' AS source_key
+        FROM aios.character_proposition_knowledge cpk
+        JOIN aios.character_instance ci ON ci.instance_id=cpk.instance_id
+        WHERE ci.character_id=$1
+        """,
+        character_id,
+    )
+
+    updated = 0
+    for row in rows:
+        weights = await calculate_weights(
+            db,
+            instance_id=row["instance_id"],
+            proposition_id=row["proposition_id"],
+            acquisition_mode=row["acquisition_mode"],
+            base_confidence=float(row["base_confidence"]),
+            source_key=row["source_key"],
+        )
+        await db.execute(
+            """
+            UPDATE aios.character_proposition_knowledge
+            SET base_confidence=$3,
+                attention_weight=$4,
+                trust_weight=$5,
+                compatibility_weight=$6,
+                retention_weight=$7,
+                salience_weight=$8,
+                effective_confidence=$9,
+                updated_at=now()
+            WHERE instance_id=$1 AND proposition_id=$2
+            """,
+            row["instance_id"],
+            row["proposition_id"],
+            weights["base_confidence"],
+            weights["attention_weight"],
+            weights["trust_weight"],
+            weights["compatibility_weight"],
+            weights["retention_weight"],
+            weights["salience_weight"],
+            weights["effective_confidence"],
+        )
+        updated += 1
+
+    return updated
