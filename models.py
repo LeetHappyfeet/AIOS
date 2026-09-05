@@ -143,3 +143,8 @@ class WorldActionIn(BaseModel):
     target_entity_id: Optional[UUID] = None
     text: Optional[str] = None
     payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CharacterForkIn(BaseModel):
+    target_world_id: Optional[UUID] = None
+    target_world_key: Optional[str] = None
