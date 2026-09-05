@@ -12,3 +12,4 @@ qdrant-client
 sentence-transformers
 numpy
 spacy>=3.7,<4
+trafilatura>=1.12,<3
