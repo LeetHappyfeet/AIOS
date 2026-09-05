@@ -1,70 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
-from collections import defaultdict
-from dataclasses import dataclass
-from typing import Dict, List, Set
-from uuid import UUID
+from uuid import UUID, uuid5, NAMESPACE_URL
 
 from aios_app.db import Database
 
 logger = logging.getLogger("aios.world.split_seeder")
 
-
-# ============================================================
-# Parameters (tunable, conservative)
-# ============================================================
-
-MIN_CLUSTER_SIZE = 3
-MIN_AVG_SIMILARITY = 0.72
-MAX_PREDICATE_VARIETY = 1  # >1 indicates tension
-
-
-# ============================================================
-# Models
-# ============================================================
-
-@dataclass
-class ClaimLite:
-    claim_id: UUID
-    subject: str | None
-    predicate: str | None
-    object: str | None
-
-
-# ============================================================
-# Helpers
-# ============================================================
-
-def _connected_components(edges: List[tuple[UUID, UUID]]) -> List[Set[UUID]]:
-    graph: Dict[UUID, Set[UUID]] = defaultdict(set)
-    for a, b in edges:
-        graph[a].add(b)
-        graph[b].add(a)
-
-    seen: Set[UUID] = set()
-    components: List[Set[UUID]] = []
-
-    for node in graph:
-        if node in seen:
-            continue
-        stack = [node]
-        comp = set()
-        while stack:
-            cur = stack.pop()
-            if cur in seen:
-                continue
-            seen.add(cur)
-            comp.add(cur)
-            stack.extend(graph[cur])
-        components.append(comp)
-
-    return components
-
-
-# ============================================================
-# Public API
-# ============================================================
 
 async def seed_world_splits_from_similarity(
     db: Database,
@@ -73,93 +16,112 @@ async def seed_world_splits_from_similarity(
     limit: int = 500,
 ) -> int:
     """
-    Seed world split candidates from similarity clusters.
+    Backward-compatible entrypoint with stricter semantics.
 
-    Returns number of world_split_candidate rows inserted.
+    Similarity/narrative divergence no longer creates possible worlds. A world
+    split candidate is seeded only from an explicit normalized proposition
+    conflict (opposite polarity or a competing exclusive value).
+
+    similarity_threshold is retained for API compatibility but is not used.
     """
-
-    edges = await db.fetch(
+    conflicts = await db.fetch(
         """
-        SELECT claim_a_id, claim_b_id, similarity
-        FROM aios.claim_similarity_edge
-        WHERE similarity >= $1
-        ORDER BY similarity DESC
-        LIMIT $2
+        SELECT
+            pc.conflict_id, pc.proposition_a_id, pc.proposition_b_id,
+            pc.conflict_type, pc.strength, pc.detected_at,
+            oa.claim_id AS claim_a_id, ob.claim_id AS claim_b_id,
+            dsa.section_id AS section_a_id, dsb.section_id AS section_b_id,
+            oa.observed_at AS observed_a_at, ob.observed_at AS observed_b_at
+        FROM aios.proposition_conflict pc
+        JOIN LATERAL (
+            SELECT o.claim_id, o.dag_node_id, o.observed_at
+            FROM aios.observation o
+            WHERE o.proposition_id=pc.proposition_a_id
+            ORDER BY o.observed_at
+            LIMIT 1
+        ) oa ON true
+        JOIN LATERAL (
+            SELECT o.claim_id, o.dag_node_id, o.observed_at
+            FROM aios.observation o
+            WHERE o.proposition_id=pc.proposition_b_id
+            ORDER BY o.observed_at
+            LIMIT 1
+        ) ob ON true
+        JOIN aios.document_section dsa ON dsa.node_id=oa.dag_node_id
+        JOIN aios.document_section dsb ON dsb.node_id=ob.dag_node_id
+        ORDER BY pc.detected_at
+        LIMIT $1
         """,
-        similarity_threshold,
         limit,
     )
 
-    if not edges:
-        return 0
-
-    edge_pairs = [(e["claim_a_id"], e["claim_b_id"]) for e in edges]
-    components = _connected_components(edge_pairs)
-
-    if not components:
-        return 0
-
-    # Fetch minimal claim info
-    ids = {cid for comp in components for cid in comp}
-
-    rows = await db.fetch(
-        """
-        SELECT claim_id, subject, predicate, object
-        FROM aios.claim_candidate
-        WHERE claim_id = ANY($1::uuid[])
-        """,
-        list(ids),
-    )
-
-    claims: Dict[UUID, ClaimLite] = {
-        r["claim_id"]: ClaimLite(
-            claim_id=r["claim_id"],
-            subject=r["subject"],
-            predicate=r["predicate"],
-            object=r["object"],
-        )
-        for r in rows
-    }
-
     inserted = 0
+    for row in conflicts:
+        split_id = uuid5(
+            NAMESPACE_URL,
+            f"urn:aios:proposition-conflict:{row['conflict_id']}",
+        )
+        boundary = [{
+            "conflict_id": str(row["conflict_id"]),
+            "proposition_a_id": str(row["proposition_a_id"]),
+            "proposition_b_id": str(row["proposition_b_id"]),
+            "conflict_type": row["conflict_type"],
+            "strength": float(row["strength"]),
+        }]
+        cluster_a = [str(row["claim_a_id"])]
+        cluster_b = [str(row["claim_b_id"])]
 
-    for comp in components:
-        if len(comp) < MIN_CLUSTER_SIZE:
-            continue
-
-        predicates = set()
-        subjects = set()
-
-        for cid in comp:
-            c = claims.get(cid)
-            if not c:
-                continue
-            if c.predicate:
-                predicates.add(c.predicate.lower())
-            if c.subject:
-                subjects.add(c.subject.lower())
-
-        # Heuristic tension signal
-        if len(predicates) <= MAX_PREDICATE_VARIETY:
-            continue
-
-        # Create split candidate
-        await db.execute(
+        result = await db.execute(
             """
             INSERT INTO aios.world_split_candidate (
-              seed_claim_ids,
-              reason,
-              signal_strength
+                split_id, seed_section_id, window_start, window_end,
+                cluster_count, cluster_a, cluster_b,
+                centroid_distance, boundary_pairs
             )
-            VALUES ($1::uuid[], $2, $3)
-            ON CONFLICT DO NOTHING
+            VALUES (
+                $1,$2,
+                LEAST($3::timestamptz,$4::timestamptz),
+                GREATEST($3::timestamptz,$4::timestamptz),
+                2,$5::jsonb,$6::jsonb,$7,$8::jsonb
+            )
+            ON CONFLICT (split_id) DO NOTHING
             """,
-            list(comp),
-            f"predicate_divergence:{len(predicates)}",
-            min(1.0, len(predicates) / 3.0),
+            split_id,
+            row["section_a_id"],
+            row["observed_a_at"],
+            row["observed_b_at"],
+            json.dumps(cluster_a),
+            json.dumps(cluster_b),
+            float(row["strength"]),
+            json.dumps(boundary),
+        )
+        if result.endswith("1"):
+            inserted += 1
+
+        await db.execute(
+            """
+            INSERT INTO aios.section_cluster_assignment (
+                split_id, section_id, cluster_label, score_to_centroid
+            )
+            VALUES ($1,$2,'A',$3)
+            ON CONFLICT (split_id, section_id) DO NOTHING
+            """,
+            split_id,
+            row["section_a_id"],
+            float(row["strength"]),
+        )
+        await db.execute(
+            """
+            INSERT INTO aios.section_cluster_assignment (
+                split_id, section_id, cluster_label, score_to_centroid
+            )
+            VALUES ($1,$2,'B',$3)
+            ON CONFLICT (split_id, section_id) DO NOTHING
+            """,
+            split_id,
+            row["section_b_id"],
+            float(row["strength"]),
         )
 
-        inserted += 1
-
-    logger.info("Seeded %d world split candidates", inserted)
+    logger.info("Seeded %d world splits from explicit proposition conflicts", inserted)
     return inserted
