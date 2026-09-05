@@ -156,7 +156,7 @@ async def _log_promotion(
         GRAPH_IRI,
         BASE_RECEIPT_PREDICATE,
         BASE_RECEIPT_OBJECT,
-        section_id,
+        str(section_id),
     )
 
 
