@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+from typing import Optional
+from uuid import UUID
+
+from aios_app.db import Database
+
+
+async def epistemic_search(
+    db: Database,
+    *,
+    query: str,
+    limit: int = 25,
+    instance_id: Optional[UUID] = None,
+    source_key: Optional[str] = None,
+    include_conflicts: bool = True,
+) -> dict:
+    q = query.strip()
+    if not q:
+        return {"query": query, "results": []}
+
+    rows = await db.fetch(
+        """
+        WITH matched AS (
+            SELECT DISTINCT p.proposition_id
+            FROM aios.proposition p
+            LEFT JOIN aios.observation o ON o.proposition_id=p.proposition_id
+            LEFT JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id
+            WHERE (
+                p.canonical_text ILIKE '%' || $1 || '%'
+                OR COALESCE(p.subject_norm,'') ILIKE '%' || $1 || '%'
+                OR COALESCE(p.predicate_norm,'') ILIKE '%' || $1 || '%'
+                OR COALESCE(p.object_norm,'') ILIKE '%' || $1 || '%'
+                OR COALESCE(cc.raw_text,'') ILIKE '%' || $1 || '%'
+            )
+            AND ($2::text IS NULL OR o.source_key=$2)
+            LIMIT $3
+        )
+        SELECT
+            p.proposition_id, p.topic_key, p.canonical_text,
+            p.subject_norm, p.predicate_norm, p.object_norm,
+            p.polarity, p.modality,
+            count(DISTINCT o.observation_id) AS observation_count,
+            count(DISTINCT o.source_key) AS source_count,
+            max(cpk.effective_confidence) AS character_effective_confidence,
+            max(cpk.epistemic_status) AS character_epistemic_status
+        FROM matched m
+        JOIN aios.proposition p ON p.proposition_id=m.proposition_id
+        LEFT JOIN aios.observation o ON o.proposition_id=p.proposition_id
+        LEFT JOIN aios.character_proposition_knowledge cpk
+          ON cpk.proposition_id=p.proposition_id
+         AND cpk.instance_id=$4
+        GROUP BY p.proposition_id
+        ORDER BY
+            character_effective_confidence DESC NULLS LAST,
+            observation_count DESC,
+            source_count DESC,
+            p.canonical_text
+        LIMIT $3
+        """,
+        q,
+        source_key,
+        limit,
+        instance_id,
+    )
+
+    results = []
+    for row in rows:
+        item = dict(row)
+        if include_conflicts:
+            conflicts = await db.fetch(
+                """
+                SELECT
+                    pc.conflict_type, pc.strength,
+                    CASE WHEN pc.proposition_a_id=$1
+                         THEN pc.proposition_b_id ELSE pc.proposition_a_id END
+                         AS competing_proposition_id,
+                    cp.canonical_text AS competing_text
+                FROM aios.proposition_conflict pc
+                JOIN aios.proposition cp
+                  ON cp.proposition_id = CASE WHEN pc.proposition_a_id=$1
+                       THEN pc.proposition_b_id ELSE pc.proposition_a_id END
+                WHERE pc.proposition_a_id=$1 OR pc.proposition_b_id=$1
+                ORDER BY pc.strength DESC
+                """,
+                row["proposition_id"],
+            )
+            item["conflicts"] = [dict(c) for c in conflicts]
+        results.append(item)
+
+    return {
+        "query": query,
+        "instance_id": instance_id,
+        "source_key": source_key,
+        "results": results,
+    }
+
+
+async def document_epistemic_summary(db: Database, *, document_id: UUID) -> dict:
+    doc = await db.fetchrow(
+        """
+        SELECT document_id, source_type, source_url, title, retrieved_at, meta
+        FROM aios.source_document WHERE document_id=$1
+        """,
+        document_id,
+    )
+    if not doc:
+        raise ValueError(f"unknown document {document_id}")
+
+    metadata = await db.fetch(
+        """
+        SELECT field_type, raw_value, normalized_value, source_location,
+               confidence, extraction_method
+        FROM aios.document_metadata_observation
+        WHERE document_id=$1
+        ORDER BY field_type, confidence DESC
+        """,
+        document_id,
+    )
+    structure = await db.fetch(
+        """
+        SELECT unit_id, parent_unit_id, unit_type, unit_index, path, title,
+               depth, start_char, end_char
+        FROM aios.document_unit
+        WHERE document_id=$1
+        ORDER BY unit_index, path
+        """,
+        document_id,
+    )
+    propositions = await db.fetch(
+        """
+        SELECT p.proposition_id, p.canonical_text, p.topic_key,
+               count(DISTINCT o.observation_id) AS observation_count
+        FROM aios.observation o
+        JOIN aios.proposition p ON p.proposition_id=o.proposition_id
+        WHERE o.document_id=$1
+        GROUP BY p.proposition_id
+        ORDER BY observation_count DESC, p.canonical_text
+        LIMIT 500
+        """,
+        document_id,
+    )
+    return {
+        "document": dict(doc),
+        "metadata_observations": [dict(x) for x in metadata],
+        "structure": [dict(x) for x in structure],
+        "propositions": [dict(x) for x in propositions],
+    }
