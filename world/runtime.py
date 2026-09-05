@@ -306,6 +306,77 @@ class WorldRuntimeService:
             "available_actions": ["speak", "move", "inspect", "use_item", "wait", "custom"],
         }
 
+    async def render_text_frame(self, instance_id: UUID, *, recent_limit: int = 12) -> str:
+        """Render the structured AgentFrame as a deterministic text-RPG surface."""
+        frame = await self.build_frame(instance_id, recent_limit=recent_limit)
+        char = frame["character"]
+        runtime = frame["runtime"]
+        state = frame["state"]
+        world = frame["world"]
+
+        lines = [
+            f"=== {char.get('display_name') or char.get('canonical_name') or char.get('character_id')} ===",
+            f"World: {runtime['world_key']}  Instance: {runtime['instance_id']}",
+            f"State version: {runtime['state_version']}  Status: {runtime['lifecycle_state']}",
+            f"Location entity: {state.get('location_entity_id') or 'unknown'}",
+        ]
+
+        stats = []
+        for key in ("health", "stamina", "energy"):
+            if state.get(key) is not None:
+                stats.append(f"{key}={state[key]}")
+        if stats:
+            lines.append("Stats: " + "  ".join(stats))
+
+        if state.get("goals"):
+            lines.append("\nGoals:")
+            for goal in state["goals"]:
+                lines.append(f"- {goal}")
+
+        if frame["inventory"]:
+            lines.append("\nInventory:")
+            for item in frame["inventory"]:
+                name = item.get("display_name") or item.get("entity_key") or str(item["entity_id"])
+                equipped = " [equipped]" if item.get("equipped") else ""
+                lines.append(f"- {name} x{item.get('quantity', 1)}{equipped}")
+
+        if world["relations"]:
+            lines.append("\nActive relations:")
+            for rel in world["relations"]:
+                lines.append(
+                    f"- {rel['subject_entity_id']} --{rel['relation_type']}--> {rel['object_entity_id']}"
+                )
+
+        if world["entities"]:
+            lines.append("\nWorld entities:")
+            for ent in world["entities"][:30]:
+                name = ent.get("display_name") or ent.get("entity_key") or str(ent["entity_id"])
+                lines.append(f"- {name} ({ent['entity_type']}) [{ent['entity_id']}]")
+
+        if frame["knowledge"]:
+            lines.append("\nRelevant knowledge:")
+            for fact in frame["knowledge"][:20]:
+                lines.append(
+                    f"- [{fact['epistemic_status']}] {fact['raw_text']}"
+                )
+
+        if frame["recent_events"]:
+            lines.append("\nRecent events:")
+            for event in frame["recent_events"]:
+                if event.get("message_text"):
+                    role = event.get("speaker_role") or "other"
+                    speaker = event.get("speaker_id") or "unknown"
+                    lines.append(f"- [{role}:{speaker}] {event['message_text']}")
+
+        if world["rules"]:
+            lines.append("\nActive world rules:")
+            for rule in world["rules"]:
+                lines.append(f"- {rule['rule_key']} ({rule['rule_type']})")
+
+        lines.append("\nAvailable actions: " + ", ".join(frame["available_actions"]))
+        lines.append("Submit an action; AIOS validates and applies the result to the world.")
+        return "\n".join(lines)
+
     async def apply_action(
         self,
         *,
@@ -530,7 +601,7 @@ class WorldRuntimeService:
             session_id=timeline["session_id"],
             character_id=source["character_id"],
             user_name=timeline["user_name"],
-            scope_key=timeline["scope_key"],
+            scope_key=f"{timeline['scope_key']}:fork:{instance_id}",
             meta={
                 "runtime_instance_id": str(instance_id),
                 "forked_from_instance_id": str(source_instance_id),
@@ -786,6 +857,16 @@ class WorldRuntimeService:
                     raise ValueError(
                         f"world rule '{rule['rule_key']}' requires a target for '{action_type}'"
                     )
+
+            elif rule_type == "require_target_type":
+                applies = data.get("action_type", "*")
+                allowed_types = set(data.get("target_entity_types") or [])
+                if applies in ("*", action_type) and allowed_types:
+                    if target_entity_type not in allowed_types:
+                        raise ValueError(
+                            f"world rule '{rule['rule_key']}' rejects target type "
+                            f"'{target_entity_type}' for '{action_type}'"
+                        )
 
             elif rule_type == "deny_action":
                 applies = data.get("action_type", "*")
