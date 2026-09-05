@@ -96,6 +96,35 @@ async def assert_observed_proposition_in_world(
     return row["assertion_id"]
 
 
+async def assert_claim_or_proposition_in_world(
+    db: Database,
+    *,
+    world_id: UUID,
+    proposition_id: Optional[UUID] = None,
+    claim_id: Optional[UUID] = None,
+    confidence: float = 0.7,
+    reason: str = "explicit world bootstrap/import",
+) -> UUID:
+    if proposition_id is None and claim_id is None:
+        raise ValueError("proposition_id or claim_id is required")
+    if proposition_id is None:
+        row = await db.fetchrow(
+            "SELECT proposition_id FROM aios.observation WHERE claim_id=$1",
+            claim_id,
+        )
+        if not row:
+            raise ValueError("claim has not been normalized yet")
+        proposition_id = row["proposition_id"]
+
+    return await assert_observed_proposition_in_world(
+        db,
+        world_id=world_id,
+        proposition_id=proposition_id,
+        confidence=confidence,
+        reason=reason,
+    )
+
+
 async def resolve_generated_facts_once(db: Database, *, limit: int = 100) -> int:
     """
     Reconcile provisional generated facts against later concrete evidence.
