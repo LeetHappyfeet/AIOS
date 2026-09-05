@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import hashlib
 import re
 from typing import Any, Optional
@@ -134,7 +135,7 @@ async def ensure_proposition(
         norm["polarity"],
         norm["canonical_text"],
         modality,
-        meta or {},
+        json.dumps(meta or {}),
     )
     return row["proposition_id"]
 
@@ -217,7 +218,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         row["retrieved_at"],
         row["created_at"],
         float(row["confidence"] or 0.0),
-        {"normalizer_version": NORMALIZER_VERSION},
+        json.dumps({"normalizer_version": NORMALIZER_VERSION}),
     )
 
     provenance = await db.fetchrow(
@@ -245,7 +246,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         observation["observation_id"],
         source_weight,
         float(row["confidence"] or 0.0),
-        {"claim_id": str(claim_id)},
+        json.dumps({"claim_id": str(claim_id)}),
     )
 
     await _detect_conflicts(db, proposition_id=proposition_id)
@@ -307,7 +308,7 @@ async def _detect_conflicts(db: Database, *, proposition_id: UUID) -> int:
             peer["proposition_id"],
             conflict_type,
             strength,
-            {"detector": NORMALIZER_VERSION},
+            json.dumps({"detector": NORMALIZER_VERSION}),
         )
         if result.endswith("1"):
             inserted += 1
