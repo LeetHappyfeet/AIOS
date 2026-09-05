@@ -689,6 +689,25 @@ class WorldRuntimeService:
 
         await self.db.execute(
             """
+            INSERT INTO aios.character_proposition_knowledge (
+                instance_id, proposition_id, epistemic_status, confidence,
+                acquisition_mode, source_entity_id, first_node_id, last_node_id,
+                first_acquired_at, updated_at, meta
+            )
+            SELECT $1, proposition_id, epistemic_status, confidence,
+                   acquisition_mode, NULL, first_node_id, last_node_id,
+                   first_acquired_at, now(),
+                   meta || jsonb_build_object('copied_on_fork',true)
+            FROM aios.character_proposition_knowledge
+            WHERE instance_id=$2
+            ON CONFLICT (instance_id, proposition_id) DO NOTHING
+            """,
+            instance_id,
+            source_instance_id,
+        )
+
+        await self.db.execute(
+            """
             INSERT INTO aios.character_knowledge (
                 instance_id, claim_id, epistemic_status, confidence,
                 source_entity_id, first_node_id, last_node_id, meta
