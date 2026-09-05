@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Optional
 from uuid import UUID
 
@@ -55,7 +56,7 @@ async def record_acquisition(
         confidence,
         source_entity_id,
         dag_node_id,
-        meta or {},
+        json.dumps(meta or {}),
     )
     return row["acquisition_id"]
 
@@ -116,7 +117,7 @@ async def project_knowledge_acquisitions_once(
             row["source_entity_id"],
             row["dag_node_id"],
             row["created_at"],
-            row["meta"] or {},
+            json.dumps(row["meta"] or {}),
         )
 
         # Keep the legacy claim-level projection populated when a concrete
@@ -145,7 +146,7 @@ async def project_knowledge_acquisitions_once(
                 row["confidence"],
                 row["source_entity_id"],
                 row["dag_node_id"],
-                {"acquisition_mode": row["acquisition_mode"]},
+                json.dumps({"acquisition_mode": row["acquisition_mode"]}),
             )
 
         await db.execute(
