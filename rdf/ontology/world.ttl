@@ -189,3 +189,64 @@ world:transitionReason a owl:DatatypeProperty ;
   rdfs:domain world:WorldTransition ;
   rdfs:range xsd:string ;
   rdfs:comment "Reason for world transition (contradiction, revision, fork, retraction)." .
+
+
+#################################################################
+# Normalized Epistemic Layer
+#################################################################
+
+world:Proposition a owl:Class ;
+  rdfs:label "Normalized Proposition" ;
+  rdfs:comment "A normalized semantic proposition derived from one or more immutable observations." .
+
+world:Observation a owl:Class ;
+  rdfs:label "Observation" ;
+  rdfs:comment "A source-specific report or utterance that points to a normalized proposition without asserting truth." .
+
+world:NarrativeCluster a owl:Class ;
+  rdfs:label "Narrative Cluster" ;
+  rdfs:comment "A grouping of source observations expressing aligned framing or normalized proposition structure. Narrative clusters are not possible worlds." .
+
+world:observesProposition a owl:ObjectProperty ;
+  rdfs:domain world:Observation ;
+  rdfs:range world:Proposition .
+
+world:topicKey a owl:DatatypeProperty ;
+  rdfs:domain world:Proposition ;
+  rdfs:range xsd:string .
+
+world:canonicalText a owl:DatatypeProperty ;
+  rdfs:domain world:Proposition ;
+  rdfs:range xsd:string .
+
+world:normalizedSubject a owl:DatatypeProperty ;
+  rdfs:domain world:Proposition ;
+  rdfs:range xsd:string .
+
+world:normalizedPredicate a owl:DatatypeProperty ;
+  rdfs:domain world:Proposition ;
+  rdfs:range xsd:string .
+
+world:normalizedObject a owl:DatatypeProperty ;
+  rdfs:domain world:Proposition ;
+  rdfs:range xsd:string .
+
+world:polarity a owl:DatatypeProperty ;
+  rdfs:domain world:Proposition ;
+  rdfs:range xsd:integer .
+
+world:modality a owl:DatatypeProperty ;
+  rdfs:domain world:Proposition ;
+  rdfs:range xsd:string .
+
+world:sourceKey a owl:DatatypeProperty ;
+  rdfs:domain world:Observation ;
+  rdfs:range xsd:string .
+
+world:sourceDomain a owl:DatatypeProperty ;
+  rdfs:domain world:Observation ;
+  rdfs:range xsd:string .
+
+world:sourceKind a owl:DatatypeProperty ;
+  rdfs:domain world:Observation ;
+  rdfs:range xsd:string .
