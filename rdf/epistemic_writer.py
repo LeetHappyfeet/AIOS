@@ -72,7 +72,7 @@ async def project_normalized_observation(
             WHERE claim_id=$1
               AND rdf_dataset='char'
               AND rdf_graph=$2
-              AND rdf_predicate='char:knowsProposition'
+              AND rdf_predicate='char:hasObservation'
             """,
             claim_id,
             char_graph,
@@ -134,11 +134,15 @@ PREFIX prov:  <http://www.w3.org/ns/prov#>
 
 INSERT DATA {{
   GRAPH <{char_graph}> {{
+    <urn:aios:char:{char_owner_segment}> a char:Character ;
+      char:characterId {_lit(character_id)} ;
+      char:hasObservation <{char_obs_iri}> .
+
     <{char_obs_iri}> a char:CharacterObservation ;
       char:characterId {_lit(character_id)} ;
       char:memoryOwner {_lit(character_id)} ;
       char:identityRuleset {_lit(row["identity_ruleset"] or "character-id-v1")} ;
-      char:knowsProposition <{prop_iri}> ;
+      char:observesProposition <{prop_iri}> ;
       prov:wasDerivedFrom <{obs_iri}> .
   }}
 }}
@@ -158,8 +162,8 @@ INSERT DATA {{
             char_dataset,
             char_graph,
             char_obs_iri,
-            "char:knowsProposition",
-            prop_iri,
+            "char:hasObservation",
+            char_obs_iri,
             '{"layer":"character-epistemic-v1","identity":"character_id"}',
         )
 
