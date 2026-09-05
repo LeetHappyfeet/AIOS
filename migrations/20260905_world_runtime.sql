@@ -7,6 +7,11 @@
 
 BEGIN;
 
+ALTER TABLE aios.character_instance
+    ADD COLUMN IF NOT EXISTS parent_instance_id uuid REFERENCES aios.character_instance(instance_id),
+    ADD COLUMN IF NOT EXISTS forked_from_node_id uuid REFERENCES aios.dag_node(node_id);
+
+
 CREATE TABLE IF NOT EXISTS aios.world_entity (
     entity_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
     world_id uuid NOT NULL REFERENCES aios.world(world_id),
