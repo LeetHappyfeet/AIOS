@@ -51,15 +51,38 @@ async def handle_extract_claims(db: Database, job: Dict[str, Any]) -> None:
 # -------------------------------------------------
 
 async def handle_normalize_proposition(db: Database, job: Dict[str, Any]) -> None:
-    await normalize_claim_once(db, claim_id=UUID(job["payload"]["claim_id"]))
+    claim_id = UUID(job["payload"]["claim_id"])
+    exists = await db.fetchrow(
+        "SELECT 1 FROM aios.claim_candidate WHERE claim_id=$1",
+        claim_id,
+    )
+    if not exists:
+        logger.warning(
+            "Skipping stale normalize_proposition job for missing claim %s",
+            claim_id,
+        )
+        return
+    await normalize_claim_once(db, claim_id=claim_id)
 
 
 async def handle_rdf_epistemic_project(db: Database, job: Dict[str, Any]) -> None:
+    claim_id = UUID(job["payload"]["claim_id"])
+    exists = await db.fetchrow(
+        "SELECT 1 FROM aios.observation WHERE claim_id=$1",
+        claim_id,
+    )
+    if not exists:
+        logger.warning(
+            "Skipping stale rdf_epistemic_project job for missing observation claim %s",
+            claim_id,
+        )
+        return
+
     fuseki = FusekiClient(settings.fuseki_base_url)
     await project_normalized_observation(
         db,
         fuseki,
-        claim_id=UUID(job["payload"]["claim_id"]),
+        claim_id=claim_id,
     )
 
 
