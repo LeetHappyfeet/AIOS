@@ -148,3 +148,9 @@ class WorldActionIn(BaseModel):
 class CharacterForkIn(BaseModel):
     target_world_id: Optional[UUID] = None
     target_world_key: Optional[str] = None
+
+
+class EntityControllerIn(BaseModel):
+    controller_type: ControllerType
+    controller_ref: str
+    authority: str = "primary"
