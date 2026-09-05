@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from uuid import UUID
+from urllib.parse import quote
 
 from aios_app.db import Database
 from .fuseki import FusekiClient
@@ -46,7 +47,7 @@ async def project_normalized_observation(
     if not row:
         raise RuntimeError(f"claim {claim_id} has not been normalized")
 
-    receipt = await db.fetchrow(
+    world_receipt = await db.fetchrow(
         """
         SELECT 1 FROM aios.rdf_promotion_log
         WHERE claim_id=$1
@@ -59,7 +60,25 @@ async def project_normalized_observation(
         GRAPH_IRI,
         RECEIPT_PREDICATE,
     )
-    if receipt:
+
+    character_id = row["character_id"] or row["memory_owner_id"]
+    char_graph = None
+    char_receipt = None
+    if character_id:
+        char_graph = f"urn:aios:char:{quote(character_id, safe='')}:epistemic"
+        char_receipt = await db.fetchrow(
+            """
+            SELECT 1 FROM aios.rdf_promotion_log
+            WHERE claim_id=$1
+              AND rdf_dataset='char'
+              AND rdf_graph=$2
+              AND rdf_predicate='char:knowsProposition'
+            """,
+            claim_id,
+            char_graph,
+        )
+
+    if world_receipt and (not character_id or char_receipt):
         return True
 
     obs_iri = f"urn:aios:observation:{row['observation_id']}"
@@ -100,13 +119,14 @@ INSERT DATA {{
 }}
 """.strip()
 
-    fuseki.update(DATASET, sparql)
+    if not world_receipt:
+        fuseki.update(DATASET, sparql)
 
-    character_id = row["character_id"] or row["memory_owner_id"]
-    if character_id:
+    if character_id and not char_receipt:
         char_dataset = "char"
-        char_graph = f"urn:aios:char:{character_id}:epistemic"
-        char_obs_iri = f"urn:aios:char:{character_id}:observation:{row['observation_id']}"
+        char_owner_segment = quote(character_id, safe="")
+        char_graph = char_graph or f"urn:aios:char:{char_owner_segment}:epistemic"
+        char_obs_iri = f"urn:aios:char:{char_owner_segment}:observation:{row['observation_id']}"
         char_sparql = f"""
 PREFIX char:  <urn:aios:char#>
 PREFIX world: <urn:aios:world#>
@@ -143,7 +163,8 @@ INSERT DATA {{
             '{"layer":"character-epistemic-v1","identity":"character_id"}',
         )
 
-    await db.execute(
+    if not world_receipt:
+        await db.execute(
         """
         INSERT INTO aios.rdf_promotion_log (
             claim_id, rdf_dataset, rdf_graph, rdf_subject,
@@ -159,5 +180,5 @@ INSERT DATA {{
         RECEIPT_PREDICATE,
         prop_iri,
         '{"layer":"normalized-observation-v1"}',
-    )
+        )
     return True
