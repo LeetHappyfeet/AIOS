@@ -448,6 +448,134 @@ class WorldRuntimeService:
             "state_version": updated["state_version"],
         }
 
+    async def fork_instance(
+        self,
+        *,
+        source_instance_id: UUID,
+        target_world_id: Optional[UUID] = None,
+        target_world_key: Optional[str] = None,
+    ) -> ActivationResult:
+        """Fork one experiential continuation into another concrete world."""
+        source = await self.get_state(source_instance_id)
+        target = await self._resolve_world(
+            world_id=target_world_id,
+            world_key=target_world_key,
+            home_world_id=None,
+        )
+        timeline = await self.db.fetchrow(
+            """
+            SELECT session_id, user_name, scope_key
+            FROM aios.timeline
+            WHERE timeline_id=$1
+            """,
+            source["timeline_id"],
+        )
+        if not timeline:
+            raise RuntimeNotFound("source runtime timeline is missing")
+
+        new_instance = await self.db.execute_returning_row(
+            """
+            INSERT INTO aios.character_instance (
+                character_id, world_id, current_world_id, parent_instance_id,
+                forked_from_node_id, meta
+            )
+            VALUES (
+                $1,$2,$2,$3,$4,
+                jsonb_build_object(
+                    'runtime_user_name',$5,
+                    'forked_from_instance_id',$3::text
+                )
+            )
+            RETURNING instance_id
+            """,
+            source["character_id"],
+            target["world_id"],
+            source_instance_id,
+            source["head_node_id"],
+            timeline["user_name"],
+        )
+        instance_id = new_instance["instance_id"]
+
+        timeline_id = await get_or_create_timeline(
+            self.db,
+            world_key=target["world_key"],
+            session_id=timeline["session_id"],
+            character_id=source["character_id"],
+            user_name=timeline["user_name"],
+            scope_key=timeline["scope_key"],
+            meta={
+                "runtime_instance_id": str(instance_id),
+                "forked_from_instance_id": str(source_instance_id),
+                "forked_from_node_id": str(source["head_node_id"]) if source["head_node_id"] else None,
+                "world_runtime": True,
+            },
+        )
+
+        entity = await self.db.execute_returning_row(
+            """
+            INSERT INTO aios.world_entity (
+                world_id, entity_key, entity_type, display_name,
+                character_instance_id, meta
+            )
+            SELECT $1,$2,'character',COALESCE(ci.display_name, ci.character_id),
+                   $3,jsonb_build_object('forked_from_entity_id',$4::text)
+            FROM aios.character_identity ci
+            WHERE ci.character_id=$5
+            RETURNING entity_id
+            """,
+            target["world_id"],
+            f"character-instance:{instance_id}",
+            instance_id,
+            source["entity_id"],
+            source["character_id"],
+        )
+
+        await self.db.execute(
+            """
+            INSERT INTO aios.character_runtime_state (
+                instance_id, world_id, timeline_id, head_node_id,
+                lifecycle_state, health, stamina, energy,
+                physical_state, emotional_state, social_state,
+                goals, active_tasks, runtime_flags, state_version
+            )
+            SELECT
+                $1,$2,$3,NULL,'ready',health,stamina,energy,
+                physical_state,emotional_state,social_state,
+                goals,active_tasks,
+                runtime_flags || jsonb_build_object(
+                    'forked_from_instance_id',$4::text,
+                    'forked_from_node_id',$5::text
+                ),
+                1
+            FROM aios.character_runtime_state
+            WHERE instance_id=$4
+            """,
+            instance_id,
+            target["world_id"],
+            timeline_id,
+            source_instance_id,
+            source["head_node_id"],
+        )
+
+        await self.db.execute(
+            """
+            INSERT INTO aios.character_knowledge (
+                instance_id, claim_id, epistemic_status, confidence,
+                source_entity_id, first_node_id, last_node_id, meta
+            )
+            SELECT $1, claim_id, epistemic_status, confidence,
+                   NULL, first_node_id, last_node_id,
+                   meta || jsonb_build_object('copied_on_fork',true)
+            FROM aios.character_knowledge
+            WHERE instance_id=$2
+            ON CONFLICT (instance_id, claim_id) DO NOTHING
+            """,
+            instance_id,
+            source_instance_id,
+        )
+
+        return await self._activation_result(instance_id)
+
     async def create_entity(
         self,
         *,
