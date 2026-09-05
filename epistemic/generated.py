@@ -98,11 +98,10 @@ async def assert_observed_proposition_in_world(
 
 async def resolve_generated_facts_once(db: Database, *, limit: int = 100) -> int:
     """
-    Reconcile provisional generated facts against later observations.
+    Reconcile provisional generated facts against later concrete evidence.
 
-    Exact later observations corroborate a generated fill. Explicit proposition
-    conflicts in the same concrete world supersede it. Narrative disagreement
-    alone never causes a world mutation.
+    Evidence can arrive through runtime observations or through an explicit
+    observed proposition imported into the world during RP/bootstrap.
     """
     rows = await db.fetch(
         """
@@ -123,6 +122,16 @@ async def resolve_generated_facts_once(db: Database, *, limit: int = 100) -> int
                     AND op.topic_key=p.topic_key
                     AND o.observed_at > a.last_checked_at
               )
+              OR EXISTS (
+                  SELECT 1
+                  FROM aios.world_proposition_assertion wa
+                  JOIN aios.proposition wp ON wp.proposition_id=wa.proposition_id
+                  WHERE wa.world_id=a.world_id
+                    AND wa.source_kind='observed'
+                    AND wa.epistemic_status NOT IN ('rejected','superseded')
+                    AND wp.topic_key=p.topic_key
+                    AND wa.updated_at > a.last_checked_at
+              )
           )
         ORDER BY a.created_at
         LIMIT $1
@@ -134,37 +143,70 @@ async def resolve_generated_facts_once(db: Database, *, limit: int = 100) -> int
     for generated in rows:
         support = await db.fetchrow(
             """
-            SELECT max(COALESCE(NULLIF(o.extraction_confidence,0),0.5)) AS confidence
-            FROM aios.observation o
-            JOIN aios.timeline t ON t.timeline_id=o.timeline_id
-            WHERE t.world_id=$1 AND o.proposition_id=$2
+            SELECT GREATEST(
+                COALESCE((
+                    SELECT max(COALESCE(NULLIF(o.extraction_confidence,0),0.5))
+                    FROM aios.observation o
+                    JOIN aios.timeline t ON t.timeline_id=o.timeline_id
+                    WHERE t.world_id=$1 AND o.proposition_id=$2
+                ),0),
+                COALESCE((
+                    SELECT max(a.confidence)
+                    FROM aios.world_proposition_assertion a
+                    WHERE a.world_id=$1
+                      AND a.proposition_id=$2
+                      AND a.source_kind='observed'
+                      AND a.epistemic_status NOT IN ('rejected','superseded')
+                ),0)
+            ) AS confidence
             """,
             generated["world_id"],
             generated["proposition_id"],
         )
-        support_conf = float(support["confidence"] or 0.0) if support else 0.0
+        support_conf = float(support["confidence"] or 0.0)
 
         conflict = await db.fetchrow(
             """
-            SELECT
-                CASE
-                    WHEN pc.proposition_a_id=$2 THEN pc.proposition_b_id
-                    ELSE pc.proposition_a_id
-                END AS competing_proposition_id,
-                pc.conflict_type,
-                pc.strength,
-                max(COALESCE(NULLIF(o.extraction_confidence,0),0.5)) AS observed_confidence
-            FROM aios.proposition_conflict pc
-            JOIN aios.observation o
-              ON o.proposition_id = CASE
-                    WHEN pc.proposition_a_id=$2 THEN pc.proposition_b_id
-                    ELSE pc.proposition_a_id
-                 END
-            JOIN aios.timeline t ON t.timeline_id=o.timeline_id
-            WHERE t.world_id=$1
-              AND (pc.proposition_a_id=$2 OR pc.proposition_b_id=$2)
-            GROUP BY competing_proposition_id, pc.conflict_type, pc.strength
-            ORDER BY (pc.strength * max(COALESCE(NULLIF(o.extraction_confidence,0),0.5))) DESC
+            WITH competing AS (
+                SELECT
+                    CASE
+                        WHEN pc.proposition_a_id=$2 THEN pc.proposition_b_id
+                        ELSE pc.proposition_a_id
+                    END AS proposition_id,
+                    pc.conflict_type,
+                    pc.strength
+                FROM aios.proposition_conflict pc
+                WHERE pc.proposition_a_id=$2 OR pc.proposition_b_id=$2
+            ),
+            scored AS (
+                SELECT
+                    c.proposition_id,
+                    c.conflict_type,
+                    c.strength,
+                    GREATEST(
+                        COALESCE((
+                            SELECT max(COALESCE(NULLIF(o.extraction_confidence,0),0.5))
+                            FROM aios.observation o
+                            JOIN aios.timeline t ON t.timeline_id=o.timeline_id
+                            WHERE t.world_id=$1
+                              AND o.proposition_id=c.proposition_id
+                        ),0),
+                        COALESCE((
+                            SELECT max(a.confidence)
+                            FROM aios.world_proposition_assertion a
+                            WHERE a.world_id=$1
+                              AND a.proposition_id=c.proposition_id
+                              AND a.source_kind='observed'
+                              AND a.epistemic_status NOT IN ('rejected','superseded')
+                        ),0)
+                    ) AS observed_confidence
+                FROM competing c
+            )
+            SELECT proposition_id AS competing_proposition_id,
+                   conflict_type, strength, observed_confidence
+            FROM scored
+            WHERE observed_confidence > 0
+            ORDER BY strength * observed_confidence DESC
             LIMIT 1
             """,
             generated["world_id"],
@@ -176,7 +218,7 @@ async def resolve_generated_facts_once(db: Database, *, limit: int = 100) -> int
                 db,
                 world_id=generated["world_id"],
                 proposition_id=conflict["competing_proposition_id"],
-                confidence=float(conflict["observed_confidence"] or 0.5),
+                confidence=float(conflict["observed_confidence"]),
                 reason=f"supersedes generated fill: {conflict['conflict_type']}",
             )
             await db.execute(
