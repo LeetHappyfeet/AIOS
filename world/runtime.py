@@ -124,6 +124,9 @@ class WorldRuntimeService:
             )
         entity_id = entity["entity_id"]
 
+        controller_ref = controller_ref or (
+            user_name if controller_type == "human" else f"character:{character_id}"
+        )
         if controller_ref:
             await self.db.execute(
                 """
@@ -150,6 +153,21 @@ class WorldRuntimeService:
             timeline_id,
         )
         head_node_id = head["node_id"] if head else None
+
+        await self.db.execute(
+            """
+            INSERT INTO aios.entity_controller (
+                entity_id, controller_type, controller_ref, authority, active, meta
+            )
+            SELECT $1, controller_type, controller_ref, authority, active,
+                   meta || jsonb_build_object('copied_on_fork',true)
+            FROM aios.entity_controller
+            WHERE entity_id=$2 AND active=true
+            ON CONFLICT (entity_id, controller_type, controller_ref) DO NOTHING
+            """,
+            entity["entity_id"],
+            source["entity_id"],
+        )
 
         await self.db.execute(
             """
@@ -326,6 +344,7 @@ class WorldRuntimeService:
         if action_type not in {"speak", "move", "inspect", "use_item", "wait", "custom"}:
             raise ValueError(f"unsupported action_type '{action_type}'")
 
+        target = None
         if target_entity_id:
             target = await self.db.fetchrow(
                 "SELECT entity_id, entity_type FROM aios.world_entity WHERE entity_id=$1 AND world_id=$2",
@@ -334,6 +353,14 @@ class WorldRuntimeService:
             )
             if not target:
                 raise RuntimeNotFound("target entity is not present in this world")
+
+        await self._validate_action_rules(
+            world_id=state["world_id"],
+            action_type=action_type,
+            actor_entity_type=state["entity_type"],
+            target_entity_type=target["entity_type"] if target else None,
+            has_target=target is not None,
+        )
 
         reserved = await self.db.execute_returning_row(
             """
@@ -721,6 +748,58 @@ class WorldRuntimeService:
             authority,
         )
         return dict(row)
+
+    async def _validate_action_rules(
+        self,
+        *,
+        world_id: UUID,
+        action_type: str,
+        actor_entity_type: Optional[str],
+        target_entity_type: Optional[str],
+        has_target: bool,
+    ) -> None:
+        """Apply deterministic world-level action constraints before mutation."""
+        rules = await self.db.fetch(
+            """
+            SELECT rule_key, rule_type, rule_data
+            FROM aios.world_rule
+            WHERE world_id=$1 AND enabled=true
+            ORDER BY priority, rule_key
+            """,
+            world_id,
+        )
+
+        for rule in rules:
+            data = dict(rule["rule_data"] or {})
+            rule_type = rule["rule_type"]
+
+            if rule_type == "action_allowlist":
+                actions = set(data.get("actions") or [])
+                if actions and action_type not in actions:
+                    raise ValueError(
+                        f"world rule '{rule['rule_key']}' does not allow action '{action_type}'"
+                    )
+
+            elif rule_type == "require_target":
+                applies = data.get("action_type", "*")
+                if applies in ("*", action_type) and not has_target:
+                    raise ValueError(
+                        f"world rule '{rule['rule_key']}' requires a target for '{action_type}'"
+                    )
+
+            elif rule_type == "deny_action":
+                applies = data.get("action_type", "*")
+                if applies not in ("*", action_type):
+                    continue
+                actor_filter = data.get("actor_entity_type")
+                target_filter = data.get("target_entity_type")
+                if actor_filter and actor_filter != actor_entity_type:
+                    continue
+                if target_filter and target_filter != target_entity_type:
+                    continue
+                raise ValueError(
+                    f"world rule '{rule['rule_key']}' denies action '{action_type}'"
+                )
 
     async def _resolve_world(
         self,
