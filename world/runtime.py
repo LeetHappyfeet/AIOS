@@ -335,10 +335,20 @@ class WorldRuntimeService:
             if not target:
                 raise RuntimeNotFound("target entity is not present in this world")
 
-        await self.db.execute(
-            "UPDATE aios.character_runtime_state SET lifecycle_state='acting', updated_at=now() WHERE instance_id=$1",
+        reserved = await self.db.execute_returning_row(
+            """
+            UPDATE aios.character_runtime_state
+            SET lifecycle_state='acting', updated_at=now()
+            WHERE instance_id=$1
+              AND state_version=$2
+              AND lifecycle_state='ready'
+            RETURNING instance_id
+            """,
             instance_id,
+            expected_state_version,
         )
+        if not reserved:
+            raise RuntimeConflict("instance state changed before the action could be reserved")
 
         event_payload = {
             **payload,
@@ -437,6 +447,136 @@ class WorldRuntimeService:
             "node_id": node_id,
             "state_version": updated["state_version"],
         }
+
+    async def create_entity(
+        self,
+        *,
+        world_id: UUID,
+        entity_key: Optional[str],
+        entity_type: str,
+        display_name: Optional[str],
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        world = await self.db.fetchrow(
+            "SELECT world_id FROM aios.world WHERE world_id=$1",
+            world_id,
+        )
+        if not world:
+            raise RuntimeNotFound(f"Unknown world {world_id}")
+        row = await self.db.execute_returning_row(
+            """
+            INSERT INTO aios.world_entity (
+                world_id, entity_key, entity_type, display_name, meta
+            )
+            VALUES ($1,$2,$3,$4,$5::jsonb)
+            RETURNING entity_id, world_id, entity_key, entity_type, display_name, meta
+            """,
+            world_id,
+            entity_key,
+            entity_type,
+            display_name,
+            json.dumps(meta or {}),
+        )
+        return dict(row)
+
+    async def relate_entities(
+        self,
+        *,
+        world_id: UUID,
+        subject_entity_id: UUID,
+        relation_type: str,
+        object_entity_id: UUID,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        rows = await self.db.fetch(
+            """
+            SELECT entity_id
+            FROM aios.world_entity
+            WHERE world_id=$1 AND entity_id = ANY($2::uuid[])
+            """,
+            world_id,
+            [subject_entity_id, object_entity_id],
+        )
+        if len(rows) != 2:
+            raise RuntimeNotFound("both relation endpoints must exist in the same world")
+        row = await self.db.execute_returning_row(
+            """
+            INSERT INTO aios.world_entity_relation (
+                world_id, subject_entity_id, relation_type, object_entity_id, meta
+            )
+            VALUES ($1,$2,$3,$4,$5::jsonb)
+            RETURNING relation_id, world_id, subject_entity_id,
+                      relation_type, object_entity_id, meta
+            """,
+            world_id,
+            subject_entity_id,
+            relation_type,
+            object_entity_id,
+            json.dumps(meta or {}),
+        )
+        return dict(row)
+
+    async def upsert_rule(
+        self,
+        *,
+        world_id: UUID,
+        rule_key: str,
+        rule_type: str,
+        enabled: bool,
+        priority: int,
+        rule_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        row = await self.db.execute_returning_row(
+            """
+            INSERT INTO aios.world_rule (
+                world_id, rule_key, rule_type, enabled, priority, rule_data
+            )
+            VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+            ON CONFLICT (world_id, rule_key) DO UPDATE
+            SET rule_type=EXCLUDED.rule_type,
+                enabled=EXCLUDED.enabled,
+                priority=EXCLUDED.priority,
+                rule_data=EXCLUDED.rule_data,
+                updated_at=now()
+            RETURNING rule_id, world_id, rule_key, rule_type,
+                      enabled, priority, rule_data
+            """,
+            world_id,
+            rule_key,
+            rule_type,
+            enabled,
+            priority,
+            json.dumps(rule_data),
+        )
+        if not row:
+            raise RuntimeNotFound(f"Unknown world {world_id}")
+        return dict(row)
+
+    async def add_controller(
+        self,
+        *,
+        entity_id: UUID,
+        controller_type: str,
+        controller_ref: str,
+        authority: str = "primary",
+    ) -> Dict[str, Any]:
+        row = await self.db.execute_returning_row(
+            """
+            INSERT INTO aios.entity_controller (
+                entity_id, controller_type, controller_ref, authority
+            )
+            VALUES ($1,$2,$3,$4)
+            ON CONFLICT (entity_id, controller_type, controller_ref)
+            DO UPDATE SET authority=EXCLUDED.authority, active=true
+            RETURNING controller_id, entity_id, controller_type,
+                      controller_ref, authority, active
+            """,
+            entity_id,
+            controller_type,
+            controller_ref,
+            authority,
+        )
+        return dict(row)
 
     async def _resolve_world(
         self,
