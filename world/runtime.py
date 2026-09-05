@@ -156,21 +156,6 @@ class WorldRuntimeService:
 
         await self.db.execute(
             """
-            INSERT INTO aios.entity_controller (
-                entity_id, controller_type, controller_ref, authority, active, meta
-            )
-            SELECT $1, controller_type, controller_ref, authority, active,
-                   meta || jsonb_build_object('copied_on_fork',true)
-            FROM aios.entity_controller
-            WHERE entity_id=$2 AND active=true
-            ON CONFLICT (entity_id, controller_type, controller_ref) DO NOTHING
-            """,
-            entity["entity_id"],
-            source["entity_id"],
-        )
-
-        await self.db.execute(
-            """
             INSERT INTO aios.character_runtime_state (
                 instance_id, world_id, timeline_id, head_node_id, lifecycle_state
             )
@@ -571,6 +556,21 @@ class WorldRuntimeService:
             instance_id,
             source["entity_id"],
             source["character_id"],
+        )
+
+        await self.db.execute(
+            """
+            INSERT INTO aios.entity_controller (
+                entity_id, controller_type, controller_ref, authority, active, meta
+            )
+            SELECT $1, controller_type, controller_ref, authority, active,
+                   meta || jsonb_build_object('copied_on_fork',true)
+            FROM aios.entity_controller
+            WHERE entity_id=$2 AND active=true
+            ON CONFLICT (entity_id, controller_type, controller_ref) DO NOTHING
+            """,
+            entity["entity_id"],
+            source["entity_id"],
         )
 
         await self.db.execute(
