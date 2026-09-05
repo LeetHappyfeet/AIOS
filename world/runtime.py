@@ -708,12 +708,18 @@ class WorldRuntimeService:
             INSERT INTO aios.character_proposition_knowledge (
                 instance_id, proposition_id, epistemic_status, confidence,
                 acquisition_mode, source_entity_id, first_node_id, last_node_id,
-                first_acquired_at, updated_at, meta
+                first_acquired_at, updated_at, meta,
+                base_confidence, attention_weight, trust_weight,
+                compatibility_weight, retention_weight, salience_weight,
+                effective_confidence
             )
             SELECT $1, proposition_id, epistemic_status, confidence,
                    acquisition_mode, NULL, first_node_id, last_node_id,
                    first_acquired_at, now(),
-                   meta || jsonb_build_object('copied_on_fork',true)
+                   meta || jsonb_build_object('copied_on_fork',true),
+                   base_confidence, attention_weight, trust_weight,
+                   compatibility_weight, retention_weight, salience_weight,
+                   effective_confidence
             FROM aios.character_proposition_knowledge
             WHERE instance_id=$2
             ON CONFLICT (instance_id, proposition_id) DO NOTHING
