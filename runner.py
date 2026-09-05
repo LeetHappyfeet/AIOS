@@ -21,6 +21,10 @@ from aios_app.pipeline.worker import run_claim_extraction_for_section
 from aios_app.rdf.fuseki import FusekiClient
 from aios_app.rdf.world_liminal import promote_liminal_claims
 from aios_app.rdf.world_liminal_classifier_runner import classify_liminal_claims
+from aios_app.epistemic.normalizer import normalize_claim_once
+from aios_app.epistemic.narratives import assign_narratives_once
+from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
+from aios_app.epistemic.generated import resolve_generated_facts_once
 
 logger = logging.getLogger("aios.pipeline.runner")
 
@@ -39,6 +43,26 @@ async def handle_dag_to_document_section(db: Database, job: Dict[str, Any]) -> N
 async def handle_extract_claims(db: Database, job: Dict[str, Any]) -> None:
     section_id = UUID(job["payload"]["section_id"])
     await run_claim_extraction_for_section(db, section_id=section_id)
+
+
+# -------------------------------------------------
+# Epistemic handlers
+# -------------------------------------------------
+
+async def handle_normalize_proposition(db: Database, job: Dict[str, Any]) -> None:
+    await normalize_claim_once(db, claim_id=UUID(job["payload"]["claim_id"]))
+
+
+async def handle_assign_narratives(db: Database, job: Dict[str, Any]) -> None:
+    await assign_narratives_once(db, limit=500)
+
+
+async def handle_project_character_knowledge(db: Database, job: Dict[str, Any]) -> None:
+    await project_knowledge_acquisitions_once(db, limit=500)
+
+
+async def handle_resolve_generated_facts(db: Database, job: Dict[str, Any]) -> None:
+    await resolve_generated_facts_once(db, limit=200)
 
 
 # -------------------------------------------------
@@ -67,6 +91,10 @@ JOB_HANDLERS.update(
         "extract_claims": handle_extract_claims,
         "rdf_liminal_promote": handle_rdf_liminal_promote,
         "rdf_liminal_classify": handle_rdf_liminal_classify,
+        "normalize_proposition": handle_normalize_proposition,
+        "assign_narratives": handle_assign_narratives,
+        "project_character_knowledge": handle_project_character_knowledge,
+        "resolve_generated_facts": handle_resolve_generated_facts,
     }
 )
 
