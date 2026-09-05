@@ -176,6 +176,7 @@ async def add_node_and_edge(
     *,
     timeline_id: UUID,
     event_id: int,
+    character_id: Optional[str],
     kind: str,
     speaker_id: Optional[str],
     speaker_role: Optional[str],
@@ -218,6 +219,7 @@ async def add_node_and_edge(
             timeline_id,
             event_id,
             event_time,
+            character_id,
             kind,
             speaker_id,
             speaker_role,
@@ -229,12 +231,13 @@ async def add_node_and_edge(
             $1,
             $2,
             COALESCE(ie.event_time, ie.created_at),
-            $3::aios.event_kind,
-            $4,
-            $5::aios.actor_type,
-            $6,
+            $3,
+            $4::aios.event_kind,
+            $5,
+            $6::aios.actor_type,
             $7,
-            $8::jsonb
+            $8,
+            $9::jsonb
         FROM aios.ingest_event ie
         WHERE ie.event_id = $2
         ON CONFLICT (timeline_id, event_id) DO NOTHING
@@ -242,6 +245,7 @@ async def add_node_and_edge(
         """,
         timeline_id,
         event_id,
+        character_id,
         kind,
         speaker_id,
         speaker_role,
