@@ -50,6 +50,11 @@ class IngestIn(BaseModel):
     speaker_type: ActorType = "user"
     recipient_id: Optional[str] = None
 
+    # Explicit first-person identity for roleplay/control layers. When set,
+    # semantic pivot resolution treats "I" as this identity while preserving
+    # speaker_id as the transport/source actor.
+    viewpoint_id: Optional[str] = None
+
     character_id: str
     user_name: str
 
