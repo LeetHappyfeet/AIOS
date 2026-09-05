@@ -152,6 +152,8 @@ async def ingest(req: IngestIn) -> IngestOut:
             "speaker_id": req.speaker_id,
             "recipient_id": req.recipient_id,
             "viewpoint_id": req.viewpoint_id,
+            "pivot_character_id": req.character_id,
+            "identity_ruleset": "character-id-v1",
             "scope_key": req.scope_key or settings.default_scope,
         }
     )
