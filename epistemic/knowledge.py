@@ -94,6 +94,7 @@ async def project_knowledge_acquisitions_once(
                 continue
             proposition_id = obs["proposition_id"]
 
+        acquisition_meta = dict(row["meta"] or {})
         source = await db.fetchrow(
             """
             SELECT o.source_key
@@ -110,7 +111,7 @@ async def project_knowledge_acquisitions_once(
             proposition_id=proposition_id,
             acquisition_mode=row["acquisition_mode"],
             base_confidence=row["confidence"],
-            source_key=source["source_key"] if source else None,
+            source_key=acquisition_meta.get("source_key") or (source["source_key"] if source else None),
         )
 
         await db.execute(
@@ -228,7 +229,8 @@ async def acquire_document(
     observations = await db.fetch(
         """
         SELECT DISTINCT ON (o.proposition_id)
-            o.proposition_id, o.claim_id, o.dag_node_id, o.extraction_confidence
+            o.proposition_id, o.claim_id, o.dag_node_id, o.extraction_confidence,
+            o.source_key
         FROM aios.observation o
         WHERE o.document_id=$1
         ORDER BY o.proposition_id, o.observed_at
@@ -252,7 +254,10 @@ async def acquire_document(
             epistemic_status=epistemic_status,
             confidence=base,
             dag_node_id=obs["dag_node_id"],
-            meta={"document_id": str(document_id)},
+            meta={
+                "document_id": str(document_id),
+                "source_key": obs["source_key"],
+            },
         )
         queued += 1
 
