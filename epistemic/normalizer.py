@@ -156,6 +156,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             cc.confidence, cc.extraction_rule, cc.extraction_ver, cc.created_at,
             ds.document_id, n.node_id, n.timeline_id,
             n.speaker_id, n.speaker_role::text AS speaker_role, n.recipient_id,
+            NULLIF(n.payload->>'viewpoint_id', '') AS explicit_viewpoint_id,
             ie.source AS ingest_source,
             sd.source_type, sd.source_url, sd.retrieved_at
         FROM aios.claim_candidate cc
@@ -237,14 +238,14 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             "normalizer_version": NORMALIZER_VERSION,
             "lineage_complete": lineage_complete,
             "legacy_partial_lineage": not lineage_complete,
-            "viewpoint_id": row["speaker_id"],
+            "viewpoint_id": row["explicit_viewpoint_id"] or row["speaker_id"],
             "speaker_role": row["speaker_role"],
             "recipient_id": row["recipient_id"],
             "epistemic_scope": (
                 "character"
-                if row["speaker_role"] in {"character", "agent"} and row["speaker_id"]
+                if row["speaker_role"] in {"character", "agent"} and (row["explicit_viewpoint_id"] or row["speaker_id"])
                 else "speaker"
-                if row["speaker_id"]
+                if (row["explicit_viewpoint_id"] or row["speaker_id"])
                 else "source"
             ),
             "semantic_pivot_resolved": "pivot-v1" in (row["extraction_rule"] or ""),
