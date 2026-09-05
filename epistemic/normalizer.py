@@ -153,7 +153,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         """
         SELECT
             cc.claim_id, cc.subject, cc.predicate, cc.object, cc.raw_text,
-            cc.confidence, cc.extraction_ver, cc.created_at,
+            cc.confidence, cc.extraction_rule, cc.extraction_ver, cc.created_at,
             ds.document_id, n.node_id, n.timeline_id,
             n.speaker_id, n.speaker_role::text AS speaker_role, n.recipient_id,
             ie.source AS ingest_source,
