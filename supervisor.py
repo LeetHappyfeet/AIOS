@@ -148,6 +148,35 @@ STAGES: List[Stage] = [
     ),
 
     # -------------------------------------------------
+    # 4) normalized observation -> RDF epistemic graph
+    # -------------------------------------------------
+    Stage(
+        name="rdf_epistemic_project",
+        job_type="rdf_epistemic_project",
+        eligibility_sql="""
+        SELECT o.claim_id
+        FROM aios.observation o
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM aios.rdf_promotion_log rpl
+            WHERE rpl.claim_id=o.claim_id
+              AND rpl.rdf_dataset='world'
+              AND rpl.rdf_graph='urn:aios:world:epistemic'
+              AND rpl.rdf_predicate='world:observesProposition'
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='rdf_epistemic_project'
+              AND pj.status IN ('queued','running')
+              AND pj.payload->>'claim_id'=o.claim_id::text
+          )
+        ORDER BY o.observed_at
+        LIMIT $1
+        """,
+        payload_builder=claim_id_payload,
+    ),
+
+    # -------------------------------------------------
     # 4) observations -> source narrative clusters
     # -------------------------------------------------
     Stage(
