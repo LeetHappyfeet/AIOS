@@ -15,25 +15,31 @@ SERVICES = [
     {
         "name": "Accumulator",
         "cmd": [PYTHON, "-m", "aios_app.accumulator.main"],
+        "required": True,
     },
     {
         "name": "RAG",
         "cmd": [PYTHON, "-m", "aios_app.rag.cli"],
+        "required": False,
     },
     {
         "name": "Supervisor",
         "cmd": [PYTHON, "-m", "aios_app.supervisor"],
+        "required": True,
     },
     {
         "name": "Pipeline Runner",
         "cmd": [PYTHON, "-m", "aios_app.runner"],
+        "required": True,
     },
     {
         "name": "UI",
         "cmd": [PYTHON, "-m", "aios_app.ui.app"],
+        "required": False,
     },
     {
         "name": "API",
+        "required": True,
         "cmd": [
             PYTHON,
             "-m",
@@ -95,20 +101,36 @@ def main() -> None:
             time.sleep(0.5)
 
             if process.poll() is not None:
-                raise RuntimeError(
-                    f"{svc['name']} exited during startup with code "
-                    f"{process.returncode}"
+                if svc.get("required", True):
+                    raise RuntimeError(
+                        f"{svc['name']} exited during startup with code "
+                        f"{process.returncode}"
+                    )
+                print(
+                    f"⚠ Optional service {svc['name']} exited during startup "
+                    f"with code {process.returncode}; core AIOS will continue."
                 )
 
         print("\n✅ All services started. Press Ctrl+C to stop.\n")
 
+        reported_optional_exits = set()
         while True:
             for svc, process in zip(SERVICES, processes):
                 code = process.poll()
-                if code is not None:
+                if code is None:
+                    continue
+
+                if svc.get("required", True):
                     raise RuntimeError(
                         f"{svc['name']} exited unexpectedly with code {code}"
                     )
+
+                if svc["name"] not in reported_optional_exits:
+                    print(
+                        f"⚠ Optional service {svc['name']} exited with code {code}; "
+                        "core AIOS remains running."
+                    )
+                    reported_optional_exits.add(svc["name"])
             time.sleep(1)
 
     except KeyboardInterrupt:
