@@ -25,10 +25,15 @@ from aios_app.models import (
     WorldActionIn,
     CharacterForkIn,
     EntityControllerIn,
+    KnowledgeAcquireIn,
+    GeneratedFactIn,
 )
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.memory import recent_nodes_as_memory, pick_latest_timeline_for_character
 from aios_app.world.runtime import WorldRuntimeService, RuntimeConflict, RuntimeNotFound
+from aios_app.epistemic.knowledge import record_acquisition
+from aios_app.epistemic.generated import create_generated_fact
+from aios_app.epistemic.query import proposition_context, world_epistemic_state
 
 logger = logging.getLogger("aios.main")
 
@@ -440,3 +445,78 @@ async def add_entity_controller(entity_id: UUID, req: EntityControllerIn):
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# =================================================
+# Epistemic control API
+# =================================================
+
+@app.post("/instance/{instance_id}/knowledge/acquire")
+async def acquire_instance_knowledge(instance_id: UUID, req: KnowledgeAcquireIn):
+    """
+    Record an explicit information-acquisition event.
+
+    This does not grant global /world omniscience. The supervisor projects the
+    acquisition into this experiential character instance only.
+    """
+    try:
+        acquisition_id = await record_acquisition(
+            db,
+            instance_id=instance_id,
+            proposition_id=req.proposition_id,
+            claim_id=req.claim_id,
+            acquisition_mode=req.acquisition_mode,
+            epistemic_status=req.epistemic_status,
+            confidence=req.confidence,
+            source_entity_id=req.source_entity_id,
+            dag_node_id=req.dag_node_id,
+            meta=req.meta,
+        )
+        return {
+            "ok": True,
+            "acquisition_id": acquisition_id,
+            "projection_status": "queued",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/fact/generated")
+async def generate_provisional_world_fact(world_id: UUID, req: GeneratedFactIn):
+    """
+    Add a generated gap-fill proposition as provisional, never as silent truth.
+    Later concrete observations can corroborate or supersede it.
+    """
+    try:
+        return await create_generated_fact(
+            db,
+            world_id=world_id,
+            subject=req.subject,
+            predicate=req.predicate,
+            object_value=req.object,
+            raw_text=req.raw_text,
+            confidence=req.confidence,
+            generated_at_node_id=req.generated_at_node_id,
+            reason=req.reason,
+            meta=req.meta,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/epistemic/proposition/{proposition_id}")
+async def get_proposition_context(proposition_id: UUID):
+    """Show source narratives, evidence distribution, and explicit conflicts."""
+    try:
+        return await proposition_context(db, proposition_id=proposition_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/world/{world_id}/epistemic")
+async def get_world_epistemic_state(world_id: UUID):
+    """Inspect provisional, observed, corroborated, and superseded world facts."""
+    try:
+        return await world_epistemic_state(db, world_id=world_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
