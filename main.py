@@ -43,7 +43,11 @@ from aios_app.epistemic.generated import (
 )
 from aios_app.epistemic.query import proposition_context, world_epistemic_state
 from aios_app.documents.long_document import ingest_long_document
-from aios_app.epistemic.weights import get_profile, upsert_profile
+from aios_app.epistemic.weights import (
+    get_profile,
+    upsert_profile,
+    reweight_character_knowledge,
+)
 from aios_app.epistemic.knowledge import acquire_document
 from aios_app.epistemic.search import epistemic_search, document_epistemic_summary
 
@@ -621,11 +625,19 @@ async def put_character_epistemic_profile(
     req: CharacterEpistemicProfileIn,
 ):
     try:
-        return await upsert_profile(
+        profile = await upsert_profile(
             db,
             character_id=character_id,
             data=req.model_dump(),
         )
+        reweighted = await reweight_character_knowledge(
+            db,
+            character_id=character_id,
+        )
+        return {
+            "profile": profile,
+            "reweighted_knowledge_rows": reweighted,
+        }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
