@@ -6,11 +6,47 @@ from uuid import UUID
 from aios_app.db import Database
 
 
+async def _resolve_instance_scope(
+    db: Database,
+    *,
+    character_id: Optional[str],
+    instance_id: Optional[UUID],
+) -> tuple[Optional[str], Optional[UUID]]:
+    if instance_id is not None:
+        row = await db.fetchrow(
+            "SELECT character_id FROM aios.character_instance WHERE instance_id=$1",
+            instance_id,
+        )
+        if not row:
+            raise ValueError(f"unknown character instance {instance_id}")
+        if character_id is not None and row["character_id"] != character_id:
+            raise ValueError(
+                f"instance {instance_id} belongs to character {row['character_id']}, not {character_id}"
+            )
+        return row["character_id"], instance_id
+
+    if character_id is None:
+        return None, None
+
+    row = await db.fetchrow(
+        """
+        SELECT instance_id
+        FROM aios.character_instance
+        WHERE character_id=$1
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        character_id,
+    )
+    return character_id, (row["instance_id"] if row else None)
+
+
 async def epistemic_search(
     db: Database,
     *,
     query: str,
     limit: int = 25,
+    character_id: Optional[str] = None,
     instance_id: Optional[UUID] = None,
     source_key: Optional[str] = None,
     include_conflicts: bool = True,
@@ -18,6 +54,20 @@ async def epistemic_search(
     q = query.strip()
     if not q:
         return {"query": query, "results": []}
+
+    resolved_character_id, resolved_instance_id = await _resolve_instance_scope(
+        db,
+        character_id=character_id,
+        instance_id=instance_id,
+    )
+    if resolved_character_id is not None and resolved_instance_id is None:
+        return {
+            "query": query,
+            "character_id": resolved_character_id,
+            "instance_id": None,
+            "epistemic_scope": "character",
+            "results": [],
+        }
 
     rows = await db.fetch(
         """
@@ -70,7 +120,7 @@ async def epistemic_search(
         q,
         source_key,
         limit,
-        instance_id,
+        resolved_instance_id,
     )
 
     results = []
@@ -106,16 +156,17 @@ async def epistemic_search(
                 ORDER BY pc.strength DESC
                 """,
                 row["proposition_id"],
-                instance_id,
+                resolved_instance_id,
             )
             item["conflicts"] = [dict(c) for c in conflicts]
         results.append(item)
 
     return {
         "query": query,
-        "instance_id": instance_id,
+        "character_id": resolved_character_id,
+        "instance_id": resolved_instance_id,
         "source_key": source_key,
-        "epistemic_scope": "character" if instance_id else "global_observation",
+        "epistemic_scope": "character" if resolved_character_id else "global_observation",
         "results": results,
     }
 
