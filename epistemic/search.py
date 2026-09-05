@@ -34,6 +34,15 @@ async def epistemic_search(
                 OR COALESCE(cc.raw_text,'') ILIKE '%' || $1 || '%'
             )
             AND ($2::text IS NULL OR o.source_key=$2)
+            AND (
+                $4::uuid IS NULL
+                OR EXISTS (
+                    SELECT 1
+                    FROM aios.character_proposition_knowledge known
+                    WHERE known.instance_id=$4
+                      AND known.proposition_id=p.proposition_id
+                )
+            )
             LIMIT $3
         )
         SELECT
@@ -80,10 +89,24 @@ async def epistemic_search(
                 JOIN aios.proposition cp
                   ON cp.proposition_id = CASE WHEN pc.proposition_a_id=$1
                        THEN pc.proposition_b_id ELSE pc.proposition_a_id END
-                WHERE pc.proposition_a_id=$1 OR pc.proposition_b_id=$1
+                WHERE (pc.proposition_a_id=$1 OR pc.proposition_b_id=$1)
+                  AND (
+                      $2::uuid IS NULL
+                      OR EXISTS (
+                          SELECT 1
+                          FROM aios.character_proposition_knowledge known
+                          WHERE known.instance_id=$2
+                            AND known.proposition_id = CASE
+                                WHEN pc.proposition_a_id=$1
+                                THEN pc.proposition_b_id
+                                ELSE pc.proposition_a_id
+                            END
+                      )
+                  )
                 ORDER BY pc.strength DESC
                 """,
                 row["proposition_id"],
+                instance_id,
             )
             item["conflicts"] = [dict(c) for c in conflicts]
         results.append(item)
@@ -92,6 +115,7 @@ async def epistemic_search(
         "query": query,
         "instance_id": instance_id,
         "source_key": source_key,
+        "epistemic_scope": "character" if instance_id else "global_observation",
         "results": results,
     }
 
