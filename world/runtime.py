@@ -7,6 +7,7 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
+from aios_app.epistemic.weights import get_profile
 
 
 class RuntimeConflict(RuntimeError):
@@ -208,6 +209,11 @@ class WorldRuntimeService:
             state["character_id"],
         )
 
+        epistemic_profile = await get_profile(
+            self.db,
+            character_id=state["character_id"],
+        )
+
         nearby = await self.db.fetch(
             """
             SELECT entity_id, entity_type, display_name, entity_key, meta
@@ -292,7 +298,10 @@ class WorldRuntimeService:
         )
 
         return {
-            "character": dict(identity) if identity else {"character_id": state["character_id"]},
+            "character": {
+                **(dict(identity) if identity else {"character_id": state["character_id"]}),
+                "epistemic_profile": epistemic_profile,
+            },
             "runtime": {
                 "instance_id": instance_id,
                 "entity_id": entity_id,
