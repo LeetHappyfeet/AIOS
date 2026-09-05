@@ -86,3 +86,60 @@ class MemoryMatch(BaseModel):
 class MemoryOut(BaseModel):
     timeline_id: Optional[UUID] = None
     vector_matches: List[MemoryMatch] = Field(default_factory=list)
+
+
+# -------------------------------------------------
+# Shared world runtime models
+# -------------------------------------------------
+
+ControllerType = Literal["human", "agent", "system", "tool", "script"]
+
+
+class CharacterActivateIn(BaseModel):
+    user_name: str
+    session_id: Optional[UUID] = None
+    scope_key: str = "default"
+    world_id: Optional[UUID] = None
+    world_key: Optional[str] = None
+    controller_type: ControllerType = "agent"
+    controller_ref: Optional[str] = None
+
+
+class CharacterActivateOut(BaseModel):
+    character_id: str
+    instance_id: UUID
+    entity_id: UUID
+    world_id: UUID
+    timeline_id: UUID
+    head_node_id: Optional[UUID] = None
+    state_version: int
+    lifecycle_state: str
+
+
+class WorldEntityCreateIn(BaseModel):
+    entity_key: Optional[str] = None
+    entity_type: str = "object"
+    display_name: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorldRelationCreateIn(BaseModel):
+    subject_entity_id: UUID
+    relation_type: str
+    object_entity_id: UUID
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorldRulePutIn(BaseModel):
+    rule_type: str = "constraint"
+    enabled: bool = True
+    priority: int = 100
+    rule_data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorldActionIn(BaseModel):
+    expected_state_version: int
+    action_type: str
+    target_entity_id: Optional[UUID] = None
+    text: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
