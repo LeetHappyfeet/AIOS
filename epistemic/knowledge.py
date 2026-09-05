@@ -23,14 +23,18 @@ async def record_acquisition(
     if proposition_id is None and claim_id is None:
         raise ValueError("proposition_id or claim_id is required")
 
-    if proposition_id is None:
+    if proposition_id is None and claim_id is not None:
+        claim_exists = await db.fetchrow(
+            "SELECT 1 FROM aios.claim_candidate WHERE claim_id=$1",
+            claim_id,
+        )
+        if not claim_exists:
+            raise ValueError(f"unknown claim {claim_id}")
         row = await db.fetchrow(
             "SELECT proposition_id FROM aios.observation WHERE claim_id=$1",
             claim_id,
         )
-        if not row:
-            raise ValueError("claim has not been normalized into a proposition yet")
-        proposition_id = row["proposition_id"]
+        proposition_id = row["proposition_id"] if row else None
 
     exists = await db.fetchrow(
         "SELECT 1 FROM aios.character_instance WHERE instance_id=$1",
