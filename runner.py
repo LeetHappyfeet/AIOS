@@ -21,6 +21,7 @@ from aios_app.pipeline.worker import run_claim_extraction_for_section
 from aios_app.rdf.fuseki import FusekiClient
 from aios_app.rdf.world_liminal import promote_liminal_claims
 from aios_app.rdf.world_liminal_classifier_runner import classify_liminal_claims
+from aios_app.rdf.epistemic_writer import project_normalized_observation
 from aios_app.epistemic.normalizer import normalize_claim_once
 from aios_app.epistemic.narratives import assign_narratives_once
 from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
@@ -51,6 +52,15 @@ async def handle_extract_claims(db: Database, job: Dict[str, Any]) -> None:
 
 async def handle_normalize_proposition(db: Database, job: Dict[str, Any]) -> None:
     await normalize_claim_once(db, claim_id=UUID(job["payload"]["claim_id"]))
+
+
+async def handle_rdf_epistemic_project(db: Database, job: Dict[str, Any]) -> None:
+    fuseki = FusekiClient(settings.fuseki_base_url)
+    await project_normalized_observation(
+        db,
+        fuseki,
+        claim_id=UUID(job["payload"]["claim_id"]),
+    )
 
 
 async def handle_assign_narratives(db: Database, job: Dict[str, Any]) -> None:
@@ -92,6 +102,7 @@ JOB_HANDLERS.update(
         "rdf_liminal_promote": handle_rdf_liminal_promote,
         "rdf_liminal_classify": handle_rdf_liminal_classify,
         "normalize_proposition": handle_normalize_proposition,
+        "rdf_epistemic_project": handle_rdf_epistemic_project,
         "assign_narratives": handle_assign_narratives,
         "project_character_knowledge": handle_project_character_knowledge,
         "resolve_generated_facts": handle_resolve_generated_facts,
