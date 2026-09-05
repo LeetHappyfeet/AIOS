@@ -24,6 +24,7 @@ from aios_app.models import (
     WorldRulePutIn,
     WorldActionIn,
     CharacterForkIn,
+    EntityControllerIn,
 )
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.memory import recent_nodes_as_memory, pick_latest_timeline_for_character
@@ -412,3 +413,30 @@ async def fork_instance(instance_id: UUID, req: CharacterForkIn) -> CharacterAct
         return CharacterActivateOut(**result.__dict__)
     except RuntimeNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/instance/{instance_id}/frame/text")
+async def get_instance_text_frame(instance_id: UUID, recent_limit: int = 12):
+    try:
+        return {
+            "instance_id": instance_id,
+            "text": await world_runtime.render_text_frame(
+                instance_id,
+                recent_limit=recent_limit,
+            ),
+        }
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/entity/{entity_id}/controller")
+async def add_entity_controller(entity_id: UUID, req: EntityControllerIn):
+    try:
+        return await world_runtime.add_controller(
+            entity_id=entity_id,
+            controller_type=req.controller_type,
+            controller_ref=req.controller_ref,
+            authority=req.authority,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
