@@ -350,8 +350,23 @@ class WorldRuntimeService:
         if not reserved:
             raise RuntimeConflict("instance state changed before the action could be reserved")
 
+        controller = await self.db.fetchrow(
+            """
+            SELECT controller_type, controller_ref
+            FROM aios.entity_controller
+            WHERE entity_id=$1 AND active=true
+            ORDER BY CASE authority WHEN 'primary' THEN 0 ELSE 1 END, created_at
+            LIMIT 1
+            """,
+            state["entity_id"],
+        )
+        controller_type = controller["controller_type"] if controller else "agent"
+        speaker_role = "user" if controller_type == "human" else "agent"
+
         event_payload = {
             **payload,
+            "controller_type": controller_type,
+            "controller_ref": controller["controller_ref"] if controller else None,
             "runtime_instance_id": str(instance_id),
             "actor_entity_id": str(state["entity_id"]) if state["entity_id"] else None,
             "target_entity_id": str(target_entity_id) if target_entity_id else None,
@@ -366,7 +381,7 @@ class WorldRuntimeService:
                 dedupe_key
             )
             SELECT now(), 'world_runtime', 'other', t.session_id,
-                   $1, 'agent', $2, ci.character_id, t.user_name, $3,
+                   $1, $7::aios.actor_type, $2, ci.character_id, t.user_name, $3,
                    $4::jsonb, $5
             FROM aios.character_runtime_state rs
             JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
@@ -380,6 +395,7 @@ class WorldRuntimeService:
             json.dumps(event_payload),
             f"runtime::{instance_id}::{expected_state_version}::{action_type}",
             instance_id,
+            speaker_role,
         )
         event_id = int(ev["event_id"])
 
@@ -390,7 +406,7 @@ class WorldRuntimeService:
             character_id=state["character_id"],
             kind="other",
             speaker_id=str(state["entity_id"]),
-            speaker_role="agent",
+            speaker_role=speaker_role,
             recipient_id=str(target_entity_id) if target_entity_id else None,
             message_text=message_text,
             payload=event_payload,
