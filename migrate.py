@@ -9,7 +9,17 @@ import asyncpg
 from aios_app.config import settings
 
 
-MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+ROOT_DIR = Path(__file__).resolve().parent
+MIGRATIONS_DIR = ROOT_DIR / "migrations"
+BASE_SCHEMA = ROOT_DIR / "aios_schema.sql"
+
+
+def _strip_psql_meta_commands(sql: str) -> str:
+    """Remove pg_dump psql-only backslash commands before asyncpg execution."""
+    return "\n".join(
+        line for line in sql.splitlines()
+        if not line.lstrip().startswith("\\")
+    )
 
 
 async def apply_migrations() -> None:
@@ -23,6 +33,29 @@ async def apply_migrations() -> None:
 
     conn = await asyncpg.connect(settings.db_dsn)
     try:
+        base_exists = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema='aios'
+                  AND table_name='character_identity'
+            )
+            """
+        )
+
+        if not base_exists:
+            if not BASE_SCHEMA.exists():
+                raise RuntimeError(
+                    "AIOS base schema is missing and aios_schema.sql was not found."
+                )
+            print("[base]  Loading aios_schema.sql")
+            base_sql = _strip_psql_meta_commands(
+                BASE_SCHEMA.read_text(encoding="utf-8")
+            )
+            await conn.execute(base_sql)
+            print("[done]  Base schema loaded")
+
         await conn.execute(
             """
             CREATE SCHEMA IF NOT EXISTS aios;
@@ -57,16 +90,16 @@ async def apply_migrations() -> None:
                 continue
 
             print(f"[apply] {path.name}")
-            async with conn.transaction():
-                await conn.execute(sql)
-                await conn.execute(
-                    """
-                    INSERT INTO aios.schema_migration (migration_name, sha256)
-                    VALUES ($1,$2)
-                    """,
-                    path.name,
-                    digest,
-                )
+            # Migration files own their BEGIN/COMMIT boundaries.
+            await conn.execute(sql)
+            await conn.execute(
+                """
+                INSERT INTO aios.schema_migration (migration_name, sha256)
+                VALUES ($1,$2)
+                """,
+                path.name,
+                digest,
+            )
             print(f"[done]  {path.name}")
 
         print("Database migrations are up to date.")
