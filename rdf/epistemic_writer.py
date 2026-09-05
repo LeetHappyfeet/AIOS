@@ -31,6 +31,9 @@ async def project_normalized_observation(
         SELECT
             o.observation_id, o.claim_id, o.source_key, o.source_domain,
             o.source_kind, o.observed_at, o.dag_node_id,
+            NULLIF(o.meta->>'character_id', '') AS character_id,
+            NULLIF(o.meta->>'memory_owner_id', '') AS memory_owner_id,
+            NULLIF(o.meta->>'identity_ruleset', '') AS identity_ruleset,
             p.proposition_id, p.topic_key, p.canonical_text,
             p.subject_norm, p.predicate_norm, p.object_norm,
             p.polarity, p.modality
@@ -98,6 +101,47 @@ INSERT DATA {{
 """.strip()
 
     fuseki.update(DATASET, sparql)
+
+    character_id = row["character_id"] or row["memory_owner_id"]
+    if character_id:
+        char_dataset = "char"
+        char_graph = f"urn:aios:char:{character_id}:epistemic"
+        char_obs_iri = f"urn:aios:char:{character_id}:observation:{row['observation_id']}"
+        char_sparql = f"""
+PREFIX char:  <urn:aios:char#>
+PREFIX world: <urn:aios:world#>
+PREFIX prov:  <http://www.w3.org/ns/prov#>
+
+INSERT DATA {{
+  GRAPH <{char_graph}> {{
+    <{char_obs_iri}> a char:CharacterObservation ;
+      char:characterId {_lit(character_id)} ;
+      char:memoryOwner {_lit(character_id)} ;
+      char:identityRuleset {_lit(row["identity_ruleset"] or "character-id-v1")} ;
+      char:knowsProposition <{prop_iri}> ;
+      prov:wasDerivedFrom <{obs_iri}> .
+  }}
+}}
+""".strip()
+        fuseki.update(char_dataset, char_sparql)
+
+        await db.execute(
+            """
+            INSERT INTO aios.rdf_promotion_log (
+                claim_id, rdf_dataset, rdf_graph, rdf_subject,
+                rdf_predicate, rdf_object, promoted_by, promotion_meta
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,'epistemic_writer',$7::jsonb)
+            ON CONFLICT (claim_id, rdf_dataset, rdf_graph, rdf_predicate) DO NOTHING
+            """,
+            claim_id,
+            char_dataset,
+            char_graph,
+            char_obs_iri,
+            "char:knowsProposition",
+            prop_iri,
+            '{"layer":"character-epistemic-v1","identity":"character_id"}',
+        )
 
     await db.execute(
         """
