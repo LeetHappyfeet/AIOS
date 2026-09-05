@@ -176,3 +176,10 @@ class GeneratedFactIn(BaseModel):
     generated_at_node_id: Optional[UUID] = None
     reason: Optional[str] = None
     meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorldObservedFactIn(BaseModel):
+    proposition_id: Optional[UUID] = None
+    claim_id: Optional[UUID] = None
+    confidence: float = 0.7
+    reason: str = "explicit world bootstrap/import"
