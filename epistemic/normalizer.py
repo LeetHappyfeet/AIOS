@@ -158,10 +158,10 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             ie.source AS ingest_source,
             sd.source_type, sd.source_url, sd.retrieved_at
         FROM aios.claim_candidate cc
-        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
-        JOIN aios.document_section ds ON ds.section_id=es.section_id
-        JOIN aios.dag_node n ON n.node_id=ds.node_id
-        JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+        LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+        LEFT JOIN aios.dag_node n ON n.node_id=ds.node_id
+        LEFT JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         LEFT JOIN aios.source_document sd ON sd.document_id=ds.document_id
         WHERE cc.claim_id=$1
         """,
@@ -190,8 +190,22 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             source_domain = None
 
     source_key = source_domain or row["ingest_source"] or row["source_type"] or "unknown"
-    source_kind = row["source_type"] or (
-        "chat" if str(row["ingest_source"] or "").lower() not in {"", "internet"} else "internet"
+
+    if row["source_type"]:
+        source_kind = row["source_type"]
+    elif row["ingest_source"]:
+        source_kind = (
+            "internet"
+            if str(row["ingest_source"]).lower() in {"internet", "web", "accumulator"}
+            else "chat"
+        )
+    else:
+        source_kind = "unknown"
+
+    lineage_complete = bool(
+        row["node_id"] is not None
+        and row["timeline_id"] is not None
+        and row["ingest_source"] is not None
     )
 
     observation = await db.execute_returning_row(
@@ -218,7 +232,11 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         row["retrieved_at"],
         row["created_at"],
         float(row["confidence"] or 0.0),
-        json.dumps({"normalizer_version": NORMALIZER_VERSION}),
+        json.dumps({
+            "normalizer_version": NORMALIZER_VERSION,
+            "lineage_complete": lineage_complete,
+            "legacy_partial_lineage": not lineage_complete,
+        }),
     )
 
     provenance = await db.fetchrow(
