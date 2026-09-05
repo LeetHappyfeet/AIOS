@@ -220,6 +220,16 @@ STAGES: List[Stage] = [
                         AND op.topic_key=p.topic_key
                         AND o.observed_at > a.last_checked_at
                   )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM aios.world_proposition_assertion wa
+                      JOIN aios.proposition wp ON wp.proposition_id=wa.proposition_id
+                      WHERE wa.world_id=a.world_id
+                        AND wa.source_kind='observed'
+                        AND wa.epistemic_status NOT IN ('rejected','superseded')
+                        AND wp.topic_key=p.topic_key
+                        AND wa.updated_at > a.last_checked_at
+                  )
               )
         )
           AND NOT EXISTS (
