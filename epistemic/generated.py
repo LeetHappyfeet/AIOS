@@ -134,7 +134,7 @@ async def resolve_generated_facts_once(db: Database, *, limit: int = 100) -> int
     for generated in rows:
         support = await db.fetchrow(
             """
-            SELECT max(COALESCE(o.extraction_confidence,0.5)) AS confidence
+            SELECT max(COALESCE(NULLIF(o.extraction_confidence,0),0.5)) AS confidence
             FROM aios.observation o
             JOIN aios.timeline t ON t.timeline_id=o.timeline_id
             WHERE t.world_id=$1 AND o.proposition_id=$2
@@ -153,7 +153,7 @@ async def resolve_generated_facts_once(db: Database, *, limit: int = 100) -> int
                 END AS competing_proposition_id,
                 pc.conflict_type,
                 pc.strength,
-                max(COALESCE(o.extraction_confidence,0.5)) AS observed_confidence
+                max(COALESCE(NULLIF(o.extraction_confidence,0),0.5)) AS observed_confidence
             FROM aios.proposition_conflict pc
             JOIN aios.observation o
               ON o.proposition_id = CASE
@@ -164,7 +164,7 @@ async def resolve_generated_facts_once(db: Database, *, limit: int = 100) -> int
             WHERE t.world_id=$1
               AND (pc.proposition_a_id=$2 OR pc.proposition_b_id=$2)
             GROUP BY competing_proposition_id, pc.conflict_type, pc.strength
-            ORDER BY (pc.strength * max(COALESCE(o.extraction_confidence,0.5))) DESC
+            ORDER BY (pc.strength * max(COALESCE(NULLIF(o.extraction_confidence,0),0.5))) DESC
             LIMIT 1
             """,
             generated["world_id"],
