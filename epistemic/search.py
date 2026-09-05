@@ -25,20 +25,7 @@ async def _resolve_instance_scope(
             )
         return row["character_id"], instance_id
 
-    if character_id is None:
-        return None, None
-
-    row = await db.fetchrow(
-        """
-        SELECT instance_id
-        FROM aios.character_instance
-        WHERE character_id=$1
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        character_id,
-    )
-    return character_id, (row["instance_id"] if row else None)
+    return character_id, None
 
 
 async def epistemic_search(
@@ -60,15 +47,6 @@ async def epistemic_search(
         character_id=character_id,
         instance_id=instance_id,
     )
-    if resolved_character_id is not None and resolved_instance_id is None:
-        return {
-            "query": query,
-            "character_id": resolved_character_id,
-            "instance_id": None,
-            "epistemic_scope": "character",
-            "results": [],
-        }
-
     rows = await db.fetch(
         """
         WITH matched AS (
@@ -85,13 +63,24 @@ async def epistemic_search(
             )
             AND ($2::text IS NULL OR o.source_key=$2)
             AND (
-                $4::uuid IS NULL
-                OR EXISTS (
-                    SELECT 1
-                    FROM aios.character_proposition_knowledge known
-                    WHERE known.instance_id=$4
-                      AND known.proposition_id=p.proposition_id
+                (
+                    $4::uuid IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM aios.character_proposition_knowledge known
+                        WHERE known.instance_id=$4
+                          AND known.proposition_id=p.proposition_id
+                    )
                 )
+                OR (
+                    $4::uuid IS NULL
+                    AND $5::text IS NOT NULL
+                    AND COALESCE(
+                        o.meta->>'memory_owner_id',
+                        o.meta->>'character_id'
+                    )=$5
+                )
+                OR ($4::uuid IS NULL AND $5::text IS NULL)
             )
             LIMIT $3
         )
@@ -121,6 +110,7 @@ async def epistemic_search(
         source_key,
         limit,
         resolved_instance_id,
+        resolved_character_id,
     )
 
     results = []
@@ -141,22 +131,43 @@ async def epistemic_search(
                        THEN pc.proposition_b_id ELSE pc.proposition_a_id END
                 WHERE (pc.proposition_a_id=$1 OR pc.proposition_b_id=$1)
                   AND (
-                      $2::uuid IS NULL
-                      OR EXISTS (
-                          SELECT 1
-                          FROM aios.character_proposition_knowledge known
-                          WHERE known.instance_id=$2
-                            AND known.proposition_id = CASE
-                                WHEN pc.proposition_a_id=$1
-                                THEN pc.proposition_b_id
-                                ELSE pc.proposition_a_id
-                            END
+                      (
+                          $2::uuid IS NOT NULL
+                          AND EXISTS (
+                              SELECT 1
+                              FROM aios.character_proposition_knowledge known
+                              WHERE known.instance_id=$2
+                                AND known.proposition_id = CASE
+                                    WHEN pc.proposition_a_id=$1
+                                    THEN pc.proposition_b_id
+                                    ELSE pc.proposition_a_id
+                                END
+                          )
                       )
+                      OR (
+                          $2::uuid IS NULL
+                          AND $3::text IS NOT NULL
+                          AND EXISTS (
+                              SELECT 1
+                              FROM aios.observation owned
+                              WHERE owned.proposition_id = CASE
+                                  WHEN pc.proposition_a_id=$1
+                                  THEN pc.proposition_b_id
+                                  ELSE pc.proposition_a_id
+                              END
+                                AND COALESCE(
+                                    owned.meta->>'memory_owner_id',
+                                    owned.meta->>'character_id'
+                                )=$3
+                          )
+                      )
+                      OR ($2::uuid IS NULL AND $3::text IS NULL)
                   )
                 ORDER BY pc.strength DESC
                 """,
                 row["proposition_id"],
                 resolved_instance_id,
+                resolved_character_id,
             )
             item["conflicts"] = [dict(c) for c in conflicts]
         results.append(item)
@@ -166,7 +177,13 @@ async def epistemic_search(
         "character_id": resolved_character_id,
         "instance_id": resolved_instance_id,
         "source_key": source_key,
-        "epistemic_scope": "character" if resolved_character_id else "global_observation",
+        "epistemic_scope": (
+            "character_instance"
+            if resolved_instance_id
+            else "character"
+            if resolved_character_id
+            else "global_observation"
+        ),
         "results": results,
     }
 
