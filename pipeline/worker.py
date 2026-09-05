@@ -101,7 +101,8 @@ async def run_claim_extraction_for_section(
             n.event_id,
             n.speaker_id,
             n.speaker_role::text AS speaker_role,
-            n.recipient_id
+            n.recipient_id,
+            NULLIF(n.payload->>'viewpoint_id', '') AS explicit_viewpoint_id
         FROM aios.document_section ds
         JOIN aios.dag_node n
           ON n.node_id = ds.node_id
@@ -185,7 +186,7 @@ async def run_claim_extraction_for_section(
         subject, predicate, obj = extract_spo(sentence)
         pivot = resolve_subject_pivot(
             subject,
-            speaker_id=row["speaker_id"],
+            speaker_id=row["explicit_viewpoint_id"] or row["speaker_id"],
             speaker_role=row["speaker_role"],
             recipient_id=row["recipient_id"],
         )
