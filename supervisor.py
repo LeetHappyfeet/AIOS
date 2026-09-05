@@ -44,6 +44,10 @@ def section_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"section_id": str(row["section_id"])}
 
 
+def claim_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {"claim_id": str(row["claim_id"])}
+
+
 def empty_payload(_: Dict[str, object]) -> Dict[str, object]:
     return {}
 
@@ -117,6 +121,115 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=section_id_payload,
+    ),
+
+    # -------------------------------------------------
+    # 3) claim_candidate -> normalized proposition/observation
+    # -------------------------------------------------
+    Stage(
+        name="normalize_proposition",
+        job_type="normalize_proposition",
+        eligibility_sql="""
+        SELECT cc.claim_id
+        FROM aios.claim_candidate cc
+        WHERE NOT EXISTS (
+            SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='normalize_proposition'
+              AND pj.status IN ('queued','running')
+              AND pj.payload->>'claim_id'=cc.claim_id::text
+          )
+        ORDER BY cc.created_at
+        LIMIT $1
+        """,
+        payload_builder=claim_id_payload,
+    ),
+
+    # -------------------------------------------------
+    # 4) observations -> source narrative clusters
+    # -------------------------------------------------
+    Stage(
+        name="assign_narratives",
+        job_type="assign_narratives",
+        eligibility_sql="""
+        SELECT 1
+        WHERE EXISTS (
+            SELECT 1
+            FROM aios.observation o
+            WHERE NOT EXISTS (
+                SELECT 1 FROM aios.narrative_membership nm
+                WHERE nm.observation_id=o.observation_id
+            )
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='assign_narratives'
+              AND pj.status IN ('queued','running')
+          )
+        LIMIT $1
+        """,
+        payload_builder=empty_payload,
+    ),
+
+    # -------------------------------------------------
+    # 5) explicit acquisition events -> character knowledge
+    # -------------------------------------------------
+    Stage(
+        name="project_character_knowledge",
+        job_type="project_character_knowledge",
+        eligibility_sql="""
+        SELECT 1
+        WHERE EXISTS (
+            SELECT 1 FROM aios.knowledge_acquisition_event
+            WHERE processed_at IS NULL
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='project_character_knowledge'
+              AND pj.status IN ('queued','running')
+          )
+        LIMIT $1
+        """,
+        payload_builder=empty_payload,
+    ),
+
+    # -------------------------------------------------
+    # 6) provisional generated world facts -> reconciliation
+    # -------------------------------------------------
+    Stage(
+        name="resolve_generated_facts",
+        job_type="resolve_generated_facts",
+        eligibility_sql="""
+        SELECT 1
+        WHERE EXISTS (
+            SELECT 1
+            FROM aios.world_proposition_assertion a
+            JOIN aios.proposition p ON p.proposition_id=a.proposition_id
+            WHERE a.source_kind='generated_fill'
+              AND a.epistemic_status='provisional'
+              AND (
+                  a.last_checked_at IS NULL
+                  OR EXISTS (
+                      SELECT 1
+                      FROM aios.observation o
+                      JOIN aios.timeline t ON t.timeline_id=o.timeline_id
+                      JOIN aios.proposition op ON op.proposition_id=o.proposition_id
+                      WHERE t.world_id=a.world_id
+                        AND op.topic_key=p.topic_key
+                        AND o.observed_at > a.last_checked_at
+                  )
+              )
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='resolve_generated_facts'
+              AND pj.status IN ('queued','running')
+          )
+        LIMIT $1
+        """,
+        payload_builder=empty_payload,
     ),
 
     # -------------------------------------------------
