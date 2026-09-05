@@ -28,6 +28,10 @@ from aios_app.models import (
     KnowledgeAcquireIn,
     GeneratedFactIn,
     WorldObservedFactIn,
+    LongDocumentIn,
+    CharacterEpistemicProfileIn,
+    DocumentAcquireIn,
+    EpistemicSearchIn,
 )
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.memory import recent_nodes_as_memory, pick_latest_timeline_for_character
@@ -38,6 +42,10 @@ from aios_app.epistemic.generated import (
     assert_claim_or_proposition_in_world,
 )
 from aios_app.epistemic.query import proposition_context, world_epistemic_state
+from aios_app.documents.long_document import ingest_long_document
+from aios_app.epistemic.weights import get_profile, upsert_profile
+from aios_app.epistemic.knowledge import acquire_document
+from aios_app.epistemic.search import epistemic_search, document_epistemic_summary
 
 logger = logging.getLogger("aios.main")
 
@@ -546,3 +554,89 @@ async def import_observed_world_fact(world_id: UUID, req: WorldObservedFactIn):
         return {"ok": True, "assertion_id": assertion_id}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# =================================================
+# Long-document + deterministic epistemic APIs
+# =================================================
+
+@app.post("/document/ingest")
+async def ingest_document(req: LongDocumentIn):
+    """
+    Ingest arbitrary long-form text into its own source document and DAG.
+
+    Metadata is optional and document-derived. No ISBN/DOI/author is required.
+    """
+    try:
+        return await ingest_long_document(
+            db,
+            text=req.text,
+            source_type=req.source_type,
+            source_uri=req.source_uri,
+            title=req.title,
+            source_name=req.source_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/document/{document_id}/epistemic")
+async def get_document_epistemic_summary(document_id: UUID):
+    try:
+        return await document_epistemic_summary(db, document_id=document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/instance/{instance_id}/knowledge/acquire/document/{document_id}")
+async def acquire_document_knowledge(
+    instance_id: UUID,
+    document_id: UUID,
+    req: DocumentAcquireIn,
+):
+    try:
+        return await acquire_document(
+            db,
+            instance_id=instance_id,
+            document_id=document_id,
+            acquisition_mode=req.acquisition_mode,
+            epistemic_status=req.epistemic_status,
+            confidence=req.confidence,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/character/{character_id}/epistemic-profile")
+async def get_character_epistemic_profile(character_id: str):
+    try:
+        return await get_profile(db, character_id=character_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/character/{character_id}/epistemic-profile")
+async def put_character_epistemic_profile(
+    character_id: str,
+    req: CharacterEpistemicProfileIn,
+):
+    try:
+        return await upsert_profile(
+            db,
+            character_id=character_id,
+            data=req.model_dump(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/epistemic/search")
+async def search_epistemic(req: EpistemicSearchIn):
+    return await epistemic_search(
+        db,
+        query=req.query,
+        limit=max(1, min(req.limit, 200)),
+        instance_id=req.instance_id,
+        source_key=req.source_key,
+        include_conflicts=req.include_conflicts,
+    )
