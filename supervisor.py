@@ -292,8 +292,14 @@ STAGES: List[Stage] = [
               SELECT 1
               FROM aios.pipeline_job pj
               WHERE pj.job_type = 'rdf_liminal_promote'
-                AND pj.status IN ('queued', 'running')
                 AND (pj.payload->>'section_id') = ds.section_id::text
+                AND (
+                    pj.status IN ('queued', 'running')
+                    OR (
+                        pj.status = 'failed'
+                        AND pj.updated_at > now() - interval '30 seconds'
+                    )
+                )
           )
         ORDER BY n.event_id
         LIMIT $1
