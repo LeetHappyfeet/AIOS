@@ -22,6 +22,7 @@ from aios_app.models import (
     WorldRelationCreateIn,
     WorldRulePutIn,
     WorldActionIn,
+    CharacterForkIn,
 )
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.memory import recent_nodes_as_memory, pick_latest_timeline_for_character
@@ -396,3 +397,17 @@ async def put_world_rule(world_id: UUID, rule_key: str, req: WorldRulePutIn):
         priority=req.priority,
         rule_data=req.rule_data,
     )
+
+
+@app.post("/instance/{instance_id}/fork", response_model=CharacterActivateOut)
+async def fork_instance(instance_id: UUID, req: CharacterForkIn) -> CharacterActivateOut:
+    """Create a new experiential continuation in another epistemic/runtime world."""
+    try:
+        result = await world_runtime.fork_instance(
+            source_instance_id=instance_id,
+            target_world_id=req.target_world_id,
+            target_world_key=req.target_world_key,
+        )
+        return CharacterActivateOut(**result.__dict__)
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
