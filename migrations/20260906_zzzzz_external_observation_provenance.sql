@@ -64,6 +64,19 @@ CREATE INDEX IF NOT EXISTS idx_ingest_event_target_world
     ON aios.ingest_event (target_world_id, created_at DESC)
     WHERE target_world_id IS NOT NULL;
 
+DROP INDEX IF EXISTS aios.ux_timeline_identity;
+
+CREATE UNIQUE INDEX ux_timeline_identity
+    ON aios.timeline (
+        world_id,
+        name,
+        session_id,
+        character_id,
+        user_name,
+        scope_key,
+        source_id
+    ) NULLS NOT DISTINCT;
+
 CREATE INDEX IF NOT EXISTS idx_timeline_source_identity
     ON aios.timeline (source_id, created_at DESC)
     WHERE source_id IS NOT NULL;
