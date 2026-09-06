@@ -99,18 +99,60 @@ class HUDAssembler:
         context = await self.context_resolver.resolve(instance_id)
         raw_state = await self._runtime_state(instance_id)
 
-        recent_rows = await self.db.fetch(
+        bounded_limit = max(1, min(recent_limit, 100))
+
+        runtime_rows = await self.db.fetch(
             """
-            SELECT node_id, event_time, speaker_id, speaker_role, message_text, payload
+            SELECT node_id, event_id, event_time, speaker_id, speaker_role,
+                   message_text, payload
             FROM aios.dag_node
             WHERE timeline_id=$1
             ORDER BY event_id DESC
             LIMIT $2
             """,
             context.timeline_id,
-            max(1, min(recent_limit, 100)),
+            bounded_limit,
         )
-        recent_newest = [dict(row) for row in recent_rows]
+        runtime_newest = [
+            {**dict(row), "event_stream": "runtime"}
+            for row in runtime_rows
+        ]
+
+        source_newest: list[dict[str, Any]] = []
+        if context.source_timeline_id and context.source_head_node_id:
+            source_rows = await self.db.fetch(
+                """
+                SELECT dn.node_id, dn.event_id, dn.event_time, dn.speaker_id,
+                       dn.speaker_role, dn.message_text, dn.payload
+                FROM aios.dag_node dn
+                JOIN aios.dag_node source_head
+                  ON source_head.node_id=$2
+                 AND source_head.timeline_id=$1
+                WHERE dn.timeline_id=$1
+                  AND dn.event_id <= source_head.event_id
+                ORDER BY dn.event_id DESC
+                LIMIT $3
+                """,
+                context.source_timeline_id,
+                context.source_head_node_id,
+                bounded_limit,
+            )
+            source_newest = [
+                {**dict(row), "event_stream": "source"}
+                for row in source_rows
+            ]
+
+        recent_newest = source_newest + runtime_newest
+        recent_newest.sort(
+            key=lambda row: (
+                row.get("event_time") is not None,
+                row.get("event_time"),
+                row.get("event_id", -1),
+            ),
+            reverse=True,
+        )
+        recent_newest = recent_newest[:bounded_limit]
+
         focus_text = next(
             (row.get("message_text") for row in recent_newest if row.get("message_text")),
             "",
@@ -221,6 +263,8 @@ class HUDAssembler:
                 "world_key": context.world_key,
                 "timeline_id": context.timeline_id,
                 "head_node_id": context.head_node_id,
+                "source_timeline_id": context.source_timeline_id,
+                "source_head_node_id": context.source_head_node_id,
                 "state_version": context.state_version,
                 "lifecycle_state": context.lifecycle_state,
                 "location_entity_id": context.location_entity_id,
@@ -250,6 +294,9 @@ class HUDAssembler:
                 "token_budget": resolved_total,
                 "section_token_budgets": section_caps,
                 "world_lineage": list(context.lineage_world_ids),
+                "source_cursor_bounded": bool(
+                    context.source_timeline_id and context.source_head_node_id
+                ),
                 "focus_text": focus_text,
             },
         }
