@@ -235,6 +235,18 @@ class TopologyRetriever:
                     array_position($2::uuid[], ck.instance_id) AS instance_depth
                 FROM aios.character_proposition_knowledge ck
                 WHERE ck.instance_id = ANY($2::uuid[])
+                  AND EXISTS (
+                      SELECT 1
+                      FROM aios.knowledge_acquisition_event kae
+                      LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+                      LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                      LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+                      LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                      LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+                      WHERE kae.instance_id=ck.instance_id
+                        AND kae.proposition_id=ck.proposition_id
+                        AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+                  )
                 ORDER BY ck.proposition_id,
                          array_position($2::uuid[], ck.instance_id),
                          ck.updated_at DESC
