@@ -109,3 +109,24 @@ def test_v2_web_record_keeps_source_speaker_and_targets_separate():
     assert context["speaker_id"] == "example_news"
     assert context["target_character_id"] == "alice"
     assert context["target_world_id"] == "00000000-0000-0000-0000-000000000001"
+
+
+def test_queue_recovers_pending_tasks(tmp_path):
+    state_path = tmp_path / "crawl-state.json"
+    queue = CrawlQueue(state_path)
+    task = CrawlTask(
+        url="https://example.com/article",
+        source_id="example",
+    )
+    task_id = queue.add(task)
+    queue.update(task_id, state="running", current_url=task.url)
+
+    recovered = CrawlQueue(state_path)
+    status = recovered.get(task_id)
+
+    assert status is not None
+    assert status["state"] == "queued"
+    assert "Recovered" in status["message"]
+    popped = recovered.pop()
+    assert popped is not None
+    assert popped.task_id == task_id
