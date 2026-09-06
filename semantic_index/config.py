@@ -18,6 +18,12 @@ class SemanticIndexConfig:
     epistemic_collection: str = os.getenv(
         "AIOS_QDRANT_EPISTEMIC_COLLECTION", "epistemic_objects_v1"
     )
+    legacy_rag_collection: str = os.getenv(
+        "AIOS_QDRANT_LEGACY_RAG_COLLECTION", "doc_sections_v1"
+    )
+    drop_legacy_rag_collection: bool = os.getenv(
+        "AIOS_DROP_LEGACY_RAG_COLLECTION", "1"
+    ) == "1"
 
     embedding_model: str = os.getenv(
         "AIOS_SEMANTIC_EMBEDDING_MODEL",
