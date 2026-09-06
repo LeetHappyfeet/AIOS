@@ -240,7 +240,7 @@ class WorldRuntimeService:
         self,
         instance_id: UUID,
         *,
-        recent_limit: int = 12,
+        recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Coordinate construction of the canonical branch-aware RPG HUD."""
@@ -257,7 +257,7 @@ class WorldRuntimeService:
         self,
         instance_id: UUID,
         *,
-        recent_limit: int = 12,
+        recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
     ) -> str:
         """Render exactly the same canonical HUD returned by build_frame()."""
