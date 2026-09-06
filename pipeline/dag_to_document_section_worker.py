@@ -52,6 +52,11 @@ async def run_worker(
         section_order = row["event_id"]
         document_id = None
 
+    elif row["kind"] == "observation":
+        section_path = f"/observation/{row['event_id']}"
+        section_order = row["event_id"]
+        document_id = None
+
     else:
         raise RuntimeError(
             f"Unsupported dag_node.kind {row['kind']!r} for node {node_id}"
