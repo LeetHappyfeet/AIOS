@@ -298,7 +298,7 @@ async def resolve_claim_context(
         claim_id,
     )
     if existing:
-        return ClaimContext(
+        context = ClaimContext(
             claim_id=claim_id,
             claim_kind=existing["claim_kind"],
             subject_kind=existing["subject_kind"],
@@ -316,6 +316,24 @@ async def resolve_claim_context(
             object_is_pivot=bool(existing["object_is_pivot"]),
             confidence=float(existing["confidence"]),
         )
+        receipt = await db.fetchrow(
+            """
+            SELECT 1
+            FROM aios.rdf_promotion_log
+            WHERE claim_id=$1
+              AND rdf_dataset=$2
+              AND rdf_graph=$3
+              AND rdf_predicate=$4
+            """,
+            claim_id,
+            DATASET,
+            LIMINAL_GRAPH,
+            RDF_RECEIPT_PREDICATE,
+        )
+        if not receipt:
+            await _write_liminal_context(fuseki, context)
+            await _log_rdf_context(db, context)
+        return context
 
     row = await db.fetchrow(
         """
