@@ -251,6 +251,20 @@ async def ingest(req: IngestIn) -> IngestOut:
 
     event_id = int(ev["event_id"])
 
+    # Re-selecting a previously seen swipe may hit the text dedupe key and
+    # reuse its immutable event row. Reactivate that row before superseding the
+    # currently selected alternative.
+    if source_event_id:
+        await db.execute(
+            """
+            UPDATE aios.ingest_event
+            SET superseded_at=NULL,
+                superseded_by_event_id=NULL
+            WHERE event_id=$1
+            """,
+            event_id,
+        )
+
     try:
         # -------------------------------------------------
         # Timeline resolution (STRUCTURAL ONLY)
@@ -376,6 +390,8 @@ async def ingest(req: IngestIn) -> IngestOut:
                     ),
                     -1
                   ) <= $7
+                  OR $8::boolean
+            )
             """,
             timeline_id,
             node_id,
@@ -384,6 +400,7 @@ async def ingest(req: IngestIn) -> IngestOut:
             req.user_name,
             req.scope_key or settings.default_scope,
             event_id,
+            bool(source_event_id),
         )
 
         await mark_matching_runtime_dirty(
