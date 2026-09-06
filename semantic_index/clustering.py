@@ -279,6 +279,8 @@ async def _cluster_metadata(
             p.created_at,
             ctx.claim_kind,
             ctx.predicate_family,
+            ctx.origin_character_id,
+            ctx.character_instance_id,
             ctx.world_id,
             ctx.timeline_id,
             obs.source_domain,
@@ -286,7 +288,9 @@ async def _cluster_metadata(
             obs.observed_at
         FROM aios.proposition p
         LEFT JOIN LATERAL (
-            SELECT ccr.claim_kind, ccr.predicate_family, ccr.world_id, ccr.timeline_id
+            SELECT ccr.claim_kind, ccr.predicate_family,
+                   ccr.origin_character_id, ccr.character_instance_id,
+                   ccr.world_id, ccr.timeline_id
             FROM aios.observation o
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
             WHERE o.proposition_id=p.proposition_id
@@ -329,6 +333,8 @@ async def _cluster_metadata(
         "dominant_predicates": counts("predicate_norm"),
         "claim_kinds": counts("claim_kind"),
         "predicate_families": counts("predicate_family"),
+        "origin_characters": counts("origin_character_id"),
+        "character_instances": counts("character_instance_id"),
         "world_distribution": counts("world_id"),
         "timeline_distribution": counts("timeline_id"),
         "source_domains": counts("source_domain"),
