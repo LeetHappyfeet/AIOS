@@ -12,6 +12,7 @@ from aios_app.hud.render_text import render_hud_text
 from aios_app.world.topology import (
     ensure_character_root_world,
     ensure_runtime_branch_world,
+    latest_source_anchor,
 )
 
 
@@ -175,6 +176,16 @@ class WorldRuntimeService:
 
         source_timeline_id = world.get("anchor_timeline_id")
         source_head_node_id = world.get("anchor_node_id")
+        if session_id is not None:
+            latest_timeline_id, latest_node_id = await latest_source_anchor(
+                self.db,
+                character_id=character_id,
+                session_id=session_id,
+            )
+            if latest_timeline_id is not None:
+                source_timeline_id = latest_timeline_id
+            if latest_node_id is not None:
+                source_head_node_id = latest_node_id
 
         await self.db.execute(
             """
@@ -188,12 +199,12 @@ class WorldRuntimeService:
                 timeline_id=EXCLUDED.timeline_id,
                 head_node_id=COALESCE(EXCLUDED.head_node_id, aios.character_runtime_state.head_node_id),
                 source_timeline_id=COALESCE(
-                    aios.character_runtime_state.source_timeline_id,
-                    EXCLUDED.source_timeline_id
+                    EXCLUDED.source_timeline_id,
+                    aios.character_runtime_state.source_timeline_id
                 ),
                 source_head_node_id=COALESCE(
-                    aios.character_runtime_state.source_head_node_id,
-                    EXCLUDED.source_head_node_id
+                    EXCLUDED.source_head_node_id,
+                    aios.character_runtime_state.source_head_node_id
                 ),
                 lifecycle_state='ready',
                 updated_at=now()
