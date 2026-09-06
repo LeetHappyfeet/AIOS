@@ -22,6 +22,7 @@ EventKind = Literal[
     "other",
     "document",
     "paragraph",
+    "observation",
 ]
 
 
@@ -70,6 +71,38 @@ class IngestIn(BaseModel):
     dedupe_key: Optional[str] = None
 
     # optional: group chat, world instance, etc.
+    scope_key: Optional[str] = None
+
+
+class ExternalObservationIn(BaseModel):
+    """
+    Generic provenance-safe ingress for non-character observations.
+
+    target_character_id and target_world_id are downstream routing/enrichment
+    hints only. They never become origin character ownership or world truth.
+    """
+    source_id: str = Field(min_length=1)
+    source_kind: str = Field(default="external", min_length=1)
+    source_name: Optional[str] = None
+    source_uri: Optional[str] = None
+    source_event_id: Optional[str] = None
+    source_meta: Dict[str, Any] = Field(default_factory=dict)
+
+    session_id: Optional[UUID] = None
+    event_time: Optional[datetime] = None
+
+    speaker_id: Optional[str] = None
+    speaker_type: ActorType = "source"
+    recipient_id: Optional[str] = None
+    viewpoint_id: Optional[str] = None
+
+    target_character_id: Optional[str] = None
+    target_world_id: Optional[UUID] = None
+
+    text: str
+    kind: EventKind = "observation"
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    dedupe_key: Optional[str] = None
     scope_key: Optional[str] = None
 
 
