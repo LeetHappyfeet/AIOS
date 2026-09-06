@@ -547,6 +547,17 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
         )
         await db.execute(
             """
+            UPDATE aios.semantic_outlier_candidate
+            SET status='stale'
+            WHERE embedding_version=$1
+              AND run_id <> $2
+              AND status='candidate'
+            """,
+            cfg.embedding_version,
+            run_id,
+        )
+        await db.execute(
+            """
             UPDATE aios.semantic_cluster_run
             SET cluster_count=$2,
                 outlier_count=$3,
