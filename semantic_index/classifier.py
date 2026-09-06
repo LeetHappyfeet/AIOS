@@ -82,7 +82,9 @@ def _weighted_overlap(a: Any, b: Any) -> float:
     right = _as_counts(b)
     keys = set(left) | set(right)
     if not keys:
-        return 0.0
+        # Unknown metadata is neutral. Treating absence as zero overlap would
+        # falsely manufacture source/world/instance separation evidence.
+        return 0.5
     intersection = sum(min(left.get(k, 0.0), right.get(k, 0.0)) for k in keys)
     union = sum(max(left.get(k, 0.0), right.get(k, 0.0)) for k in keys)
     return intersection / union if union else 0.0
