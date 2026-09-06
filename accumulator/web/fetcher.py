@@ -41,9 +41,12 @@ class SeleniumFetcher:
 
         return {
             "html": html,
+            "final_url": self.driver.current_url,
             "load_time_ms": load_time_ms,
             "rendered": True,
             "user_agent": DEFAULT_USER_AGENT,
+            "status_code": None,
+            "content_type": None,
         }
 
     def close(self):
