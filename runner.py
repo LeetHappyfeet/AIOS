@@ -28,6 +28,7 @@ from aios_app.epistemic.context_resolver import resolve_claim_context
 from aios_app.epistemic.narratives import assign_narratives_once
 from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
 from aios_app.epistemic.generated import resolve_generated_facts_once
+from aios_app.epistemic.topology import derive_claim_topology, derive_world_assertion_topology
 from aios_app.world.topology import project_world_topology
 
 logger = logging.getLogger("aios.pipeline.runner")
@@ -123,6 +124,18 @@ async def handle_rdf_epistemic_project(db: Database, job: Dict[str, Any]) -> Non
     )
 
 
+async def handle_derive_claim_topology(db: Database, job: Dict[str, Any]) -> None:
+    claim_id = UUID(job["payload"]["claim_id"])
+    fuseki = FusekiClient(settings.fuseki_base_url)
+    await derive_claim_topology(db, fuseki, claim_id=claim_id)
+
+
+async def handle_derive_world_assertion_topology(db: Database, job: Dict[str, Any]) -> None:
+    assertion_id = UUID(job["payload"]["assertion_id"])
+    fuseki = FusekiClient(settings.fuseki_base_url)
+    await derive_world_assertion_topology(db, fuseki, assertion_id=assertion_id)
+
+
 async def handle_assign_narratives(db: Database, job: Dict[str, Any]) -> None:
     await assign_narratives_once(db, limit=500)
 
@@ -192,6 +205,8 @@ JOB_HANDLERS.update(
         "resolve_claim_context": handle_resolve_claim_context,
         "normalize_proposition": handle_normalize_proposition,
         "rdf_epistemic_project": handle_rdf_epistemic_project,
+        "derive_claim_topology": handle_derive_claim_topology,
+        "derive_world_assertion_topology": handle_derive_world_assertion_topology,
         "assign_narratives": handle_assign_narratives,
         "project_character_knowledge": handle_project_character_knowledge,
         "resolve_generated_facts": handle_resolve_generated_facts,
