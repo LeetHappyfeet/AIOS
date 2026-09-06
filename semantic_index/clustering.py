@@ -276,35 +276,51 @@ async def _cluster_metadata(
     }
 
 
+def _config_signature(cfg: SemanticIndexConfig) -> str:
+    return "|".join([
+        ALGORITHM_VERSION,
+        cfg.embedding_version,
+        f"core={cfg.cluster_core_threshold:.6f}",
+        f"attach={cfg.cluster_attach_threshold:.6f}",
+        f"floor={cfg.cluster_boundary_floor:.6f}",
+        f"min_size={cfg.cluster_min_size}",
+        f"min_links={cfg.cluster_min_attach_links}",
+        f"min_density={cfg.cluster_min_density:.6f}",
+        f"min_cohesion={cfg.cluster_min_cohesion:.6f}",
+    ])
+
+
 async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
     watermark = await db.fetchrow(
         """
-        SELECT MAX(updated_at) AS watermark
-        FROM aios.semantic_neighbor_candidate
+        SELECT MAX(analyzed_at) AS watermark
+        FROM aios.semantic_structure_state
         WHERE embedding_version=$1
-          AND status='candidate'
         """,
         cfg.embedding_version,
     )
-    neighbor_watermark = watermark["watermark"] if watermark else None
-    if neighbor_watermark is None:
+    structure_watermark = watermark["watermark"] if watermark else None
+    if structure_watermark is None:
         return 0
 
+    config_signature = _config_signature(cfg)
     previous = await db.fetchrow(
         """
-        SELECT neighbor_watermark
+        SELECT structure_watermark
         FROM aios.semantic_cluster_run
         WHERE embedding_version=$1
           AND algorithm_version=$2
+          AND config_signature=$3
           AND status='done'
         ORDER BY completed_at DESC
         LIMIT 1
         """,
         cfg.embedding_version,
         ALGORITHM_VERSION,
+        config_signature,
     )
-    if previous and previous["neighbor_watermark"] is not None:
-        if previous["neighbor_watermark"] >= neighbor_watermark:
+    if previous and previous["structure_watermark"] is not None:
+        if previous["structure_watermark"] >= structure_watermark:
             return 0
 
     rows = await db.fetch(
@@ -327,9 +343,6 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
         )
         for row in rows
     ]
-    if not edges:
-        return 0
-
     indexed_rows = await db.fetch(
         """
         SELECT p.proposition_id
@@ -370,9 +383,9 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
         INSERT INTO aios.semantic_cluster_run (
             run_id, embedding_version, algorithm_version,
             core_threshold, attach_threshold, min_cluster_size,
-            neighbor_watermark, status
+            structure_watermark, config_signature, status
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,'running')
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running')
         """,
         run_id,
         cfg.embedding_version,
@@ -380,7 +393,8 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
         cfg.cluster_core_threshold,
         cfg.cluster_attach_threshold,
         cfg.cluster_min_size,
-        neighbor_watermark,
+        structure_watermark,
+        config_signature,
     )
 
     try:
