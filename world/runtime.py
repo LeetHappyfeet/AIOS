@@ -8,6 +8,8 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.epistemic.weights import get_profile
+from aios_app.hud.frame import HUDAssembler
+from aios_app.hud.render_text import render_hud_text
 from aios_app.world.topology import (
     ensure_character_root_world,
     ensure_runtime_branch_world,
@@ -39,6 +41,7 @@ class WorldRuntimeService:
 
     def __init__(self, db: Database):
         self.db = db
+        self.hud = HUDAssembler(db)
 
     async def activate_character(
         self,
@@ -209,219 +212,37 @@ class WorldRuntimeService:
             raise RuntimeNotFound(f"Unknown runtime instance {instance_id}")
         return dict(row)
 
-    async def build_frame(self, instance_id: UUID, *, recent_limit: int = 12) -> Dict[str, Any]:
-        state = await self.get_state(instance_id)
-        world_id = state["world_id"]
-        entity_id = state["entity_id"]
+    async def build_frame(
+        self,
+        instance_id: UUID,
+        *,
+        recent_limit: int = 12,
+        token_budget: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Coordinate construction of the canonical branch-aware RPG HUD."""
+        try:
+            return await self.hud.build(
+                instance_id,
+                recent_limit=recent_limit,
+                token_budget=token_budget,
+            )
+        except LookupError as exc:
+            raise RuntimeNotFound(str(exc)) from exc
 
-        identity = await self.db.fetchrow(
-            """
-            SELECT character_id, display_name, canonical_name, species, gender,
-                   visual_summary, primary_role, archetype, default_tone,
-                   speech_style, moral_constraints, meta
-            FROM aios.character_identity
-            WHERE character_id=$1
-            """,
-            state["character_id"],
-        )
-
-        epistemic_profile = await get_profile(
-            self.db,
-            character_id=state["character_id"],
-        )
-
-        nearby = await self.db.fetch(
-            """
-            SELECT entity_id, entity_type, display_name, entity_key, meta
-            FROM aios.world_entity
-            WHERE world_id=$1 AND entity_id IS DISTINCT FROM $2
-            ORDER BY created_at
-            LIMIT 100
-            """,
-            world_id,
-            entity_id,
-        )
-        relations = await self.db.fetch(
-            """
-            SELECT relation_type, subject_entity_id, object_entity_id, meta
-            FROM aios.world_entity_relation
-            WHERE world_id=$1 AND valid_to_node_id IS NULL
-              AND (subject_entity_id=$2 OR object_entity_id=$2)
-            """,
-            world_id,
-            entity_id,
-        )
-        inventory = await self.db.fetch(
-            """
-            SELECT i.quantity, i.equipped, i.state,
-                   e.entity_id, e.entity_type, e.display_name, e.entity_key
-            FROM aios.character_inventory i
-            JOIN aios.world_entity e ON e.entity_id=i.entity_id
-            WHERE i.instance_id=$1
-            """,
+    async def render_text_frame(
+        self,
+        instance_id: UUID,
+        *,
+        recent_limit: int = 12,
+        token_budget: Optional[int] = None,
+    ) -> str:
+        """Render exactly the same canonical HUD returned by build_frame()."""
+        frame = await self.build_frame(
             instance_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
         )
-        knowledge = await self.db.fetch(
-            """
-            SELECT
-                ck.epistemic_status,
-                ck.confidence,
-                ck.acquisition_mode,
-                ck.source_entity_id,
-                ck.updated_at,
-                ck.base_confidence,
-                ck.attention_weight,
-                ck.trust_weight,
-                ck.compatibility_weight,
-                ck.retention_weight,
-                ck.salience_weight,
-                ck.effective_confidence,
-                p.proposition_id,
-                p.topic_key,
-                p.canonical_text,
-                p.subject_norm,
-                p.predicate_norm,
-                p.object_norm,
-                p.polarity,
-                p.modality
-            FROM aios.character_proposition_knowledge ck
-            JOIN aios.proposition p ON p.proposition_id=ck.proposition_id
-            WHERE ck.instance_id=$1
-            ORDER BY ck.updated_at DESC
-            LIMIT 60
-            """,
-            instance_id,
-        )
-        rules = await self.db.fetch(
-            """
-            SELECT rule_key, rule_type, priority, rule_data
-            FROM aios.world_rule
-            WHERE world_id=$1 AND enabled=true
-            ORDER BY priority, rule_key
-            """,
-            world_id,
-        )
-        recent = await self.db.fetch(
-            """
-            SELECT node_id, event_time, speaker_id, speaker_role, message_text, payload
-            FROM aios.dag_node
-            WHERE timeline_id=$1
-            ORDER BY event_id DESC
-            LIMIT $2
-            """,
-            state["timeline_id"],
-            recent_limit,
-        )
-
-        return {
-            "character": {
-                **(dict(identity) if identity else {"character_id": state["character_id"]}),
-                "epistemic_profile": epistemic_profile,
-            },
-            "runtime": {
-                "instance_id": instance_id,
-                "entity_id": entity_id,
-                "world_id": world_id,
-                "world_key": state["world_key"],
-                "timeline_id": state["timeline_id"],
-                "head_node_id": state["head_node_id"],
-                "state_version": state["state_version"],
-                "lifecycle_state": state["lifecycle_state"],
-            },
-            "state": {
-                "location_entity_id": state["location_entity_id"],
-                "health": state["health"],
-                "stamina": state["stamina"],
-                "energy": state["energy"],
-                "physical": state["physical_state"],
-                "emotional": state["emotional_state"],
-                "social": state["social_state"],
-                "goals": state["goals"],
-                "active_tasks": state["active_tasks"],
-                "flags": state["runtime_flags"],
-            },
-            "world": {
-                "rules": [dict(r) for r in rules],
-                "entities": [dict(r) for r in nearby],
-                "relations": [dict(r) for r in relations],
-            },
-            "inventory": [dict(r) for r in inventory],
-            "knowledge": [dict(r) for r in knowledge],
-            "recent_events": [dict(r) for r in reversed(recent)],
-            "available_actions": ["speak", "move", "inspect", "use_item", "wait", "custom"],
-        }
-
-    async def render_text_frame(self, instance_id: UUID, *, recent_limit: int = 12) -> str:
-        """Render the structured AgentFrame as a deterministic text-RPG surface."""
-        frame = await self.build_frame(instance_id, recent_limit=recent_limit)
-        char = frame["character"]
-        runtime = frame["runtime"]
-        state = frame["state"]
-        world = frame["world"]
-
-        lines = [
-            f"=== {char.get('display_name') or char.get('canonical_name') or char.get('character_id')} ===",
-            f"World: {runtime['world_key']}  Instance: {runtime['instance_id']}",
-            f"State version: {runtime['state_version']}  Status: {runtime['lifecycle_state']}",
-            f"Location entity: {state.get('location_entity_id') or 'unknown'}",
-        ]
-
-        stats = []
-        for key in ("health", "stamina", "energy"):
-            if state.get(key) is not None:
-                stats.append(f"{key}={state[key]}")
-        if stats:
-            lines.append("Stats: " + "  ".join(stats))
-
-        if state.get("goals"):
-            lines.append("\nGoals:")
-            for goal in state["goals"]:
-                lines.append(f"- {goal}")
-
-        if frame["inventory"]:
-            lines.append("\nInventory:")
-            for item in frame["inventory"]:
-                name = item.get("display_name") or item.get("entity_key") or str(item["entity_id"])
-                equipped = " [equipped]" if item.get("equipped") else ""
-                lines.append(f"- {name} x{item.get('quantity', 1)}{equipped}")
-
-        if world["relations"]:
-            lines.append("\nActive relations:")
-            for rel in world["relations"]:
-                lines.append(
-                    f"- {rel['subject_entity_id']} --{rel['relation_type']}--> {rel['object_entity_id']}"
-                )
-
-        if world["entities"]:
-            lines.append("\nWorld entities:")
-            for ent in world["entities"][:30]:
-                name = ent.get("display_name") or ent.get("entity_key") or str(ent["entity_id"])
-                lines.append(f"- {name} ({ent['entity_type']}) [{ent['entity_id']}]")
-
-        if frame["knowledge"]:
-            lines.append("\nRelevant knowledge:")
-            for fact in frame["knowledge"][:20]:
-                lines.append(
-                    f"- [{fact['epistemic_status']}/{fact.get('acquisition_mode','unknown')}] "
-                    f"{fact['canonical_text']}"
-                )
-
-        if frame["recent_events"]:
-            lines.append("\nRecent events:")
-            for event in frame["recent_events"]:
-                if event.get("message_text"):
-                    role = event.get("speaker_role") or "other"
-                    speaker = event.get("speaker_id") or "unknown"
-                    lines.append(f"- [{role}:{speaker}] {event['message_text']}")
-
-        if world["rules"]:
-            lines.append("\nActive world rules:")
-            for rule in world["rules"]:
-                lines.append(f"- {rule['rule_key']} ({rule['rule_type']})")
-
-        lines.append("\nAvailable actions: " + ", ".join(frame["available_actions"]))
-        lines.append("Submit an action; AIOS validates and applies the result to the world.")
-        return "\n".join(lines)
+        return render_hud_text(frame)
 
     async def apply_action(
         self,
