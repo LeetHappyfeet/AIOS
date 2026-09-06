@@ -5,6 +5,7 @@ from typing import Optional
 
 from aios_app.db import Database
 from aios_app.char.identity_store import IdentityStore
+from aios_app.world.topology import ensure_character_root_world
 
 logger = logging.getLogger("aios.char.discover")
 
@@ -25,6 +26,7 @@ async def run_worker(
 
     existing = await store.get(character_id)
     if existing:
+        await ensure_character_root_world(db, character_id=character_id)
         logger.debug("Character %s already registered", character_id)
         return
 
@@ -41,4 +43,6 @@ async def run_worker(
         },
     )
 
-    logger.info("Character %s registered in character_identity", character_id)
+    await ensure_character_root_world(db, character_id=character_id)
+
+    logger.info("Character %s registered in character_identity with root world", character_id)
