@@ -13,12 +13,14 @@ async def recent_nodes_as_memory(
 ) -> List[MemoryMatch]:
     rows = await db.fetch(
         """
-        SELECT node_id, created_at, speaker_id, speaker_role, message_text
-        FROM aios.dag_node
-        WHERE timeline_id = $1
+        SELECT dn.node_id, dn.created_at, dn.speaker_id, dn.speaker_role, dn.message_text
+        FROM aios.dag_node dn
+        JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        WHERE dn.timeline_id = $1
+          AND ie.superseded_at IS NULL
           AND message_text IS NOT NULL
           AND length(message_text) > 0
-        ORDER BY event_id DESC
+        ORDER BY dn.event_id DESC
         LIMIT $2
         """,
         timeline_id,
