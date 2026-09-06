@@ -201,6 +201,8 @@ def _profile_values(profile) -> list[Any]:
         profile.rules_budget,
         profile.goals_budget,
         profile.entity_hops,
+        profile.semantic_retrieval_limit,
+        profile.deep_memory_limit,
         profile.include_emotional_state,
         profile.include_physical_state,
         profile.include_social_state,
@@ -301,6 +303,14 @@ def render():
                     entity_hops = gr.Number(label="Scene entity hops", value=1, precision=0)
 
                 with gr.Row():
+                    semantic_retrieval_limit = gr.Number(
+                        label="Semantic retrieval limit", value=25, precision=0
+                    )
+                    deep_memory_limit = gr.Number(
+                        label="Deep memory limit", value=0, precision=0
+                    )
+
+                with gr.Row():
                     memory_budget = gr.Number(label="Memory budget", value=350, precision=0)
                     belief_budget = gr.Number(label="Belief budget", value=320, precision=0)
                     relationship_budget = gr.Number(label="Relationship budget", value=160, precision=0)
@@ -377,6 +387,7 @@ def render():
             profile_name, profile_description, token_budget, recent_event_limit,
             memory_budget, belief_budget, relationship_budget, scene_budget,
             inventory_budget, rules_budget, goals_budget, entity_hops,
+            semantic_retrieval_limit, deep_memory_limit,
             include_emotional_state, include_physical_state,
             include_social_state, include_inventory, include_relationships,
             include_conflicts, include_provenance, include_confidence,
@@ -475,6 +486,7 @@ def render():
             profile_name, profile_description, token_budget, recent_event_limit,
             memory_budget, belief_budget, relationship_budget, scene_budget,
             inventory_budget, rules_budget, goals_budget, entity_hops,
+            semantic_retrieval_limit, deep_memory_limit,
             include_emotional_state, include_physical_state,
             include_social_state, include_inventory, include_relationships,
             include_conflicts, include_provenance, include_confidence,
@@ -494,7 +506,8 @@ def render():
 
         def save_profile_click(
             name, description, token, recent, memory, beliefs, relationships,
-            scene, inventory, rules, goals, hops, emotion, physical, social,
+            scene, inventory, rules, goals, hops, semantic_limit, deep_limit,
+            emotion, physical, social,
             inventory_on, relationships_on, conflicts, provenance, confidence,
         ):
             if not name:
@@ -515,6 +528,8 @@ def render():
                         "rules_budget": rules,
                         "goals_budget": goals,
                         "entity_hops": hops,
+                        "semantic_retrieval_limit": semantic_limit,
+                        "deep_memory_limit": deep_limit,
                         "include_emotional_state": emotion,
                         "include_physical_state": physical,
                         "include_social_state": social,
