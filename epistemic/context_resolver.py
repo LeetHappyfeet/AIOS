@@ -267,6 +267,22 @@ def is_semantic_pivot(kind: Optional[str], *, role: str, predicate_family: str) 
     return False
 
 
+def resolve_ingest_viewpoint(
+    *,
+    explicit_viewpoint_id: Optional[str],
+    speaker_id: Optional[str],
+    speaker_type: Optional[str],
+    origin_character_id: Optional[str],
+) -> Optional[str]:
+    if explicit_viewpoint_id:
+        return explicit_viewpoint_id
+    if speaker_type == "character":
+        return speaker_id or origin_character_id
+    if speaker_type == "source":
+        return None
+    return speaker_id
+
+
 def infer_acquisition_mode(*, source_kind: Optional[str], speaker_role: Optional[str], node_kind: Optional[str]) -> str:
     # DAG node kind is authoritative for the ingestion form. A chat source may
     # have a vendor name such as "SillyTavern", which must not be mistaken for
@@ -417,17 +433,12 @@ async def resolve_claim_context(
     origin_character_id = row["character_id"]
     speaker_id = row["speaker_id"]
     speaker_type = row["speaker_role"]
-    if row["explicit_viewpoint_id"]:
-        viewpoint_id = row["explicit_viewpoint_id"]
-    elif speaker_type == "character":
-        viewpoint_id = speaker_id or origin_character_id
-    elif speaker_type == "source":
-        # A source can assert text without becoming a character/viewpoint owner.
-        # speaker_id remains durable provenance; an explicit viewpoint may still
-        # be supplied for a signed author/editor when that distinction matters.
-        viewpoint_id = None
-    else:
-        viewpoint_id = speaker_id
+    viewpoint_id = resolve_ingest_viewpoint(
+        explicit_viewpoint_id=row["explicit_viewpoint_id"],
+        speaker_id=speaker_id,
+        speaker_type=speaker_type,
+        origin_character_id=origin_character_id,
+    )
     epistemic_scope = "character" if viewpoint_id == origin_character_id and origin_character_id else (
         "speaker" if viewpoint_id else "source"
     )
