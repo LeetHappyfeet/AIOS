@@ -195,6 +195,74 @@ async def source_node_retrieval_ready(
     )
 
 
+async def _enqueue_live_job(
+    db: Database,
+    *,
+    job_type: str,
+    payload: dict,
+) -> bool:
+    discriminator = next(
+        (
+            (key, str(payload[key]))
+            for key in ("node_id", "section_id", "claim_id", "acquisition_id")
+            if payload.get(key) is not None
+        ),
+        None,
+    )
+    if discriminator:
+        key, value = discriminator
+        exists = await db.fetchrow(
+            """
+            SELECT 1
+            FROM aios.pipeline_job
+            WHERE job_type=$1
+              AND status IN ('queued','running')
+              AND payload->>$2=$3
+            LIMIT 1
+            """,
+            job_type,
+            key,
+            value,
+        )
+    else:
+        exists = await db.fetchrow(
+            """
+            SELECT 1
+            FROM aios.pipeline_job
+            WHERE job_type=$1
+              AND status IN ('queued','running')
+            LIMIT 1
+            """,
+            job_type,
+        )
+    if exists:
+        await db.execute(
+            """
+            UPDATE aios.pipeline_job
+            SET priority=LEAST(priority,$2), updated_at=now()
+            WHERE job_type=$1
+              AND status IN ('queued','running')
+              AND (
+                    $3::text IS NULL
+                    OR payload->>$3=$4
+                  )
+            """,
+            job_type,
+            LIVE_PRIORITY,
+            discriminator[0] if discriminator else None,
+            discriminator[1] if discriminator else None,
+        )
+        return False
+
+    await enqueue_job(
+        db,
+        job_type=job_type,
+        payload=payload,
+        priority=LIVE_PRIORITY,
+    )
+    return True
+
+
 async def enqueue_live_turn_work(
     db: Database,
     *,
@@ -210,23 +278,21 @@ async def enqueue_live_turn_work(
         node_id,
     )
     if not section:
-        await enqueue_job(
+        created = await _enqueue_live_job(
             db,
             job_type="dag_to_document_section",
             payload={"node_id": str(node_id), "live_instance_id": str(instance_id)},
-            priority=LIVE_PRIORITY,
         )
-        return 1
+        return int(created)
 
     section_id = section["section_id"]
     if section["claims_extracted_at"] is None:
-        await enqueue_job(
+        created = await _enqueue_live_job(
             db,
             job_type="extract_claims",
             payload={"section_id": str(section_id), "live_instance_id": str(instance_id)},
-            priority=LIVE_PRIORITY,
         )
-        return 1
+        return int(created)
 
     claims = await db.fetch(
         """
@@ -245,13 +311,11 @@ async def enqueue_live_turn_work(
             claim_id,
         )
         if not context:
-            await enqueue_job(
+            queued += int(await _enqueue_live_job(
                 db,
                 job_type="resolve_claim_context",
                 payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
-                priority=LIVE_PRIORITY,
-            )
-            queued += 1
+            ))
             continue
 
         observation = await db.fetchrow(
@@ -259,13 +323,11 @@ async def enqueue_live_turn_work(
             claim_id,
         )
         if not observation:
-            await enqueue_job(
+            queued += int(await _enqueue_live_job(
                 db,
                 job_type="normalize_proposition",
                 payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
-                priority=LIVE_PRIORITY,
-            )
-            queued += 1
+            ))
             continue
 
         acquisition = await db.fetchrow(
@@ -280,13 +342,11 @@ async def enqueue_live_turn_work(
             claim_id,
         )
         if acquisition and acquisition["processed_at"] is None:
-            await enqueue_job(
+            queued += int(await _enqueue_live_job(
                 db,
                 job_type="project_character_knowledge",
                 payload={"live_instance_id": str(instance_id)},
-                priority=LIVE_PRIORITY,
-            )
-            queued += 1
+            ))
 
         topology = await db.fetchrow(
             """
@@ -299,13 +359,11 @@ async def enqueue_live_turn_work(
             claim_id,
         )
         if not topology:
-            await enqueue_job(
+            queued += int(await _enqueue_live_job(
                 db,
                 job_type="derive_claim_topology",
                 payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
-                priority=LIVE_PRIORITY,
-            )
-            queued += 1
+            ))
 
     return queued
 
