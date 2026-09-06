@@ -4,6 +4,7 @@ from aios_app.epistemic.context_resolver import (
     classify_entity_kind,
     classify_predicate_family,
     is_semantic_pivot,
+    resolve_ingest_viewpoint,
 )
 
 
@@ -68,3 +69,33 @@ def test_same_statement_normalizes_to_one_source_neutral_proposition():
     # Separate observations/knowledge rows carry Alice/Bob visibility instead.
     assert alice["proposition_hash"] == bob["proposition_hash"]
     assert alice["topic_key"] == bob["topic_key"]
+
+
+def test_external_source_speaker_does_not_become_character_viewpoint():
+    viewpoint = resolve_ingest_viewpoint(
+        explicit_viewpoint_id=None,
+        speaker_id="fox_news",
+        speaker_type="source",
+        origin_character_id=None,
+    )
+    assert viewpoint is None
+
+
+def test_character_speaker_retains_first_person_viewpoint():
+    viewpoint = resolve_ingest_viewpoint(
+        explicit_viewpoint_id=None,
+        speaker_id="alice",
+        speaker_type="character",
+        origin_character_id="alice",
+    )
+    assert viewpoint == "alice"
+
+
+def test_explicit_external_viewpoint_is_preserved_without_character_ownership():
+    viewpoint = resolve_ingest_viewpoint(
+        explicit_viewpoint_id="reporter:jane_doe",
+        speaker_id="news_org",
+        speaker_type="source",
+        origin_character_id=None,
+    )
+    assert viewpoint == "reporter:jane_doe"
