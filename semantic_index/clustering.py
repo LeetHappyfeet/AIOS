@@ -330,6 +330,23 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
     if not edges:
         return 0
 
+    indexed_rows = await db.fetch(
+        """
+        SELECT p.proposition_id
+        FROM aios.proposition p
+        JOIN aios.semantic_vector_index_state s
+          ON s.object_type='proposition'
+         AND s.object_key=p.proposition_id::text
+         AND s.qdrant_collection=$1
+         AND s.embedding_model=$2
+         AND s.embedding_version=$3
+        """,
+        cfg.proposition_collection,
+        cfg.embedding_model,
+        cfg.embedding_version,
+    )
+    indexed_nodes = {row["proposition_id"] for row in indexed_rows}
+
     core_components = _build_core_components(
         edges,
         core_threshold=cfg.cluster_core_threshold,
@@ -341,6 +358,11 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
         attach_threshold=cfg.cluster_attach_threshold,
         min_attach_links=cfg.cluster_min_attach_links,
     )
+    claimed_by_drafts = (
+        set().union(*(draft.members for draft in drafts))
+        if drafts else set()
+    )
+    unclaimed.update(indexed_nodes - claimed_by_drafts)
 
     run_id = uuid4()
     await db.execute(
@@ -363,6 +385,7 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
 
     try:
         accepted_clusters = 0
+        cluster_membership_map: dict[UUID, UUID] = {}
         for draft in drafts:
             density, cohesion, boundary_strength, separation = _cluster_metrics(draft)
             if cohesion < cfg.cluster_min_cohesion:
@@ -440,7 +463,37 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
                     strongest_neighbor,
                     strongest_similarity,
                 )
+            for proposition_id in draft.members:
+                cluster_membership_map[proposition_id] = cluster_id
             accepted_clusters += 1
+
+        boundary_groups: dict[tuple[UUID, UUID], list[float]] = {}
+        for edge in edges:
+            cluster_a = cluster_membership_map.get(edge.a)
+            cluster_b = cluster_membership_map.get(edge.b)
+            if cluster_a is None or cluster_b is None or cluster_a == cluster_b:
+                continue
+            pair = tuple(sorted((cluster_a, cluster_b), key=str))
+            boundary_groups.setdefault(pair, []).append(edge.similarity)
+
+        for (cluster_a, cluster_b), similarities in boundary_groups.items():
+            await db.execute(
+                """
+                INSERT INTO aios.semantic_cluster_boundary (
+                    run_id, cluster_a_id, cluster_b_id,
+                    edge_count, mean_similarity, max_similarity,
+                    min_similarity, meta
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,'{}'::jsonb)
+                """,
+                run_id,
+                cluster_a,
+                cluster_b,
+                len(similarities),
+                mean(similarities),
+                max(similarities),
+                min(similarities),
+            )
 
         nearest_by_node: dict[UUID, tuple[UUID, float]] = {}
         for edge in edges:
