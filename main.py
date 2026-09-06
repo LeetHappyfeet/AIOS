@@ -352,12 +352,18 @@ async def get_instance_state(instance_id: UUID):
 
 
 @app.get("/instance/{instance_id}/frame")
-async def get_instance_frame(instance_id: UUID, recent_limit: int = 12):
-    """
-    Build the decision-ready frame used by either an LLM agent or a debug/text UI.
-    """
+async def get_instance_frame(
+    instance_id: UUID,
+    recent_limit: int = 12,
+    token_budget: Optional[int] = None,
+):
+    """Build the canonical branch-aware RPG HUD for this runtime instance."""
     try:
-        return await world_runtime.build_frame(instance_id, recent_limit=recent_limit)
+        return await world_runtime.build_frame(
+            instance_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
+        )
     except RuntimeNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -440,13 +446,18 @@ async def fork_instance(instance_id: UUID, req: CharacterForkIn) -> CharacterAct
 
 
 @app.get("/instance/{instance_id}/frame/text")
-async def get_instance_text_frame(instance_id: UUID, recent_limit: int = 12):
+async def get_instance_text_frame(
+    instance_id: UUID,
+    recent_limit: int = 12,
+    token_budget: Optional[int] = None,
+):
     try:
         return {
             "instance_id": instance_id,
             "text": await world_runtime.render_text_frame(
                 instance_id,
                 recent_limit=recent_limit,
+                token_budget=token_budget,
             ),
         }
     except RuntimeNotFound as exc:
