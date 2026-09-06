@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from statistics import mean
 from typing import Any
@@ -75,6 +76,11 @@ def _bridge_edge_indexes(edges: list[Edge]) -> set[int]:
     for idx, edge in enumerate(edges):
         adjacency.setdefault(edge.a, []).append((edge.b, idx))
         adjacency.setdefault(edge.b, []).append((edge.a, idx))
+
+    if adjacency:
+        sys.setrecursionlimit(
+            max(sys.getrecursionlimit(), len(adjacency) * 2 + 100)
+        )
 
     discovery: dict[UUID, int] = {}
     low: dict[UUID, int] = {}
