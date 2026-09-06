@@ -30,11 +30,11 @@ SERVICES = [
         "readiness": {"type": "log", "marker": "AIOS_READY service=accumulator"},
     },
     {
-        "name": "RAG",
-        "cmd": [PYTHON, "-m", "aios_app.rag.cli"],
+        "name": "Semantic Index",
+        "cmd": [PYTHON, "-m", "aios_app.semantic_index.cli"],
         "required": False,
-        "startup_timeout": float(os.getenv("AIOS_RAG_STARTUP_TIMEOUT", "120")),
-        "readiness": {"type": "log", "marker": "AIOS_READY service=rag"},
+        "startup_timeout": float(os.getenv("AIOS_SEMANTIC_INDEX_STARTUP_TIMEOUT", "120")),
+        "readiness": {"type": "log", "marker": "AIOS_READY service=semantic_index"},
     },
     {
         "name": "Supervisor",
