@@ -173,16 +173,28 @@ class WorldRuntimeService:
         )
         head_node_id = head["node_id"] if head else None
 
+        source_timeline_id = world.get("anchor_timeline_id")
+        source_head_node_id = world.get("anchor_node_id")
+
         await self.db.execute(
             """
             INSERT INTO aios.character_runtime_state (
-                instance_id, world_id, timeline_id, head_node_id, lifecycle_state
+                instance_id, world_id, timeline_id, head_node_id,
+                source_timeline_id, source_head_node_id, lifecycle_state
             )
-            VALUES ($1,$2,$3,$4,'ready')
+            VALUES ($1,$2,$3,$4,$5,$6,'ready')
             ON CONFLICT (instance_id) DO UPDATE
             SET world_id=EXCLUDED.world_id,
                 timeline_id=EXCLUDED.timeline_id,
                 head_node_id=COALESCE(EXCLUDED.head_node_id, aios.character_runtime_state.head_node_id),
+                source_timeline_id=COALESCE(
+                    aios.character_runtime_state.source_timeline_id,
+                    EXCLUDED.source_timeline_id
+                ),
+                source_head_node_id=COALESCE(
+                    aios.character_runtime_state.source_head_node_id,
+                    EXCLUDED.source_head_node_id
+                ),
                 lifecycle_state='ready',
                 updated_at=now()
             """,
@@ -190,6 +202,8 @@ class WorldRuntimeService:
             world_id,
             timeline_id,
             head_node_id,
+            source_timeline_id,
+            source_head_node_id,
         )
         return await self._activation_result(instance_id)
 
@@ -516,12 +530,15 @@ class WorldRuntimeService:
             """
             INSERT INTO aios.character_runtime_state (
                 instance_id, world_id, timeline_id, head_node_id,
+                source_timeline_id, source_head_node_id,
                 lifecycle_state, health, stamina, energy,
                 physical_state, emotional_state, social_state,
                 goals, active_tasks, runtime_flags, state_version
             )
             SELECT
-                $1,$2,$3,NULL,'ready',health,stamina,energy,
+                $1,$2,$3,NULL,
+                source_timeline_id, source_head_node_id,
+                'ready',health,stamina,energy,
                 physical_state,emotional_state,social_state,
                 goals,active_tasks,
                 runtime_flags || jsonb_build_object(
