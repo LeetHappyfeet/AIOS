@@ -40,3 +40,27 @@ class SemanticIndexConfig:
     hud_candidate_k: int = int(os.getenv("AIOS_SEMANTIC_HUD_CANDIDATE_K", "200"))
     neighbor_k: int = int(os.getenv("AIOS_SEMANTIC_NEIGHBOR_K", "24"))
     neighbor_min_score: float = float(os.getenv("AIOS_SEMANTIC_NEIGHBOR_MIN_SCORE", "0.72"))
+
+    # Semantic clustering. Core edges create dense components; weaker edges may
+    # attach fringe members but cannot merge two established cores.
+    cluster_core_threshold: float = float(
+        os.getenv("AIOS_SEMANTIC_CLUSTER_CORE_THRESHOLD", "0.82")
+    )
+    cluster_attach_threshold: float = float(
+        os.getenv("AIOS_SEMANTIC_CLUSTER_ATTACH_THRESHOLD", "0.76")
+    )
+    cluster_boundary_floor: float = float(
+        os.getenv("AIOS_SEMANTIC_CLUSTER_BOUNDARY_FLOOR", "0.72")
+    )
+    cluster_min_size: int = int(
+        os.getenv("AIOS_SEMANTIC_CLUSTER_MIN_SIZE", "3")
+    )
+    cluster_min_attach_links: int = int(
+        os.getenv("AIOS_SEMANTIC_CLUSTER_MIN_ATTACH_LINKS", "2")
+    )
+    cluster_min_density: float = float(
+        os.getenv("AIOS_SEMANTIC_CLUSTER_MIN_DENSITY", "0.35")
+    )
+    cluster_min_cohesion: float = float(
+        os.getenv("AIOS_SEMANTIC_CLUSTER_MIN_COHESION", "0.78")
+    )
