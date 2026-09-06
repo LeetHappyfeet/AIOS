@@ -64,6 +64,23 @@ CREATE TABLE IF NOT EXISTS aios.semantic_cluster_membership (
 CREATE INDEX IF NOT EXISTS idx_semantic_cluster_membership_proposition
     ON aios.semantic_cluster_membership (proposition_id, affinity DESC);
 
+CREATE TABLE IF NOT EXISTS aios.semantic_cluster_boundary (
+    run_id uuid NOT NULL REFERENCES aios.semantic_cluster_run(run_id) ON DELETE CASCADE,
+    cluster_a_id uuid NOT NULL REFERENCES aios.semantic_cluster_candidate(cluster_id) ON DELETE CASCADE,
+    cluster_b_id uuid NOT NULL REFERENCES aios.semantic_cluster_candidate(cluster_id) ON DELETE CASCADE,
+    edge_count integer NOT NULL,
+    mean_similarity double precision NOT NULL,
+    max_similarity double precision NOT NULL,
+    min_similarity double precision NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    meta jsonb NOT NULL DEFAULT '{}'::jsonb,
+    CHECK (cluster_a_id <> cluster_b_id),
+    PRIMARY KEY (run_id, cluster_a_id, cluster_b_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_cluster_boundary_strength
+    ON aios.semantic_cluster_boundary (run_id, max_similarity DESC);
+
 CREATE TABLE IF NOT EXISTS aios.semantic_outlier_candidate (
     run_id uuid NOT NULL REFERENCES aios.semantic_cluster_run(run_id) ON DELETE CASCADE,
     proposition_id uuid NOT NULL REFERENCES aios.proposition(proposition_id) ON DELETE CASCADE,
@@ -82,6 +99,9 @@ CREATE INDEX IF NOT EXISTS idx_semantic_outlier_candidate_prop
 
 COMMENT ON TABLE aios.semantic_cluster_candidate IS
 'Advisory vector-geometry clusters. Classification into topic, state transition, narrative split, or branch requires later semantic/context validation.';
+
+COMMENT ON TABLE aios.semantic_cluster_boundary IS
+'Cross-cluster vector bridges retained for later topic/state/narrative/branch separation analysis.';
 
 COMMENT ON TABLE aios.semantic_outlier_candidate IS
 'Advisory semantic outliers. Never delete, reject, or demote propositions solely from this table.';
