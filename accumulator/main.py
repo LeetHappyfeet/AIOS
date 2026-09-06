@@ -63,12 +63,35 @@ async def ingest_loop(
 
     while True:
         files = sorted(input_dir.glob("**/*.jsonl"))
-        if files:
-            logger.info("Scanning %d jsonl files for ingestion", len(files))
 
         for path in files:
             key = str(path)
             start_at = state.offsets.get(key, 0)
+
+            try:
+                file_size = path.stat().st_size
+            except OSError:
+                logger.exception("Failed to stat JSONL input %s", path)
+                continue
+
+            if file_size == start_at:
+                continue
+
+            if file_size < start_at:
+                logger.warning(
+                    "JSONL input shrank from offset %d to %d bytes; restarting %s from offset 0",
+                    start_at,
+                    file_size,
+                    path,
+                )
+                start_at = 0
+
+            logger.debug(
+                "Accumulator found new JSONL data: %s offset=%d size=%d",
+                path,
+                start_at,
+                file_size,
+            )
 
             try:
                 end_at = await ingestor.ingest_file(path, start_at=start_at)
