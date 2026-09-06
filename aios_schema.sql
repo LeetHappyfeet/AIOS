@@ -70,7 +70,8 @@ CREATE TYPE aios.event_kind AS ENUM (
     'system',
     'other',
     'document',
-    'paragraph'
+    'paragraph',
+    'observation'
 );
 
 
