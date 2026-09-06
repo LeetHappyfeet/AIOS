@@ -11,7 +11,7 @@ def u(n: int) -> UUID:
     return UUID(int=n)
 
 
-def test_weak_bridge_does_not_merge_strong_cores():
+def test_single_strong_bridge_does_not_merge_dense_cores():
     edges = [
         Edge(u(1), u(2), 0.91),
         Edge(u(2), u(3), 0.90),
@@ -19,7 +19,7 @@ def test_weak_bridge_does_not_merge_strong_cores():
         Edge(u(4), u(5), 0.93),
         Edge(u(5), u(6), 0.92),
         Edge(u(4), u(6), 0.90),
-        Edge(u(3), u(4), 0.75),
+        Edge(u(3), u(4), 0.86),
     ]
 
     components = _build_core_components(
