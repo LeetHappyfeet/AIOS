@@ -138,9 +138,15 @@ async def ingest(req: IngestIn) -> IngestOut:
       - World promotion happens later via logic, not user claims
     """
 
-    # IngestIn.text is intentionally canonical linguistic content. Structured
-    # transport/application metadata belongs in payload, not message_text.
+    # Resolve first-person identity exactly once at ingress. character_id is the
+    # active character context; it is not assumed to be the physical speaker.
     message_text = req.text
+    if req.viewpoint_id:
+        resolved_viewpoint_id = req.viewpoint_id
+    elif req.speaker_type == "character":
+        resolved_viewpoint_id = req.speaker_id or req.character_id
+    else:
+        resolved_viewpoint_id = req.speaker_id
 
     payload: Dict[str, Any] = dict(req.payload or {})
     payload.update(
@@ -151,7 +157,7 @@ async def ingest(req: IngestIn) -> IngestOut:
             "speaker_type": req.speaker_type,
             "speaker_id": req.speaker_id,
             "recipient_id": req.recipient_id,
-            "viewpoint_id": req.viewpoint_id,
+            "viewpoint_id": resolved_viewpoint_id,
             "pivot_character_id": req.character_id,
             "identity_ruleset": "character-id-v1",
             "scope_key": req.scope_key or settings.default_scope,
@@ -177,6 +183,7 @@ async def ingest(req: IngestIn) -> IngestOut:
                 speaker_id,
                 speaker_role,
                 recipient_id,
+                viewpoint_id,
                 character_id,
                 user_name,
                 message_text,
@@ -194,8 +201,9 @@ async def ingest(req: IngestIn) -> IngestOut:
                 $7,
                 $8,
                 $9,
-                $10::jsonb,
-                $11
+                $10,
+                $11::jsonb,
+                $12
             )
             ON CONFLICT (dedupe_key) DO UPDATE
             SET dedupe_key = EXCLUDED.dedupe_key
@@ -207,6 +215,7 @@ async def ingest(req: IngestIn) -> IngestOut:
             req.speaker_id,
             req.speaker_type,
             req.recipient_id,
+            resolved_viewpoint_id,
             req.character_id,
             req.user_name,
             message_text,
@@ -254,6 +263,7 @@ async def ingest(req: IngestIn) -> IngestOut:
             recipient_id=req.recipient_id,
             message_text=message_text,
             payload=payload,
+            viewpoint_id=resolved_viewpoint_id,
             edge_type="next",
         )
 
@@ -401,7 +411,7 @@ async def get_instance_state(instance_id: UUID):
 @app.get("/instance/{instance_id}/frame")
 async def get_instance_frame(
     instance_id: UUID,
-    recent_limit: int = 12,
+    recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
 ):
     """Build the canonical branch-aware RPG HUD for this runtime instance."""
@@ -495,7 +505,7 @@ async def fork_instance(instance_id: UUID, req: CharacterForkIn) -> CharacterAct
 @app.get("/instance/{instance_id}/frame/text")
 async def get_instance_text_frame(
     instance_id: UUID,
-    recent_limit: int = 12,
+    recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
 ):
     try:

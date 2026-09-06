@@ -55,13 +55,14 @@ def resolve_subject_pivot(
     Resolve deterministic identity pivots for a character-scoped memory chain.
 
     Core invariant:
-        if character_id exists, first-person language ("I", "me", "myself")
-        resolves to character_id.
+        first-person language resolves to the already-resolved viewpoint_id.
+        character_id is the active character context, not automatically the
+        physical speaker or first-person identity.
 
-    speaker_id remains provenance: who supplied the text. viewpoint_id can
-    describe an explicit controller/narrator perspective, but neither is
-    allowed to displace character_id as the first-person root of a character
-    memory chain.
+    speaker_id remains provenance: who supplied the text. A character memory
+    owner exists only when the effective viewpoint is that character; a human
+    using a character as an augmentation/search context must not silently write
+    first-person statements into the character memory chain.
 
     Named subjects are never rewritten merely because the chain has a
     character owner. The owner controls epistemic/RDF scope, not proposition
@@ -74,17 +75,25 @@ def resolve_subject_pivot(
     explicit_viewpoint = _norm(viewpoint_id)
     recipient = _norm(recipient_id)
 
-    # character_id is authoritative for character memory. Fall back only for
-    # non-character sources/legacy data where no character binding exists.
-    first_person_identity = character or explicit_viewpoint or speaker
-    memory_owner = character
-    effective_viewpoint = character or explicit_viewpoint or speaker
+    effective_viewpoint = explicit_viewpoint or (
+        (speaker or character) if speaker_role == "character" else speaker
+    )
+    first_person_identity = effective_viewpoint
+    memory_owner = (
+        character
+        if character and effective_viewpoint == character
+        else None
+    )
 
     if key in FIRST_PERSON_SUBJECTS and first_person_identity:
         return PivotResolution(
             subject=first_person_identity,
             pivot_type="first_person",
-            epistemic_scope="character" if character else "speaker",
+            epistemic_scope=(
+                "character"
+                if memory_owner
+                else ("speaker" if effective_viewpoint else "source")
+            ),
             character_id=character,
             viewpoint_id=effective_viewpoint,
             memory_owner_id=memory_owner,
@@ -97,7 +106,11 @@ def resolve_subject_pivot(
         return PivotResolution(
             subject=recipient,
             pivot_type="second_person",
-            epistemic_scope="character" if character else "recipient",
+            epistemic_scope=(
+                "character"
+                if memory_owner
+                else ("speaker" if effective_viewpoint else "recipient")
+            ),
             character_id=character,
             viewpoint_id=effective_viewpoint,
             memory_owner_id=memory_owner,
@@ -109,7 +122,11 @@ def resolve_subject_pivot(
     return PivotResolution(
         subject=clean_subject,
         pivot_type=None,
-        epistemic_scope="character" if character else "source",
+        epistemic_scope=(
+            "character"
+            if memory_owner
+            else ("speaker" if effective_viewpoint else "source")
+        ),
         character_id=character,
         viewpoint_id=effective_viewpoint,
         memory_owner_id=memory_owner,

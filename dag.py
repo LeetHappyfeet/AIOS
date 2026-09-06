@@ -183,6 +183,7 @@ async def add_node_and_edge(
     recipient_id: Optional[str],
     message_text: Optional[str],
     payload: Dict[str, Any],
+    viewpoint_id: Optional[str] = None,
     parent_node_id: Optional[UUID] = None,
     edge_type: str = "next",
 ) -> Tuple[UUID, Optional[UUID]]:
@@ -224,6 +225,7 @@ async def add_node_and_edge(
             speaker_id,
             speaker_role,
             recipient_id,
+            viewpoint_id,
             message_text,
             payload
         )
@@ -237,7 +239,8 @@ async def add_node_and_edge(
             $6::aios.actor_type,
             $7,
             $8,
-            $9::jsonb
+            $9,
+            $10::jsonb
         FROM aios.ingest_event ie
         WHERE ie.event_id = $2
         ON CONFLICT (timeline_id, event_id) DO NOTHING
@@ -250,6 +253,7 @@ async def add_node_and_edge(
         speaker_id,
         speaker_role,
         recipient_id,
+        viewpoint_id,
         message_text,
         payload_json,
     )

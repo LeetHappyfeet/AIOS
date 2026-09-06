@@ -4,21 +4,21 @@ from aios_app.epistemic.pivots import (
 )
 
 
-def test_character_id_is_authoritative_first_person_pivot():
+def test_explicit_viewpoint_is_authoritative_first_person_pivot():
     pivot = resolve_subject_pivot(
         "I",
         character_id="alice",
         speaker_id="human-controller",
         speaker_role="user",
         recipient_id="bob",
-        viewpoint_id="temporary-viewpoint",
+        viewpoint_id="human-controller",
     )
     assert pivot.resolved is True
-    assert pivot.subject == "alice"
+    assert pivot.subject == "human-controller"
     assert pivot.character_id == "alice"
-    assert pivot.memory_owner_id == "alice"
-    assert pivot.viewpoint_id == "alice"
-    assert pivot.epistemic_scope == "character"
+    assert pivot.memory_owner_id is None
+    assert pivot.viewpoint_id == "human-controller"
+    assert pivot.epistemic_scope == "speaker"
     assert pivot.ruleset_id == CHARACTER_IDENTITY_RULESET
 
 
@@ -77,3 +77,18 @@ def test_second_person_uses_recipient_but_character_still_owns_memory():
     assert pivot.pivot_type == "second_person"
     assert pivot.memory_owner_id == "alice"
     assert pivot.viewpoint_id == "alice"
+
+
+def test_character_viewpoint_keeps_character_memory_owner():
+    pivot = resolve_subject_pivot(
+        "I",
+        character_id="alice",
+        speaker_id="alice",
+        speaker_role="character",
+        recipient_id="bob",
+        viewpoint_id="alice",
+    )
+    assert pivot.resolved is True
+    assert pivot.subject == "alice"
+    assert pivot.memory_owner_id == "alice"
+    assert pivot.epistemic_scope == "character"

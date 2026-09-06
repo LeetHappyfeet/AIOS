@@ -113,6 +113,7 @@ async def run_accumulator() -> None:
 
     try:
         ingestor = JSONLDAGIngestor(db, input_dir)
+        logger.info("AIOS_READY service=accumulator")
         await ingest_loop(
             ingestor=ingestor,
             input_dir=input_dir,

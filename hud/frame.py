@@ -9,6 +9,7 @@ from aios_app.db import Database
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
 from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.hud.profile import get_profile as get_hud_profile
 
 
 @dataclass(frozen=True)
@@ -93,13 +94,22 @@ class HUDAssembler:
         self,
         instance_id: UUID,
         *,
-        recent_limit: int = 12,
+        recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
     ) -> dict[str, Any]:
         context = await self.context_resolver.resolve(instance_id)
         raw_state = await self._runtime_state(instance_id)
+        hud_profile = await get_hud_profile(
+            self.db,
+            character_id=context.character_id,
+        )
 
-        bounded_limit = max(1, min(recent_limit, 100))
+        effective_recent_limit = (
+            hud_profile.recent_event_limit
+            if recent_limit is None
+            else recent_limit
+        )
+        bounded_limit = max(1, min(effective_recent_limit, 100))
 
         runtime_rows = await self.db.fetch(
             """
@@ -160,26 +170,61 @@ class HUDAssembler:
         goals = list(_json_value(raw_state.get("goals"), []))
         scorer = HUDRelevanceScorer(context, focus_text=focus_text, goals=goals)
 
-        section_caps = dict(self.budget.section_tokens)
+        section_caps = {
+            "scene": hud_profile.scene_budget,
+            "relationships": hud_profile.relationship_budget,
+            "inventory": hud_profile.inventory_budget,
+            "memories": hud_profile.memory_budget,
+            "beliefs": hud_profile.belief_budget,
+            "goals": hud_profile.goals_budget,
+            "rules": hud_profile.rules_budget,
+            "recent_events": max(32, int(hud_profile.token_budget * 0.14)),
+        }
+        resolved_total = hud_profile.token_budget
         if token_budget is not None and token_budget > 0:
-            scale = token_budget / max(1, self.budget.total_tokens)
+            scale = token_budget / max(1, hud_profile.token_budget)
             section_caps = {
                 key: max(32, int(value * scale))
                 for key, value in section_caps.items()
             }
             resolved_total = token_budget
-        else:
-            resolved_total = self.budget.total_tokens
 
         identity = await self._identity(context)
         scene = await self._scene(
             context,
             scorer,
             token_cap=section_caps["scene"],
+            entity_hops=hud_profile.entity_hops,
         )
-        relationships = await self._relationships(context, scorer)
-        inventory = await self._inventory(context, scorer)
+        relationships = (
+            await self._relationships(context, scorer)
+            if hud_profile.include_relationships
+            else []
+        )
+        inventory = (
+            await self._inventory(context, scorer)
+            if hud_profile.include_inventory
+            else []
+        )
         knowledge = await self._knowledge(context, scorer)
+        if not hud_profile.include_conflicts:
+            for item in knowledge:
+                item["conflicts"] = []
+        if not hud_profile.include_provenance:
+            for item in knowledge:
+                for key in (
+                    "source_entity_id", "source_world_id", "source_node_id",
+                    "acquisition_mode", "predicate_family",
+                ):
+                    item.pop(key, None)
+        if not hud_profile.include_confidence:
+            for item in knowledge:
+                for key in (
+                    "confidence", "base_confidence", "effective_confidence",
+                    "attention_weight", "trust_weight", "compatibility_weight",
+                    "retention_weight", "salience_weight",
+                ):
+                    item.pop(key, None)
         rules = await self._rules(context, scorer)
         recent_events = self._recent_events(recent_newest, scorer)
 
@@ -274,9 +319,18 @@ class HUDAssembler:
                 "health": raw_state.get("health"),
                 "stamina": raw_state.get("stamina"),
                 "energy": raw_state.get("energy"),
-                "physical": _json_value(raw_state.get("physical_state"), {}),
-                "emotional": _json_value(raw_state.get("emotional_state"), {}),
-                "social": _json_value(raw_state.get("social_state"), {}),
+                "physical": (
+                    _json_value(raw_state.get("physical_state"), {})
+                    if hud_profile.include_physical_state else {}
+                ),
+                "emotional": (
+                    _json_value(raw_state.get("emotional_state"), {})
+                    if hud_profile.include_emotional_state else {}
+                ),
+                "social": (
+                    _json_value(raw_state.get("social_state"), {})
+                    if hud_profile.include_social_state else {}
+                ),
                 "active_tasks": _json_value(raw_state.get("active_tasks"), []),
                 "flags": _json_value(raw_state.get("runtime_flags"), {}),
             },
@@ -290,6 +344,8 @@ class HUDAssembler:
             "actions": ["speak", "move", "inspect", "use_item", "wait", "custom"],
             "hud": {
                 "version": "hud-v1",
+                "profile_id": hud_profile.profile_id,
+                "profile_name": hud_profile.profile_name,
                 "selection": "branch-aware/entity-centered/deterministic",
                 "token_budget": resolved_total,
                 "section_token_budgets": section_caps,
@@ -334,45 +390,54 @@ class HUDAssembler:
         scorer: HUDRelevanceScorer,
         *,
         token_cap: int,
+        entity_hops: int,
     ) -> dict[str, Any]:
         seed_ids = list(context.scene_entity_ids)
         rows = await self.db.fetch(
             """
-            WITH seed(entity_id) AS (
-                SELECT unnest($3::uuid[])
-            ),
-            expanded(entity_id) AS (
-                SELECT entity_id FROM seed
+            WITH RECURSIVE expanded(entity_id, depth) AS (
+                SELECT unnest($3::uuid[]), 0
                 UNION
-                SELECT CASE
-                    WHEN r.subject_entity_id = ANY($3::uuid[]) THEN r.object_entity_id
-                    ELSE r.subject_entity_id
-                END
-                FROM aios.world_entity_relation r
-                WHERE r.world_id=$1
-                  AND r.valid_to_node_id IS NULL
-                  AND (
-                      r.subject_entity_id = ANY($3::uuid[])
-                      OR r.object_entity_id = ANY($3::uuid[])
-                  )
+                SELECT
+                    CASE
+                        WHEN r.subject_entity_id=x.entity_id THEN r.object_entity_id
+                        ELSE r.subject_entity_id
+                    END,
+                    x.depth + 1
+                FROM expanded x
+                JOIN aios.world_entity_relation r
+                  ON r.world_id=$1
+                 AND r.valid_to_node_id IS NULL
+                 AND (
+                     r.subject_entity_id=x.entity_id
+                     OR r.object_entity_id=x.entity_id
+                 )
+                WHERE x.depth < $4
             )
-            SELECT e.entity_id, e.entity_type, e.display_name, e.entity_key, e.meta
+            SELECT DISTINCT
+                e.entity_id, e.entity_type, e.display_name, e.entity_key, e.meta,
+                e.created_at,
+                MIN(x.depth) OVER (PARTITION BY e.entity_id) AS graph_depth
             FROM aios.world_entity e
             JOIN expanded x ON x.entity_id=e.entity_id
             WHERE e.world_id=$1
               AND e.entity_id IS DISTINCT FROM $2
-            ORDER BY e.created_at
+            ORDER BY graph_depth, e.created_at
             LIMIT 200
             """,
             context.world_id,
             context.entity_id,
             seed_ids,
+            max(0, min(int(entity_hops), 4)),
         )
         entities: list[dict[str, Any]] = []
         location = None
         for rank, row in enumerate(rows):
             item = dict(row)
-            item["tier"] = 0 if context.entity_is_active(item["entity_id"]) else 2
+            item["tier"] = 0 if context.entity_is_active(item["entity_id"]) else min(
+                2,
+                int(item.get("graph_depth") or 0) + 1,
+            )
             score = scorer.score(
                 item,
                 rank=rank,
