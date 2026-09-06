@@ -272,8 +272,6 @@ async def ingest(req: IngestIn) -> IngestOut:
             FROM aios.character_instance ci,
                  aios.timeline rt,
                  aios.world rw
-            LEFT JOIN aios.dag_node previous_source_head
-              ON previous_source_head.node_id=rs.source_head_node_id
             WHERE ci.instance_id=rs.instance_id
               AND rt.timeline_id=rs.timeline_id
               AND rw.world_id=rs.world_id
@@ -288,10 +286,14 @@ async def ingest(req: IngestIn) -> IngestOut:
                         AND rw.anchor_timeline_id=$1
                     )
                   )
-              AND (
-                    previous_source_head.event_id IS NULL
-                    OR previous_source_head.event_id <= $7
-                  )
+              AND COALESCE(
+                    (
+                        SELECT dn.event_id
+                        FROM aios.dag_node dn
+                        WHERE dn.node_id=rs.source_head_node_id
+                    ),
+                    -1
+                  ) <= $7
             """,
             timeline_id,
             node_id,
