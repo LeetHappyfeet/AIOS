@@ -7,7 +7,6 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
-from aios_app.epistemic.weights import get_profile
 from aios_app.hud.frame import HUDAssembler
 from aios_app.hud.render_text import render_hud_text
 from aios_app.world.topology import (
