@@ -11,7 +11,7 @@ from aios_app.accumulator.web.queue import CrawlQueue, CrawlTask
 from aios_app.accumulator.web.worker import AccumulatorWorker
 
 
-queue = CrawlQueue()
+queue = CrawlQueue(OUTPUT_DIR / ".crawl_state.json")
 worker = AccumulatorWorker(queue)
 worker.start()
 
