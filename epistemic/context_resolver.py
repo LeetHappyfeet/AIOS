@@ -391,15 +391,32 @@ async def resolve_claim_context(
             ie.source_kind AS explicit_source_kind,
             ie.target_character_id,
             ie.target_world_id,
-            (
-                SELECT ci.instance_id
-                FROM aios.character_instance ci
-                WHERE ci.character_id=n.character_id
-                  AND ci.world_id=t.world_id
-                ORDER BY
-                    CASE WHEN ci.current_world_id=t.world_id THEN 0 ELSE 1 END,
-                    ci.created_at
-                LIMIT 1
+            COALESCE(
+                (
+                    SELECT ci.instance_id
+                    FROM aios.character_instance ci
+                    JOIN aios.character_runtime_state rs
+                      ON rs.instance_id=ci.instance_id
+                    JOIN aios.timeline rt
+                      ON rt.timeline_id=rs.timeline_id
+                    WHERE ci.character_id=n.character_id
+                      AND rs.source_timeline_id=n.timeline_id
+                      AND rt.session_id IS NOT DISTINCT FROM t.session_id
+                      AND rt.user_name IS NOT DISTINCT FROM t.user_name
+                      AND rt.scope_key=t.scope_key
+                    ORDER BY rs.updated_at DESC, ci.created_at DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT ci.instance_id
+                    FROM aios.character_instance ci
+                    WHERE ci.character_id=n.character_id
+                      AND ci.world_id=t.world_id
+                    ORDER BY
+                        CASE WHEN ci.current_world_id=t.world_id THEN 0 ELSE 1 END,
+                        ci.created_at
+                    LIMIT 1
+                )
             ) AS character_instance_id
         FROM aios.claim_candidate cc
         JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
