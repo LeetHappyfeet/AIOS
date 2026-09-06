@@ -32,14 +32,26 @@ async def project_normalized_observation(
         SELECT
             o.observation_id, o.claim_id, o.source_key, o.source_domain,
             o.source_kind, o.observed_at, o.dag_node_id,
-            NULLIF(o.meta->>'character_id', '') AS character_id,
-            NULLIF(o.meta->>'memory_owner_id', '') AS memory_owner_id,
+            ccr.origin_character_id AS character_id,
+            ccr.origin_character_id AS memory_owner_id,
+            ccr.character_instance_id,
+            ccr.world_id,
+            ccr.viewpoint_id,
+            ccr.epistemic_scope,
+            ccr.acquisition_mode,
+            ccr.claim_kind,
+            ccr.subject_kind,
+            ccr.object_kind,
+            ccr.predicate_family,
+            ccr.subject_is_pivot,
+            ccr.object_is_pivot,
             NULLIF(o.meta->>'identity_ruleset', '') AS identity_ruleset,
             p.proposition_id, p.topic_key, p.canonical_text,
             p.subject_norm, p.predicate_norm, p.object_norm,
             p.polarity, p.modality
         FROM aios.observation o
         JOIN aios.proposition p ON p.proposition_id=o.proposition_id
+        JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
         WHERE o.claim_id=$1
         """,
         claim_id,
@@ -110,6 +122,8 @@ INSERT DATA {{
 
     <{obs_iri}> a world:Observation ;
       world:observesProposition <{prop_iri}> ;
+      world:indexScope "system-observation-index" ;
+      world:epistemicScope {_lit(row['epistemic_scope'])} ;
       world:sourceKey {_lit(row['source_key'])} ;
       world:sourceDomain {_lit(row['source_domain'])} ;
       world:sourceKind {_lit(row['source_kind'])} ;
@@ -127,6 +141,18 @@ INSERT DATA {{
         char_owner_segment = quote(character_id, safe="")
         char_graph = char_graph or f"urn:aios:char:{char_owner_segment}:epistemic"
         char_obs_iri = f"urn:aios:char:{char_owner_segment}:observation:{row['observation_id']}"
+        context_links = []
+        if row["character_instance_id"]:
+            context_links.append(
+                f"<{char_obs_iri}> char:characterInstance "
+                f"<urn:aios:character-instance:{row['character_instance_id']}> ."
+            )
+        if row["world_id"]:
+            context_links.append(
+                f"<{char_obs_iri}> char:originWorld "
+                f"<urn:aios:world:{row['world_id']}> ."
+            )
+
         char_sparql = f"""
 PREFIX char:  <urn:aios:char#>
 PREFIX world: <urn:aios:world#>
@@ -141,9 +167,16 @@ INSERT DATA {{
     <{char_obs_iri}> a char:CharacterObservation ;
       char:characterId {_lit(character_id)} ;
       char:memoryOwner {_lit(character_id)} ;
+      char:viewpointId {_lit(row["viewpoint_id"])} ;
+      char:epistemicScope {_lit(row["epistemic_scope"])} ;
+      char:acquisitionMode {_lit(row["acquisition_mode"])} ;
+      char:claimKind {_lit(row["claim_kind"])} ;
+      char:predicateFamily {_lit(row["predicate_family"])} ;
       char:identityRuleset {_lit(row["identity_ruleset"] or "character-id-v1")} ;
       char:observesProposition <{prop_iri}> ;
       prov:wasDerivedFrom <{obs_iri}> .
+
+    {chr(10).join(context_links)}
   }}
 }}
 """.strip()
