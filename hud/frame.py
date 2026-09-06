@@ -9,6 +9,7 @@ from aios_app.db import Database
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
 from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.profile import get_profile as get_hud_profile
 
 
@@ -88,6 +89,7 @@ class HUDAssembler:
     def __init__(self, db: Database, *, budget: Optional[HUDBudget] = None):
         self.db = db
         self.context_resolver = HUDContextResolver(db)
+        self.retriever = TopologyRetriever(db)
         self.budget = budget or HUDBudget()
 
     async def build(
@@ -206,7 +208,60 @@ class HUDAssembler:
             if hud_profile.include_inventory
             else []
         )
-        knowledge = await self._knowledge(context, scorer)
+        topology_memories = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="memory",
+            focus_text=focus_text,
+            goals=goals,
+            max_hops=max(2, int(hud_profile.entity_hops)),
+            limit=hud_profile.semantic_retrieval_limit,
+        )
+        topology_beliefs = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="belief",
+            focus_text=focus_text,
+            goals=goals,
+            max_hops=max(2, int(hud_profile.entity_hops)),
+            limit=hud_profile.semantic_retrieval_limit,
+        )
+        topology_goals = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="goal",
+            focus_text=focus_text,
+            goals=goals,
+            max_hops=max(1, int(hud_profile.entity_hops)),
+            limit=min(hud_profile.semantic_retrieval_limit, 30),
+        )
+        topology_events = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="event",
+            focus_text=focus_text,
+            goals=goals,
+            max_hops=max(2, int(hud_profile.entity_hops)),
+            limit=min(hud_profile.semantic_retrieval_limit, 40),
+        )
+
+        topology_knowledge = (
+            topology_memories + topology_beliefs + topology_goals + topology_events
+        )
+        if topology_knowledge:
+            seen: set[Any] = set()
+            knowledge = []
+            for item in topology_knowledge:
+                proposition_id = item.get("proposition_id")
+                if proposition_id in seen:
+                    continue
+                seen.add(proposition_id)
+                knowledge.append(item)
+        else:
+            # Projection is asynchronous. Do not make a live character appear to
+            # lose memory while semantic topology catches up.
+            knowledge = await self._knowledge(context, scorer)
+
         if not hud_profile.include_conflicts:
             for item in knowledge:
                 item["conflicts"] = []
@@ -214,7 +269,7 @@ class HUDAssembler:
             for item in knowledge:
                 for key in (
                     "source_entity_id", "source_world_id", "source_node_id",
-                    "acquisition_mode", "predicate_family",
+                    "acquisition_mode", "predicate_family", "topology",
                 ):
                     item.pop(key, None)
         if not hud_profile.include_confidence:
@@ -346,10 +401,12 @@ class HUDAssembler:
                 "version": "hud-v1",
                 "profile_id": hud_profile.profile_id,
                 "profile_name": hud_profile.profile_name,
-                "selection": "branch-aware/entity-centered/deterministic",
+                "selection": "branch-aware/topology-guided/entity-centered/deterministic",
                 "token_budget": resolved_total,
                 "section_token_budgets": section_caps,
                 "world_lineage": list(context.lineage_world_ids),
+                "instance_lineage": list(context.lineage_instance_ids),
+                "topology_retrieval": bool(topology_knowledge),
                 "source_cursor_bounded": bool(
                     context.source_timeline_id and context.source_head_node_id
                 ),
