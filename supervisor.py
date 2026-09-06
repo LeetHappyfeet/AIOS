@@ -256,7 +256,13 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT o.claim_id
         FROM aios.observation o
-        WHERE NOT EXISTS (
+        JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        WHERE ie.superseded_at IS NULL
+          AND NOT EXISTS (
             SELECT 1
             FROM aios.rdf_promotion_log rpl
             WHERE rpl.claim_id=o.claim_id
@@ -287,7 +293,13 @@ STAGES: List[Stage] = [
         SELECT o.claim_id
         FROM aios.observation o
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-        WHERE NOT EXISTS (
+        JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        WHERE ie.superseded_at IS NULL
+          AND NOT EXISTS (
             SELECT 1
             FROM aios.semantic_topology_projection stp
             WHERE stp.claim_id=o.claim_id
@@ -369,8 +381,15 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT 1
         WHERE EXISTS (
-            SELECT 1 FROM aios.knowledge_acquisition_event
-            WHERE processed_at IS NULL
+            SELECT 1
+            FROM aios.knowledge_acquisition_event kae
+            LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+            LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+            LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+            LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+            LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+            WHERE kae.processed_at IS NULL
+              AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
         )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
@@ -389,7 +408,13 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT kae.acquisition_id
         FROM aios.knowledge_acquisition_event kae
+        LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+        LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+        LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE kae.proposition_id IS NOT NULL
+          AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
           AND NOT EXISTS (
             SELECT 1
             FROM aios.semantic_topology_projection stp
