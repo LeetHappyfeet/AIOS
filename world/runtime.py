@@ -98,7 +98,7 @@ class WorldRuntimeService:
                 INSERT INTO aios.character_instance (
                     character_id, world_id, current_world_id, meta
                 )
-                VALUES ($1,$2,$2,jsonb_build_object('runtime_user_name',$3))
+                VALUES ($1,$2,$2,jsonb_build_object('runtime_user_name',$3::text))
                 RETURNING instance_id
                 """,
                 character_id,
