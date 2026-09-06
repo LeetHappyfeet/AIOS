@@ -158,10 +158,12 @@ class HUDAssembler:
                 SELECT dn.node_id, dn.event_id, dn.event_time, dn.speaker_id,
                        dn.speaker_role, dn.message_text, dn.payload
                 FROM aios.dag_node dn
+                JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
                 JOIN aios.dag_node source_head
                   ON source_head.node_id=$2
                  AND source_head.timeline_id=$1
                 WHERE dn.timeline_id=$1
+                  AND ie.superseded_at IS NULL
                   AND dn.event_id <= source_head.event_id
                 ORDER BY dn.event_id DESC
                 LIMIT $3
@@ -789,6 +791,18 @@ class HUDAssembler:
                    OR pc.proposition_b_id=p.proposition_id
             ) conflicts ON true
             WHERE ck.instance_id=$1
+              AND EXISTS (
+                  SELECT 1
+                  FROM aios.knowledge_acquisition_event kae
+                  LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+                  LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                  LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+                  LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                  LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+                  WHERE kae.instance_id=ck.instance_id
+                    AND kae.proposition_id=ck.proposition_id
+                    AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+              )
             ORDER BY ck.updated_at DESC
             LIMIT 250
             """,
