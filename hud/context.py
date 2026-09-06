@@ -18,6 +18,8 @@ class HUDContext:
     world_key: str
     timeline_id: UUID
     head_node_id: Optional[UUID]
+    source_timeline_id: Optional[UUID]
+    source_head_node_id: Optional[UUID]
     state_version: int
     lifecycle_state: str
     location_entity_id: Optional[UUID]
@@ -53,6 +55,8 @@ class HUDContextResolver:
                 rs.world_id,
                 rs.timeline_id,
                 rs.head_node_id,
+                rs.source_timeline_id,
+                rs.source_head_node_id,
                 rs.state_version,
                 rs.lifecycle_state,
                 rs.location_entity_id,
@@ -126,6 +130,8 @@ class HUDContextResolver:
             world_key=state["world_key"],
             timeline_id=state["timeline_id"],
             head_node_id=state["head_node_id"],
+            source_timeline_id=state["source_timeline_id"],
+            source_head_node_id=state["source_head_node_id"],
             state_version=state["state_version"],
             lifecycle_state=state["lifecycle_state"],
             location_entity_id=state["location_entity_id"],
