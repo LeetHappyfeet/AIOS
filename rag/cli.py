@@ -3,12 +3,11 @@
 from __future__ import annotations
 import asyncio
 import logging
-import time
 
 from aios_app.db import Database
 from aios_app.config import settings  # your existing settings object
 from .rag_config import RagConfig
-from .ingest_worker import ingest_once
+from .ingest_worker import ingest_once, initialize_backend
 
 logger = logging.getLogger("aios.rag.cli")
 
@@ -28,8 +27,10 @@ async def run_forever(poll_seconds: int = 2) -> None:
     cfg = RagConfig()
     db = Database(settings.db_dsn)
     await db.connect()
-    logger.info("AIOS_READY service=rag")
     try:
+        logger.info("RAG startup: initializing embedding backend and Qdrant")
+        initialize_backend(cfg, warmup=True)
+        logger.info("AIOS_READY service=rag")
         while True:
             n = await ingest_once(db, cfg)
             if n == 0:
