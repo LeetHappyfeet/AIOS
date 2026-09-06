@@ -59,7 +59,7 @@ class WorldRuntimeService:
         if not ident:
             raise RuntimeNotFound(f"Unknown character_id '{character_id}'")
 
-        if world_id is not None || world_key is not None:
+        if world_id is not None or world_key is not None:
             world = await self._resolve_world(
                 world_id=world_id,
                 world_key=world_key,
