@@ -147,7 +147,12 @@ async def handle_assign_narratives(db: Database, job: Dict[str, Any]) -> None:
 
 
 async def handle_project_character_knowledge(db: Database, job: Dict[str, Any]) -> None:
-    await project_knowledge_acquisitions_once(db, limit=500)
+    live_instance_id = (job.get("payload") or {}).get("live_instance_id")
+    await project_knowledge_acquisitions_once(
+        db,
+        limit=500,
+        instance_id=UUID(live_instance_id) if live_instance_id else None,
+    )
 
 
 async def handle_resolve_generated_facts(db: Database, job: Dict[str, Any]) -> None:
