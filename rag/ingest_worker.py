@@ -75,7 +75,8 @@ def initialize_backend(cfg: RagConfig, *, warmup: bool = True) -> tuple[Embedder
                 f"RAG embedding warmup dimension {actual_dim} does not match expected {vector_dim}"
             )
 
-    logger.info(
+    log_backend_ready = logger.info if warmup else logger.debug
+    log_backend_ready(
         "RAG backend initialized [model=%s dim=%d collection=%s]",
         cfg.embedding_model,
         vector_dim,
