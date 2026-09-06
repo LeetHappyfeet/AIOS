@@ -584,14 +584,17 @@ async def get_instance_text_frame(
     wait_ms: int = 1200,
 ):
     try:
+        frame = await world_runtime.build_frame(
+            instance_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
+            wait_ms=wait_ms,
+        )
         return {
             "instance_id": instance_id,
-            "text": await world_runtime.render_text_frame(
-                instance_id,
-                recent_limit=recent_limit,
-                token_budget=token_budget,
-                wait_ms=wait_ms,
-            ),
+            "generation_ready": bool(frame.get("hud", {}).get("generation_ready")),
+            "freshness": frame.get("hud", {}).get("freshness", {}),
+            "text": render_hud_text(frame),
         }
     except RuntimeNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
