@@ -302,9 +302,12 @@ class WorldRuntimeService:
             if (
                 not head
                 or target["timeline_id"] != state.get("source_timeline_id")
-                or target["event_id"] > head["event_id"]
+                or target["event_id"] != head["event_id"]
+                or through_node_id != state.get("source_head_node_id")
             ):
-                raise RuntimeConflict("requested preparation node is outside the active source cursor")
+                raise RuntimeConflict(
+                    "requested preparation node is not the current active source head"
+                )
 
         ready = await readiness_state(self.db, instance_id=instance_id)
         exact_cached = (
@@ -369,7 +372,11 @@ class WorldRuntimeService:
             after.get("state_version") == state.get("state_version")
             and after.get("source_head_node_id") == state.get("source_head_node_id")
         )
-        generation_ready = bool(retrieval_ready and coordinates_stable)
+        generation_ready = bool(
+            retrieval_ready
+            and coordinates_stable
+            and after.get("source_head_node_id") == target_node_id
+        )
         frame.setdefault("hud", {})
         frame["hud"]["generation_ready"] = generation_ready
         frame["hud"]["freshness"] = {
