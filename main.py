@@ -155,6 +155,15 @@ async def ingest(req: IngestIn) -> IngestOut:
         resolved_viewpoint_id = req.speaker_id
 
     payload: Dict[str, Any] = dict(req.payload or {})
+    client_source = str(payload.get("source") or settings.source_name)
+    source_message_id = payload.get("message_id")
+    source_event_id = (
+        f"{req.speaker_type}:{source_message_id}"
+        if client_source.lower() == "sillytavern" and source_message_id is not None
+        else None
+    )
+    source_kind = "sillytavern_chat" if source_event_id else None
+
     payload.update(
         {
             "text": req.text,
@@ -184,6 +193,8 @@ async def ingest(req: IngestIn) -> IngestOut:
             INSERT INTO aios.ingest_event (
                 event_time,
                 source,
+                source_kind,
+                source_event_id,
                 kind,
                 session_id,
                 speaker_id,
@@ -199,23 +210,27 @@ async def ingest(req: IngestIn) -> IngestOut:
             VALUES (
                 now(),
                 $1,
-                $2::aios.event_kind,
+                $2,
                 $3,
-                $4,
-                $5::aios.actor_type,
+                $4::aios.event_kind,
+                $5,
                 $6,
-                $7,
+                $7::aios.actor_type,
                 $8,
                 $9,
                 $10,
-                $11::jsonb,
-                $12
+                $11,
+                $12,
+                $13::jsonb,
+                $14
             )
             ON CONFLICT (dedupe_key) DO UPDATE
             SET dedupe_key = EXCLUDED.dedupe_key
             RETURNING event_id
             """,
             settings.source_name,
+            source_kind,
+            source_event_id,
             req.kind or "other",
             req.session_id,
             req.speaker_id,
@@ -254,10 +269,60 @@ async def ingest(req: IngestIn) -> IngestOut:
         )
 
         # -------------------------------------------------
+        # Source-slot supersession / DAG branch replacement
+        # -------------------------------------------------
+        # Clients such as SillyTavern reuse one stable message_id while a user
+        # swipes/regenerates alternatives. Preserve every alternative as
+        # immutable provenance, but only the newest alternative remains active.
+        replacement_parent_node_id = None
+        if source_event_id:
+            prior = await db.fetchrow(
+                """
+                SELECT ie.event_id, dn.node_id,
+                       de.parent_node_id
+                FROM aios.ingest_event ie
+                LEFT JOIN aios.dag_node dn ON dn.event_id=ie.event_id
+                LEFT JOIN LATERAL (
+                    SELECT parent_node_id
+                    FROM aios.dag_edge
+                    WHERE child_node_id=dn.node_id
+                    ORDER BY created_at
+                    LIMIT 1
+                ) de ON true
+                WHERE ie.session_id=$1
+                  AND ie.source=$2
+                  AND ie.source_event_id=$3
+                  AND ie.event_id<>$4
+                  AND ie.superseded_at IS NULL
+                ORDER BY ie.event_id DESC
+                LIMIT 1
+                """,
+                req.session_id,
+                settings.source_name,
+                source_event_id,
+                event_id,
+            )
+            if prior:
+                replacement_parent_node_id = prior["parent_node_id"]
+                await db.execute(
+                    """
+                    UPDATE aios.ingest_event
+                    SET superseded_at=now(),
+                        superseded_by_event_id=$2
+                    WHERE event_id=$1
+                      AND superseded_at IS NULL
+                    """,
+                    prior["event_id"],
+                    event_id,
+                )
+                payload["supersedes_event_id"] = int(prior["event_id"])
+                payload["source_branch_mode"] = "replacement"
+
+        # -------------------------------------------------
         # DAG append
         # -------------------------------------------------
-        # add_node_and_edge also flips the durable DAG stage latch on the
-        # originating ingest_event.
+        # Replacement alternatives attach to the same parent as the message
+        # they supersede instead of chaining after the discarded response.
         node_id, _ = await add_node_and_edge(
             db,
             timeline_id=timeline_id,
@@ -270,7 +335,8 @@ async def ingest(req: IngestIn) -> IngestOut:
             message_text=message_text,
             payload=payload,
             viewpoint_id=resolved_viewpoint_id,
-            edge_type="next",
+            parent_node_id=replacement_parent_node_id,
+            edge_type="alternative" if replacement_parent_node_id else "next",
         )
 
         # -------------------------------------------------
