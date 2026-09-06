@@ -416,6 +416,7 @@ class HUDAssembler:
             )
             SELECT DISTINCT
                 e.entity_id, e.entity_type, e.display_name, e.entity_key, e.meta,
+                e.created_at,
                 MIN(x.depth) OVER (PARTITION BY e.entity_id) AS graph_depth
             FROM aios.world_entity e
             JOIN expanded x ON x.entity_id=e.entity_id
