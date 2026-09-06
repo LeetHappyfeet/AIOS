@@ -1,203 +1,288 @@
-
-# Welcome to Main release branch
-
-# Changes
-/rag
-Yes, it's finally happening. We are doing RAG 2.0 but this is a sidecar process. There will be a lot of logic in queries in data processing but here is the basic layout. A weak version is being shared to get started.
-
-```
-               ┌──────────────────────────┐
-               │     Vector RAG Service    │
-               │  (similarity oracle only)│
-               └──────────┬───────────────┘
-                          │
-                          │ pointers (IDs)
-                          ▼
-┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│ document     │ → │ extracted    │ → │ claim        │ → RDF
-│ (paragraphs) │   │ sentences    │   │ candidates   │
-└──────────────┘   └──────────────┘   └──────────────┘
-        ▲                    ▲                    ▲
-        │                    │                    │
-        └────────────── DAG / TIME / IDENTITY ────┘
-
-```
-
-/ui. 
-A primative gradio UI has been added that will greatly improve your life if you wanted to try creating a character or add web pages from the accumulator. This is in early development but now does a lot of things right. 
-
-/launch.py.
-
-
-
-/characters 
-
-```
-aiosdb=# \d
-                   List of relations
- Schema |           Name            |   Type   | Owner
---------+---------------------------+----------+-------
- aios   | character_alias           | table    | aios
- aios   | character_identity        | table    | aios
- aios   | character_instance        | table    | aios
- aios   | claim_candidate           | table    | aios
- aios   | claim_candidate_full_spo  | view     | aios
- aios   | claim_provenance          | table    | aios
- aios   | claim_world_assignment    | table    | aios
- aios   | claims_normalized         | view     | aios
- aios   | dag_edge                  | table    | aios
- aios   | dag_node                  | table    | aios
- aios   | document_section          | table    | aios
- aios   | extracted_sentence        | table    | aios
- aios   | ingest_event              | table    | aios
- aios   | ingest_event_event_id_seq | sequence | aios
- aios   | memory_item               | table    | aios
- aios   | memory_item_memory_id_seq | sequence | aios
- aios   | pipeline_job              | table    | aios
- aios   | pipeline_stage_config     | table    | aios
- aios   | rdf_promotion_log         | table    | aios
- aios   | session                   | table    | aios
- aios   | source_document           | table    | aios
- aios   | timeline                  | table    | aios
- aios   | user_identity             | table    | aios
- aios   | world                     | table    | aios
-(24 rows)
-aiosdb=# \d character_identity
-                             Table "aios.character_identity"
-      Column       |           Type           | Collation | Nullable |      Default
--------------------+--------------------------+-----------+----------+-------------------
- character_id      | text                     |           | not null |
- created_at        | timestamp with time zone |           | not null | now()
- meta              | jsonb                    |           | not null | '{}'::jsonb
- home_world_id     | uuid                     |           |          |
- process_ontology  | boolean                  |           | not null | false
- canonical_name    | text                     |           |          |
- display_name      | text                     |           |          |
- canon             | text                     |           |          |
- franchise         | text                     |           |          |
- entity_type       | text                     |           | not null | 'character'::text
- species           | text                     |           |          |
- gender            | text                     |           |          |
- age_descriptor    | text                     |           |          |
- visual_summary    | text                     |           |          |
- primary_role      | text                     |           |          |
- archetype         | text                     |           |          |
- default_tone      | text[]                   |           |          |
- speech_style      | text                     |           |          |
- content_rating    | text                     |           |          | 'PG'::text
- moral_constraints | text[]                   |           |          |
- is_canonical      | boolean                  |           |          | true
- is_mutable        | boolean                  |           |          | false
- created_from      | text                     |           |          |
- updated_at        | timestamp with time zone |           |          | now()
-Indexes:
-    "character_identity_pkey" PRIMARY KEY, btree (character_id)
-    "idx_character_identity_canon" btree (canon)
-    "idx_character_identity_franchise" btree (franchise)
-Foreign-key constraints:
-    "character_identity_home_world_id_fkey" FOREIGN KEY (home_world_id) REFERENCES world(world_id) ON DELETE SET NULL
-Referenced by:
-    TABLE "character_alias" CONSTRAINT "character_alias_character_id_fkey" FOREIGN KEY (character_id) REFERENCES character_identity(character_id) ON DELETE CASCADE
-    TABLE "character_instance" CONSTRAINT "character_instance_character_id_fkey" FOREIGN KEY (character_id) REFERENCES character_identity(character_id) ON DELETE CASCADE
-
-
-A new table has been added which contains static character information and a new folder called /char has been created because while the character pipeline is very similar to the existing /world pipeline that writes to world/liminal in RDF, character memory is a lot more nuanced and segmented, yet it steals claims from /world. This separation of /world and /char memory is a new paradigm.
-```
-
 # AIOS
+
+AIOS is an epistemic runtime and memory architecture for language-model agents. It turns raw observations—chat, documents, web material, and other ingested text—into provenance-preserving temporal records, normalized claims, RDF knowledge, character-specific epistemic state, concrete runtime worlds, and finally a bounded HUD that can be consumed by either an LLM or a human-facing client.
+
+The project has moved beyond its original “RAG sidecar” phase. The RDF/epistemic pipeline and the first complete character/world runtime are now in place. Current development is focused on the **HUD assembly layer**: deciding what a character should perceive, remember, believe, carry, care about, and be allowed to act on at a particular moment without leaking information across characters, worlds, timelines, or branches.
+
+> **Development status:** the ingestion → DAG → claim → RDF → context-resolution → character/world runtime chain is implemented. The active development frontier is the branch-aware RPG/agent HUD and the clients that consume it.
+
 <p align="center">
   <img src="screenshot.png" alt="AIOS Screenshot" width="800">
 </p>
 
-AIOS is an operating system for language models, designed around observation, memory, and epistemic discipline rather than immediate answer generation. Instead of embedding AI logic into every application, AIOS provides a stable API and pipeline for ingesting, organizing, and reasoning over language-model interactions and external observations. The system includes first-class support for vector memory and retrieval-augmented generation (RAG), but treats them as downstream tools rather than the foundation of truth.
+## What AIOS is trying to solve
+
+Most LLM memory systems retrieve text and place it back into a prompt. AIOS instead treats memory as an epistemic problem.
+
+A statement can be observed without being true. A source can disagree with another source. A character can know something that another character does not. A character can remember an event differently from the global state of a world. A runtime branch can diverge without rewriting its parent history. “I” must resolve to the active character, while world facts must remain attached to the correct world.
+
+AIOS therefore separates:
+
+- **observation** — what entered the system;
+- **temporal truth** — where and when it occurred in the DAG;
+- **linguistic claims** — what the text appears to assert;
+- **semantic context** — what kind of claim/entity/relation it is and whose viewpoint produced it;
+- **world state** — what belongs to a particular world or branch;
+- **character epistemics** — what a particular character knows, believes, remembers, or has acquired;
+- **runtime state** — the concrete character instance currently acting in a world;
+- **presentation/attention** — the bounded HUD assembled for a human or LLM.
+
+RAG remains useful as a similarity oracle, but vector similarity is not treated as truth and is not allowed to decide epistemic visibility by itself.
+
+## Architecture
+
+```text
+ External sources / documents                 Chat / agent interaction
+              │                                        │
+              └────────────────┬───────────────────────┘
+                               ▼
+                         ingest_event
+                  immutable observed event
+                               │
+                               ▼
+                         Temporal DAG
+             ordering • containment • provenance
+                               │
+                               ▼
+                       document_section
+                               │
+                               ▼
+                      extracted_sentence
+                               │
+                               ▼
+                       claim_candidate
+                   untrusted S/P/O assertion
+                               │
+                               ▼
+                    /world/liminal RDF
+             semantic staging, not accepted truth
+                               │
+                               ▼
+                       Context Resolver
+          claim/entity kind • predicate family • pivots
+          character_id • world_id • viewpoint • scope
+                               │
+                  ┌────────────┴────────────┐
+                  ▼                         ▼
+          /world knowledge             /char knowledge
+       world/branch context       character epistemic context
+                  └────────────┬────────────┘
+                               ▼
+                    Character/World Runtime
+          instances • entities • relations • rules • state
+          timelines • branches • controllers • actions
+                               │
+                               ▼
+                         HUD Assembler
+       branch eligibility → semantic routing → relevance
+                               │
+                  ┌────────────┴────────────┐
+                  ▼                         ▼
+             JSON frame                 Text frame
+          application/client          LLM prompt surface
 ```
-External Observation (Accumulator)        Interactive Observation (Chat API)
-        │                                          │
-        └──────────────┬───────────────────────────┘
-                       ▼
-               ingest_event
-          (immutable observation log)
-                       │
-                       ▼
-                DAG (Temporal Truth)
-        (ordering, containment, provenance)
-                       │
-                       ▼
-          document_section (SQL projection)
-        (stable text units, deterministic order)
-                       │
-                       ▼
-           extracted_sentence
-        (canonical sentence store)
-                       │
-                       ▼
-              claim_candidate
-        (pre-semantic assertions, untrusted)
-                       │
-                       ▼
-        SQL World Assignment (liminal)
-        (existence without belief)
-                       │
-                       ▼
-          RDF /world/liminal (Jena)
-        (semantic workspace, unresolved)
 
+Qdrant/vector retrieval can assist candidate discovery, but IDs, provenance, world boundaries, character boundaries, and DAG position remain authoritative.
 
+## 1. Observation and the DAG
 
-1/13/2026
+All input begins as observation rather than fact.
+
+The API and external ingestion paths persist an `ingest_event`, then anchor that event to a timeline in the DAG. Documents, paragraphs, and chat messages therefore share a common temporal model while retaining their source metadata.
+
+The DAG is deliberately non-semantic. Its job is to preserve ordering, containment, identity, and provenance. Later classifiers can be replaced or improved without rewriting what was originally observed.
+
+For chat ingestion, the source timeline remains immutable provenance. Active runtime instances advance a source-perception cursor rather than copying source messages into the concrete runtime DAG.
+
+## 2. Claims and RDF
+
+DAG-backed text is projected into stable document sections, split into canonical sentences, and converted into `claim_candidate` records. Claims are tentative linguistic assertions, not facts.
+
+Claims are promoted into the Jena `/world` dataset through the liminal graph:
+
+```text
+urn:aios:world:liminal
 ```
 
+Liminal means “observed and available for semantic processing,” not “true.” Contradictory claims can coexist there while retaining provenance.
 
+The pipeline normalizes propositions, records RDF promotion receipts, classifies structural content, and performs later epistemic projections without collapsing disagreement into a single answer.
 
+## 3. Context Resolver and semantic pivots
 
+The Context Resolver is the bridge between generic RDF claims and the character/world engine.
 
+It classifies claims into first-order semantic kinds including:
 
+```text
+PERSON          LOCATION        OBJECT          EVENT
+MEMORY          RELATIONSHIP    BELIEF          GOAL
+RULE            TRAIT           STATE           CONCEPT
+ORGANIZATION    TIME            ACTION          QUANTITY
+```
 
+It also groups predicates into semantic families such as spatial, temporal, social, possession, epistemic, memory, causal, emotional, identity, descriptive, rule, goal, action, membership, and communication.
 
+Most importantly, the resolver attaches the coordinates required to prevent epistemic leakage:
 
+- originating `character_id`;
+- character instance when one can be resolved;
+- viewpoint;
+- `world_id`;
+- timeline and DAG node;
+- epistemic scope;
+- acquisition mode;
+- subject/object semantic-pivot flags.
 
+A character ID is a semantic pivot for first-person and character-relative knowledge. A world ID is the higher-level pivot for facts and state belonging to a world. The result is not one permanent RDF tree; AIOS derives context-specific trees/views from a graph according to character, world, timeline, and branch.
 
+This allows the same proposition to be globally available as an observed claim while remaining inaccessible to a character that has never perceived or acquired it.
 
+## 4. Character epistemics
 
+AIOS maintains a separate character knowledge model rather than treating `/char` as a copy of `/world`.
 
+Character epistemic state can represent knowledge, belief, memory, source acquisition, generated information, confidence/weighting, and links back to normalized propositions and concrete runtime entities. This supports cases such as:
 
-The system begins at two equivalent entry points: external observation (via the accumulator) and interactive observation (via the Chat API). These are deliberately treated the same at the structural level, even though they originate from very different sources. A web page scraped from Fox News, a paragraph from a PDF, or a message typed into SillyTavern are all considered events observed by the system, not truths asserted by it. This is a foundational design choice: the system does not start with facts, it starts with observations.
-In the case of the accumulator, web content is fetched, normalized, and written into immutable JSONL files. These JSONL records act as a sensor log. They preserve exactly what was observed, when it was observed, and where it came from, without attempting to interpret meaning or truth. This immutability is critical: it allows the system to be replayed, reinterpreted, or audited later if extraction logic changes. The accumulator’s job ends here — it does not assign meaning, it does not decide relevance, and it does not touch RDF.
-Both accumulator ingestion and chat ingestion converge at the same internal mechanism: ingest events. Every observed action — a scraped document, a paragraph, a chat message — becomes an ingest_event in SQL. These events are idempotent and deduplicated, meaning the system can safely reprocess input without duplicating history. The ingest event represents the fact that something happened, not what it means.
-From ingest events, the system constructs a Directed Acyclic Graph (DAG). The DAG is the backbone of the entire architecture. It is where temporal truth lives. Each node in the DAG represents a discrete observed unit: a document, a paragraph, or a chat message. Edges encode ordering and containment — documents contain paragraphs, paragraphs follow one another, chat messages form conversational chains. Crucially, the DAG is not semantic. It does not know what a paragraph “means.” It only knows what came before what, what belongs to what, and when it was observed. This is why the DAG is considered the source of temporal truth: once something is in the DAG, its position in time and context is fixed.
-At this stage, the system has achieved something subtle but powerful. It has unified wildly different inputs — web pages, PDFs, conversations — into a single temporal structure without collapsing them into claims or facts. Everything is still observational. Nothing is yet asserted as true, false, or even meaningful. The DAG simply says: this happened, in this order, from this source. That restraint is what makes the later reasoning stages possible.
-In the next reply, I’ll continue from here and explain how the DAG is projected into document sections, how sentences and claims are extracted, and how the system moves from temporal structure into pre-semantic assertions — still before RDF and Jena come into play.
+- two characters knowing different things about the same world;
+- a character remembering an event that another character never witnessed;
+- a document or conversation teaching a character something;
+- contradictory sources remaining visible rather than being averaged away;
+- generated facts being tracked separately from observed source material.
 
-Once observations have been anchored in the DAG, the system begins a second phase: projection and normalization. This phase exists to make the temporal record usable for analysis without altering its meaning. The first projection is from DAG paragraph nodes into the document_section table. This is not a second source of truth; it is a SQL-native mirror of the DAG’s document structure. Each paragraph node is copied into document_section with a stable document identifier, a deterministic section path, and a document-local ordering. The key principle here is that projection never invents structure. It preserves the ordering and boundaries already defined by the DAG, allowing downstream processes to operate on stable, replayable text units without needing to traverse graph edges.
-From document sections, the system performs sentence extraction. Each section is split into sentences using a deterministic NLP pipeline. These sentences are stored as extracted_sentence rows, each explicitly linked back to its originating section and, through that, to the original DAG node and source document. This linkage is intentional and critical. At no point does a sentence become free-floating text; it always retains provenance back to the original observation and its position in time. This ensures that any later reasoning, correction, or dispute can always trace an assertion back to its textual and temporal origin.
-With sentences in hand, the system performs its first genuinely semantic operation: claim extraction. Each sentence is analyzed to extract a tentative subject–predicate–object structure. These extracted triples are stored as claim_candidate records. The name is important: these are not facts, and they are not beliefs. They are candidates — linguistic assertions detected in text. Many of them are incomplete, malformed, or trivial. That is expected. The system intentionally captures noise at this stage because deciding what doesn’t matter is itself a semantic judgment that must be deferred.
-Every claim candidate is immediately assigned to the liminal world in SQL. This assignment does not mean the claim is believed; it means only that the claim exists as an observed assertion. Provenance is attached at the document level so the system can later answer questions like “where did this claim come from?” or “which source asserted this?” without implying correctness. At this point, the system has crossed a boundary: it now has structured assertions — but it still has not declared truth.
-The important thing to notice about this phase is its discipline. Temporal truth (the DAG) remains untouched. Textual content is normalized but not interpreted. Semantic structure is extracted, but meaning is not endorsed. Claims are allowed to contradict each other freely because the system has not yet introduced the concept of a resolved world. Everything exists in a suspended, observational state.
-In the next reply, I’ll explain how these liminal claims are materialized into RDF in Jena, why /world/liminal exists as a distinct conceptual space, and how classification begins to separate content from noise without asserting belief or reality yet.
-fter claims exist in SQL as structured but untrusted assertions, the system introduces RDF not as a truth engine, but as a semantic workspace. This is an important distinction. RDF, in this architecture, is not used to say “this is true.” It is used to say “this exists as a thing that can be reasoned about.” The /world dataset in Jena represents a shared, observer-independent space where claims about the world can be accumulated, annotated, and compared without yet being endorsed.
-The first RDF interaction is the promotion of liminal claims. Claims that have been extracted and have not yet appeared in RDF are written into the Jena /world dataset under the named graph urn:aios:world:liminal. Each claim becomes a first-class RDF resource with a stable IRI derived from its SQL identifier. This resource records basic properties: its textual form, extraction metadata, confidence score, timestamp, and provenance back to a source document when available. At this point, RDF is acting as a mirror of SQL, but with a key difference: it provides a graph structure that can later support inference, classification, and cross-claim relationships.
-The choice to isolate these statements in a liminal graph is intentional. /world/liminal is not a world in the narrative sense; it is a staging area. It contains everything the system has observed people or sources assert about reality, regardless of quality, coherence, or contradiction. News headlines, footnotes, navigation text, bibliographic fragments, and genuine descriptive statements all coexist here. This openness is essential. The system must see the full shape of observed discourse before it can begin to decide what constitutes a coherent world.
-Once claims exist in RDF, the system performs its first semantic refinement step: classification. A deterministic classifier analyzes each claim and assigns a world:contentKind value such as “content,” “reference,” “navigation,” or “footer.” This classification does not change the claim’s status or remove it from liminality. It simply adds a lens through which later reasoning can operate. The classifier is intentionally conservative and rule-based. Its job is not to be clever, but to be predictable, auditable, and repeatable. Every classification decision is logged back into SQL so the system can always explain when and why a particular annotation was applied.
-At this stage, Jena contains a graph of claims that are typed, timestamped, and traceable, but still unresolved. No claim has been declared true or false. No world has been named. Contradictions are not errors; they are signals. The RDF store now serves as a semantic commons: a place where all observed assertions about the world can coexist and be examined structurally. This is the point at which the system becomes capable of higher-order reasoning — not because it has decided anything yet, but because it has finally assembled the material needed to do so responsibly.
+The separation between `/world` and `/char` is fundamental: world claims describe a world context; character claims describe a character's epistemic relationship to information in that context.
 
-What makes this powerful right now, even before world resolution or belief assignment exists, is that the system already forms a stable interface between raw experience and structured meaning. Most systems try to jump directly from text to answers. Yours stops earlier, at a point where the information is fully captured, fully contextualized, and fully auditable, but not yet prematurely interpreted. That alone unlocks capabilities that are rare in current AI systems.
-First, the system gives you true memory with provenance, not just recall. If you hook this up to a chat agent today, the agent is no longer relying on a rolling context window or opaque vector similarity. Every memory it retrieves is anchored to a specific moment in time, a specific source, and a specific conversational or documentary context. When the agent says “I remember you mentioning X,” that statement can be traced to an actual DAG node, an ingest event, and a source. This makes the agent’s memory inspectable. You can ask not only what it remembers, but why it remembers it, and where it came from.
-Second, the architecture already supports non-destructive disagreement and contradiction, which is something almost no live system handles well. If you connect this to live web ingestion or multiple users right now, the system will happily ingest mutually incompatible claims without breaking. It doesn’t need to decide who is right in order to function. That means you can point it at polarized news sources, conflicting documentation, or divergent personal accounts and it will preserve all of them side by side. Even without world resolution logic, that alone is valuable: you can surface what is being said, by whom, and in what context, instead of collapsing everything into a single averaged narrative.
-Third, it enables tool-using agents that can reason about information quality without being told the answer. Because claims are classified (navigation, reference, content, etc.) and tied to provenance, an agent plugged in today could already do things like: ignore footer noise, downweight citation fragments, prioritize descriptive claims, or explain why a piece of information might be unreliable — without asserting what is true. That’s a subtle but important shift. The agent isn’t acting as an oracle; it’s acting as an analyst. This makes it far safer and more trustworthy in real-world applications.
-Fourth, the system is powerful because it separates observation from belief, which lets you experiment. You can hook this up to a chatbot, a research assistant, or even a monitoring system right now and let it accumulate observations over time. You don’t need to get world resolution “right” before you deploy it. The data you collect today will still be usable tomorrow when your reasoning logic improves. That’s the opposite of most pipelines, where early design mistakes permanently poison downstream conclusions.
-Finally, even in its current state, this architecture gives you something most AI systems fundamentally lack: epistemic humility encoded in software. The system knows what it has seen, knows what it hasn’t decided, and knows where its information came from. If you hook this up today, you get an AI that can say, in a very literal sense, “Here is what has been observed so far, here is how it was classified, and here is what has not yet been resolved.” That alone is powerful  not because it gives final answers, but because it creates a reliable foundation on which final answers can eventually be built.
+## 5. Character and world runtime
 
-# how to run.
-1. Install requirements and dependencies. There may be some missing dependencies.
-2. Set up Qdrant, SQL, and your global variables for the name of your databases. You can host these elsewhere on the network which makes AIOS itself very lightweight.
-3. run launch.py 'python -m aios_app.launch' 
-Your web interface will be at http://localhost:7860
-Your API endpoint is at http://localhost:8000 for ingestion and UI.
+The runtime turns the epistemic model into an environment an agent can inhabit.
 
+A character identity can be activated into a concrete `character_instance` associated with a runtime world, timeline, entity, controller, and mutable runtime state. Worlds can form parent/root relationships and runtime branches, allowing a session to diverge without destroying the source world or its provenance.
 
+Runtime support includes world entities, entity relations, world rules, character state, location, inventory/stateful objects, actions, controller identity, branching/forking, and source-perception boundaries.
 
-# AI-OS Database Setup
+Humans, LLMs, or other controllers can therefore operate through the same runtime model instead of requiring separate memory architectures.
+
+## 6. The HUD: current development focus
+
+The HUD is the next major layer being built on top of the completed pipeline and runtime foundations.
+
+The canonical HUD assembler resolves the active runtime/world/DAG coordinates **before** selecting content. Context and branch eligibility are hard boundaries; relevance scoring only ranks information that is already legal for the active character to see.
+
+The current frame can assemble sections for:
+
+- identity and epistemic profile;
+- runtime presence and world/timeline coordinates;
+- current scene and nearby entities;
+- physical, emotional, social, health, stamina, and energy state;
+- relationships;
+- inventory;
+- active memories;
+- knowledge and beliefs;
+- goals;
+- rules;
+- recent perceived events;
+- available actions.
+
+The frame is deterministic and token-budgeted. It exposes both a structured JSON representation for applications and a deterministic text renderer intended to become the LLM-facing “text adventure/HUD” prompt surface.
+
+The design target is:
+
+```text
+all stored knowledge
+        ↓
+world + branch eligibility
+        ↓
+character epistemic eligibility
+        ↓
+scene/entity relevance
+        ↓
+attention / token budgeting
+        ↓
+small actionable HUD
+```
+
+The HUD should never become another unrestricted retrieval layer. Its purpose is to provide the active mind with the smallest useful, provenance-compatible view of the much larger AIOS graph.
+
+## API highlights
+
+The FastAPI service currently exposes the runtime and ingestion surfaces used by clients. Important routes include:
+
+```text
+POST /session
+POST /ingest
+
+POST /character/{character_id}/activate
+GET  /instance/{instance_id}/state
+GET  /instance/{instance_id}/frame
+GET  /instance/{instance_id}/frame/text
+POST /instance/{instance_id}/action
+```
+
+Additional endpoints support world entities/relations/rules, character forks/controllers, knowledge acquisition, generated and observed facts, epistemic queries, long-document ingestion, and character epistemic profiles.
+
+The text-frame endpoint is intended for integrations such as SillyTavern or other LLM clients. The JSON frame is intended for richer interfaces that want to render the same canonical state themselves.
+
+## Pipeline execution
+
+AIOS uses a supervisor/runner job pipeline. The supervisor discovers eligible work and queues jobs; the runner performs individual stages. Major work now includes character discovery, world topology projection, document/claim processing, liminal RDF promotion, proposition normalization, context resolution, and epistemic projection.
+
+This separation makes the pipeline replayable and keeps HTTP ingestion from pretending that all downstream semantic processing completed synchronously.
+
+## Storage roles
+
+**PostgreSQL** is the durable operational and provenance store. It contains ingest events, DAG structure, source/document projections, claims, pipeline jobs, character identities and instances, world topology, runtime state, epistemic records, and RDF processing receipts.
+
+**Apache Jena Fuseki** provides RDF semantic workspaces. AIOS uses separate `/world` and `/char` datasets/graphs so world semantics and character epistemics can be reasoned about without conflating them.
+
+**Qdrant** provides vector similarity/retrieval support. It is a retrieval aid, not an authority on truth, chronology, world membership, or character knowledge.
+
+## Running the development branch
+
+AIOS is currently under active development. The development branch is:
+
+```bash
+git switch AIOS-development
+git pull
+```
+
+Install the Python requirements, configure the environment/database settings, and provide reachable PostgreSQL, Fuseki, and Qdrant services. Fuseki must have the `/world` and `/char` datasets and the AIOS ontology loaded.
+
+From the application environment, launch AIOS with:
+
+```bash
+python -m aios_app.launch
+```
+
+The default services are:
+
+```text
+FastAPI:  http://localhost:8000
+Web UI:   http://localhost:7860
+```
+
+Use the health endpoint to verify the API:
+
+```text
+GET /healthz
+```
+
+Database migrations in `migrations/` must be applied for the schema expected by the current development branch.
 
 ## Requirements
-- PostgreSQL 14+
-- Apache Jena Fuseki (Create /char and /world datasets and don't forget to load the ontology folder .ttl files)
+
+Core infrastructure:
+
+- Python and the project dependencies in the repository;
+- PostgreSQL 14+;
+- Apache Jena Fuseki with `/world` and `/char` datasets;
+- Qdrant for vector retrieval.
+
+See the repository configuration, migrations, ontology files, and application modules for the exact development-state schema and service settings.
+
+## Project direction
+
+The original ingestion and RDF work established the system's durable memory substrate. The character engine added identity, viewpoint, epistemic separation, world topology, runtime instances, and branching. The Context Resolver connected those two halves.
+
+The current milestone is to finish the HUD as the **attention and presentation layer** over that architecture. Once stable, clients should not need to understand the entire RDF graph or SQL schema. They should be able to activate a character, submit observations/actions, and request a bounded frame representing what that character can reasonably perceive, remember, know, believe, and do now.
+
+That is the intended AIOS boundary: **observations go in; an epistemically valid world-and-character context comes out.**
