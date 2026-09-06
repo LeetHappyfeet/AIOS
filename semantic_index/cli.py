@@ -8,6 +8,7 @@ from aios_app.db import Database
 from .config import SemanticIndexConfig
 from .service import index_once, initialize_backend
 from .structure import analyze_neighbors_once
+from .clustering import cluster_neighbors_once
 
 logger = logging.getLogger("aios.semantic_index.cli")
 
@@ -23,7 +24,8 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         while True:
             indexed = await index_once(db, cfg)
             structured = await analyze_neighbors_once(db, cfg)
-            if indexed == 0 and structured == 0:
+            clustered = await cluster_neighbors_once(db, cfg)
+            if indexed == 0 and structured == 0 and clustered == 0:
                 await asyncio.sleep(poll_seconds)
     finally:
         await db.close()
