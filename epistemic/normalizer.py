@@ -156,7 +156,18 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             cc.confidence, cc.extraction_rule, cc.extraction_ver, cc.created_at,
             ds.document_id, n.node_id, n.timeline_id,
             n.speaker_id, n.speaker_role::text AS speaker_role, n.recipient_id,
-            n.character_id,
+            ccr.origin_character_id AS character_id,
+            ccr.character_instance_id,
+            ccr.viewpoint_id AS resolved_viewpoint_id,
+            ccr.world_id AS resolved_world_id,
+            ccr.epistemic_scope AS resolved_epistemic_scope,
+            ccr.acquisition_mode,
+            ccr.claim_kind,
+            ccr.subject_kind,
+            ccr.object_kind,
+            ccr.predicate_family,
+            ccr.subject_is_pivot,
+            ccr.object_is_pivot,
             NULLIF(n.payload->>'viewpoint_id', '') AS explicit_viewpoint_id,
             COALESCE(NULLIF(n.payload->>'identity_ruleset', ''), 'character-id-v1') AS identity_ruleset,
             ie.source AS ingest_source,
@@ -167,12 +178,18 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         LEFT JOIN aios.dag_node n ON n.node_id=ds.node_id
         LEFT JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         LEFT JOIN aios.source_document sd ON sd.document_id=ds.document_id
+        LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
         WHERE cc.claim_id=$1
         """,
         claim_id,
     )
     if not row:
         raise RuntimeError(f"Cannot normalize missing claim {claim_id}")
+    if row["resolved_epistemic_scope"] is None:
+        raise RuntimeError(
+            f"Cannot normalize unresolved claim context {claim_id}; "
+            "resolve_claim_context must complete first"
+        )
 
     proposition_id = await ensure_proposition(
         db,
@@ -209,6 +226,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
     lineage_complete = bool(
         row["node_id"] is not None
         and row["timeline_id"] is not None
+        and row["resolved_world_id"] is not None
         and row["ingest_source"] is not None
     )
 
@@ -241,16 +259,28 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             "lineage_complete": lineage_complete,
             "legacy_partial_lineage": not lineage_complete,
             "character_id": row["character_id"],
-            "viewpoint_id": row["character_id"] or row["explicit_viewpoint_id"] or row["speaker_id"],
+            "character_instance_id": str(row["character_instance_id"]) if row["character_instance_id"] else None,
+            "viewpoint_id": row["resolved_viewpoint_id"],
             "memory_owner_id": row["character_id"],
+            "world_id": str(row["resolved_world_id"]) if row["resolved_world_id"] else None,
             "speaker_id": row["speaker_id"],
             "speaker_role": row["speaker_role"],
             "recipient_id": row["recipient_id"],
             "identity_ruleset": row["identity_ruleset"],
-            "epistemic_scope": "character" if row["character_id"] else (
-                "speaker" if (row["explicit_viewpoint_id"] or row["speaker_id"]) else "source"
+            "epistemic_scope": row["resolved_epistemic_scope"],
+            "acquisition_mode": row["acquisition_mode"],
+            "claim_kind": row["claim_kind"],
+            "subject_kind": row["subject_kind"],
+            "object_kind": row["object_kind"],
+            "predicate_family": row["predicate_family"],
+            "subject_is_pivot": bool(row["subject_is_pivot"]),
+            "object_is_pivot": bool(row["object_is_pivot"]),
+            "context_resolver_version": "context-resolver-v1",
+            "semantic_pivot_resolved": (
+                "character-pivot-v1" in (row["extraction_rule"] or "")
+                or bool(row["subject_is_pivot"])
+                or bool(row["object_is_pivot"])
             ),
-            "semantic_pivot_resolved": "character-pivot-v1" in (row["extraction_rule"] or ""),
         }),
     )
 
