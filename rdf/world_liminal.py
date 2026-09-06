@@ -147,7 +147,7 @@ async def _log_promotion(
             $5,
             'world_liminal_writer',
             now(),
-            jsonb_build_object('section_id', $6::text)
+            jsonb_build_object('section_id', ($6::uuid)::text)
         )
         ON CONFLICT (claim_id, rdf_dataset, rdf_graph, rdf_predicate) DO NOTHING
         """,
@@ -156,7 +156,7 @@ async def _log_promotion(
         GRAPH_IRI,
         BASE_RECEIPT_PREDICATE,
         BASE_RECEIPT_OBJECT,
-        str(section_id),
+        section_id,
     )
 
 
