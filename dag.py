@@ -69,6 +69,7 @@ async def get_or_create_timeline(
     user_name: Optional[str],
     scope_key: str,
     meta: Optional[Dict[str, Any]] = None,
+    source_id: Optional[str] = None,
 ) -> UUID:
     """
     Resolve the temporal DAG timeline for one conversation/source scope.
@@ -116,9 +117,10 @@ async def get_or_create_timeline(
             character_id,
             user_name,
             scope_key,
-            meta
+            meta,
+            source_id
         )
-        VALUES ($1, 'main', $2, $3, $4, $5, $6::jsonb)
+        VALUES ($1, 'main', $2, $3, $4, $5, $6::jsonb, $7)
         ON CONFLICT DO NOTHING
         RETURNING timeline_id
         """,
@@ -128,6 +130,7 @@ async def get_or_create_timeline(
         user_name,
         scope_key,
         meta_json,
+        source_id,
     )
     if row:
         return row["timeline_id"]
