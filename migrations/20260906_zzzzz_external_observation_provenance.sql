@@ -7,19 +7,11 @@
 
 BEGIN;
 
-DO $
-BEGIN
-    ALTER TYPE aios.actor_type ADD VALUE IF NOT EXISTS 'source';
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END $;
+ALTER TYPE aios.actor_type
+    ADD VALUE IF NOT EXISTS 'source';
 
-DO $
-BEGIN
-    ALTER TYPE aios.event_kind ADD VALUE IF NOT EXISTS 'observation';
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END $;
+ALTER TYPE aios.event_kind
+    ADD VALUE IF NOT EXISTS 'observation';
 
 CREATE TABLE IF NOT EXISTS aios.source_identity (
     source_id text PRIMARY KEY,
