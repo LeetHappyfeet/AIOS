@@ -30,6 +30,7 @@ class Stage:
     job_type: str
     eligibility_sql: str
     payload_builder: Callable[[Dict[str, object]], Dict[str, object]]
+    priority: int = 100
 
 
 # =================================================
@@ -92,6 +93,7 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=character_id_payload,
+        priority=10,
     ),
 
     # -------------------------------------------------
@@ -472,7 +474,12 @@ async def enqueue_stage_jobs(
     count = 0
     for row in rows:
         payload = stage.payload_builder(dict(row))
-        await enqueue_job(db, job_type=stage.job_type, payload=payload)
+        await enqueue_job(
+            db,
+            job_type=stage.job_type,
+            payload=payload,
+            priority=stage.priority,
+        )
         count += 1
 
     return count
