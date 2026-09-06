@@ -157,6 +157,33 @@ async def ensure_runtime_branch_world(
         world_key,
     )
     if existing:
+        if existing["anchor_timeline_id"] is None or existing["anchor_node_id"] is None:
+            anchor_timeline_id, anchor_node_id = await latest_source_anchor(
+                db,
+                character_id=character_id,
+                session_id=session_id,
+            )
+            if anchor_timeline_id is not None or anchor_node_id is not None:
+                await db.execute(
+                    """
+                    UPDATE aios.world
+                    SET anchor_timeline_id=COALESCE(anchor_timeline_id,$2),
+                        anchor_node_id=COALESCE(anchor_node_id,$3)
+                    WHERE world_id=$1
+                    """,
+                    existing["world_id"],
+                    anchor_timeline_id,
+                    anchor_node_id,
+                )
+                existing = await db.fetchrow(
+                    """
+                    SELECT world_id, world_key, world_type, parent_world_id, root_world_id,
+                           anchor_timeline_id, anchor_node_id, origin_character_id
+                    FROM aios.world
+                    WHERE world_id=$1
+                    """,
+                    existing["world_id"],
+                )
         return dict(existing)
 
     anchor_timeline_id, anchor_node_id = await latest_source_anchor(
