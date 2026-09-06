@@ -61,7 +61,7 @@ class UnionFind:
             self.rank[ra] += 1
 
 
-def _cluster_id(embedding_version: str, members: set[UUID]) -> UUID:
+def _cluster_key(embedding_version: str, members: set[UUID]) -> UUID:
     stable = ",".join(sorted(str(value) for value in members))
     return uuid5(
         NAMESPACE_URL,
@@ -372,7 +372,8 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
                 unclaimed.update(draft.members)
                 continue
 
-            cluster_id = _cluster_id(cfg.embedding_version, draft.members)
+            cluster_key = _cluster_key(cfg.embedding_version, draft.members)
+            cluster_id = uuid4()
             meta = await _cluster_metadata(db, draft.members)
             meta.update({
                 "core_member_count": len(draft.core_members),
@@ -384,29 +385,19 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
             await db.execute(
                 """
                 INSERT INTO aios.semantic_cluster_candidate (
-                    cluster_id, run_id, embedding_version, algorithm_version,
+                    cluster_id, cluster_key, run_id,
+                    embedding_version, algorithm_version,
                     member_count, internal_edge_count, density, cohesion,
                     boundary_strength, separation, status, meta,
                     created_at, updated_at
                 )
                 VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-                    'candidate',$11::jsonb,now(),now()
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                    'candidate',$12::jsonb,now(),now()
                 )
-                ON CONFLICT (cluster_id)
-                DO UPDATE SET
-                    run_id=EXCLUDED.run_id,
-                    member_count=EXCLUDED.member_count,
-                    internal_edge_count=EXCLUDED.internal_edge_count,
-                    density=EXCLUDED.density,
-                    cohesion=EXCLUDED.cohesion,
-                    boundary_strength=EXCLUDED.boundary_strength,
-                    separation=EXCLUDED.separation,
-                    status='candidate',
-                    meta=EXCLUDED.meta,
-                    updated_at=now()
                 """,
                 cluster_id,
+                cluster_key,
                 run_id,
                 cfg.embedding_version,
                 ALGORITHM_VERSION,
