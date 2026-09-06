@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
@@ -7,8 +8,10 @@ from typing import Any, Iterable, Optional
 from aios_app.db import Database
 from aios_app.hud.context import HUDContext
 from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.semantic_index.query import SemanticQueryService
 
 
+logger = logging.getLogger("aios.hud.retrieval")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
 
 
@@ -90,6 +93,51 @@ class TopologyRetriever:
 
     def __init__(self, db: Database):
         self.db = db
+        self.semantic = SemanticQueryService()
+        self._semantic_seed_cache: dict[tuple[str, str, tuple[str, ...]], list[str]] = {}
+
+    def _semantic_seed_propositions(
+        self,
+        context: HUDContext,
+        *,
+        focus_text: str,
+        goals: Iterable[Any],
+    ) -> list[str]:
+        query_text = " ".join(
+            part for part in (
+                focus_text,
+                " ".join(str(goal) for goal in goals),
+            )
+            if part
+        ).strip()
+        if not query_text:
+            return []
+        lineage = tuple(str(value) for value in context.lineage_instance_ids)
+        cache_key = (str(context.character_id), query_text, lineage)
+        cached = self._semantic_seed_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            hits = self.semantic.search_epistemic(
+                query_text,
+                character_id=context.character_id,
+                instance_ids=context.lineage_instance_ids,
+            )
+            proposition_ids = []
+            seen: set[str] = set()
+            for _, _, payload in hits:
+                proposition_id = str(payload.get("proposition_id") or "")
+                if proposition_id and proposition_id not in seen:
+                    seen.add(proposition_id)
+                    proposition_ids.append(proposition_id)
+            self._semantic_seed_cache[cache_key] = proposition_ids
+            if len(self._semantic_seed_cache) > 64:
+                self._semantic_seed_cache.pop(next(iter(self._semantic_seed_cache)))
+            return proposition_ids
+        except Exception as exc:
+            logger.debug("Semantic seed lookup unavailable; using topology/lexical fallback: %s", exc)
+            self._semantic_seed_cache[cache_key] = []
+            return []
 
     async def retrieve_character_knowledge(
         self,
@@ -112,6 +160,11 @@ class TopologyRetriever:
         lineage_ids = list(context.lineage_instance_ids)
         lineage_keys = [str(value) for value in context.lineage_instance_ids]
         terms = _focus_terms(focus_text, " ".join(str(goal) for goal in goals))
+        semantic_seed_ids = self._semantic_seed_propositions(
+            context,
+            focus_text=focus_text,
+            goals=goals,
+        )
 
         rows = await self.db.fetch(
             """
@@ -144,6 +197,10 @@ class TopologyRetriever:
                         WHERE lower(COALESCE(label,'')) LIKE '%' || term || '%'
                            OR lower(node_key) LIKE '%' || term || '%'
                     )
+                )
+                OR (
+                    cardinality($6::uuid[]) > 0
+                    AND proposition_id = ANY($6::uuid[])
                 )
             ),
             walk(topology_node_id, depth, path_cost, path) AS (
@@ -189,7 +246,7 @@ class TopologyRetriever:
                       WHEN e.parent_node_id=w.topology_node_id THEN e.child_node_id
                       ELSE e.parent_node_id
                   END
-                WHERE w.depth < $6
+                WHERE w.depth < $7
                   AND NOT (
                       CASE
                           WHEN e.parent_node_id=w.topology_node_id THEN e.child_node_id
@@ -286,7 +343,7 @@ class TopologyRetriever:
                         ccr.resolved_at DESC
                     LIMIT 1
                 ) ctx ON true
-                WHERE COALESCE(ctx.claim_kind, 'BELIEF') = ANY($7::text[])
+                WHERE COALESCE(ctx.claim_kind, 'BELIEF') = ANY($8::text[])
             ),
             topic_ranked AS (
                 SELECT c.*,
@@ -303,20 +360,21 @@ class TopologyRetriever:
             )
             SELECT *
             FROM topic_ranked
-            WHERE $8::boolean OR topic_recency_rank=1
+            WHERE $9::boolean OR topic_recency_rank=1
             ORDER BY
                 topology_cost,
                 topology_depth,
                 topology_significance DESC,
                 instance_depth,
                 updated_at DESC
-            LIMIT $9
+            LIMIT $10
             """,
             scope_key,
             lineage_ids,
             lineage_keys,
             str(context.instance_id),
             terms,
+            semantic_seed_ids,
             hops,
             list(policy.claim_kinds),
             bool(policy.retain_topic_history),
