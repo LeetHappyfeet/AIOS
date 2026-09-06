@@ -83,6 +83,20 @@ async def get_profile(db: Database, *, character_id: str) -> HUDProfile:
     return HUDProfile.from_row(row)
 
 
+async def get_profile_by_name(
+    db: Database,
+    *,
+    profile_name: str,
+) -> HUDProfile:
+    row = await db.fetchrow(
+        "SELECT * FROM aios.hud_profile WHERE profile_name=$1",
+        profile_name,
+    )
+    if not row:
+        raise ValueError(f"Unknown HUD profile '{profile_name}'")
+    return HUDProfile.from_row(row)
+
+
 async def list_profiles(db: Database) -> list[HUDProfile]:
     rows = await db.fetch(
         "SELECT * FROM aios.hud_profile ORDER BY profile_name"
