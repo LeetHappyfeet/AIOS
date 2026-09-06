@@ -21,6 +21,7 @@ def test_zero_claim_message_is_ready_after_extraction():
             "normalized": 0,
             "knowledge_ready": 0,
             "topology_ready": 0,
+            "acquisition_topology_ready": 0,
         },
     ])
     ready = asyncio.run(
@@ -42,6 +43,7 @@ def test_claim_message_waits_for_all_retrieval_stages():
             "normalized": 2,
             "knowledge_ready": 1,
             "topology_ready": 2,
+            "acquisition_topology_ready": 1,
         },
     ])
     ready = asyncio.run(
@@ -63,6 +65,7 @@ def test_claim_message_ready_when_context_knowledge_and_topology_match():
             "normalized": 2,
             "knowledge_ready": 2,
             "topology_ready": 2,
+            "acquisition_topology_ready": 2,
         },
     ])
     ready = asyncio.run(
