@@ -63,6 +63,16 @@ async def handle_normalize_proposition(db: Database, job: Dict[str, Any]) -> Non
             claim_id,
         )
         return
+    context = await db.fetchrow(
+        "SELECT 1 FROM aios.claim_context_resolution WHERE claim_id=$1",
+        claim_id,
+    )
+    if not context:
+        logger.info(
+            "Deferring normalize_proposition for claim %s until context resolution",
+            claim_id,
+        )
+        return
     await normalize_claim_once(db, claim_id=claim_id)
 
 
@@ -75,6 +85,16 @@ async def handle_rdf_epistemic_project(db: Database, job: Dict[str, Any]) -> Non
     if not exists:
         logger.warning(
             "Skipping stale rdf_epistemic_project job for missing observation claim %s",
+            claim_id,
+        )
+        return
+    context = await db.fetchrow(
+        "SELECT 1 FROM aios.claim_context_resolution WHERE claim_id=$1",
+        claim_id,
+    )
+    if not context:
+        logger.info(
+            "Deferring rdf_epistemic_project for claim %s until context resolution",
             claim_id,
         )
         return
