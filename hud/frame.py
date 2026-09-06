@@ -118,8 +118,23 @@ class HUDAssembler:
         goals = list(_json_value(raw_state.get("goals"), []))
         scorer = HUDRelevanceScorer(context, focus_text=focus_text, goals=goals)
 
+        section_caps = dict(self.budget.section_tokens)
+        if token_budget is not None and token_budget > 0:
+            scale = token_budget / max(1, self.budget.total_tokens)
+            section_caps = {
+                key: max(32, int(value * scale))
+                for key, value in section_caps.items()
+            }
+            resolved_total = token_budget
+        else:
+            resolved_total = self.budget.total_tokens
+
         identity = await self._identity(context)
-        scene = await self._scene(context, scorer)
+        scene = await self._scene(
+            context,
+            scorer,
+            token_cap=section_caps["scene"],
+        )
         relationships = await self._relationships(context, scorer)
         inventory = await self._inventory(context, scorer)
         knowledge = await self._knowledge(context, scorer)
@@ -160,17 +175,6 @@ class HUDAssembler:
         # Old event claims can be useful causal context, but current DAG events
         # stay first because they describe what actually just happened here.
         event_items = list(reversed(recent_events)) + semantic_events
-
-        section_caps = dict(self.budget.section_tokens)
-        if token_budget is not None and token_budget > 0:
-            scale = token_budget / max(1, self.budget.total_tokens)
-            section_caps = {
-                key: max(32, int(value * scale))
-                for key, value in section_caps.items()
-            }
-            resolved_total = token_budget
-        else:
-            resolved_total = self.budget.total_tokens
 
         memories = _trim_to_budget(
             memories,
@@ -281,6 +285,8 @@ class HUDAssembler:
         self,
         context: HUDContext,
         scorer: HUDRelevanceScorer,
+        *,
+        token_cap: int,
     ) -> dict[str, Any]:
         rows = await self.db.fetch(
             """
@@ -317,10 +323,9 @@ class HUDAssembler:
                 -item["relevance"]["total"],
             )
         )
-        cap = self.budget.section_tokens["scene"]
         entities = _trim_to_budget(
             entities,
-            cap,
+            token_cap,
             lambda x: f"{x.get('display_name','')} {x.get('entity_type','')} {x.get('meta','')}",
         )
 
@@ -489,6 +494,9 @@ class HUDAssembler:
                       WHEN pc.proposition_a_id=p.proposition_id THEN pc.proposition_b_id
                       ELSE pc.proposition_a_id
                   END
+                JOIN aios.character_proposition_knowledge other_ck
+                  ON other_ck.instance_id=$1
+                 AND other_ck.proposition_id=other.proposition_id
                 WHERE pc.proposition_a_id=p.proposition_id
                    OR pc.proposition_b_id=p.proposition_id
             ) conflicts ON true
