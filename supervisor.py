@@ -61,6 +61,10 @@ def assertion_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"assertion_id": str(row["assertion_id"])}
 
 
+def acquisition_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {"acquisition_id": str(row["acquisition_id"])}
+
+
 def empty_payload(_: Dict[str, object]) -> Dict[str, object]:
     return {}
 
@@ -370,6 +374,33 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+    ),
+
+
+    Stage(
+        name="derive_character_acquisition_topology",
+        job_type="derive_character_acquisition_topology",
+        eligibility_sql="""
+        SELECT kae.acquisition_id
+        FROM aios.knowledge_acquisition_event kae
+        WHERE kae.proposition_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM aios.semantic_topology_projection stp
+            WHERE stp.acquisition_id=kae.acquisition_id
+              AND stp.projected_at IS NOT NULL
+              AND stp.resolver_version='semantic-topology-v1'
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='derive_character_acquisition_topology'
+              AND pj.status IN ('queued','running')
+              AND pj.payload->>'acquisition_id'=kae.acquisition_id::text
+        )
+        ORDER BY kae.created_at
+        LIMIT $1
+        """,
+        payload_builder=acquisition_id_payload,
     ),
 
     # -------------------------------------------------
