@@ -288,17 +288,38 @@ class HUDAssembler:
         *,
         token_cap: int,
     ) -> dict[str, Any]:
+        seed_ids = list(context.scene_entity_ids)
         rows = await self.db.fetch(
             """
-            SELECT entity_id, entity_type, display_name, entity_key, meta
-            FROM aios.world_entity
-            WHERE world_id=$1
-              AND entity_id IS DISTINCT FROM $2
-            ORDER BY created_at
+            WITH seed(entity_id) AS (
+                SELECT unnest($3::uuid[])
+            ),
+            expanded(entity_id) AS (
+                SELECT entity_id FROM seed
+                UNION
+                SELECT CASE
+                    WHEN r.subject_entity_id = ANY($3::uuid[]) THEN r.object_entity_id
+                    ELSE r.subject_entity_id
+                END
+                FROM aios.world_entity_relation r
+                WHERE r.world_id=$1
+                  AND r.valid_to_node_id IS NULL
+                  AND (
+                      r.subject_entity_id = ANY($3::uuid[])
+                      OR r.object_entity_id = ANY($3::uuid[])
+                  )
+            )
+            SELECT e.entity_id, e.entity_type, e.display_name, e.entity_key, e.meta
+            FROM aios.world_entity e
+            JOIN expanded x ON x.entity_id=e.entity_id
+            WHERE e.world_id=$1
+              AND e.entity_id IS DISTINCT FROM $2
+            ORDER BY e.created_at
             LIMIT 200
             """,
             context.world_id,
             context.entity_id,
+            seed_ids,
         )
         entities: list[dict[str, Any]] = []
         location = None
@@ -329,16 +350,18 @@ class HUDAssembler:
             lambda x: f"{x.get('display_name','')} {x.get('entity_type','')} {x.get('meta','')}",
         )
 
+        selected_ids = [context.entity_id] + [item["entity_id"] for item in entities]
         relations = await self.db.fetch(
             """
             SELECT relation_type, subject_entity_id, object_entity_id, meta
             FROM aios.world_entity_relation
             WHERE world_id=$1
               AND valid_to_node_id IS NULL
-              AND (subject_entity_id=$2 OR object_entity_id=$2)
+              AND subject_entity_id = ANY($2::uuid[])
+              AND object_entity_id = ANY($2::uuid[])
             """,
             context.world_id,
-            context.entity_id,
+            selected_ids,
         )
 
         actors = [
