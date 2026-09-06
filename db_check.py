@@ -11,6 +11,7 @@ REQUIRED_TABLES = {
     "character_identity",
     "character_instance",
     "character_runtime_state",
+    "character_hud_readiness",
     "character_epistemic_profile",
     "character_proposition_knowledge",
     "source_identity",
