@@ -70,16 +70,19 @@ async def project_knowledge_acquisitions_once(
     db: Database,
     *,
     limit: int = 200,
+    instance_id: Optional[UUID] = None,
 ) -> int:
     rows = await db.fetch(
         """
         SELECT *
         FROM aios.knowledge_acquisition_event
         WHERE processed_at IS NULL
+          AND ($2::uuid IS NULL OR instance_id=$2)
         ORDER BY created_at
         LIMIT $1
         """,
         limit,
+        instance_id,
     )
     projected = 0
 
