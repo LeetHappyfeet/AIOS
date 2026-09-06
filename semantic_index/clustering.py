@@ -69,15 +69,60 @@ def _cluster_key(embedding_version: str, members: set[UUID]) -> UUID:
     )
 
 
+def _bridge_edge_indexes(edges: list[Edge]) -> set[int]:
+    """Return graph-theoretic bridges in an undirected edge list."""
+    adjacency: dict[UUID, list[tuple[UUID, int]]] = {}
+    for idx, edge in enumerate(edges):
+        adjacency.setdefault(edge.a, []).append((edge.b, idx))
+        adjacency.setdefault(edge.b, []).append((edge.a, idx))
+
+    discovery: dict[UUID, int] = {}
+    low: dict[UUID, int] = {}
+    bridges: set[int] = set()
+    clock = 0
+
+    def visit(node: UUID, parent_edge: int | None) -> None:
+        nonlocal clock
+        clock += 1
+        discovery[node] = clock
+        low[node] = clock
+
+        for neighbor, edge_idx in adjacency.get(node, []):
+            if edge_idx == parent_edge:
+                continue
+            if neighbor not in discovery:
+                visit(neighbor, edge_idx)
+                low[node] = min(low[node], low[neighbor])
+                if low[neighbor] > discovery[node]:
+                    bridges.add(edge_idx)
+            else:
+                low[node] = min(low[node], discovery[neighbor])
+
+    for node in adjacency:
+        if node not in discovery:
+            visit(node, None)
+
+    return bridges
+
+
 def _build_core_components(
     edges: list[Edge],
     *,
     core_threshold: float,
     min_cluster_size: int,
 ) -> list[set[UUID]]:
+    strong_edges = [
+        edge for edge in edges
+        if edge.similarity >= core_threshold
+    ]
+    bridge_indexes = _bridge_edge_indexes(strong_edges)
+
     uf = UnionFind()
-    for edge in edges:
-        if edge.similarity < core_threshold:
+    for idx, edge in enumerate(strong_edges):
+        # A single edge is insufficient evidence to fuse two semantic regions.
+        # Removing bridges makes cores cycle/density supported instead of merely
+        # connected.
+        if idx in bridge_indexes:
             continue
         uf.union(edge.a, edge.b)
 
@@ -163,12 +208,23 @@ def _attach_fringe(
     return drafts, all_nodes - claimed
 
 
-def _cluster_metrics(draft: ClusterDraft) -> tuple[float, float, float, float]:
+def _cluster_metrics(
+    draft: ClusterDraft,
+    *,
+    neighbor_k: int,
+) -> tuple[float, float, float, float]:
     n = len(draft.members)
     possible_edges = n * (n - 1) / 2
+    # The proposition graph is a capped k-nearest-neighbor graph, not a full
+    # similarity matrix. Normalize against the maximum edge capacity that the
+    # index can reasonably expose for this cluster size.
+    observed_capacity = min(
+        possible_edges,
+        n * max(1, min(neighbor_k, n - 1)) / 2,
+    )
     density = (
-        len(draft.internal_edges) / possible_edges
-        if possible_edges > 0
+        min(1.0, len(draft.internal_edges) / observed_capacity)
+        if observed_capacity > 0
         else 0.0
     )
     cohesion = (
@@ -401,7 +457,10 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
         accepted_clusters = 0
         cluster_membership_map: dict[UUID, UUID] = {}
         for draft in drafts:
-            density, cohesion, boundary_strength, separation = _cluster_metrics(draft)
+            density, cohesion, boundary_strength, separation = _cluster_metrics(
+                draft,
+                neighbor_k=cfg.neighbor_k,
+            )
             if cohesion < cfg.cluster_min_cohesion:
                 unclaimed.update(draft.members)
                 continue
