@@ -24,7 +24,7 @@ class RetrievalPolicy:
 POLICIES = {
     "memory": RetrievalPolicy(
         "memory",
-        ("MEMORY", "EVENT", "RELATIONSHIP"),
+        ("MEMORY", "EVENT"),
         max_hops=3,
         limit=60,
         retain_topic_history=True,
@@ -49,6 +49,13 @@ POLICIES = {
         max_hops=2,
         limit=40,
         retain_topic_history=True,
+    ),
+    "rule": RetrievalPolicy(
+        "rule",
+        ("RULE",),
+        max_hops=1,
+        limit=30,
+        retain_topic_history=False,
     ),
 }
 
