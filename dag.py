@@ -71,24 +71,39 @@ async def get_or_create_timeline(
     meta: Optional[Dict[str, Any]] = None,
 ) -> UUID:
     """
-    One timeline per world.
-    World continuity is singular.
-    Matches UNIQUE (world_id, name).
+    Resolve the temporal DAG timeline for one conversation/source scope.
+
+    Timeline identity is:
+      world + name + session + character + user + scope
+
+    The previous world/name-only identity caused every liminal conversation to
+    share one DAG and interleave unrelated message histories.
     """
 
     meta_json = json.dumps(meta or {})
     world_id = await get_or_create_world(db, world_key=world_key)
 
-    row = await db.fetchrow(
-        """
-        SELECT timeline_id
-        FROM aios.timeline
-        WHERE world_id = $1
-          AND name = 'main'
-        LIMIT 1
-        """,
-        world_id,
-    )
+    async def _fetch_existing():
+        return await db.fetchrow(
+            """
+            SELECT timeline_id
+            FROM aios.timeline
+            WHERE world_id = $1
+              AND name = 'main'
+              AND session_id IS NOT DISTINCT FROM $2
+              AND character_id IS NOT DISTINCT FROM $3
+              AND user_name IS NOT DISTINCT FROM $4
+              AND scope_key = $5
+            LIMIT 1
+            """,
+            world_id,
+            session_id,
+            character_id,
+            user_name,
+            scope_key,
+        )
+
+    row = await _fetch_existing()
     if row:
         return row["timeline_id"]
 
@@ -104,7 +119,7 @@ async def get_or_create_timeline(
             meta
         )
         VALUES ($1, 'main', $2, $3, $4, $5, $6::jsonb)
-        ON CONFLICT (world_id, name) DO NOTHING
+        ON CONFLICT DO NOTHING
         RETURNING timeline_id
         """,
         world_id,
@@ -117,16 +132,11 @@ async def get_or_create_timeline(
     if row:
         return row["timeline_id"]
 
-    row = await db.fetchrow(
-        """
-        SELECT timeline_id
-        FROM aios.timeline
-        WHERE world_id = $1
-          AND name = 'main'
-        LIMIT 1
-        """,
-        world_id,
-    )
+    row = await _fetch_existing()
+    if not row:
+        raise RuntimeError(
+            "Timeline insert conflicted but matching timeline could not be resolved"
+        )
     return row["timeline_id"]
 
 
@@ -166,6 +176,7 @@ async def add_node_and_edge(
     *,
     timeline_id: UUID,
     event_id: int,
+    character_id: Optional[str],
     kind: str,
     speaker_id: Optional[str],
     speaker_role: Optional[str],
@@ -208,6 +219,7 @@ async def add_node_and_edge(
             timeline_id,
             event_id,
             event_time,
+            character_id,
             kind,
             speaker_id,
             speaker_role,
@@ -219,12 +231,13 @@ async def add_node_and_edge(
             $1,
             $2,
             COALESCE(ie.event_time, ie.created_at),
-            $3::aios.event_kind,
-            $4,
-            $5::aios.actor_type,
-            $6,
+            $3,
+            $4::aios.event_kind,
+            $5,
+            $6::aios.actor_type,
             $7,
-            $8::jsonb
+            $8,
+            $9::jsonb
         FROM aios.ingest_event ie
         WHERE ie.event_id = $2
         ON CONFLICT (timeline_id, event_id) DO NOTHING
@@ -232,6 +245,7 @@ async def add_node_and_edge(
         """,
         timeline_id,
         event_id,
+        character_id,
         kind,
         speaker_id,
         speaker_role,

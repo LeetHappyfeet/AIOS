@@ -48,6 +48,13 @@ async def detect_split_seed_and_grow(
       - keep edges above cfg.edge_threshold
       - do a crude 2-cluster split on embeddings of the gathered nodes
     """
+    if source_type.lower() in {"news", "internet", "web"}:
+        logger.info(
+            "Narrative-like source_type=%s is routed to narrative clustering, not world splitting",
+            source_type,
+        )
+        return None
+
     qs = RagQueryService(cfg)
 
     filters = RagFilters(

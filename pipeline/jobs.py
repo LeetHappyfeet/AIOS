@@ -56,19 +56,38 @@ async def enqueue_job(
 
 
 # ---------------------------------------------------------------------
-# Fetch
+# Atomic fetch + claim
 # ---------------------------------------------------------------------
 
 async def fetch_next_job(db: Database) -> Optional[Dict[str, Any]]:
-    row = await db.fetchrow(
+    """
+    Atomically claim the next runnable job.
+
+    The previous implementation selected FOR UPDATE through one pooled
+    connection and then marked the job running through another connection.
+    The row lock was therefore released before the state transition, allowing
+    multiple runners to claim the same job. This single UPDATE statement keeps
+    selection, SKIP LOCKED, and the queued→running transition atomic.
+    """
+
+    row = await db.execute_returning_row(
         """
-        SELECT job_id, job_type, payload
-        FROM aios.pipeline_job
-        WHERE status = 'queued'
-          AND run_after <= now()
-        ORDER BY priority ASC, created_at ASC
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1
+        WITH next_job AS (
+            SELECT job_id
+            FROM aios.pipeline_job
+            WHERE status = 'queued'
+              AND run_after <= now()
+            ORDER BY priority ASC, created_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE aios.pipeline_job pj
+        SET status = 'running',
+            attempts = pj.attempts + 1,
+            updated_at = now()
+        FROM next_job nj
+        WHERE pj.job_id = nj.job_id
+        RETURNING pj.job_id, pj.job_type, pj.payload
         """
     )
 
@@ -76,13 +95,10 @@ async def fetch_next_job(db: Database) -> Optional[Dict[str, Any]]:
         return None
 
     job = dict(row)
-
-    # 🔑 Normalize JSON payload
     if isinstance(job.get("payload"), str):
         job["payload"] = json.loads(job["payload"])
 
     return job
-
 
 
 # ---------------------------------------------------------------------
@@ -91,7 +107,8 @@ async def fetch_next_job(db: Database) -> Optional[Dict[str, Any]]:
 
 async def mark_running(db: Database, job_id: UUID) -> None:
     """
-    Mark a job as running and increment attempt counter.
+    Backward-compatible helper. New runners should not call this because
+    fetch_next_job() now performs the queued→running transition atomically.
     """
     await db.execute(
         """
@@ -100,15 +117,13 @@ async def mark_running(db: Database, job_id: UUID) -> None:
             attempts = attempts + 1,
             updated_at = now()
         WHERE job_id = $1
+          AND status <> 'running'
         """,
         job_id,
     )
 
 
 async def mark_done(db: Database, job_id: UUID) -> None:
-    """
-    Mark a job as completed successfully.
-    """
     await db.execute(
         """
         UPDATE aios.pipeline_job
@@ -125,10 +140,6 @@ async def mark_failed(
     job_id: UUID,
     error: str,
 ) -> None:
-    """
-    Mark a job as failed.
-    Error text is truncated to prevent DB abuse.
-    """
     await db.execute(
         """
         UPDATE aios.pipeline_job
@@ -143,7 +154,7 @@ async def mark_failed(
 
 
 # ---------------------------------------------------------------------
-# Optional helpers (nice to have, not required)
+# Optional retry helper
 # ---------------------------------------------------------------------
 
 async def retry_failed_job(
@@ -152,9 +163,6 @@ async def retry_failed_job(
     job_id: UUID,
     delay_seconds: int = 30,
 ) -> None:
-    """
-    Requeue a failed job after a delay.
-    """
     await db.execute(
         """
         UPDATE aios.pipeline_job

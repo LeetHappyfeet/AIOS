@@ -1,0 +1,73 @@
+@prefix world: <urn:aios:world#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+#################################################################
+# Claim context resolution vocabulary
+#
+# These terms annotate observed liminal claims. They do not assert that the
+# claim is true in a world or known by any character other than through an
+# explicit character epistemic projection.
+#################################################################
+
+world:claimKind a rdf:Property ;
+    rdfs:comment "First-order semantic class assigned to an observed claim." .
+
+world:subjectKind a rdf:Property ;
+    rdfs:comment "Semantic class of the claim's resolved/surface subject." .
+
+world:objectKind a rdf:Property ;
+    rdfs:comment "Semantic class of the claim's object." .
+
+world:predicateFamily a rdf:Property ;
+    rdfs:comment "Traversal semantics for the claim predicate." .
+
+world:originCharacter a rdf:Property ;
+    rdfs:comment "Character identity whose memory/viewpoint chain introduced the observation." .
+
+world:originCharacterInstance a rdf:Property ;
+    rdfs:comment "World-specific character instance associated with the observation when resolvable." .
+
+world:originWorld a rdf:Property ;
+    rdfs:comment "World containing the source timeline; provenance only, not world truth." .
+
+world:originTimeline a rdf:Property ;
+    rdfs:comment "DAG timeline from which the observation was derived." .
+
+world:viewpointId a rdf:Property .
+world:epistemicScope a rdf:Property .
+world:acquisitionMode a rdf:Property .
+world:subjectIsPivot a rdf:Property .
+world:objectIsPivot a rdf:Property .
+world:contextResolverVersion a rdf:Property .
+
+world:Person a rdfs:Class .
+world:Location a rdfs:Class .
+world:Object a rdfs:Class .
+world:Event a rdfs:Class .
+world:Memory a rdfs:Class .
+world:Relationship a rdfs:Class .
+world:Belief a rdfs:Class .
+world:Goal a rdfs:Class .
+world:Rule a rdfs:Class .
+world:Trait a rdfs:Class .
+world:State a rdfs:Class .
+world:Concept a rdfs:Class .
+world:Organization a rdfs:Class .
+world:Time a rdfs:Class .
+world:Action a rdfs:Class .
+world:Quantity a rdfs:Class .
+world:Unknown a rdfs:Class .
+
+world:Spatial a rdfs:Class .
+world:Temporal a rdfs:Class .
+world:Social a rdfs:Class .
+world:Possession a rdfs:Class .
+world:Epistemic a rdfs:Class .
+world:Causal a rdfs:Class .
+world:Emotional a rdfs:Class .
+world:Identity a rdfs:Class .
+world:Descriptive a rdfs:Class .
+world:Membership a rdfs:Class .
+world:Communication a rdfs:Class .

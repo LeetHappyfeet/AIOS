@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Dict, Optional, Iterable
 from dataclasses import dataclass
@@ -210,7 +211,7 @@ class IdentityStore:
             franchise,
             entity_type,
             home_world_id,
-            meta,
+            json.dumps(meta),
         )
 
         identity = self._row_to_identity(row)

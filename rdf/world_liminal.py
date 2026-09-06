@@ -11,6 +11,8 @@ logger = logging.getLogger("aios.rdf.world_liminal")
 
 DATASET = "world"
 GRAPH_IRI = "urn:aios:world:liminal"
+BASE_RECEIPT_PREDICATE = "rdf:type"
+BASE_RECEIPT_OBJECT = "world:Claim"
 
 
 # -------------------------------------------------
@@ -29,8 +31,8 @@ async def promote_liminal_claims(
 
     The section is the completion boundary for a stored message. A successful
     RDF write is acknowledged in rdf_promotion_log per claim. Only after every
-    claim belonging to the section has a receipt is the originating
-    ingest_event marked rdf_processed_at/process_status='done'.
+    claim belonging to the section has its base rdf:type world:Claim receipt is
+    the originating ingest_event marked rdf_processed_at/process_status='done'.
 
     Semantics:
     - Liminal is NOT a world
@@ -64,7 +66,7 @@ async def promote_liminal_claims(
     logger.info(
         "Promoted %d claims from section %s into /world/liminal",
         len(rows),
-        section_id,
+        str(section_id),
     )
     return len(rows)
 
@@ -103,13 +105,17 @@ async def _fetch_claims(
               WHERE rpl.claim_id = cc.claim_id
                 AND rpl.rdf_dataset = $2
                 AND rpl.rdf_graph = $3
+                AND rpl.rdf_predicate = $4
+                AND rpl.rdf_object = $5
           )
         ORDER BY es.sentence_index, cc.created_at
-        LIMIT $4
+        LIMIT $6
         """,
         section_id,
         DATASET,
         GRAPH_IRI,
+        BASE_RECEIPT_PREDICATE,
+        BASE_RECEIPT_OBJECT,
         limit,
     )
 
@@ -137,17 +143,19 @@ async def _log_promotion(
             $2,
             $3,
             'urn:aios:world:claim:' || $1::text,
-            'rdf:type',
-            'world:Claim',
+            $4,
+            $5,
             'world_liminal_writer',
             now(),
-            jsonb_build_object('section_id', $4::text)
+            jsonb_build_object('section_id', ($6::uuid)::text)
         )
-        ON CONFLICT (claim_id, rdf_dataset, rdf_graph) DO NOTHING
+        ON CONFLICT (claim_id, rdf_dataset, rdf_graph, rdf_predicate) DO NOTHING
         """,
         claim_id,
         DATASET,
         GRAPH_IRI,
+        BASE_RECEIPT_PREDICATE,
+        BASE_RECEIPT_OBJECT,
         section_id,
     )
 
@@ -157,7 +165,7 @@ async def _finalize_section_if_complete(
     section_id: UUID,
 ) -> bool:
     """
-    Mark the source ingest event done iff no unacknowledged claims remain.
+    Mark the source ingest event done iff no unacknowledged base claims remain.
 
     Sections containing no extracted sentences/claims are terminal too: there
     is no RDF content to write, but all eligible RDF work is complete.
@@ -179,6 +187,8 @@ async def _finalize_section_if_complete(
                       WHERE rpl.claim_id = cc.claim_id
                         AND rpl.rdf_dataset = $2
                         AND rpl.rdf_graph = $3
+                        AND rpl.rdf_predicate = $4
+                        AND rpl.rdf_object = $5
                   )
             ) AS has_unpromoted_claims
         FROM aios.document_section ds
@@ -189,6 +199,8 @@ async def _finalize_section_if_complete(
         section_id,
         DATASET,
         GRAPH_IRI,
+        BASE_RECEIPT_PREDICATE,
+        BASE_RECEIPT_OBJECT,
     )
 
     if not row:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 from typing import Optional, Dict, Any
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,9 +17,39 @@ from aios_app.models import (
     IngestIn,
     IngestOut,
     MemoryOut,
+    CharacterActivateIn,
+    CharacterActivateOut,
+    WorldEntityCreateIn,
+    WorldRelationCreateIn,
+    WorldRulePutIn,
+    WorldActionIn,
+    CharacterForkIn,
+    EntityControllerIn,
+    KnowledgeAcquireIn,
+    GeneratedFactIn,
+    WorldObservedFactIn,
+    LongDocumentIn,
+    CharacterEpistemicProfileIn,
+    DocumentAcquireIn,
+    EpistemicSearchIn,
 )
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.memory import recent_nodes_as_memory, pick_latest_timeline_for_character
+from aios_app.world.runtime import WorldRuntimeService, RuntimeConflict, RuntimeNotFound
+from aios_app.epistemic.knowledge import record_acquisition
+from aios_app.epistemic.generated import (
+    create_generated_fact,
+    assert_claim_or_proposition_in_world,
+)
+from aios_app.epistemic.query import proposition_context, world_epistemic_state
+from aios_app.documents.long_document import ingest_long_document
+from aios_app.epistemic.weights import (
+    get_profile,
+    upsert_profile,
+    reweight_character_knowledge,
+)
+from aios_app.epistemic.knowledge import acquire_document
+from aios_app.epistemic.search import epistemic_search, document_epistemic_summary
 
 logger = logging.getLogger("aios.main")
 
@@ -37,6 +68,7 @@ app.add_middleware(
 )
 
 db = Database(settings.db_dsn)
+world_runtime = WorldRuntimeService(db)
 
 # =================================================
 # Lifecycle
@@ -119,6 +151,9 @@ async def ingest(req: IngestIn) -> IngestOut:
             "speaker_type": req.speaker_type,
             "speaker_id": req.speaker_id,
             "recipient_id": req.recipient_id,
+            "viewpoint_id": req.viewpoint_id,
+            "pivot_character_id": req.character_id,
+            "identity_ruleset": "character-id-v1",
             "scope_key": req.scope_key or settings.default_scope,
         }
     )
@@ -212,6 +247,7 @@ async def ingest(req: IngestIn) -> IngestOut:
             db,
             timeline_id=timeline_id,
             event_id=event_id,
+            character_id=req.character_id,
             kind=req.kind or "other",
             speaker_id=req.speaker_id,
             speaker_role=req.speaker_type,
@@ -219,6 +255,53 @@ async def ingest(req: IngestIn) -> IngestOut:
             message_text=message_text,
             payload=payload,
             edge_type="next",
+        )
+
+        # -------------------------------------------------
+        # Runtime source-perception cursor advancement
+        # -------------------------------------------------
+        # The liminal/source DAG remains immutable provenance.  Matching active
+        # runtime instances merely advance their authorized perception boundary;
+        # source messages are never copied into the concrete runtime DAG.
+        await db.execute(
+            """
+            UPDATE aios.character_runtime_state rs
+            SET source_timeline_id=$1,
+                source_head_node_id=$2,
+                updated_at=now()
+            FROM aios.character_instance ci,
+                 aios.timeline rt,
+                 aios.world rw
+            WHERE ci.instance_id=rs.instance_id
+              AND rt.timeline_id=rs.timeline_id
+              AND rw.world_id=rs.world_id
+              AND ci.character_id=$3
+              AND rt.session_id IS NOT DISTINCT FROM $4
+              AND rt.user_name IS NOT DISTINCT FROM $5
+              AND rt.scope_key=$6
+              AND (
+                    rs.source_timeline_id=$1
+                    OR (
+                        rs.source_timeline_id IS NULL
+                        AND rw.anchor_timeline_id=$1
+                    )
+                  )
+              AND COALESCE(
+                    (
+                        SELECT dn.event_id
+                        FROM aios.dag_node dn
+                        WHERE dn.node_id=rs.source_head_node_id
+                    ),
+                    -1
+                  ) <= $7
+            """,
+            timeline_id,
+            node_id,
+            req.character_id,
+            req.session_id,
+            req.user_name,
+            req.scope_key or settings.default_scope,
+            event_id,
         )
     except Exception as exc:
         await db.execute(
@@ -276,4 +359,358 @@ async def memory(
     return MemoryOut(
         timeline_id=timeline_id,
         vector_matches=matches,
+    )
+
+
+# =================================================
+# Shared concrete world runtime
+# =================================================
+
+@app.post("/character/{character_id}/activate", response_model=CharacterActivateOut)
+async def activate_character(character_id: str, req: CharacterActivateIn) -> CharacterActivateOut:
+    """
+    Materialize or resume one experiential character instance in a concrete world.
+
+    controller_type distinguishes live humans from LLM agents/scripts without
+    changing the world/entity model seen by the simulation.
+    """
+    try:
+        result = await world_runtime.activate_character(
+            character_id=character_id,
+            user_name=req.user_name,
+            session_id=req.session_id,
+            scope_key=req.scope_key,
+            world_id=req.world_id,
+            world_key=req.world_key,
+            controller_type=req.controller_type,
+            controller_ref=req.controller_ref,
+        )
+        return CharacterActivateOut(**result.__dict__)
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/instance/{instance_id}/state")
+async def get_instance_state(instance_id: UUID):
+    try:
+        return await world_runtime.get_state(instance_id)
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/instance/{instance_id}/frame")
+async def get_instance_frame(
+    instance_id: UUID,
+    recent_limit: int = 12,
+    token_budget: Optional[int] = None,
+):
+    """Build the canonical branch-aware RPG HUD for this runtime instance."""
+    try:
+        return await world_runtime.build_frame(
+            instance_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
+        )
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/instance/{instance_id}/action")
+async def apply_instance_action(instance_id: UUID, req: WorldActionIn):
+    try:
+        return await world_runtime.apply_action(
+            instance_id=instance_id,
+            expected_state_version=req.expected_state_version,
+            action_type=req.action_type,
+            target_entity_id=req.target_entity_id,
+            text=req.text,
+            payload=req.payload,
+        )
+    except RuntimeConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/entity")
+async def create_world_entity(world_id: UUID, req: WorldEntityCreateIn):
+    try:
+        return await world_runtime.create_entity(
+            world_id=world_id,
+            entity_key=req.entity_key,
+            entity_type=req.entity_type,
+            display_name=req.display_name,
+            meta=req.meta,
+        )
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/relation")
+async def create_world_relation(world_id: UUID, req: WorldRelationCreateIn):
+    """
+    Express composable relations such as hosted_on, wearing, riding,
+    attached_to, controlling, inside, or observes_through.
+    """
+    try:
+        return await world_runtime.relate_entities(
+            world_id=world_id,
+            subject_entity_id=req.subject_entity_id,
+            relation_type=req.relation_type,
+            object_entity_id=req.object_entity_id,
+            meta=req.meta,
+        )
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/world/{world_id}/rule/{rule_key}")
+async def put_world_rule(world_id: UUID, rule_key: str, req: WorldRulePutIn):
+    return await world_runtime.upsert_rule(
+        world_id=world_id,
+        rule_key=rule_key,
+        rule_type=req.rule_type,
+        enabled=req.enabled,
+        priority=req.priority,
+        rule_data=req.rule_data,
+    )
+
+
+@app.post("/instance/{instance_id}/fork", response_model=CharacterActivateOut)
+async def fork_instance(instance_id: UUID, req: CharacterForkIn) -> CharacterActivateOut:
+    """Create a new experiential continuation in another epistemic/runtime world."""
+    try:
+        result = await world_runtime.fork_instance(
+            source_instance_id=instance_id,
+            target_world_id=req.target_world_id,
+            target_world_key=req.target_world_key,
+        )
+        return CharacterActivateOut(**result.__dict__)
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/instance/{instance_id}/frame/text")
+async def get_instance_text_frame(
+    instance_id: UUID,
+    recent_limit: int = 12,
+    token_budget: Optional[int] = None,
+):
+    try:
+        return {
+            "instance_id": instance_id,
+            "text": await world_runtime.render_text_frame(
+                instance_id,
+                recent_limit=recent_limit,
+                token_budget=token_budget,
+            ),
+        }
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/entity/{entity_id}/controller")
+async def add_entity_controller(entity_id: UUID, req: EntityControllerIn):
+    try:
+        return await world_runtime.add_controller(
+            entity_id=entity_id,
+            controller_type=req.controller_type,
+            controller_ref=req.controller_ref,
+            authority=req.authority,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# =================================================
+# Epistemic control API
+# =================================================
+
+@app.post("/instance/{instance_id}/knowledge/acquire")
+async def acquire_instance_knowledge(instance_id: UUID, req: KnowledgeAcquireIn):
+    """
+    Record an explicit information-acquisition event.
+
+    This does not grant global /world omniscience. The supervisor projects the
+    acquisition into this experiential character instance only.
+    """
+    try:
+        acquisition_id = await record_acquisition(
+            db,
+            instance_id=instance_id,
+            proposition_id=req.proposition_id,
+            claim_id=req.claim_id,
+            acquisition_mode=req.acquisition_mode,
+            epistemic_status=req.epistemic_status,
+            confidence=req.confidence,
+            source_entity_id=req.source_entity_id,
+            dag_node_id=req.dag_node_id,
+            meta=req.meta,
+        )
+        return {
+            "ok": True,
+            "acquisition_id": acquisition_id,
+            "projection_status": "queued",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/fact/generated")
+async def generate_provisional_world_fact(world_id: UUID, req: GeneratedFactIn):
+    """
+    Add a generated gap-fill proposition as provisional, never as silent truth.
+    Later concrete observations can corroborate or supersede it.
+    """
+    try:
+        return await create_generated_fact(
+            db,
+            world_id=world_id,
+            subject=req.subject,
+            predicate=req.predicate,
+            object_value=req.object,
+            raw_text=req.raw_text,
+            confidence=req.confidence,
+            generated_at_node_id=req.generated_at_node_id,
+            reason=req.reason,
+            meta=req.meta,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/epistemic/proposition/{proposition_id}")
+async def get_proposition_context(proposition_id: UUID):
+    """Show source narratives, evidence distribution, and explicit conflicts."""
+    try:
+        return await proposition_context(db, proposition_id=proposition_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/world/{world_id}/epistemic")
+async def get_world_epistemic_state(world_id: UUID):
+    """Inspect provisional, observed, corroborated, and superseded world facts."""
+    try:
+        return await world_epistemic_state(db, world_id=world_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/fact/observed")
+async def import_observed_world_fact(world_id: UUID, req: WorldObservedFactIn):
+    """
+    Promote an already-normalized RP/web observation into this concrete world.
+
+    This is explicit world bootstrap, not automatic truth promotion from a
+    scraped source.
+    """
+    try:
+        assertion_id = await assert_claim_or_proposition_in_world(
+            db,
+            world_id=world_id,
+            proposition_id=req.proposition_id,
+            claim_id=req.claim_id,
+            confidence=req.confidence,
+            reason=req.reason,
+        )
+        return {"ok": True, "assertion_id": assertion_id}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# =================================================
+# Long-document + deterministic epistemic APIs
+# =================================================
+
+@app.post("/document/ingest")
+async def ingest_document(req: LongDocumentIn):
+    """
+    Ingest arbitrary long-form text into its own source document and DAG.
+
+    Metadata is optional and document-derived. No ISBN/DOI/author is required.
+    """
+    try:
+        return await ingest_long_document(
+            db,
+            text=req.text,
+            source_type=req.source_type,
+            source_uri=req.source_uri,
+            title=req.title,
+            source_name=req.source_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/document/{document_id}/epistemic")
+async def get_document_epistemic_summary(document_id: UUID):
+    try:
+        return await document_epistemic_summary(db, document_id=document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/instance/{instance_id}/knowledge/acquire/document/{document_id}")
+async def acquire_document_knowledge(
+    instance_id: UUID,
+    document_id: UUID,
+    req: DocumentAcquireIn,
+):
+    try:
+        return await acquire_document(
+            db,
+            instance_id=instance_id,
+            document_id=document_id,
+            acquisition_mode=req.acquisition_mode,
+            epistemic_status=req.epistemic_status,
+            confidence=req.confidence,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/character/{character_id}/epistemic-profile")
+async def get_character_epistemic_profile(character_id: str):
+    try:
+        return await get_profile(db, character_id=character_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/character/{character_id}/epistemic-profile")
+async def put_character_epistemic_profile(
+    character_id: str,
+    req: CharacterEpistemicProfileIn,
+):
+    try:
+        profile = await upsert_profile(
+            db,
+            character_id=character_id,
+            data=req.model_dump(),
+        )
+        reweighted = await reweight_character_knowledge(
+            db,
+            character_id=character_id,
+        )
+        return {
+            "profile": profile,
+            "reweighted_knowledge_rows": reweighted,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/epistemic/search")
+async def search_epistemic(req: EpistemicSearchIn):
+    return await epistemic_search(
+        db,
+        query=req.query,
+        limit=max(1, min(req.limit, 200)),
+        character_id=req.character_id,
+        instance_id=req.instance_id,
+        source_key=req.source_key,
+        include_conflicts=req.include_conflicts,
     )

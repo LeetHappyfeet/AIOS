@@ -9,6 +9,7 @@ from uuid import UUID
 import spacy
 
 from aios_app.db import Database
+from aios_app.epistemic.pivots import resolve_subject_pivot
 
 logger = logging.getLogger("aios.pipeline.worker")
 
@@ -97,7 +98,13 @@ async def run_claim_extraction_for_section(
             ds.document_id,
             ds.content,
             ds.claims_extracted_at,
-            n.event_id
+            n.event_id,
+            n.speaker_id,
+            n.speaker_role::text AS speaker_role,
+            n.recipient_id,
+            n.character_id,
+            NULLIF(n.payload->>'viewpoint_id', '') AS explicit_viewpoint_id,
+            COALESCE(NULLIF(n.payload->>'identity_ruleset', ''), 'character-id-v1') AS identity_ruleset
         FROM aios.document_section ds
         JOIN aios.dag_node n
           ON n.node_id = ds.node_id
@@ -179,6 +186,16 @@ async def run_claim_extraction_for_section(
             continue
 
         subject, predicate, obj = extract_spo(sentence)
+        pivot = resolve_subject_pivot(
+            subject,
+            character_id=row["character_id"],
+            speaker_id=row["speaker_id"],
+            speaker_role=row["speaker_role"],
+            recipient_id=row["recipient_id"],
+            viewpoint_id=row["explicit_viewpoint_id"],
+            ruleset_id=row["identity_ruleset"],
+        )
+        subject = pivot.subject
 
         r = await db.execute_returning_row(
             """
@@ -196,7 +213,7 @@ async def run_claim_extraction_for_section(
             VALUES (
                 $1, $2, $3, $4,
                 $5,
-                'spacy-dep',
+                $7,
                 $6,
                 0.0,
                 'pending'
@@ -209,6 +226,7 @@ async def run_claim_extraction_for_section(
             obj,
             sentence,
             WORKER_VERSION,
+            "spacy-dep+character-pivot-v1" if pivot.resolved else "spacy-dep",
         )
 
         claim_id = r["claim_id"]
