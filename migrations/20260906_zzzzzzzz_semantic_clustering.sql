@@ -24,7 +24,8 @@ CREATE INDEX IF NOT EXISTS idx_semantic_cluster_run_latest
     ON aios.semantic_cluster_run (embedding_version, completed_at DESC);
 
 CREATE TABLE IF NOT EXISTS aios.semantic_cluster_candidate (
-    cluster_id uuid PRIMARY KEY,
+    cluster_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    cluster_key uuid NOT NULL,
     run_id uuid NOT NULL REFERENCES aios.semantic_cluster_run(run_id) ON DELETE CASCADE,
     embedding_version text NOT NULL,
     algorithm_version text NOT NULL,
@@ -37,9 +38,12 @@ CREATE TABLE IF NOT EXISTS aios.semantic_cluster_candidate (
     status text NOT NULL DEFAULT 'candidate',
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    meta jsonb NOT NULL DEFAULT '{}'::jsonb
+    meta jsonb NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (run_id, cluster_key)
 );
 
+CREATE INDEX IF NOT EXISTS idx_semantic_cluster_candidate_key
+    ON aios.semantic_cluster_candidate (cluster_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_semantic_cluster_candidate_run
     ON aios.semantic_cluster_candidate (run_id, cohesion DESC);
 CREATE INDEX IF NOT EXISTS idx_semantic_cluster_candidate_status
