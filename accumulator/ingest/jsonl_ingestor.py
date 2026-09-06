@@ -93,7 +93,7 @@ class JSONLDAGIngestor:
             context["source_id"],
             context["source_kind"],
             context["source_name"],
-            url,
+            f"{urlparse(url).scheme}://{urlparse(url).netloc}",
             urlparse(url).netloc.lower() or None,
             json.dumps({"ingestor": "web-jsonl-v2"}),
         )
@@ -143,6 +143,9 @@ class JSONLDAGIngestor:
                     "html_sha256": record.get("raw", {}).get("html_sha256"),
                     "accumulator_id": record.get("accumulator_id"),
                     "schema_version": record.get("schema_version"),
+                    "source_id": self._source_context(record)["source_id"],
+                    "source_kind": self._source_context(record)["source_kind"],
+                    "speaker_id": self._source_context(record)["speaker_id"],
                     "author": document.get("author"),
                     "published_at": document.get("published_at"),
                     "updated_at": document.get("updated_at"),
