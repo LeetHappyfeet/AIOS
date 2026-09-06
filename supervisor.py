@@ -151,7 +151,7 @@ STAGES: List[Stage] = [
               )
               OR
               (
-                  n.kind = 'chat_message'
+                  n.kind IN ('chat_message', 'observation')
                   AND n.event_id IS NOT NULL
               )
           )
