@@ -132,6 +132,12 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT cc.claim_id
         FROM aios.claim_candidate cc
+        JOIN aios.extracted_sentence es
+          ON es.sentence_id = cc.sentence_id
+        JOIN aios.document_section ds
+          ON ds.section_id = es.section_id
+        JOIN aios.dag_node n
+          ON n.node_id = ds.node_id
         WHERE EXISTS (
             SELECT 1
             FROM aios.claim_context_resolution ccr
