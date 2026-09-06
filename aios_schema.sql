@@ -807,6 +807,14 @@ ALTER TABLE ONLY aios.session
 
 
 --
+-- Name: source_identity source_identity_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.source_identity
+    ADD CONSTRAINT source_identity_pkey PRIMARY KEY (source_id);
+
+
+--
 -- Name: source_document source_document_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
 --
 
@@ -1067,6 +1075,48 @@ CREATE INDEX idx_session_source_session ON aios.session USING btree (source, sou
 
 
 --
+-- Name: idx_source_identity_domain; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_source_identity_domain ON aios.source_identity USING btree (canonical_domain) WHERE (canonical_domain IS NOT NULL);
+
+
+--
+-- Name: idx_ingest_event_source_identity; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_ingest_event_source_identity ON aios.ingest_event USING btree (source_id, created_at DESC) WHERE (source_id IS NOT NULL);
+
+
+--
+-- Name: idx_ingest_event_target_character; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_ingest_event_target_character ON aios.ingest_event USING btree (target_character_id, created_at DESC) WHERE (target_character_id IS NOT NULL);
+
+
+--
+-- Name: idx_ingest_event_target_world; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_ingest_event_target_world ON aios.ingest_event USING btree (target_world_id, created_at DESC) WHERE (target_world_id IS NOT NULL);
+
+
+--
+-- Name: idx_timeline_source_identity; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_timeline_source_identity ON aios.timeline USING btree (source_id, created_at DESC) WHERE (source_id IS NOT NULL);
+
+
+--
+-- Name: idx_claim_context_source; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_claim_context_source ON aios.claim_context_resolution USING btree (source_id, resolved_at DESC) WHERE (source_id IS NOT NULL);
+
+
+--
 -- Name: idx_source_document_type; Type: INDEX; Schema: aios; Owner: -
 --
 
@@ -1293,6 +1343,46 @@ ALTER TABLE ONLY aios.document_section
 
 ALTER TABLE ONLY aios.extracted_sentence
     ADD CONSTRAINT extracted_sentence_section_id_fkey FOREIGN KEY (section_id) REFERENCES aios.document_section(section_id) ON DELETE CASCADE;
+
+
+--
+-- Name: ingest_event ingest_event_source_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.ingest_event
+    ADD CONSTRAINT ingest_event_source_id_fkey FOREIGN KEY (source_id) REFERENCES aios.source_identity(source_id) ON DELETE SET NULL;
+
+
+--
+-- Name: ingest_event ingest_event_target_world_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.ingest_event
+    ADD CONSTRAINT ingest_event_target_world_id_fkey FOREIGN KEY (target_world_id) REFERENCES aios.world(world_id) ON DELETE SET NULL;
+
+
+--
+-- Name: timeline timeline_source_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.timeline
+    ADD CONSTRAINT timeline_source_id_fkey FOREIGN KEY (source_id) REFERENCES aios.source_identity(source_id) ON DELETE SET NULL;
+
+
+--
+-- Name: claim_context_resolution claim_context_resolution_source_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_source_id_fkey FOREIGN KEY (source_id) REFERENCES aios.source_identity(source_id) ON DELETE SET NULL;
+
+
+--
+-- Name: claim_context_resolution claim_context_resolution_target_world_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_target_world_id_fkey FOREIGN KEY (target_world_id) REFERENCES aios.world(world_id) ON DELETE SET NULL;
 
 
 --
