@@ -309,6 +309,7 @@ async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -
                 AND s.qdrant_collection=$2
                 AND s.embedding_model=$3
                 AND s.embedding_version=$4
+                AND s.indexed_at >= e.updated_at
           )
         ORDER BY e.updated_at
         LIMIT $1
