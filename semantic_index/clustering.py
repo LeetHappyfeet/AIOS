@@ -14,7 +14,7 @@ from .neighbor_classifier import NEIGHBOR_CLASSIFIER_VERSION
 
 logger = logging.getLogger("aios.semantic_clustering")
 
-ALGORITHM_VERSION = "semantic-cluster-v1"
+ALGORITHM_VERSION = "semantic-cluster-v2"
 
 
 @dataclass(frozen=True)
@@ -212,7 +212,8 @@ def _attach_fringe(
             a_in = edge.a in draft.members
             b_in = edge.b in draft.members
             if a_in and b_in:
-                draft.internal_edges.append(edge)
+                if edge.relation != "CONTRADICTS":
+                    draft.internal_edges.append(edge)
             elif a_in or b_in:
                 draft.boundary_edges.append(edge)
 
