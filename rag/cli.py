@@ -28,6 +28,7 @@ async def run_forever(poll_seconds: int = 2) -> None:
     cfg = RagConfig()
     db = Database(settings.db_dsn)
     await db.connect()
+    logger.info("AIOS_READY service=rag")
     try:
         while True:
             n = await ingest_once(db, cfg)
