@@ -17,6 +17,8 @@ def _context():
         world_key="char:natalie:session:test",
         timeline_id=uuid4(),
         head_node_id=uuid4(),
+        source_timeline_id=uuid4(),
+        source_head_node_id=uuid4(),
         state_version=7,
         lifecycle_state="ready",
         location_entity_id=None,
