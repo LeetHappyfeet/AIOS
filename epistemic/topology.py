@@ -175,10 +175,11 @@ async def _upsert_edge(
 
 
 def _rdf_graph(decision: TopologyDecision) -> tuple[str, str]:
+    scope_segment = quote(decision.scope_key, safe="")
     if decision.scope_kind == "character" and decision.character_id:
         cid = quote(decision.character_id, safe="")
-        return "char", f"urn:aios:char:{cid}:topology"
-    return "world", WORLD_GRAPH
+        return "char", f"urn:aios:char:{cid}:topology:{scope_segment}"
+    return "world", f"{WORLD_GRAPH}:{scope_segment}"
 
 
 async def _project_scope_rdf(
@@ -218,7 +219,7 @@ async def _project_scope_rdf(
             triples.append(f"<{parent_iri}> <urn:aios:topology#{pred}> <{node_iri}> .")
 
     sparql = f"""
-DELETE WHERE {{ GRAPH <{graph}> {{ <{scope_iri}> ?p ?o }} }};
+CLEAR SILENT GRAPH <{graph}>;
 INSERT DATA {{ GRAPH <{graph}> {{ {' '.join(triples)} }} }}
 """
     fuseki.update(dataset, sparql)
