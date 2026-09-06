@@ -89,7 +89,7 @@ STAGES: List[Stage] = [
                 AND pj.status IN ('queued', 'running')
           )
         ORDER BY ie.character_id
-        LIMIT 1
+        LIMIT LEAST($1, 1)
         """,
         payload_builder=character_id_payload,
         priority=10,
