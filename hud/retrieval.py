@@ -24,7 +24,7 @@ class RetrievalPolicy:
 POLICIES = {
     "memory": RetrievalPolicy(
         "memory",
-        ("MEMORY", "EVENT", "RELATIONSHIP", "STATE"),
+        ("MEMORY", "EVENT", "RELATIONSHIP"),
         max_hops=3,
         limit=60,
         retain_topic_history=True,
@@ -342,6 +342,45 @@ class TopologyRetriever:
                 6,
             )
             result.append(item)
+
+        if result:
+            proposition_ids = [item["proposition_id"] for item in result]
+            conflict_rows = await self.db.fetch(
+                """
+                SELECT
+                    base.proposition_id,
+                    other.proposition_id AS competing_proposition_id,
+                    other.canonical_text AS text,
+                    pc.conflict_type,
+                    pc.strength
+                FROM unnest($1::uuid[]) base(proposition_id)
+                JOIN aios.proposition_conflict pc
+                  ON pc.proposition_a_id=base.proposition_id
+                  OR pc.proposition_b_id=base.proposition_id
+                JOIN aios.proposition other
+                  ON other.proposition_id = CASE
+                      WHEN pc.proposition_a_id=base.proposition_id
+                      THEN pc.proposition_b_id
+                      ELSE pc.proposition_a_id
+                  END
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM aios.character_proposition_knowledge other_ck
+                    WHERE other_ck.instance_id = ANY($2::uuid[])
+                      AND other_ck.proposition_id=other.proposition_id
+                )
+                ORDER BY pc.strength DESC
+                """,
+                proposition_ids,
+                lineage_ids,
+            )
+            by_proposition: dict[Any, list[dict[str, Any]]] = {}
+            for conflict in conflict_rows:
+                entry = dict(conflict)
+                base_id = entry.pop("proposition_id")
+                by_proposition.setdefault(base_id, []).append(entry)
+            for item in result:
+                item["conflicts"] = by_proposition.get(item["proposition_id"], [])
 
         result.sort(
             key=lambda item: (
