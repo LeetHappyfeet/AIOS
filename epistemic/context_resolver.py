@@ -453,16 +453,20 @@ async def resolve_claim_context(
         """
         INSERT INTO aios.claim_context_resolution (
             claim_id, claim_kind, subject_kind, object_kind, predicate_family,
-            origin_character_id, character_instance_id, viewpoint_id,
-            world_id, timeline_id, dag_node_id, epistemic_scope,
+            origin_character_id, character_instance_id, speaker_id, speaker_type,
+            viewpoint_id, world_id, timeline_id, dag_node_id, epistemic_scope,
             acquisition_mode, subject_is_pivot, object_is_pivot,
             confidence, resolver_version, meta
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
+        VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb
+        )
         ON CONFLICT (claim_id) DO NOTHING
         """,
         claim_id, claim_kind, subject_kind, object_kind, family,
-        origin_character_id, context.character_instance_id, viewpoint_id,
+        origin_character_id, context.character_instance_id,
+        context.speaker_id, context.speaker_type, viewpoint_id,
         context.world_id, context.timeline_id, context.dag_node_id,
         epistemic_scope, acquisition_mode, context.subject_is_pivot,
         context.object_is_pivot, confidence, RESOLVER_VERSION,
