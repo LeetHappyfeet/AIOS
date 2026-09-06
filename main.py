@@ -81,11 +81,13 @@ world_runtime = WorldRuntimeService(db)
 @app.on_event("startup")
 async def startup() -> None:
     await db.connect()
+    await world_runtime.hud.plugin_manager.startup()
     logger.info("Database connected")
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    await world_runtime.hud.plugin_manager.shutdown()
     await db.close()
     logger.info("Database closed")
 
