@@ -464,3 +464,138 @@ async def derive_world_assertion_topology(
         RESOLVER_VERSION, json.dumps({"branch_kind": "world_assertion"}),
     )
     return True
+
+
+async def derive_character_acquisition_topology(
+    db: Database,
+    fuseki: FusekiClient,
+    *,
+    acquisition_id: UUID,
+) -> bool:
+    row = await db.fetchrow(
+        """
+        SELECT
+            kae.acquisition_id, kae.instance_id, kae.proposition_id, kae.claim_id,
+            kae.acquisition_mode, kae.epistemic_status, kae.confidence,
+            kae.source_entity_id, kae.dag_node_id, kae.meta,
+            ci.character_id, ci.current_world_id, ci.world_id,
+            ci.parent_instance_id, ci.forked_from_node_id,
+            p.topic_key, p.canonical_text,
+            o.source_key, ccr.source_id, ccr.source_kind
+        FROM aios.knowledge_acquisition_event kae
+        JOIN aios.character_instance ci ON ci.instance_id=kae.instance_id
+        LEFT JOIN aios.proposition p ON p.proposition_id=kae.proposition_id
+        LEFT JOIN LATERAL (
+            SELECT o.source_key
+            FROM aios.observation o
+            WHERE o.proposition_id=kae.proposition_id
+            ORDER BY o.observed_at DESC
+            LIMIT 1
+        ) o ON true
+        LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=kae.claim_id
+        WHERE kae.acquisition_id=$1
+        """,
+        acquisition_id,
+    )
+    if not row or row["proposition_id"] is None:
+        return False
+
+    data = dict(row)
+    decision = TopologyDecision(
+        scope_kind="character",
+        scope_key=f"char:{data['character_id']}",
+        branch_kind="epistemic_transition",
+        significance=0.95,
+        character_id=data["character_id"],
+        character_instance_id=data["instance_id"],
+        world_id=data["current_world_id"] or data["world_id"],
+        source_id=data.get("source_id"),
+    )
+    projection_key = f"acquisition:{acquisition_id}:{decision.scope_key}"
+
+    root = await _upsert_node(
+        db, decision=decision, node_type="ROOT", node_key="root",
+        label=decision.scope_key, timeline_id=None, dag_node_id=None,
+        proposition_id=None, claim_id=None, assertion_id=None,
+        significance=1.0,
+    )
+    instance = await _upsert_node(
+        db, decision=decision, node_type="INSTANCE", node_key=str(data["instance_id"]),
+        label=f"character-instance:{data['instance_id']}", timeline_id=None,
+        dag_node_id=data.get("forked_from_node_id"), proposition_id=None,
+        claim_id=None, assertion_id=None, significance=1.0,
+        meta={
+            "parent_instance_id": str(data["parent_instance_id"]) if data.get("parent_instance_id") else None,
+            "forked_from_node_id": str(data["forked_from_node_id"]) if data.get("forked_from_node_id") else None,
+        },
+    )
+    await _upsert_edge(
+        db, decision=decision, parent=root, child=instance,
+        edge_type="experiential_branch", significance=1.0,
+    )
+
+    acquisition = await _upsert_node(
+        db, decision=decision, node_type="EPISTEMIC_TRANSITION",
+        node_key=f"acquisition:{acquisition_id}",
+        label=data.get("canonical_text"), timeline_id=None,
+        dag_node_id=data.get("dag_node_id"), proposition_id=data["proposition_id"],
+        claim_id=data.get("claim_id"), assertion_id=None, significance=0.95,
+        meta={
+            "acquisition_id": str(acquisition_id),
+            "acquisition_mode": data["acquisition_mode"],
+            "epistemic_status": data["epistemic_status"],
+            "source_id": data.get("source_id"),
+            "source_kind": data.get("source_kind"),
+            "source_key": data.get("source_key"),
+        },
+    )
+    await _upsert_edge(
+        db, decision=decision, parent=instance, child=acquisition,
+        edge_type="acquires", significance=0.95, claim_id=data.get("claim_id"),
+    )
+
+    topic = await _upsert_node(
+        db, decision=decision, node_type="TOPIC", node_key=str(data["topic_key"]),
+        label=data["canonical_text"], timeline_id=None,
+        dag_node_id=data.get("dag_node_id"), proposition_id=data["proposition_id"],
+        claim_id=data.get("claim_id"), assertion_id=None, significance=0.85,
+    )
+    await _upsert_edge(
+        db, decision=decision, parent=acquisition, child=topic,
+        edge_type="epistemic_transition", significance=0.95,
+        claim_id=data.get("claim_id"),
+    )
+
+    if data.get("source_id") or data.get("source_key"):
+        source_key = str(data.get("source_id") or data.get("source_key"))
+        source_node = await _upsert_node(
+            db, decision=decision, node_type="SOURCE_REFERENCE",
+            node_key=f"source:{source_key}", label=source_key,
+            timeline_id=None, dag_node_id=data.get("dag_node_id"),
+            proposition_id=None, claim_id=data.get("claim_id"),
+            assertion_id=None, significance=0.8,
+            meta={"source_kind": data.get("source_kind")},
+        )
+        await _upsert_edge(
+            db, decision=decision, parent=acquisition, child=source_node,
+            edge_type="acquired_from", significance=0.85,
+            claim_id=data.get("claim_id"),
+        )
+
+    dataset, graph = await _project_scope_rdf(db, fuseki, decision=decision)
+    await db.execute(
+        """
+        INSERT INTO aios.semantic_topology_projection (
+            projection_key, claim_id, acquisition_id, scope_key,
+            rdf_dataset, rdf_graph, resolver_version, projected_at,
+            last_error, meta
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,now(),NULL,$8::jsonb)
+        ON CONFLICT (projection_key) DO UPDATE
+        SET projected_at=now(), last_error=NULL, updated_at=now(), meta=EXCLUDED.meta
+        """,
+        projection_key, data.get("claim_id"), acquisition_id, decision.scope_key,
+        dataset, graph, RESOLVER_VERSION,
+        json.dumps({"branch_kind": "epistemic_transition"}),
+    )
+    return True
