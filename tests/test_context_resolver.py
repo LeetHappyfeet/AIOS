@@ -1,3 +1,4 @@
+from aios_app.epistemic.normalizer import normalize_components
 from aios_app.epistemic.context_resolver import (
     classify_claim_kind,
     classify_entity_kind,
@@ -47,3 +48,23 @@ def test_unknown_entity_is_not_guessed_into_shared_world_identity():
 def test_rule_and_goal_detection_from_raw_text():
     assert classify_predicate_family(None, "Guests must leave before dawn.") == "RULE"
     assert classify_predicate_family(None, "Alice plans to find Bob.") == "GOAL"
+
+
+def test_same_statement_normalizes_to_one_source_neutral_proposition():
+    alice = normalize_components(
+        subject="king",
+        predicate="be",
+        object_value="dead",
+        raw_text="The king is dead.",
+    )
+    bob = normalize_components(
+        subject="king",
+        predicate="be",
+        object_value="dead",
+        raw_text="The king is dead.",
+    )
+
+    # Character ownership is deliberately absent from proposition identity.
+    # Separate observations/knowledge rows carry Alice/Bob visibility instead.
+    assert alice["proposition_hash"] == bob["proposition_hash"]
+    assert alice["topic_key"] == bob["topic_key"]
