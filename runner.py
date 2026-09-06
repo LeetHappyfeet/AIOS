@@ -23,6 +23,7 @@ from aios_app.rdf.world_liminal import promote_liminal_claims
 from aios_app.rdf.world_liminal_classifier_runner import classify_liminal_claims
 from aios_app.rdf.epistemic_writer import project_normalized_observation
 from aios_app.epistemic.normalizer import normalize_claim_once
+from aios_app.epistemic.context_resolver import resolve_claim_context
 from aios_app.epistemic.narratives import assign_narratives_once
 from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
 from aios_app.epistemic.generated import resolve_generated_facts_once
@@ -118,12 +119,29 @@ async def handle_rdf_liminal_classify(db: Database, job: Dict[str, Any]) -> None
     await classify_liminal_claims(db, fuseki, batch_size=500)
 
 
+async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> None:
+    claim_id = UUID(job["payload"]["claim_id"])
+    exists = await db.fetchrow(
+        "SELECT 1 FROM aios.claim_candidate WHERE claim_id=$1",
+        claim_id,
+    )
+    if not exists:
+        logger.warning(
+            "Skipping stale resolve_claim_context job for missing claim %s",
+            claim_id,
+        )
+        return
+    fuseki = FusekiClient(settings.fuseki_base_url)
+    await resolve_claim_context(db, fuseki, claim_id=claim_id)
+
+
 JOB_HANDLERS.update(
     {
         "dag_to_document_section": handle_dag_to_document_section,
         "extract_claims": handle_extract_claims,
         "rdf_liminal_promote": handle_rdf_liminal_promote,
         "rdf_liminal_classify": handle_rdf_liminal_classify,
+        "resolve_claim_context": handle_resolve_claim_context,
         "normalize_proposition": handle_normalize_proposition,
         "rdf_epistemic_project": handle_rdf_epistemic_project,
         "assign_narratives": handle_assign_narratives,
