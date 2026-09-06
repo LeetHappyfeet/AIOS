@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 
 import gradio as gr
 
+from .config import OUTPUT_DIR
 from .queue import CrawlQueue, CrawlTask
 from .worker import AccumulatorWorker
 
