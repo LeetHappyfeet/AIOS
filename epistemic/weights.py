@@ -45,7 +45,16 @@ async def get_profile(db: Database, *, character_id: str) -> dict:
         raise ValueError(f"unknown character {character_id}")
 
     profile = dict(DEFAULT_PROFILE)
-    meta = dict(ident["meta"] or {})
+    raw_meta = ident["meta"]
+    if isinstance(raw_meta, str):
+        try:
+            meta = json.loads(raw_meta) if raw_meta else {}
+        except json.JSONDecodeError:
+            meta = {}
+    elif isinstance(raw_meta, dict):
+        meta = raw_meta
+    else:
+        meta = dict(raw_meta or {})
     embedded = meta.get("epistemic_profile")
     if isinstance(embedded, dict):
         profile.update({k: v for k, v in embedded.items() if k in profile})
