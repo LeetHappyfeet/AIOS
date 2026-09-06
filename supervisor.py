@@ -57,6 +57,10 @@ def world_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"world_id": str(row["world_id"])}
 
 
+def assertion_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {"assertion_id": str(row["assertion_id"])}
+
+
 def empty_payload(_: Dict[str, object]) -> Dict[str, object]:
     return {}
 
@@ -260,6 +264,64 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=claim_id_payload,
+    ),
+
+
+    # -------------------------------------------------
+    # 4b) normalized observation -> derived semantic topology
+    # -------------------------------------------------
+    Stage(
+        name="derive_claim_topology",
+        job_type="derive_claim_topology",
+        eligibility_sql="""
+        SELECT o.claim_id
+        FROM aios.observation o
+        JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM aios.semantic_topology_projection stp
+            WHERE stp.claim_id=o.claim_id
+              AND stp.projected_at IS NOT NULL
+              AND stp.resolver_version='semantic-topology-v1'
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='derive_claim_topology'
+              AND pj.status IN ('queued','running')
+              AND pj.payload->>'claim_id'=o.claim_id::text
+        )
+        ORDER BY o.observed_at
+        LIMIT $1
+        """,
+        payload_builder=claim_id_payload,
+    ),
+
+    # Explicit world assertions are the only observation-derived path that may
+    # populate asserted /world topology. Source target hints never satisfy this.
+    Stage(
+        name="derive_world_assertion_topology",
+        job_type="derive_world_assertion_topology",
+        eligibility_sql="""
+        SELECT a.assertion_id
+        FROM aios.world_proposition_assertion a
+        WHERE a.epistemic_status NOT IN ('rejected','superseded')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM aios.semantic_topology_projection stp
+            WHERE stp.assertion_id=a.assertion_id
+              AND stp.projected_at IS NOT NULL
+              AND stp.resolver_version='semantic-topology-v1'
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='derive_world_assertion_topology'
+              AND pj.status IN ('queued','running')
+              AND pj.payload->>'assertion_id'=a.assertion_id::text
+        )
+        ORDER BY a.created_at
+        LIMIT $1
+        """,
+        payload_builder=assertion_id_payload,
     ),
 
     # -------------------------------------------------
