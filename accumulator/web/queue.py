@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 import threading
 from typing import Deque, Dict, List, Optional
 from uuid import uuid4
@@ -23,6 +25,9 @@ class CrawlTask:
     same_domain_only: bool = True
     respect_robots: bool = True
     task_id: str = field(default_factory=lambda: str(uuid4()))
+
+    def as_dict(self) -> dict:
+        return asdict(self)
 
 
 @dataclass
@@ -48,28 +53,76 @@ class CrawlStatus:
 
 
 class CrawlQueue:
-    """Thread-safe in-process frontier with inspectable task status."""
+    """Thread-safe crawl frontier with optional durable recovery."""
 
-    def __init__(self):
+    def __init__(self, state_path: Path | None = None):
         self._queue: Deque[CrawlTask] = deque()
+        self._tasks: Dict[str, CrawlTask] = {}
         self._status: Dict[str, CrawlStatus] = {}
         self._lock = threading.Lock()
+        self._state_path = state_path
+        self._load()
+
+    def _load(self) -> None:
+        if self._state_path is None or not self._state_path.exists():
+            return
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+
+        for raw in data.get("tasks", []):
+            try:
+                task = CrawlTask(**raw)
+            except TypeError:
+                continue
+            self._tasks[task.task_id] = task
+
+        for raw in data.get("status", []):
+            try:
+                status = CrawlStatus(**raw)
+            except TypeError:
+                continue
+            if status.state in {"queued", "running"}:
+                status.state = "queued"
+                status.current_url = None
+                status.message = "Recovered after accumulator/UI restart"
+                task = self._tasks.get(status.task_id)
+                if task:
+                    self._queue.append(task)
+            self._status[status.task_id] = status
+
+    def _save_locked(self) -> None:
+        if self._state_path is None:
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "tasks": [task.as_dict() for task in self._tasks.values()],
+            "status": [status.as_dict() for status in self._status.values()],
+        }
+        tmp = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(self._state_path)
 
     def add(self, task: CrawlTask) -> str:
         with self._lock:
             self._queue.append(task)
+            self._tasks[task.task_id] = task
             self._status[task.task_id] = CrawlStatus(
                 task_id=task.task_id,
                 url=task.url,
                 source_id=task.source_id,
             )
+            self._save_locked()
             return task.task_id
 
     def pop(self) -> CrawlTask | None:
         with self._lock:
             if not self._queue:
                 return None
-            return self._queue.popleft()
+            task = self._queue.popleft()
+            self._save_locked()
+            return task
 
     def size(self) -> int:
         with self._lock:
@@ -84,6 +137,7 @@ class CrawlQueue:
                 if hasattr(status, key):
                     setattr(status, key, value)
             status.updated_at = datetime.now(timezone.utc).isoformat()
+            self._save_locked()
 
     def get(self, task_id: str) -> Optional[dict]:
         with self._lock:
