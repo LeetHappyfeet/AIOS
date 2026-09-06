@@ -116,6 +116,8 @@ class ClaimContext:
     predicate_family: str
     origin_character_id: Optional[str]
     character_instance_id: Optional[UUID]
+    speaker_id: Optional[str]
+    speaker_type: Optional[str]
     viewpoint_id: Optional[str]
     world_id: Optional[UUID]
     timeline_id: Optional[UUID]
@@ -135,6 +137,8 @@ class ClaimContext:
             "predicate_family": self.predicate_family,
             "origin_character_id": self.origin_character_id,
             "character_instance_id": str(self.character_instance_id) if self.character_instance_id else None,
+            "speaker_id": self.speaker_id,
+            "speaker_type": self.speaker_type,
             "viewpoint_id": self.viewpoint_id,
             "world_id": str(self.world_id) if self.world_id else None,
             "timeline_id": str(self.timeline_id) if self.timeline_id else None,
@@ -309,6 +313,8 @@ async def resolve_claim_context(
             predicate_family=existing["predicate_family"],
             origin_character_id=existing["origin_character_id"],
             character_instance_id=existing["character_instance_id"],
+            speaker_id=existing["speaker_id"],
+            speaker_type=existing["speaker_type"],
             viewpoint_id=existing["viewpoint_id"],
             world_id=existing["world_id"],
             timeline_id=existing["timeline_id"],
@@ -346,7 +352,10 @@ async def resolve_claim_context(
             n.node_id, n.timeline_id, n.kind::text AS node_kind,
             n.character_id, n.speaker_id, n.speaker_role::text AS speaker_role,
             n.recipient_id,
-            NULLIF(n.payload->>'viewpoint_id','') AS explicit_viewpoint_id,
+            COALESCE(
+                NULLIF(n.viewpoint_id,''),
+                NULLIF(n.payload->>'viewpoint_id','')
+            ) AS explicit_viewpoint_id,
             t.world_id,
             sd.source_type,
             ie.source AS ingest_source,
@@ -390,8 +399,14 @@ async def resolve_claim_context(
     )
 
     origin_character_id = row["character_id"]
-    viewpoint_id = origin_character_id or row["explicit_viewpoint_id"] or row["speaker_id"]
-    epistemic_scope = "character" if origin_character_id else (
+    speaker_id = row["speaker_id"]
+    speaker_type = row["speaker_role"]
+    viewpoint_id = row["explicit_viewpoint_id"] or (
+        (speaker_id or origin_character_id)
+        if speaker_type == "character"
+        else speaker_id
+    )
+    epistemic_scope = "character" if viewpoint_id == origin_character_id and origin_character_id else (
         "speaker" if viewpoint_id else "source"
     )
 
@@ -421,6 +436,8 @@ async def resolve_claim_context(
         predicate_family=family,
         origin_character_id=origin_character_id,
         character_instance_id=row["character_instance_id"],
+        speaker_id=speaker_id,
+        speaker_type=speaker_type,
         viewpoint_id=viewpoint_id,
         world_id=row["world_id"],
         timeline_id=row["timeline_id"],
