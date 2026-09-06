@@ -8,6 +8,25 @@ from aios_app.db import Database
 from .weights import calculate_weights
 
 
+def _json_object(value: object) -> dict:
+    """Normalize asyncpg JSON/JSONB results to a Python mapping."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if decoded is None:
+            return {}
+        if not isinstance(decoded, dict):
+            raise ValueError("expected JSON object metadata")
+        return decoded
+    try:
+        return dict(value)  # asyncpg codecs/custom mappings may already be mapping-like
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected object-like metadata") from exc
+
+
 async def record_acquisition(
     db: Database,
     *,
@@ -97,7 +116,7 @@ async def project_knowledge_acquisitions_once(
                 continue
             proposition_id = obs["proposition_id"]
 
-        acquisition_meta = dict(row["meta"] or {})
+        acquisition_meta = _json_object(row["meta"])
         source = await db.fetchrow(
             """
             SELECT o.source_key
@@ -157,7 +176,7 @@ async def project_knowledge_acquisitions_once(
             row["dag_node_id"],
             row["created_at"],
             json.dumps({
-                **(row["meta"] or {}),
+                **acquisition_meta,
                 "weight_profile_character_id": weights["profile_character_id"],
             }),
             weights["base_confidence"],
