@@ -172,12 +172,12 @@ def _score_boundary(features: BoundaryFeatures) -> dict[str, float]:
             + 0.12 * same_world
         ),
         "STATE_TRANSITION": (
-            0.24 * time_separation
-            + 0.20 * same_subject
-            + 0.18 * same_predicate
-            + 0.16 * same_timeline
+            0.20 * time_separation
+            + 0.18 * same_subject
+            + 0.16 * same_predicate
+            + 0.14 * same_timeline
             + 0.10 * same_world
-            + 0.12 * state_conflict
+            + 0.22 * features.state_like_ratio
         ),
         "NARRATIVE_SPLIT": (
             0.24 * same_topic
@@ -435,7 +435,7 @@ async def classify_latest_clusters_once(
             row["cluster_a_id"],
             row["cluster_b_id"],
         )
-        pair_count = max(conflicts["pair_count"], 1.0)
+        conflict_denominator = max(float(row["edge_count"]), 1.0)
 
         family_a = _as_counts(meta_a.get("predicate_families"))
         family_b = _as_counts(meta_b.get("predicate_families"))
@@ -481,9 +481,15 @@ async def classify_latest_clusters_once(
             ),
             temporal_overlap=temporal_overlap,
             temporal_separation=temporal_separation,
-            conflict_density=min(1.0, conflicts["conflict_count"] / pair_count),
-            exclusive_conflict_density=min(1.0, conflicts["exclusive_count"] / pair_count),
-            opposite_polarity_density=min(1.0, conflicts["polarity_count"] / pair_count),
+            conflict_density=min(
+                1.0, conflicts["conflict_count"] / conflict_denominator
+            ),
+            exclusive_conflict_density=min(
+                1.0, conflicts["exclusive_count"] / conflict_denominator
+            ),
+            opposite_polarity_density=min(
+                1.0, conflicts["polarity_count"] / conflict_denominator
+            ),
             state_like_ratio=state_like_ratio,
         )
         scores = _score_boundary(features)
