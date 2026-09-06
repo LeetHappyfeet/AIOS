@@ -59,6 +59,30 @@ def _get_store(cfg: RagConfig, *, vector_dim: int) -> QdrantStore:
 # Data model
 # ============================================================
 
+
+def initialize_backend(cfg: RagConfig, *, warmup: bool = True) -> tuple[Embedder, QdrantStore]:
+    """Fully initialize the process-local RAG backend before readiness is advertised."""
+    embedder = _get_embedder(cfg)
+    vector_dim = embedder.dim
+    store = _get_store(cfg, vector_dim=vector_dim)
+
+    if warmup:
+        logger.info("Warming embedding model [%s]", cfg.embedding_model)
+        vectors = embedder.embed(["AIOS RAG warmup"])
+        actual_dim = len(vectors[0]) if vectors and vectors[0] else 0
+        if actual_dim != vector_dim:
+            raise RuntimeError(
+                f"RAG embedding warmup dimension {actual_dim} does not match expected {vector_dim}"
+            )
+
+    logger.info(
+        "RAG backend initialized [model=%s dim=%d collection=%s]",
+        cfg.embedding_model,
+        vector_dim,
+        cfg.qdrant_collection,
+    )
+    return embedder, store
+
 @dataclass
 class SectionRow:
     section_id: UUID
@@ -178,8 +202,7 @@ async def ingest_once(db: Database, cfg: RagConfig) -> int:
     Returns number of sections indexed.
     """
 
-    embedder = _get_embedder(cfg)
-    store = _get_store(cfg, vector_dim=embedder.dim)
+    embedder, store = initialize_backend(cfg, warmup=False)
 
     sections = await fetch_unindexed_sections(
         db,
