@@ -47,3 +47,33 @@ Clusters remain `candidate` objects. A later resolver must decide whether a
 boundary represents a topic split, temporal/state transition, source narrative
 split, contradiction cluster, experiential branch, world branch, or no
 meaningful split.
+
+
+## Semantic classification
+
+The semantic structure pipeline now interprets vector geometry in three stages:
+
+1. **Neighbor relation classification** labels proposition pairs as
+   `EQUIVALENT`, `REFINES`, `CONTRADICTS`, `SAME_TOPIC`,
+   `SAME_EVENT`, `RELATED`, or `UNRESOLVED`.
+2. **Cluster classification** labels dense regions as topic, state, event,
+   memory, belief, rule, goal, mixed, or unresolved regions.
+3. **Boundary classification** interprets cluster separation as
+   `SAME_REGION`, `TOPIC_SPLIT`, `TEMPORAL_TRANSITION`,
+   `STATE_TRANSITION`, `NARRATIVE_SPLIT`,
+   `CONTRADICTION_CLUSTER`, `EXPERIENTIAL_BRANCH_CANDIDATE`,
+   `WORLD_BRANCH_CANDIDATE`, or `UNRESOLVED`.
+
+Existing proposition-conflict receipts from normalization are reused as strong
+pairwise evidence. Contradiction relations are retained for boundary analysis
+but are forbidden from forming cluster cores, attaching fringe members, or
+inflating cluster cohesion.
+
+The classifier combines vector similarity with topic/subject/predicate overlap,
+claim and predicate families, temporal overlap/separation, source distribution,
+world/timeline distribution, character-instance lineage, and cross-cluster
+conflicts. Missing metadata is neutral rather than treated as evidence of
+separation.
+
+All labels remain advisory. In particular, branch-candidate classifications do
+not create worlds or experiential branches automatically.
