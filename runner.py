@@ -141,13 +141,23 @@ async def handle_rdf_liminal_classify(db: Database, job: Dict[str, Any]) -> None
 
 async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> None:
     claim_id = UUID(job["payload"]["claim_id"])
-    exists = await db.fetchrow(
-        "SELECT 1 FROM aios.claim_candidate WHERE claim_id=$1",
+    linked = await db.fetchrow(
+        """
+        SELECT 1
+        FROM aios.claim_candidate cc
+        JOIN aios.extracted_sentence es
+          ON es.sentence_id = cc.sentence_id
+        JOIN aios.document_section ds
+          ON ds.section_id = es.section_id
+        JOIN aios.dag_node n
+          ON n.node_id = ds.node_id
+        WHERE cc.claim_id = $1
+        """,
         claim_id,
     )
-    if not exists:
+    if not linked:
         logger.warning(
-            "Skipping stale resolve_claim_context job for missing claim %s",
+            "Skipping stale resolve_claim_context job for missing or unlinked claim %s",
             claim_id,
         )
         return
