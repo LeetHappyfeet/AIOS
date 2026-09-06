@@ -411,7 +411,7 @@ async def get_instance_state(instance_id: UUID):
 @app.get("/instance/{instance_id}/frame")
 async def get_instance_frame(
     instance_id: UUID,
-    recent_limit: int = 12,
+    recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
 ):
     """Build the canonical branch-aware RPG HUD for this runtime instance."""
@@ -505,7 +505,7 @@ async def fork_instance(instance_id: UUID, req: CharacterForkIn) -> CharacterAct
 @app.get("/instance/{instance_id}/frame/text")
 async def get_instance_text_frame(
     instance_id: UUID,
-    recent_limit: int = 12,
+    recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
 ):
     try:
