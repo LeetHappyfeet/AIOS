@@ -1,10 +1,29 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
 
 from aios_app.db import Database
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    try:
+        return dict(value)
+    except (TypeError, ValueError):
+        return {}
+
 
 
 @dataclass(frozen=True)
@@ -60,7 +79,7 @@ class HUDProfile:
             include_conflicts=row["include_conflicts"],
             include_provenance=row["include_provenance"],
             include_confidence=row["include_confidence"],
-            meta=dict(row["meta"] or {}),
+            meta=_json_object(row["meta"]),
         )
 
 
