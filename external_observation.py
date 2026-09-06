@@ -23,7 +23,17 @@ def _canonical_domain(uri: str | None) -> str | None:
 
 
 async def ensure_source_identity(db: Database, req: ExternalObservationIn) -> None:
-    """Create or enrich a durable source identity without changing its key."""
+    """Create or enrich a durable source identity without changing its type."""
+    existing = await db.fetchrow(
+        "SELECT source_kind FROM aios.source_identity WHERE source_id=$1",
+        req.source_id,
+    )
+    if existing and existing["source_kind"] != req.source_kind:
+        raise ValueError(
+            f"source_id {req.source_id!r} is already registered as "
+            f"{existing['source_kind']!r}, not {req.source_kind!r}"
+        )
+
     await db.execute(
         """
         INSERT INTO aios.source_identity (
@@ -32,8 +42,7 @@ async def ensure_source_identity(db: Database, req: ExternalObservationIn) -> No
         )
         VALUES ($1,$2,$3,$4,$5,$6::jsonb)
         ON CONFLICT (source_id) DO UPDATE
-        SET source_kind=EXCLUDED.source_kind,
-            display_name=COALESCE(aios.source_identity.display_name, EXCLUDED.display_name),
+        SET display_name=COALESCE(aios.source_identity.display_name, EXCLUDED.display_name),
             canonical_uri=COALESCE(aios.source_identity.canonical_uri, EXCLUDED.canonical_uri),
             canonical_domain=COALESCE(aios.source_identity.canonical_domain, EXCLUDED.canonical_domain),
             meta=aios.source_identity.meta || EXCLUDED.meta,
