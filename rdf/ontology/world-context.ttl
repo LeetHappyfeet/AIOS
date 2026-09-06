@@ -35,6 +35,18 @@ world:originWorld a rdf:Property ;
 world:originTimeline a rdf:Property ;
     rdfs:comment "DAG timeline from which the observation was derived." .
 
+world:sourceId a rdf:Property ;
+    rdfs:comment "Durable identity of the external source that supplied the observation." .
+
+world:sourceKind a rdf:Property ;
+    rdfs:comment "Source category preserved independently from speaker and character identity." .
+
+world:targetCharacterHint a rdf:Property ;
+    rdfs:comment "Optional enrichment/routing target; never origin character ownership." .
+
+world:targetWorldHint a rdf:Property ;
+    rdfs:comment "Optional world-routing target; never an assertion that the claim is true there." .
+
 world:viewpointId a rdf:Property .
 world:epistemicScope a rdf:Property .
 world:acquisitionMode a rdf:Property .

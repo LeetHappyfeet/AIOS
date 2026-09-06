@@ -34,7 +34,8 @@ CREATE TYPE aios.actor_type AS ENUM (
     'character',
     'agent',
     'system',
-    'tool'
+    'tool',
+    'source'
 );
 
 
@@ -69,7 +70,8 @@ CREATE TYPE aios.event_kind AS ENUM (
     'system',
     'other',
     'document',
-    'paragraph'
+    'paragraph',
+    'observation'
 );
 
 
@@ -193,6 +195,10 @@ CREATE TABLE aios.claim_context_resolution (
     origin_character_id text,
     character_instance_id uuid,
     viewpoint_id text,
+    source_id text,
+    source_kind text,
+    target_character_id text,
+    target_world_id uuid,
     world_id uuid,
     timeline_id uuid,
     dag_node_id uuid,
@@ -341,6 +347,8 @@ CREATE TABLE aios.ingest_event (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     event_time timestamp with time zone,
     source text,
+    source_id text,
+    source_kind text,
     source_event_id text,
     kind aios.event_kind DEFAULT 'other'::aios.event_kind NOT NULL,
     session_id uuid,
@@ -349,6 +357,10 @@ CREATE TABLE aios.ingest_event (
     recipient_id text,
     character_id text,
     user_name text,
+    viewpoint_id text,
+    target_character_id text,
+    target_world_id uuid,
+    provenance_version text DEFAULT 'provenance-v1'::text NOT NULL,
     message_text text,
     payload jsonb DEFAULT '{}'::jsonb NOT NULL,
     dedupe_key text NOT NULL,
@@ -504,6 +516,22 @@ CREATE TABLE aios.session (
 
 
 --
+-- Name: source_identity; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.source_identity (
+    source_id text NOT NULL,
+    source_kind text NOT NULL,
+    display_name text,
+    canonical_uri text,
+    canonical_domain text,
+    meta jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: source_document; Type: TABLE; Schema: aios; Owner: -
 --
 
@@ -529,9 +557,10 @@ CREATE TABLE aios.timeline (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     meta jsonb DEFAULT '{}'::jsonb NOT NULL,
     character_id text,
-    user_name text NOT NULL,
+    user_name text,
     scope_key text DEFAULT 'default'::text NOT NULL,
-    session_id uuid
+    session_id uuid,
+    source_id text
 );
 
 
@@ -776,6 +805,14 @@ ALTER TABLE ONLY aios.section_cluster_assignment
 
 ALTER TABLE ONLY aios.session
     ADD CONSTRAINT session_pkey PRIMARY KEY (session_id);
+
+
+--
+-- Name: source_identity source_identity_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.source_identity
+    ADD CONSTRAINT source_identity_pkey PRIMARY KEY (source_id);
 
 
 --
@@ -1039,6 +1076,48 @@ CREATE INDEX idx_session_source_session ON aios.session USING btree (source, sou
 
 
 --
+-- Name: idx_source_identity_domain; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_source_identity_domain ON aios.source_identity USING btree (canonical_domain) WHERE (canonical_domain IS NOT NULL);
+
+
+--
+-- Name: idx_ingest_event_source_identity; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_ingest_event_source_identity ON aios.ingest_event USING btree (source_id, created_at DESC) WHERE (source_id IS NOT NULL);
+
+
+--
+-- Name: idx_ingest_event_target_character; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_ingest_event_target_character ON aios.ingest_event USING btree (target_character_id, created_at DESC) WHERE (target_character_id IS NOT NULL);
+
+
+--
+-- Name: idx_ingest_event_target_world; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_ingest_event_target_world ON aios.ingest_event USING btree (target_world_id, created_at DESC) WHERE (target_world_id IS NOT NULL);
+
+
+--
+-- Name: idx_timeline_source_identity; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_timeline_source_identity ON aios.timeline USING btree (source_id, created_at DESC) WHERE (source_id IS NOT NULL);
+
+
+--
+-- Name: idx_claim_context_source; Type: INDEX; Schema: aios; Owner: -
+--
+
+CREATE INDEX idx_claim_context_source ON aios.claim_context_resolution USING btree (source_id, resolved_at DESC) WHERE (source_id IS NOT NULL);
+
+
+--
 -- Name: idx_source_document_type; Type: INDEX; Schema: aios; Owner: -
 --
 
@@ -1268,6 +1347,46 @@ ALTER TABLE ONLY aios.extracted_sentence
 
 
 --
+-- Name: ingest_event ingest_event_source_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.ingest_event
+    ADD CONSTRAINT ingest_event_source_id_fkey FOREIGN KEY (source_id) REFERENCES aios.source_identity(source_id) ON DELETE SET NULL;
+
+
+--
+-- Name: ingest_event ingest_event_target_world_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.ingest_event
+    ADD CONSTRAINT ingest_event_target_world_id_fkey FOREIGN KEY (target_world_id) REFERENCES aios.world(world_id) ON DELETE SET NULL;
+
+
+--
+-- Name: timeline timeline_source_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.timeline
+    ADD CONSTRAINT timeline_source_id_fkey FOREIGN KEY (source_id) REFERENCES aios.source_identity(source_id) ON DELETE SET NULL;
+
+
+--
+-- Name: claim_context_resolution claim_context_resolution_source_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_source_id_fkey FOREIGN KEY (source_id) REFERENCES aios.source_identity(source_id) ON DELETE SET NULL;
+
+
+--
+-- Name: claim_context_resolution claim_context_resolution_target_world_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_target_world_id_fkey FOREIGN KEY (target_world_id) REFERENCES aios.world(world_id) ON DELETE SET NULL;
+
+
+--
 -- Name: ingest_event ingest_event_session_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
 --
 
@@ -1337,6 +1456,101 @@ ALTER TABLE ONLY aios.world
 
 ALTER TABLE ONLY aios.world
     ADD CONSTRAINT world_parent_world_id_fkey FOREIGN KEY (parent_world_id) REFERENCES aios.world(world_id) ON DELETE SET NULL;
+
+
+--
+-- Derived semantic topology (2026-09-06)
+--
+
+CREATE TABLE aios.semantic_topology_node (
+    topology_node_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    scope_key text NOT NULL,
+    scope_kind text NOT NULL,
+    node_type text NOT NULL,
+    node_key text NOT NULL,
+    label text,
+    character_id text,
+    character_instance_id uuid,
+    world_id uuid,
+    source_id text,
+    timeline_id uuid,
+    dag_node_id uuid,
+    proposition_id uuid,
+    claim_id uuid,
+    assertion_id uuid,
+    acquisition_id uuid,
+    significance double precision DEFAULT 0.5 NOT NULL,
+    meta jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT semantic_topology_node_scope_kind_check CHECK ((scope_kind = ANY (ARRAY['character'::text, 'world'::text, 'source'::text]))),
+    CONSTRAINT semantic_topology_node_significance_check CHECK (((significance >= (0)::double precision) AND (significance <= (1)::double precision))),
+    CONSTRAINT semantic_topology_node_pkey PRIMARY KEY (topology_node_id),
+    CONSTRAINT semantic_topology_node_scope_key_node_type_node_key_key UNIQUE (scope_key, node_type, node_key),
+    CONSTRAINT semantic_topology_node_character_id_fkey FOREIGN KEY (character_id) REFERENCES aios.character_identity(character_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_node_character_instance_id_fkey FOREIGN KEY (character_instance_id) REFERENCES aios.character_instance(instance_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_node_world_id_fkey FOREIGN KEY (world_id) REFERENCES aios.world(world_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_node_source_id_fkey FOREIGN KEY (source_id) REFERENCES aios.source_identity(source_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_node_timeline_id_fkey FOREIGN KEY (timeline_id) REFERENCES aios.timeline(timeline_id) ON DELETE SET NULL,
+    CONSTRAINT semantic_topology_node_dag_node_id_fkey FOREIGN KEY (dag_node_id) REFERENCES aios.dag_node(node_id) ON DELETE SET NULL,
+    CONSTRAINT semantic_topology_node_proposition_id_fkey FOREIGN KEY (proposition_id) REFERENCES aios.proposition(proposition_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_node_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_node_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_node_acquisition_id_fkey FOREIGN KEY (acquisition_id) REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE
+);
+
+CREATE TABLE aios.semantic_topology_edge (
+    edge_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    scope_key text NOT NULL,
+    parent_node_id uuid NOT NULL,
+    child_node_id uuid NOT NULL,
+    edge_type text NOT NULL,
+    significance double precision DEFAULT 0.5 NOT NULL,
+    claim_id uuid,
+    assertion_id uuid,
+    acquisition_id uuid,
+    meta jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT semantic_topology_edge_check CHECK ((parent_node_id <> child_node_id)),
+    CONSTRAINT semantic_topology_edge_significance_check CHECK (((significance >= (0)::double precision) AND (significance <= (1)::double precision))),
+    CONSTRAINT semantic_topology_edge_pkey PRIMARY KEY (edge_id),
+    CONSTRAINT semantic_topology_edge_scope_parent_child_type_key UNIQUE (scope_key, parent_node_id, child_node_id, edge_type),
+    CONSTRAINT semantic_topology_edge_parent_node_id_fkey FOREIGN KEY (parent_node_id) REFERENCES aios.semantic_topology_node(topology_node_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_edge_child_node_id_fkey FOREIGN KEY (child_node_id) REFERENCES aios.semantic_topology_node(topology_node_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_edge_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_edge_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_edge_acquisition_id_fkey FOREIGN KEY (acquisition_id) REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE
+);
+
+CREATE TABLE aios.semantic_topology_projection (
+    projection_key text NOT NULL,
+    claim_id uuid,
+    assertion_id uuid,
+    acquisition_id uuid,
+    scope_key text NOT NULL,
+    rdf_dataset text NOT NULL,
+    rdf_graph text NOT NULL,
+    resolver_version text NOT NULL,
+    projected_at timestamp with time zone,
+    last_error text,
+    meta jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT semantic_topology_projection_check CHECK (((claim_id IS NOT NULL) OR (assertion_id IS NOT NULL) OR (acquisition_id IS NOT NULL))),
+    CONSTRAINT semantic_topology_projection_pkey PRIMARY KEY (projection_key),
+    CONSTRAINT semantic_topology_projection_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_projection_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_projection_acquisition_id_fkey FOREIGN KEY (acquisition_id) REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_semantic_topology_scope ON aios.semantic_topology_node USING btree (scope_key, node_type);
+CREATE INDEX idx_semantic_topology_character ON aios.semantic_topology_node USING btree (character_id, created_at DESC) WHERE (character_id IS NOT NULL);
+CREATE INDEX idx_semantic_topology_world ON aios.semantic_topology_node USING btree (world_id, created_at DESC) WHERE (world_id IS NOT NULL);
+CREATE INDEX idx_semantic_topology_source ON aios.semantic_topology_node USING btree (source_id, created_at DESC) WHERE (source_id IS NOT NULL);
+CREATE INDEX idx_semantic_topology_edge_parent ON aios.semantic_topology_edge USING btree (scope_key, parent_node_id, edge_type);
+CREATE INDEX idx_semantic_topology_edge_child ON aios.semantic_topology_edge USING btree (scope_key, child_node_id, edge_type);
+CREATE INDEX idx_semantic_topology_projection_claim ON aios.semantic_topology_projection USING btree (claim_id) WHERE (claim_id IS NOT NULL);
+CREATE INDEX idx_semantic_topology_projection_assertion ON aios.semantic_topology_projection USING btree (assertion_id) WHERE (assertion_id IS NOT NULL);
+CREATE INDEX idx_semantic_topology_projection_acquisition ON aios.semantic_topology_projection USING btree (acquisition_id) WHERE (acquisition_id IS NOT NULL);
 
 
 --

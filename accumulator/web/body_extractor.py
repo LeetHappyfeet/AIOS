@@ -6,7 +6,7 @@ import trafilatura
 
 
 MAX_PARAGRAPH_CHARS = 1200
-MIN_PARAGRAPH_CHARS = 200
+MIN_PARAGRAPH_CHARS = 40
 
 
 def extract_body(html: str) -> dict:
@@ -21,7 +21,7 @@ def extract_body(html: str) -> dict:
     text = trafilatura.extract(
         html,
         include_comments=False,
-        include_tables=False,
+        include_tables=True,
         no_fallback=True,
     )
 
@@ -42,11 +42,14 @@ def extract_body(html: str) -> dict:
     # -------------------------------------------------
     if "\n\n" in text:
         raw_paragraphs = re.split(r"\n\s*\n+", text)
-        paragraphs = [
-            p.strip()
-            for p in raw_paragraphs
-            if len(p.strip()) >= MIN_PARAGRAPH_CHARS
-        ]
+        paragraphs = []
+        seen = set()
+        for paragraph in raw_paragraphs:
+            clean = paragraph.strip()
+            if len(clean) < MIN_PARAGRAPH_CHARS or clean in seen:
+                continue
+            seen.add(clean)
+            paragraphs.append(clean)
 
     # -------------------------------------------------
     # Case 2: Sentence-per-line output (Trafilatura default)

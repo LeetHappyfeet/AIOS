@@ -180,6 +180,8 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             NULLIF(n.payload->>'viewpoint_id', '') AS explicit_viewpoint_id,
             COALESCE(NULLIF(n.payload->>'identity_ruleset', ''), 'character-id-v1') AS identity_ruleset,
             ie.source AS ingest_source,
+            ie.source_id,
+            ie.source_kind AS explicit_source_kind,
             sd.source_type, sd.source_url, sd.retrieved_at
         FROM aios.claim_candidate cc
         LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
@@ -219,9 +221,11 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         except ValueError:
             source_domain = None
 
-    source_key = source_domain or row["ingest_source"] or row["source_type"] or "unknown"
+    source_key = row["source_id"] or source_domain or row["ingest_source"] or row["source_type"] or "unknown"
 
-    if row["source_type"]:
+    if row["explicit_source_kind"]:
+        source_kind = row["explicit_source_kind"]
+    elif row["source_type"]:
         source_kind = row["source_type"]
     elif row["ingest_source"]:
         source_kind = (

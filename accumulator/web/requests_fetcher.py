@@ -19,7 +19,10 @@ class RequestsFetcher:
 
         return {
             "html": resp.text,
+            "final_url": resp.url,
             "load_time_ms": load_time_ms,
             "rendered": False,
             "user_agent": DEFAULT_USER_AGENT,
+            "status_code": resp.status_code,
+            "content_type": resp.headers.get("content-type"),
         }
