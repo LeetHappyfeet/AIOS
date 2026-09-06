@@ -7,7 +7,7 @@ from uuid import UUID
 # Enums / Literals
 # -------------------------------------------------
 
-ActorType = Literal["user", "character", "agent", "system", "tool"]
+ActorType = Literal["user", "character", "agent", "system", "tool", "source"]
 
 EventKind = Literal[
     "chat_message",
