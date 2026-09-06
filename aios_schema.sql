@@ -34,7 +34,8 @@ CREATE TYPE aios.actor_type AS ENUM (
     'character',
     'agent',
     'system',
-    'tool'
+    'tool',
+    'source'
 );
 
 
@@ -193,6 +194,10 @@ CREATE TABLE aios.claim_context_resolution (
     origin_character_id text,
     character_instance_id uuid,
     viewpoint_id text,
+    source_id text,
+    source_kind text,
+    target_character_id text,
+    target_world_id uuid,
     world_id uuid,
     timeline_id uuid,
     dag_node_id uuid,
@@ -341,6 +346,8 @@ CREATE TABLE aios.ingest_event (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     event_time timestamp with time zone,
     source text,
+    source_id text,
+    source_kind text,
     source_event_id text,
     kind aios.event_kind DEFAULT 'other'::aios.event_kind NOT NULL,
     session_id uuid,
@@ -349,6 +356,10 @@ CREATE TABLE aios.ingest_event (
     recipient_id text,
     character_id text,
     user_name text,
+    viewpoint_id text,
+    target_character_id text,
+    target_world_id uuid,
+    provenance_version text DEFAULT 'provenance-v1'::text NOT NULL,
     message_text text,
     payload jsonb DEFAULT '{}'::jsonb NOT NULL,
     dedupe_key text NOT NULL,
@@ -504,6 +515,22 @@ CREATE TABLE aios.session (
 
 
 --
+-- Name: source_identity; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.source_identity (
+    source_id text NOT NULL,
+    source_kind text NOT NULL,
+    display_name text,
+    canonical_uri text,
+    canonical_domain text,
+    meta jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: source_document; Type: TABLE; Schema: aios; Owner: -
 --
 
@@ -529,9 +556,10 @@ CREATE TABLE aios.timeline (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     meta jsonb DEFAULT '{}'::jsonb NOT NULL,
     character_id text,
-    user_name text NOT NULL,
+    user_name text,
     scope_key text DEFAULT 'default'::text NOT NULL,
-    session_id uuid
+    session_id uuid,
+    source_id text
 );
 
 
