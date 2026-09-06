@@ -135,6 +135,11 @@ async def mark_matching_runtime_dirty(
             source_head_node_id=source_head_node_id,
             source_head_event_id=source_head_event_id,
         )
+        await enqueue_live_turn_work(
+            db,
+            instance_id=row["instance_id"],
+            node_id=source_head_node_id,
+        )
 
 
 async def source_node_retrieval_ready(
