@@ -417,11 +417,17 @@ async def resolve_claim_context(
     origin_character_id = row["character_id"]
     speaker_id = row["speaker_id"]
     speaker_type = row["speaker_role"]
-    viewpoint_id = row["explicit_viewpoint_id"] or (
-        (speaker_id or origin_character_id)
-        if speaker_type == "character"
-        else speaker_id
-    )
+    if row["explicit_viewpoint_id"]:
+        viewpoint_id = row["explicit_viewpoint_id"]
+    elif speaker_type == "character":
+        viewpoint_id = speaker_id or origin_character_id
+    elif speaker_type == "source":
+        # A source can assert text without becoming a character/viewpoint owner.
+        # speaker_id remains durable provenance; an explicit viewpoint may still
+        # be supplied for a signed author/editor when that distinction matters.
+        viewpoint_id = None
+    else:
+        viewpoint_id = speaker_id
     epistemic_scope = "character" if viewpoint_id == origin_character_id and origin_character_id else (
         "speaker" if viewpoint_id else "source"
     )
