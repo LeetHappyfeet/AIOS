@@ -382,16 +382,17 @@ async def ingest(req: IngestIn) -> IngestOut:
                         AND rw.anchor_timeline_id=$1
                     )
                   )
-              AND COALESCE(
-                    (
-                        SELECT dn.event_id
-                        FROM aios.dag_node dn
-                        WHERE dn.node_id=rs.source_head_node_id
-                    ),
-                    -1
-                  ) <= $7
-                  OR $8::boolean
-            )
+              AND (
+                    COALESCE(
+                        (
+                            SELECT dn.event_id
+                            FROM aios.dag_node dn
+                            WHERE dn.node_id=rs.source_head_node_id
+                        ),
+                        -1
+                    ) <= $7
+                    OR $8::boolean
+                  )
             """,
             timeline_id,
             node_id,
