@@ -410,9 +410,12 @@ class WorldRuntimeService:
             after.get("state_version") == state.get("state_version")
             and after.get("source_head_node_id") == state.get("source_head_node_id")
         )
+        # Generation consistency is a coordinate guarantee, not a promise that
+        # every background semantic enrichment stage has completed. A stable
+        # HUD may therefore be used immediately while topology_current remains
+        # false and is upgraded asynchronously on a later preparation.
         generation_ready = bool(
-            retrieval_ready
-            and coordinates_stable
+            coordinates_stable
             and after.get("source_head_node_id") == target_node_id
         )
         frame.setdefault("hud", {})
@@ -447,7 +450,7 @@ class WorldRuntimeService:
                 SET status='dirty',
                     last_error=CASE
                         WHEN $2 THEN 'runtime/source coordinates changed during HUD assembly'
-                        ELSE 'retrieval pipeline has not reached the requested source node'
+                        ELSE 'HUD snapshot was not generation-consistent'
                     END,
                     updated_at=now()
                 WHERE instance_id=$1
