@@ -150,7 +150,9 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT n.node_id
         FROM aios.dag_node n
+        JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         WHERE n.message_text IS NOT NULL
+          AND ie.superseded_at IS NULL
           AND (
               (
                   n.kind = 'paragraph'
@@ -192,7 +194,9 @@ STAGES: List[Stage] = [
         FROM aios.document_section ds
         JOIN aios.dag_node n
           ON n.node_id = ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         WHERE ds.claims_extracted_at IS NULL
+          AND ie.superseded_at IS NULL
           AND NOT EXISTS (
               SELECT 1
               FROM aios.pipeline_job pj
@@ -221,7 +225,9 @@ STAGES: List[Stage] = [
           ON ds.section_id = es.section_id
         JOIN aios.dag_node n
           ON n.node_id = ds.node_id
-        WHERE EXISTS (
+        JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+        WHERE ie.superseded_at IS NULL
+          AND EXISTS (
             SELECT 1
             FROM aios.claim_context_resolution ccr
             WHERE ccr.claim_id=cc.claim_id
@@ -466,6 +472,7 @@ STAGES: List[Stage] = [
         JOIN aios.ingest_event ie
           ON ie.event_id = n.event_id
         WHERE ds.claims_extracted_at IS NOT NULL
+          AND ie.superseded_at IS NULL
           AND ie.rdf_processed_at IS NULL
           AND NOT EXISTS (
               SELECT 1
