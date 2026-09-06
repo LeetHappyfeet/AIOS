@@ -100,7 +100,7 @@ class ExternalObservationIn(BaseModel):
     target_world_id: Optional[UUID] = None
 
     text: str
-    kind: EventKind = "observation"
+    kind: Literal["observation"] = "observation"
     payload: Dict[str, Any] = Field(default_factory=dict)
     dedupe_key: Optional[str] = None
     scope_key: Optional[str] = None
