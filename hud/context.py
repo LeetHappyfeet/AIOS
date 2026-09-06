@@ -96,21 +96,6 @@ class HUDContextResolver:
         )
         lineage_world_ids = tuple(row["world_id"] for row in lineage) or (state["world_id"],)
 
-        related = await self.db.fetch(
-            """
-            SELECT
-                CASE
-                    WHEN subject_entity_id=$2 THEN object_entity_id
-                    ELSE subject_entity_id
-                END AS entity_id
-            FROM aios.world_entity_relation
-            WHERE world_id=$1
-              AND valid_to_node_id IS NULL
-              AND (subject_entity_id=$2 OR object_entity_id=$2)
-            """,
-            state["world_id"],
-            state["entity_id"],
-        )
         inventory = await self.db.fetch(
             "SELECT entity_id FROM aios.character_inventory WHERE instance_id=$1",
             instance_id,
@@ -119,7 +104,6 @@ class HUDContextResolver:
         scene_ids = {state["entity_id"]}
         if state["location_entity_id"]:
             scene_ids.add(state["location_entity_id"])
-        scene_ids.update(row["entity_id"] for row in related if row["entity_id"])
         scene_ids.update(row["entity_id"] for row in inventory if row["entity_id"])
 
         return HUDContext(
