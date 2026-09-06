@@ -15,6 +15,29 @@ class PluginManager:
     def __init__(self, registry: Optional[PluginRegistry] = None, *, default_timeout: float = 0.25):
         self.registry = registry or build_default_registry()
         self.default_timeout = max(0.01, float(default_timeout))
+        self._started = False
+
+    async def startup(self) -> None:
+        if self._started:
+            return
+        for plugin in self.registry.enabled():
+            timeout = max(0.01, float(getattr(plugin, "timeout_seconds", self.default_timeout)))
+            try:
+                await asyncio.wait_for(plugin.startup(), timeout=timeout)
+            except Exception:
+                logger.exception("HUD plugin %s startup failed", plugin.plugin_id)
+        self._started = True
+
+    async def shutdown(self) -> None:
+        if not self._started:
+            return
+        for plugin in self.registry.enabled():
+            timeout = max(0.01, float(getattr(plugin, "timeout_seconds", self.default_timeout)))
+            try:
+                await asyncio.wait_for(plugin.shutdown(), timeout=timeout)
+            except Exception:
+                logger.exception("HUD plugin %s shutdown failed", plugin.plugin_id)
+        self._started = False
 
     async def collect(self, context: PluginRuntimeContext) -> dict[str, Any]:
         plugins = [plugin for plugin in self.registry.enabled() if plugin.applies_to(context)]
@@ -76,6 +99,21 @@ class PluginManager:
                 for signal in contribution.retrieval_signals
                 if signal.role != "none"
             )
+            for section in contribution.sections:
+                for field in section.fields:
+                    if field.retrieval_role == "none":
+                        continue
+                    retrieval_signals.append(
+                        {
+                            "plugin_id": plugin_id,
+                            "key": field.key,
+                            "value": field.value,
+                            "role": field.retrieval_role,
+                            "strength": field.retrieval_strength,
+                            "entity_id": None,
+                            "focus_text": f"{field.key} {field.value}",
+                        }
+                    )
             actions.extend(
                 {**action.to_dict(), "plugin_id": plugin_id}
                 for action in contribution.actions
