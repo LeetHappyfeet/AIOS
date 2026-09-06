@@ -132,7 +132,12 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT cc.claim_id
         FROM aios.claim_candidate cc
-        WHERE NOT EXISTS (
+        WHERE EXISTS (
+            SELECT 1
+            FROM aios.claim_context_resolution ccr
+            WHERE ccr.claim_id=cc.claim_id
+        )
+          AND NOT EXISTS (
             SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id
         )
           AND NOT EXISTS (
@@ -348,6 +353,53 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+    ),
+
+    # -------------------------------------------------
+    # 5) liminal claim -> durable context resolution
+    # -------------------------------------------------
+    # Context is derived from trusted DAG/timeline lineage first, then semantic
+    # classification annotates the claim. It never promotes the proposition to
+    # world truth and never grants it to another character.
+    Stage(
+        name="resolve_claim_context",
+        job_type="resolve_claim_context",
+        eligibility_sql="""
+        SELECT cc.claim_id
+        FROM aios.claim_candidate cc
+        WHERE EXISTS (
+            SELECT 1
+            FROM aios.rdf_promotion_log base
+            WHERE base.claim_id=cc.claim_id
+              AND base.rdf_dataset='world'
+              AND base.rdf_graph='urn:aios:world:liminal'
+              AND base.rdf_predicate='rdf:type'
+              AND base.rdf_object='world:Claim'
+        )
+          AND EXISTS (
+            SELECT 1
+            FROM aios.rdf_promotion_log cls
+            WHERE cls.claim_id=cc.claim_id
+              AND cls.rdf_dataset='world'
+              AND cls.rdf_graph='urn:aios:world:liminal'
+              AND cls.rdf_predicate='world:contentKind'
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM aios.claim_context_resolution ccr
+            WHERE ccr.claim_id=cc.claim_id
+        )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM aios.pipeline_job pj
+            WHERE pj.job_type='resolve_claim_context'
+              AND pj.status IN ('queued','running')
+              AND pj.payload->>'claim_id'=cc.claim_id::text
+        )
+        ORDER BY cc.created_at
+        LIMIT $1
+        """,
+        payload_builder=claim_id_payload,
     ),
 ]
 
