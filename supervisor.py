@@ -118,7 +118,13 @@ STAGES: List[Stage] = [
               SELECT 1
               FROM aios.pipeline_job pj
               WHERE pj.job_type='project_world_topology'
-                AND pj.status IN ('queued','running')
+                AND (
+                    pj.status IN ('queued','running')
+                    OR (
+                        pj.status='failed'
+                        AND pj.updated_at > now() - interval '30 seconds'
+                    )
+                )
           )
         ORDER BY w.created_at
         LIMIT LEAST($1, 1)
