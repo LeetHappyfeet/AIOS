@@ -16,6 +16,7 @@ from aios_app.models import (
     SessionOut,
     IngestIn,
     IngestOut,
+    ExternalObservationIn,
     MemoryOut,
     CharacterActivateIn,
     CharacterActivateOut,
@@ -50,6 +51,7 @@ from aios_app.epistemic.weights import (
 )
 from aios_app.epistemic.knowledge import acquire_document
 from aios_app.epistemic.search import epistemic_search, document_epistemic_summary
+from aios_app.external_observation import persist_external_observation
 
 logger = logging.getLogger("aios.main")
 
@@ -336,6 +338,25 @@ async def ingest(req: IngestIn) -> IngestOut:
         node_id=node_id,
         timeline_id=timeline_id,
     )
+
+
+@app.post("/observation", response_model=IngestOut)
+async def ingest_external_observation(req: ExternalObservationIn) -> IngestOut:
+    """
+    Persist one non-character observation into the liminal DAG.
+
+    This endpoint is the common ingress for future accumulators and other
+    external sensors. Source/speaker provenance is preserved independently
+    from optional character/world target hints. Those hints never assert world
+    truth and never make the observation part of a character memory.
+    """
+    try:
+        return await persist_external_observation(db, req)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"External observation ingestion failed: {exc}",
+        ) from exc
 
 
 # =================================================
