@@ -119,6 +119,10 @@ class ClaimContext:
     speaker_id: Optional[str]
     speaker_type: Optional[str]
     viewpoint_id: Optional[str]
+    source_id: Optional[str]
+    source_kind: Optional[str]
+    target_character_id: Optional[str]
+    target_world_id: Optional[UUID]
     world_id: Optional[UUID]
     timeline_id: Optional[UUID]
     dag_node_id: Optional[UUID]
@@ -140,6 +144,10 @@ class ClaimContext:
             "speaker_id": self.speaker_id,
             "speaker_type": self.speaker_type,
             "viewpoint_id": self.viewpoint_id,
+            "source_id": self.source_id,
+            "source_kind": self.source_kind,
+            "target_character_id": self.target_character_id,
+            "target_world_id": str(self.target_world_id) if self.target_world_id else None,
             "world_id": str(self.world_id) if self.world_id else None,
             "timeline_id": str(self.timeline_id) if self.timeline_id else None,
             "dag_node_id": str(self.dag_node_id) if self.dag_node_id else None,
@@ -316,6 +324,10 @@ async def resolve_claim_context(
             speaker_id=existing["speaker_id"],
             speaker_type=existing["speaker_type"],
             viewpoint_id=existing["viewpoint_id"],
+            source_id=existing["source_id"],
+            source_kind=existing["source_kind"],
+            target_character_id=existing["target_character_id"],
+            target_world_id=existing["target_world_id"],
             world_id=existing["world_id"],
             timeline_id=existing["timeline_id"],
             dag_node_id=existing["dag_node_id"],
@@ -359,6 +371,10 @@ async def resolve_claim_context(
             t.world_id,
             sd.source_type,
             ie.source AS ingest_source,
+            ie.source_id,
+            ie.source_kind AS explicit_source_kind,
+            ie.target_character_id,
+            ie.target_world_id,
             (
                 SELECT ci.instance_id
                 FROM aios.character_instance ci
@@ -410,7 +426,7 @@ async def resolve_claim_context(
         "speaker" if viewpoint_id else "source"
     )
 
-    source_kind = row["source_type"] or row["ingest_source"]
+    source_kind = row["explicit_source_kind"] or row["source_type"] or row["ingest_source"]
     acquisition_mode = infer_acquisition_mode(
         source_kind=source_kind,
         speaker_role=row["speaker_role"],
@@ -439,6 +455,10 @@ async def resolve_claim_context(
         speaker_id=speaker_id,
         speaker_type=speaker_type,
         viewpoint_id=viewpoint_id,
+        source_id=row["source_id"],
+        source_kind=source_kind,
+        target_character_id=row["target_character_id"],
+        target_world_id=row["target_world_id"],
         world_id=row["world_id"],
         timeline_id=row["timeline_id"],
         dag_node_id=row["node_id"],
@@ -454,23 +474,26 @@ async def resolve_claim_context(
         INSERT INTO aios.claim_context_resolution (
             claim_id, claim_kind, subject_kind, object_kind, predicate_family,
             origin_character_id, character_instance_id, speaker_id, speaker_type,
-            viewpoint_id, world_id, timeline_id, dag_node_id, epistemic_scope,
-            acquisition_mode, subject_is_pivot, object_is_pivot,
-            confidence, resolver_version, meta
+            viewpoint_id, source_id, source_kind, target_character_id,
+            target_world_id, world_id, timeline_id, dag_node_id,
+            epistemic_scope, acquisition_mode, subject_is_pivot,
+            object_is_pivot, confidence, resolver_version, meta
         )
         VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb
+            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+            $21,$22,$23,$24::jsonb
         )
         ON CONFLICT (claim_id) DO NOTHING
         """,
         claim_id, claim_kind, subject_kind, object_kind, family,
         origin_character_id, context.character_instance_id,
         context.speaker_id, context.speaker_type, viewpoint_id,
-        context.world_id, context.timeline_id, context.dag_node_id,
-        epistemic_scope, acquisition_mode, context.subject_is_pivot,
-        context.object_is_pivot, confidence, RESOLVER_VERSION,
-        json.dumps(context.as_meta()),
+        context.source_id, context.source_kind, context.target_character_id,
+        context.target_world_id, context.world_id, context.timeline_id,
+        context.dag_node_id, epistemic_scope, acquisition_mode,
+        context.subject_is_pivot, context.object_is_pivot, confidence,
+        RESOLVER_VERSION, json.dumps(context.as_meta()),
     )
 
     await _write_liminal_context(fuseki, context)
@@ -522,6 +545,14 @@ async def _write_liminal_context(fuseki: FusekiClient, context: ClaimContext) ->
     if context.origin_character_id:
         char_segment = quote(context.origin_character_id, safe="")
         triples.append(f"<{claim_iri}> world:originCharacter <urn:aios:character:{char_segment}> .")
+    if context.source_id:
+        triples.append(f"<{claim_iri}> world:sourceId {_sparql_lit(context.source_id)} .")
+    if context.source_kind:
+        triples.append(f"<{claim_iri}> world:sourceKind {_sparql_lit(context.source_kind)} .")
+    if context.target_character_id:
+        triples.append(f"<{claim_iri}> world:targetCharacterHint {_sparql_lit(context.target_character_id)} .")
+    if context.target_world_id:
+        triples.append(f"<{claim_iri}> world:targetWorldHint <urn:aios:world:{context.target_world_id}> .")
     if context.viewpoint_id:
         triples.append(f"<{claim_iri}> world:viewpointId {_sparql_lit(context.viewpoint_id)} .")
     if context.character_instance_id:
