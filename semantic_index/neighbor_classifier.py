@@ -181,8 +181,8 @@ async def classify_neighbor_relations_once(
             "polarity": row["a_polarity"],
             "claim_kind": row["a_claim_kind"],
             "predicate_family": row["a_predicate_family"],
-            "world_id": row["a_world_id"],
-            "timeline_id": row["a_timeline_id"],
+            "world_id": str(row["a_world_id"]) if row["a_world_id"] else None,
+            "timeline_id": str(row["a_timeline_id"]) if row["a_timeline_id"] else None,
         }
         b = {
             "topic_key": row["b_topic_key"],
@@ -192,8 +192,8 @@ async def classify_neighbor_relations_once(
             "polarity": row["b_polarity"],
             "claim_kind": row["b_claim_kind"],
             "predicate_family": row["b_predicate_family"],
-            "world_id": row["b_world_id"],
-            "timeline_id": row["b_timeline_id"],
+            "world_id": str(row["b_world_id"]) if row["b_world_id"] else None,
+            "timeline_id": str(row["b_timeline_id"]) if row["b_timeline_id"] else None,
         }
 
         relation, confidence, features = classify_neighbor_pair(
