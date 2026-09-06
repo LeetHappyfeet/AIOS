@@ -8,6 +8,7 @@ from aios_app.db import Database
 from .config import SemanticIndexConfig
 from .service import index_once, initialize_backend
 from .structure import analyze_neighbors_once
+from .neighbor_classifier import classify_neighbor_relations_once
 from .clustering import cluster_neighbors_once
 from .classifier import classify_latest_clusters_once
 
@@ -25,11 +26,22 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         while True:
             indexed = await index_once(db, cfg)
             structured = await analyze_neighbors_once(db, cfg)
-            clustered = await cluster_neighbors_once(db, cfg)
-            classified = await classify_latest_clusters_once(db, cfg)
+            neighbor_classified = await classify_neighbor_relations_once(db, cfg)
+
+            # Do not cluster a partially interpreted neighbor graph. Drain
+            # pairwise relation work first so contradiction edges cannot act
+            # as ordinary semantic glue in an early run.
+            if neighbor_classified == 0:
+                clustered = await cluster_neighbors_once(db, cfg)
+                classified = await classify_latest_clusters_once(db, cfg)
+            else:
+                clustered = 0
+                classified = 0
+
             if (
                 indexed == 0
                 and structured == 0
+                and neighbor_classified == 0
                 and clustered == 0
                 and classified == 0
             ):
