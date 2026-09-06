@@ -64,3 +64,11 @@ class SemanticIndexConfig:
     cluster_min_cohesion: float = float(
         os.getenv("AIOS_SEMANTIC_CLUSTER_MIN_COHESION", "0.78")
     )
+
+    # Advisory semantic classifier. Low-margin decisions remain UNRESOLVED.
+    classifier_min_confidence: float = float(
+        os.getenv("AIOS_SEMANTIC_CLASSIFIER_MIN_CONFIDENCE", "0.48")
+    )
+    classifier_min_margin: float = float(
+        os.getenv("AIOS_SEMANTIC_CLASSIFIER_MIN_MARGIN", "0.04")
+    )
