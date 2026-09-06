@@ -22,6 +22,20 @@ from aios_app.hud.readiness import (
 )
 logger = logging.getLogger("aios.world.runtime")
 
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if not isinstance(decoded, dict):
+            raise ValueError("expected JSON object")
+        return decoded
+    return dict(value)
+
+
 from aios_app.world.topology import (
     ensure_character_root_world,
     ensure_runtime_branch_world,
@@ -285,6 +299,31 @@ class WorldRuntimeService:
         await ensure_readiness_row(self.db, instance_id=instance_id, live=True)
         state = await self.get_state(instance_id)
         target_node_id = through_node_id or state.get("source_head_node_id")
+        ready = await readiness_state(self.db, instance_id=instance_id)
+
+        # A generation retry/swipe may intentionally ask for the exact source
+        # node used by the previous generation after the rendered character
+        # reply has advanced the active source head.  Replaying the retained
+        # prepared snapshot is safe because it does not rebuild against newer
+        # source context and therefore cannot leak the reply being replaced.
+        replay_cached = (
+            through_node_id is not None
+            and through_node_id != state.get("source_head_node_id")
+            and ready.get("prepared_source_node_id") == through_node_id
+            and ready.get("prepared_state_version") == state.get("state_version")
+            and ready.get("hud_json") is not None
+        )
+        if replay_cached:
+            frame = _json_object(ready["hud_json"])
+            frame.setdefault("hud", {})["cache"] = "replayed"
+            freshness = frame["hud"].setdefault("freshness", {})
+            freshness["replayed_snapshot"] = True
+            freshness["active_source_head_node_id"] = (
+                str(state["source_head_node_id"])
+                if state.get("source_head_node_id") else None
+            )
+            freshness["requested_source_node_id"] = str(through_node_id)
+            return frame
 
         if through_node_id is not None:
             target = await self.db.fetchrow(
@@ -309,7 +348,6 @@ class WorldRuntimeService:
                     "requested preparation node is not the current active source head"
                 )
 
-        ready = await readiness_state(self.db, instance_id=instance_id)
         exact_cached = (
             ready.get("status") == "ready"
             and ready.get("prepared_source_node_id") == target_node_id
@@ -317,7 +355,7 @@ class WorldRuntimeService:
             and ready.get("hud_json") is not None
         )
         if exact_cached:
-            frame = dict(ready["hud_json"])
+            frame = _json_object(ready["hud_json"])
             frame.setdefault("hud", {})["cache"] = "prepared"
             return frame
 
