@@ -117,9 +117,10 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("\nRECENT EVENTS:")
         for event in recent:
             if event.get("message_text"):
+                stream = event.get("event_stream") or "runtime"
                 role = event.get("speaker_role") or "other"
                 speaker = event.get("speaker_id") or "unknown"
-                lines.append(f"- [{role}:{speaker}] {event['message_text']}")
+                lines.append(f"- [{stream}|{role}:{speaker}] {event['message_text']}")
             elif event.get("text"):
                 lines.append(f"- {event['text']}")
 
