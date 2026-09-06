@@ -335,12 +335,19 @@ class WorldRuntimeService:
             state["entity_id"],
         )
         controller_type = controller["controller_type"] if controller else "agent"
+        controller_ref = controller["controller_ref"] if controller else None
         speaker_role = "user" if controller_type == "human" else "agent"
+        viewpoint_id = (
+            controller_ref
+            if controller_type == "human" and controller_ref
+            else state["character_id"]
+        )
 
         event_payload = {
             **payload,
             "controller_type": controller_type,
-            "controller_ref": controller["controller_ref"] if controller else None,
+            "controller_ref": controller_ref,
+            "viewpoint_id": viewpoint_id,
             "runtime_instance_id": str(instance_id),
             "actor_entity_id": str(state["entity_id"]) if state["entity_id"] else None,
             "target_entity_id": str(target_entity_id) if target_entity_id else None,
@@ -352,12 +359,12 @@ class WorldRuntimeService:
             """
             INSERT INTO aios.ingest_event (
                 event_time, source, kind, session_id, speaker_id, speaker_role,
-                recipient_id, character_id, user_name, message_text, payload,
-                dedupe_key
+                recipient_id, viewpoint_id, character_id, user_name,
+                message_text, payload, dedupe_key
             )
-            SELECT now(), 'world_runtime', $8::aios.event_kind, t.session_id,
-                   $1, $7::aios.actor_type, $2, ci.character_id, t.user_name, $3,
-                   $4::jsonb, $5
+            SELECT now(), 'world_runtime', $9::aios.event_kind, t.session_id,
+                   $1, $8::aios.actor_type, $2, $7, ci.character_id, t.user_name,
+                   $3, $4::jsonb, $5
             FROM aios.character_runtime_state rs
             JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
             JOIN aios.timeline t ON t.timeline_id=rs.timeline_id
@@ -370,6 +377,7 @@ class WorldRuntimeService:
             json.dumps(event_payload),
             f"runtime::{instance_id}::{expected_state_version}::{action_type}",
             instance_id,
+            viewpoint_id,
             speaker_role,
             event_kind,
         )
@@ -386,6 +394,7 @@ class WorldRuntimeService:
             recipient_id=str(target_entity_id) if target_entity_id else None,
             message_text=message_text,
             payload=event_payload,
+            viewpoint_id=viewpoint_id,
             edge_type="next",
         )
 
