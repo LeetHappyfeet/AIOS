@@ -24,11 +24,16 @@ class HUDContext:
     lifecycle_state: str
     location_entity_id: Optional[UUID]
     lineage_world_ids: tuple[UUID, ...]
+    lineage_instance_ids: tuple[UUID, ...]
     scene_entity_ids: frozenset[UUID]
 
     def world_visible(self, candidate_world_id: Optional[UUID]) -> bool:
         """Only the current branch and its ancestors are implicitly visible."""
         return candidate_world_id is None or candidate_world_id in self.lineage_world_ids
+
+    def instance_visible(self, candidate_instance_id: Optional[UUID]) -> bool:
+        """Only the active experiential branch and its ancestors are implicit memory scope."""
+        return candidate_instance_id is None or candidate_instance_id in self.lineage_instance_ids
 
     def entity_is_active(self, entity_id: Optional[UUID]) -> bool:
         return bool(entity_id and entity_id in self.scene_entity_ids)
@@ -96,6 +101,28 @@ class HUDContextResolver:
         )
         lineage_world_ids = tuple(row["world_id"] for row in lineage) or (state["world_id"],)
 
+        instance_lineage = await self.db.fetch(
+            """
+            WITH RECURSIVE lineage AS (
+                SELECT instance_id, parent_instance_id, 0 AS depth
+                FROM aios.character_instance
+                WHERE instance_id=$1
+
+                UNION ALL
+
+                SELECT ci.instance_id, ci.parent_instance_id, l.depth + 1
+                FROM aios.character_instance ci
+                JOIN lineage l ON l.parent_instance_id=ci.instance_id
+                WHERE l.depth < 64
+            )
+            SELECT instance_id
+            FROM lineage
+            ORDER BY depth
+            """,
+            instance_id,
+        )
+        lineage_instance_ids = tuple(row["instance_id"] for row in instance_lineage) or (instance_id,)
+
         inventory = await self.db.fetch(
             "SELECT entity_id FROM aios.character_inventory WHERE instance_id=$1",
             instance_id,
@@ -120,5 +147,6 @@ class HUDContextResolver:
             lifecycle_state=state["lifecycle_state"],
             location_entity_id=state["location_entity_id"],
             lineage_world_ids=lineage_world_ids,
+            lineage_instance_ids=lineage_instance_ids,
             scene_entity_ids=frozenset(scene_ids),
         )
