@@ -250,9 +250,22 @@ class HUDAssembler:
             max_hops=max(2, int(hud_profile.entity_hops)),
             limit=min(hud_profile.semantic_retrieval_limit, 40),
         )
+        topology_rules = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="rule",
+            focus_text=focus_text,
+            goals=goals,
+            max_hops=max(1, int(hud_profile.entity_hops)),
+            limit=min(hud_profile.semantic_retrieval_limit, 30),
+        )
 
         topology_knowledge = (
-            topology_memories + topology_beliefs + topology_goals + topology_events
+            topology_memories
+            + topology_beliefs
+            + topology_goals
+            + topology_events
+            + topology_rules
         )
 
         # Projection is asynchronous and may be partially complete. Fill only
@@ -263,6 +276,7 @@ class HUDAssembler:
             "belief": not topology_beliefs,
             "goal": not topology_goals,
             "event": not topology_events,
+            "rule": not topology_rules,
         }
         legacy_knowledge = (
             await self._knowledge(context, scorer)
@@ -274,9 +288,10 @@ class HUDAssembler:
         for item in legacy_knowledge:
             kind = str(item.get("claim_kind") or "BELIEF").upper()
             if (
-                (kind in {"MEMORY", "RELATIONSHIP"} and missing_modes["memory"])
+                (kind == "MEMORY" and missing_modes["memory"])
                 or (kind == "EVENT" and (missing_modes["memory"] or missing_modes["event"]))
                 or (kind == "GOAL" and missing_modes["goal"])
+                or (kind == "RULE" and missing_modes["rule"])
                 or (
                     kind not in {"MEMORY", "RELATIONSHIP", "EVENT", "GOAL", "RULE"}
                     and missing_modes["belief"]
