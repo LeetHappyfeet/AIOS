@@ -1,3 +1,4 @@
+from aios_app.models import ExternalObservationIn
 from aios_app.epistemic.normalizer import normalize_components
 from aios_app.epistemic.context_resolver import (
     classify_claim_kind,
@@ -99,3 +100,16 @@ def test_explicit_external_viewpoint_is_preserved_without_character_ownership():
         origin_character_id=None,
     )
     assert viewpoint == "reporter:jane_doe"
+
+
+def test_external_observation_contract_defaults_to_source_liminal_event():
+    req = ExternalObservationIn(
+        source_id="cnn",
+        source_kind="news_organization",
+        speaker_id="cnn",
+        text="Example observation.",
+    )
+    assert req.kind == "observation"
+    assert req.speaker_type == "source"
+    assert req.target_character_id is None
+    assert req.target_world_id is None
