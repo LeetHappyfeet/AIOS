@@ -6,6 +6,7 @@ from uuid import UUID
 import gradio as gr
 
 from aios_app.ui.registry import register_tab
+from aios_app.accumulator.web.config import OUTPUT_DIR
 from aios_app.accumulator.web.queue import CrawlQueue, CrawlTask
 from aios_app.accumulator.web.worker import AccumulatorWorker
 
