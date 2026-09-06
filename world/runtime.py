@@ -8,6 +8,10 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.epistemic.weights import get_profile
+from aios_app.world.topology import (
+    ensure_character_root_world,
+    ensure_runtime_branch_world,
+)
 
 
 class RuntimeConflict(RuntimeError):
@@ -55,11 +59,23 @@ class WorldRuntimeService:
         if not ident:
             raise RuntimeNotFound(f"Unknown character_id '{character_id}'")
 
-        world = await self._resolve_world(
-            world_id=world_id,
-            world_key=world_key,
-            home_world_id=ident["home_world_id"],
-        )
+        if world_id is not None || world_key is not None:
+            world = await self._resolve_world(
+                world_id=world_id,
+                world_key=world_key,
+                home_world_id=ident["home_world_id"],
+            )
+        else:
+            root_world_id = await ensure_character_root_world(
+                self.db,
+                character_id=character_id,
+            )
+            world = await ensure_runtime_branch_world(
+                self.db,
+                character_id=character_id,
+                session_id=session_id,
+                root_world_id=root_world_id,
+            )
         world_id = world["world_id"]
 
         instance = await self.db.fetchrow(
