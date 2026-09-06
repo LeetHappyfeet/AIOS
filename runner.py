@@ -17,6 +17,7 @@ from aios_app.pipeline.jobs import (
 
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
 from aios_app.pipeline.worker import run_claim_extraction_for_section
+from aios_app.char.discover_characters_worker import run_worker as run_discover_character
 
 from aios_app.rdf.fuseki import FusekiClient
 from aios_app.rdf.world_liminal import promote_liminal_claims
@@ -36,6 +37,14 @@ JOB_HANDLERS: Dict[str, Callable[[Database, Dict[str, Any]], Awaitable[None]]] =
 # -------------------------------------------------
 # Existing handlers
 # -------------------------------------------------
+
+async def handle_discover_characters(db: Database, job: Dict[str, Any]) -> None:
+    character_id = str(job["payload"]["character_id"]).strip()
+    if not character_id:
+        logger.warning("Skipping discover_characters job with empty character_id")
+        return
+    await run_discover_character(db, character_id=character_id)
+
 
 async def handle_dag_to_document_section(db: Database, job: Dict[str, Any]) -> None:
     node_id = UUID(job["payload"]["node_id"])
@@ -167,6 +176,7 @@ async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> Non
 
 JOB_HANDLERS.update(
     {
+        "discover_characters": handle_discover_characters,
         "dag_to_document_section": handle_dag_to_document_section,
         "extract_claims": handle_extract_claims,
         "rdf_liminal_promote": handle_rdf_liminal_promote,
