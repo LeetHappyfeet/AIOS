@@ -194,6 +194,7 @@ class HUDAssembler:
             context,
             scorer,
             token_cap=section_caps["scene"],
+            entity_hops=hud_profile.entity_hops,
         )
         relationships = (
             await self._relationships(context, scorer)
@@ -389,45 +390,53 @@ class HUDAssembler:
         scorer: HUDRelevanceScorer,
         *,
         token_cap: int,
+        entity_hops: int,
     ) -> dict[str, Any]:
         seed_ids = list(context.scene_entity_ids)
         rows = await self.db.fetch(
             """
-            WITH seed(entity_id) AS (
-                SELECT unnest($3::uuid[])
-            ),
-            expanded(entity_id) AS (
-                SELECT entity_id FROM seed
+            WITH RECURSIVE expanded(entity_id, depth) AS (
+                SELECT unnest($3::uuid[]), 0
                 UNION
-                SELECT CASE
-                    WHEN r.subject_entity_id = ANY($3::uuid[]) THEN r.object_entity_id
-                    ELSE r.subject_entity_id
-                END
-                FROM aios.world_entity_relation r
-                WHERE r.world_id=$1
-                  AND r.valid_to_node_id IS NULL
-                  AND (
-                      r.subject_entity_id = ANY($3::uuid[])
-                      OR r.object_entity_id = ANY($3::uuid[])
-                  )
+                SELECT
+                    CASE
+                        WHEN r.subject_entity_id=x.entity_id THEN r.object_entity_id
+                        ELSE r.subject_entity_id
+                    END,
+                    x.depth + 1
+                FROM expanded x
+                JOIN aios.world_entity_relation r
+                  ON r.world_id=$1
+                 AND r.valid_to_node_id IS NULL
+                 AND (
+                     r.subject_entity_id=x.entity_id
+                     OR r.object_entity_id=x.entity_id
+                 )
+                WHERE x.depth < $4
             )
-            SELECT e.entity_id, e.entity_type, e.display_name, e.entity_key, e.meta
+            SELECT DISTINCT
+                e.entity_id, e.entity_type, e.display_name, e.entity_key, e.meta,
+                MIN(x.depth) OVER (PARTITION BY e.entity_id) AS graph_depth
             FROM aios.world_entity e
             JOIN expanded x ON x.entity_id=e.entity_id
             WHERE e.world_id=$1
               AND e.entity_id IS DISTINCT FROM $2
-            ORDER BY e.created_at
+            ORDER BY graph_depth, e.created_at
             LIMIT 200
             """,
             context.world_id,
             context.entity_id,
             seed_ids,
+            max(0, min(int(entity_hops), 4)),
         )
         entities: list[dict[str, Any]] = []
         location = None
         for rank, row in enumerate(rows):
             item = dict(row)
-            item["tier"] = 0 if context.entity_is_active(item["entity_id"]) else 2
+            item["tier"] = 0 if context.entity_is_active(item["entity_id"]) else min(
+                2,
+                int(item.get("graph_depth") or 0) + 1,
+            )
             score = scorer.score(
                 item,
                 rank=rank,
