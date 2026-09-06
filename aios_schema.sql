@@ -181,6 +181,34 @@ CREATE TABLE aios.claim_candidate (
 
 
 --
+-- Name: claim_context_resolution; Type: TABLE; Schema: aios; Owner: -
+--
+
+CREATE TABLE aios.claim_context_resolution (
+    claim_id uuid NOT NULL,
+    claim_kind text DEFAULT 'UNKNOWN'::text NOT NULL,
+    subject_kind text,
+    object_kind text,
+    predicate_family text DEFAULT 'UNKNOWN'::text NOT NULL,
+    origin_character_id text,
+    character_instance_id uuid,
+    viewpoint_id text,
+    world_id uuid,
+    timeline_id uuid,
+    dag_node_id uuid,
+    epistemic_scope text DEFAULT 'source'::text NOT NULL,
+    acquisition_mode text,
+    subject_is_pivot boolean DEFAULT false NOT NULL,
+    object_is_pivot boolean DEFAULT false NOT NULL,
+    confidence double precision DEFAULT 0.0 NOT NULL,
+    resolver_version text NOT NULL,
+    meta jsonb DEFAULT '{}'::jsonb NOT NULL,
+    resolved_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT claim_context_resolution_confidence_check CHECK (((confidence >= (0.0)::double precision) AND (confidence <= (1.0)::double precision)))
+);
+
+
+--
 -- Name: claim_candidate_full_spo; Type: VIEW; Schema: aios; Owner: -
 --
 
@@ -623,6 +651,14 @@ ALTER TABLE ONLY aios.claim_candidate
 
 
 --
+-- Name: claim_context_resolution claim_context_resolution_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
+--
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_pkey PRIMARY KEY (claim_id);
+
+
+--
 -- Name: claim_provenance claim_provenance_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
 --
 
@@ -903,6 +939,11 @@ CREATE INDEX idx_dag_node_timeline ON aios.dag_node USING btree (timeline_id, cr
 -- Name: idx_document_section_document; Type: INDEX; Schema: aios; Owner: -
 --
 
+CREATE INDEX idx_claim_context_character ON aios.claim_context_resolution USING btree (origin_character_id, resolved_at DESC) WHERE (origin_character_id IS NOT NULL);
+CREATE INDEX idx_claim_context_instance ON aios.claim_context_resolution USING btree (character_instance_id, resolved_at DESC) WHERE (character_instance_id IS NOT NULL);
+CREATE INDEX idx_claim_context_semantics ON aios.claim_context_resolution USING btree (claim_kind, predicate_family);
+CREATE INDEX idx_claim_context_world ON aios.claim_context_resolution USING btree (world_id, resolved_at DESC) WHERE (world_id IS NOT NULL);
+
 CREATE INDEX idx_document_section_document ON aios.document_section USING btree (document_id);
 
 
@@ -1126,6 +1167,21 @@ ALTER TABLE ONLY aios.claim_candidate
 --
 -- Name: claim_provenance claim_provenance_claim_id_fkey; Type: FK CONSTRAINT; Schema: aios; Owner: -
 --
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_character_instance_id_fkey FOREIGN KEY (character_instance_id) REFERENCES aios.character_instance(instance_id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_dag_node_id_fkey FOREIGN KEY (dag_node_id) REFERENCES aios.dag_node(node_id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_timeline_id_fkey FOREIGN KEY (timeline_id) REFERENCES aios.timeline(timeline_id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY aios.claim_context_resolution
+    ADD CONSTRAINT claim_context_resolution_world_id_fkey FOREIGN KEY (world_id) REFERENCES aios.world(world_id) ON DELETE SET NULL;
 
 ALTER TABLE ONLY aios.claim_provenance
     ADD CONSTRAINT claim_provenance_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE;
