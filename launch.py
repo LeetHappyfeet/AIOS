@@ -33,6 +33,7 @@ SERVICES = [
         "name": "RAG",
         "cmd": [PYTHON, "-m", "aios_app.rag.cli"],
         "required": False,
+        "startup_timeout": float(os.getenv("AIOS_RAG_STARTUP_TIMEOUT", "120")),
         "readiness": {"type": "log", "marker": "AIOS_READY service=rag"},
     },
     {
