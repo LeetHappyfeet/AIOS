@@ -28,6 +28,7 @@ from aios_app.epistemic.context_resolver import resolve_claim_context
 from aios_app.epistemic.narratives import assign_narratives_once
 from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
 from aios_app.epistemic.generated import resolve_generated_facts_once
+from aios_app.world.topology import project_world_topology
 
 logger = logging.getLogger("aios.pipeline.runner")
 
@@ -44,6 +45,12 @@ async def handle_discover_characters(db: Database, job: Dict[str, Any]) -> None:
         logger.warning("Skipping discover_characters job with empty character_id")
         return
     await run_discover_character(db, character_id=character_id)
+
+
+async def handle_project_world_topology(db: Database, job: Dict[str, Any]) -> None:
+    world_id = UUID(job["payload"]["world_id"])
+    fuseki = FusekiClient(settings.fuseki_base_url)
+    await project_world_topology(db, fuseki, world_id=world_id)
 
 
 async def handle_dag_to_document_section(db: Database, job: Dict[str, Any]) -> None:
@@ -177,6 +184,7 @@ async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> Non
 JOB_HANDLERS.update(
     {
         "discover_characters": handle_discover_characters,
+        "project_world_topology": handle_project_world_topology,
         "dag_to_document_section": handle_dag_to_document_section,
         "extract_claims": handle_extract_claims,
         "rdf_liminal_promote": handle_rdf_liminal_promote,
