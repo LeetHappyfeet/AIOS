@@ -1478,6 +1478,7 @@ CREATE TABLE aios.semantic_topology_node (
     proposition_id uuid,
     claim_id uuid,
     assertion_id uuid,
+    acquisition_id uuid,
     significance double precision DEFAULT 0.5 NOT NULL,
     meta jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -1494,7 +1495,8 @@ CREATE TABLE aios.semantic_topology_node (
     CONSTRAINT semantic_topology_node_dag_node_id_fkey FOREIGN KEY (dag_node_id) REFERENCES aios.dag_node(node_id) ON DELETE SET NULL,
     CONSTRAINT semantic_topology_node_proposition_id_fkey FOREIGN KEY (proposition_id) REFERENCES aios.proposition(proposition_id) ON DELETE CASCADE,
     CONSTRAINT semantic_topology_node_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
-    CONSTRAINT semantic_topology_node_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE
+    CONSTRAINT semantic_topology_node_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_node_acquisition_id_fkey FOREIGN KEY (acquisition_id) REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE
 );
 
 CREATE TABLE aios.semantic_topology_edge (
@@ -1506,6 +1508,7 @@ CREATE TABLE aios.semantic_topology_edge (
     significance double precision DEFAULT 0.5 NOT NULL,
     claim_id uuid,
     assertion_id uuid,
+    acquisition_id uuid,
     meta jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT semantic_topology_edge_check CHECK ((parent_node_id <> child_node_id)),
@@ -1515,13 +1518,15 @@ CREATE TABLE aios.semantic_topology_edge (
     CONSTRAINT semantic_topology_edge_parent_node_id_fkey FOREIGN KEY (parent_node_id) REFERENCES aios.semantic_topology_node(topology_node_id) ON DELETE CASCADE,
     CONSTRAINT semantic_topology_edge_child_node_id_fkey FOREIGN KEY (child_node_id) REFERENCES aios.semantic_topology_node(topology_node_id) ON DELETE CASCADE,
     CONSTRAINT semantic_topology_edge_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
-    CONSTRAINT semantic_topology_edge_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE
+    CONSTRAINT semantic_topology_edge_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_edge_acquisition_id_fkey FOREIGN KEY (acquisition_id) REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE
 );
 
 CREATE TABLE aios.semantic_topology_projection (
     projection_key text NOT NULL,
     claim_id uuid,
     assertion_id uuid,
+    acquisition_id uuid,
     scope_key text NOT NULL,
     rdf_dataset text NOT NULL,
     rdf_graph text NOT NULL,
@@ -1530,10 +1535,11 @@ CREATE TABLE aios.semantic_topology_projection (
     last_error text,
     meta jsonb DEFAULT '{}'::jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT semantic_topology_projection_check CHECK (((claim_id IS NOT NULL) OR (assertion_id IS NOT NULL))),
+    CONSTRAINT semantic_topology_projection_check CHECK (((claim_id IS NOT NULL) OR (assertion_id IS NOT NULL) OR (acquisition_id IS NOT NULL))),
     CONSTRAINT semantic_topology_projection_pkey PRIMARY KEY (projection_key),
     CONSTRAINT semantic_topology_projection_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
-    CONSTRAINT semantic_topology_projection_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE
+    CONSTRAINT semantic_topology_projection_assertion_id_fkey FOREIGN KEY (assertion_id) REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    CONSTRAINT semantic_topology_projection_acquisition_id_fkey FOREIGN KEY (acquisition_id) REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_semantic_topology_scope ON aios.semantic_topology_node USING btree (scope_key, node_type);
@@ -1544,6 +1550,7 @@ CREATE INDEX idx_semantic_topology_edge_parent ON aios.semantic_topology_edge US
 CREATE INDEX idx_semantic_topology_edge_child ON aios.semantic_topology_edge USING btree (scope_key, child_node_id, edge_type);
 CREATE INDEX idx_semantic_topology_projection_claim ON aios.semantic_topology_projection USING btree (claim_id) WHERE (claim_id IS NOT NULL);
 CREATE INDEX idx_semantic_topology_projection_assertion ON aios.semantic_topology_projection USING btree (assertion_id) WHERE (assertion_id IS NOT NULL);
+CREATE INDEX idx_semantic_topology_projection_acquisition ON aios.semantic_topology_projection USING btree (acquisition_id) WHERE (acquisition_id IS NOT NULL);
 
 
 --
