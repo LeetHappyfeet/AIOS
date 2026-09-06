@@ -48,6 +48,10 @@ def claim_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"claim_id": str(row["claim_id"])}
 
 
+def character_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {"character_id": str(row["character_id"])}
+
+
 def empty_payload(_: Dict[str, object]) -> Dict[str, object]:
     return {}
 
@@ -57,6 +61,38 @@ def empty_payload(_: Dict[str, object]) -> Dict[str, object]:
 # =================================================
 
 STAGES: List[Stage] = [
+
+    # -------------------------------------------------
+    # 0) ingest_event -> character_identity
+    # -------------------------------------------------
+    # Character discovery must happen independently of claim/RDF processing so
+    # runtime activation can resolve a newly observed character as soon as the
+    # transport has durably ingested any event for that character.
+    Stage(
+        name="discover_characters",
+        job_type="discover_characters",
+        eligibility_sql="""
+        SELECT DISTINCT ie.character_id
+        FROM aios.ingest_event ie
+        WHERE ie.character_id IS NOT NULL
+          AND btrim(ie.character_id) <> ''
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.character_identity ci
+              WHERE ci.character_id = ie.character_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.pipeline_job pj
+              WHERE pj.job_type = 'discover_characters'
+                AND pj.status IN ('queued', 'running')
+                AND pj.payload->>'character_id' = ie.character_id
+          )
+        ORDER BY ie.character_id
+        LIMIT $1
+        """,
+        payload_builder=character_id_payload,
+    ),
 
     # -------------------------------------------------
     # 1) DAG → document_section
