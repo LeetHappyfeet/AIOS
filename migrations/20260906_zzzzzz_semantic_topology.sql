@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS aios.semantic_topology_node (
     proposition_id uuid REFERENCES aios.proposition(proposition_id) ON DELETE CASCADE,
     claim_id uuid REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
     assertion_id uuid REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    acquisition_id uuid REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE,
     significance double precision NOT NULL DEFAULT 0.5 CHECK (significance BETWEEN 0 AND 1),
     meta jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS aios.semantic_topology_edge (
     significance double precision NOT NULL DEFAULT 0.5 CHECK (significance BETWEEN 0 AND 1),
     claim_id uuid REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
     assertion_id uuid REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    acquisition_id uuid REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE,
     meta jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     CHECK (parent_node_id <> child_node_id),
@@ -67,6 +69,7 @@ CREATE TABLE IF NOT EXISTS aios.semantic_topology_projection (
     projection_key text PRIMARY KEY,
     claim_id uuid REFERENCES aios.claim_candidate(claim_id) ON DELETE CASCADE,
     assertion_id uuid REFERENCES aios.world_proposition_assertion(assertion_id) ON DELETE CASCADE,
+    acquisition_id uuid REFERENCES aios.knowledge_acquisition_event(acquisition_id) ON DELETE CASCADE,
     scope_key text NOT NULL,
     rdf_dataset text NOT NULL,
     rdf_graph text NOT NULL,
@@ -75,7 +78,7 @@ CREATE TABLE IF NOT EXISTS aios.semantic_topology_projection (
     last_error text,
     meta jsonb NOT NULL DEFAULT '{}'::jsonb,
     updated_at timestamptz NOT NULL DEFAULT now(),
-    CHECK (claim_id IS NOT NULL OR assertion_id IS NOT NULL)
+    CHECK (claim_id IS NOT NULL OR assertion_id IS NOT NULL OR acquisition_id IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_semantic_topology_projection_claim
@@ -84,5 +87,8 @@ CREATE INDEX IF NOT EXISTS idx_semantic_topology_projection_claim
 CREATE INDEX IF NOT EXISTS idx_semantic_topology_projection_assertion
     ON aios.semantic_topology_projection (assertion_id)
     WHERE assertion_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_semantic_topology_projection_acquisition
+    ON aios.semantic_topology_projection (acquisition_id)
+    WHERE acquisition_id IS NOT NULL;
 
 COMMIT;
