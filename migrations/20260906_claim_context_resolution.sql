@@ -17,8 +17,9 @@ CREATE TABLE IF NOT EXISTS aios.claim_context_resolution (
     object_kind text,
     predicate_family text NOT NULL DEFAULT 'UNKNOWN',
 
-    origin_character_id text
-        REFERENCES aios.character_identity(character_id) ON DELETE SET NULL,
+    -- Provenance identity is intentionally not an FK: ingest can observe a
+    -- character_id before character discovery/registry materialization.
+    origin_character_id text,
     character_instance_id uuid
         REFERENCES aios.character_instance(instance_id) ON DELETE SET NULL,
     viewpoint_id text,
