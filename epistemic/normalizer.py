@@ -42,6 +42,15 @@ def _detect_polarity(raw_text: str) -> int:
     return -1 if any(marker in text for marker in negative_markers) else 1
 
 
+def _context_epistemic_status(claim_kind: Optional[str]) -> str:
+    return {
+        "BELIEF": "believed",
+        "MEMORY": "remembered",
+        "GOAL": "intended",
+        "RULE": "accepted_rule",
+    }.get((claim_kind or "").upper(), "observed")
+
+
 def normalize_components(
     *,
     subject: Optional[str],
@@ -311,6 +320,41 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         float(row["confidence"] or 0.0),
         json.dumps({"claim_id": str(claim_id)}),
     )
+
+    # A character-scoped observation belongs only to that resolved character
+    # instance. This creates the SQL-side acquisition event used by the HUD
+    # knowledge projection; it does not assert the proposition in the world.
+    if row["character_instance_id"] is not None:
+        await db.execute(
+            """
+            INSERT INTO aios.knowledge_acquisition_event (
+                instance_id, proposition_id, claim_id, acquisition_mode,
+                epistemic_status, confidence, dag_node_id, meta
+            )
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8::jsonb
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM aios.knowledge_acquisition_event kae
+                WHERE kae.instance_id=$1
+                  AND kae.claim_id=$3
+                  AND kae.proposition_id=$2
+            )
+            """,
+            row["character_instance_id"],
+            proposition_id,
+            claim_id,
+            row["acquisition_mode"] or "context_observation",
+            _context_epistemic_status(row["claim_kind"]),
+            float(row["confidence"] or 0.0),
+            row["node_id"],
+            json.dumps({
+                "source": "context-resolver-v1",
+                "origin_character_id": row["character_id"],
+                "world_id": str(row["resolved_world_id"]) if row["resolved_world_id"] else None,
+                "claim_kind": row["claim_kind"],
+                "predicate_family": row["predicate_family"],
+            }),
+        )
 
     await _detect_conflicts(db, proposition_id=proposition_id)
     return proposition_id
