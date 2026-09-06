@@ -52,6 +52,8 @@ from aios_app.epistemic.weights import (
 from aios_app.epistemic.knowledge import acquire_document
 from aios_app.epistemic.search import epistemic_search, document_epistemic_summary
 from aios_app.external_observation import persist_external_observation
+from aios_app.hud.readiness import mark_matching_runtime_dirty
+from aios_app.hud.render_text import render_hud_text
 
 logger = logging.getLogger("aios.main")
 
@@ -315,6 +317,17 @@ async def ingest(req: IngestIn) -> IngestOut:
             req.scope_key or settings.default_scope,
             event_id,
         )
+
+        await mark_matching_runtime_dirty(
+            db,
+            character_id=req.character_id,
+            session_id=req.session_id,
+            user_name=req.user_name,
+            scope_key=req.scope_key or settings.default_scope,
+            source_timeline_id=timeline_id,
+            source_head_node_id=node_id,
+            source_head_event_id=event_id,
+        )
     except Exception as exc:
         await db.execute(
             """
@@ -434,6 +447,7 @@ async def get_instance_frame(
     instance_id: UUID,
     recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
+    wait_ms: int = 1200,
 ):
     """Build the canonical branch-aware RPG HUD for this runtime instance."""
     try:
@@ -441,7 +455,46 @@ async def get_instance_frame(
             instance_id,
             recent_limit=recent_limit,
             token_budget=token_budget,
+            wait_ms=wait_ms,
         )
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+
+
+@app.post("/instance/{instance_id}/prepare")
+async def prepare_instance_frame(
+    instance_id: UUID,
+    through_node_id: Optional[UUID] = None,
+    recent_limit: Optional[int] = None,
+    token_budget: Optional[int] = None,
+    wait_ms: int = 2500,
+):
+    """
+    Prepare a generation-consistent HUD through an exact source DAG node.
+
+    This advances only latency-critical retrieval work. Background RDF,
+    narrative clustering, web accumulation, and unrelated instances are not
+    part of the generation barrier.
+    """
+    try:
+        frame = await world_runtime.prepare_frame(
+            instance_id,
+            through_node_id=through_node_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
+            wait_ms=wait_ms,
+        )
+        return {
+            "instance_id": instance_id,
+            "generation_ready": bool(frame.get("hud", {}).get("generation_ready")),
+            "freshness": frame.get("hud", {}).get("freshness", {}),
+            "frame": frame,
+            "text": render_hud_text(frame),
+        }
+    except RuntimeConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -528,6 +581,7 @@ async def get_instance_text_frame(
     instance_id: UUID,
     recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
+    wait_ms: int = 1200,
 ):
     try:
         return {
@@ -536,6 +590,7 @@ async def get_instance_text_frame(
                 instance_id,
                 recent_limit=recent_limit,
                 token_budget=token_budget,
+                wait_ms=wait_ms,
             ),
         }
     except RuntimeNotFound as exc:
