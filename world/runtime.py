@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -19,6 +20,8 @@ from aios_app.hud.readiness import (
     set_retrieval_ready,
     source_node_retrieval_ready,
 )
+logger = logging.getLogger("aios.world.runtime")
+
 from aios_app.world.topology import (
     ensure_character_root_world,
     ensure_runtime_branch_world,
@@ -226,6 +229,23 @@ class WorldRuntimeService:
             source_timeline_id,
             source_head_node_id,
         )
+        try:
+            await ensure_readiness_row(self.db, instance_id=instance_id, live=True)
+            if await source_node_retrieval_ready(
+                self.db,
+                instance_id=instance_id,
+                node_id=source_head_node_id,
+            ):
+                await self.prepare_frame(instance_id, wait_ms=0)
+            else:
+                await enqueue_live_turn_work(
+                    self.db,
+                    instance_id=instance_id,
+                    node_id=source_head_node_id,
+                )
+        except Exception:
+            logger.exception("Failed to prewarm HUD for live instance %s", instance_id)
+
         return await self._activation_result(instance_id)
 
     async def get_state(self, instance_id: UUID) -> Dict[str, Any]:
