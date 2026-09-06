@@ -97,6 +97,19 @@ async def project_knowledge_acquisitions_once(
         FROM aios.knowledge_acquisition_event
         WHERE processed_at IS NULL
           AND ($2::uuid IS NULL OR instance_id=$2)
+          AND (
+              claim_id IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM aios.claim_candidate cc
+                  JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                  JOIN aios.document_section ds ON ds.section_id=es.section_id
+                  JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                  JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+                  WHERE cc.claim_id=aios.knowledge_acquisition_event.claim_id
+                    AND ie.superseded_at IS NULL
+              )
+          )
         ORDER BY created_at
         LIMIT $1
         """,
