@@ -53,6 +53,10 @@ def character_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"character_id": str(row["character_id"])}
 
 
+def world_id_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {"world_id": str(row["world_id"])}
+
+
 def empty_payload(_: Dict[str, object]) -> Dict[str, object]:
     return {}
 
@@ -93,6 +97,34 @@ STAGES: List[Stage] = [
         """,
         payload_builder=character_id_payload,
         priority=10,
+    ),
+
+    # -------------------------------------------------
+    # 0b) SQL world topology -> RDF /world projection
+    # -------------------------------------------------
+    Stage(
+        name="project_world_topology",
+        job_type="project_world_topology",
+        eligibility_sql="""
+        SELECT w.world_id
+        FROM aios.world w
+        LEFT JOIN aios.world_rdf_projection wrp
+          ON wrp.world_id=w.world_id
+        WHERE (
+            wrp.world_id IS NULL
+            OR wrp.projected_at IS NULL
+        )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.pipeline_job pj
+              WHERE pj.job_type='project_world_topology'
+                AND pj.status IN ('queued','running')
+          )
+        ORDER BY w.created_at
+        LIMIT LEAST($1, 1)
+        """,
+        payload_builder=world_id_payload,
+        priority=20,
     ),
 
     # -------------------------------------------------
