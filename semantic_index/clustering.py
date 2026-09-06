@@ -10,6 +10,7 @@ from uuid import UUID, NAMESPACE_URL, uuid4, uuid5
 
 from aios_app.db import Database
 from .config import SemanticIndexConfig
+from .neighbor_classifier import NEIGHBOR_CLASSIFIER_VERSION
 
 logger = logging.getLogger("aios.semantic_clustering")
 
@@ -21,6 +22,7 @@ class Edge:
     a: UUID
     b: UUID
     similarity: float
+    relation: str | None = None
 
 
 @dataclass
@@ -120,6 +122,7 @@ def _build_core_components(
     strong_edges = [
         edge for edge in edges
         if edge.similarity >= core_threshold
+        and edge.relation != "CONTRADICTS"
     ]
     bridge_indexes = _bridge_edge_indexes(strong_edges)
 
@@ -154,10 +157,12 @@ def _attach_fringe(
     adjacency: dict[UUID, list[tuple[UUID, float]]] = {}
     all_nodes: set[UUID] = set()
     for edge in edges:
-        adjacency.setdefault(edge.a, []).append((edge.b, edge.similarity))
-        adjacency.setdefault(edge.b, []).append((edge.a, edge.similarity))
         all_nodes.add(edge.a)
         all_nodes.add(edge.b)
+        if edge.relation == "CONTRADICTS":
+            continue
+        adjacency.setdefault(edge.a, []).append((edge.b, edge.similarity))
+        adjacency.setdefault(edge.b, []).append((edge.a, edge.similarity))
 
     drafts = [
         ClusterDraft(
@@ -393,21 +398,33 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
 
     rows = await db.fetch(
         """
-        SELECT proposition_id, neighbor_proposition_id, similarity
-        FROM aios.semantic_neighbor_candidate
-        WHERE embedding_version=$1
-          AND status='candidate'
-          AND similarity >= $2
-        ORDER BY similarity DESC
+        SELECT
+            snc.proposition_id,
+            snc.neighbor_proposition_id,
+            snc.similarity,
+            nr.relation
+        FROM aios.semantic_neighbor_candidate snc
+        LEFT JOIN aios.semantic_neighbor_relation nr
+          ON nr.proposition_id=snc.proposition_id
+         AND nr.neighbor_proposition_id=snc.neighbor_proposition_id
+         AND nr.embedding_version=snc.embedding_version
+         AND nr.classifier_version=$3
+         AND nr.status='candidate'
+        WHERE snc.embedding_version=$1
+          AND snc.status='candidate'
+          AND snc.similarity >= $2
+        ORDER BY snc.similarity DESC
         """,
         cfg.embedding_version,
         cfg.cluster_boundary_floor,
+        NEIGHBOR_CLASSIFIER_VERSION,
     )
     edges = [
         Edge(
             a=row["proposition_id"],
             b=row["neighbor_proposition_id"],
             similarity=float(row["similarity"]),
+            relation=row["relation"],
         )
         for row in rows
     ]
