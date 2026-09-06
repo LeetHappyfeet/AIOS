@@ -8,6 +8,10 @@ ALTER TABLE aios.ingest_event
 ALTER TABLE aios.dag_node
     ADD COLUMN IF NOT EXISTS viewpoint_id text;
 
+ALTER TABLE aios.claim_context_resolution
+    ADD COLUMN IF NOT EXISTS speaker_id text,
+    ADD COLUMN IF NOT EXISTS speaker_type text;
+
 -- Preserve already-ingested explicit viewpoints where they were carried only
 -- in JSON payload. Otherwise resolve deterministic defaults once.
 UPDATE aios.ingest_event
