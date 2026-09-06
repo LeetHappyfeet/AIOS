@@ -256,6 +256,51 @@ async def ingest(req: IngestIn) -> IngestOut:
             payload=payload,
             edge_type="next",
         )
+
+        # -------------------------------------------------
+        # Runtime source-perception cursor advancement
+        # -------------------------------------------------
+        # The liminal/source DAG remains immutable provenance.  Matching active
+        # runtime instances merely advance their authorized perception boundary;
+        # source messages are never copied into the concrete runtime DAG.
+        await db.execute(
+            """
+            UPDATE aios.character_runtime_state rs
+            SET source_timeline_id=$1,
+                source_head_node_id=$2,
+                updated_at=now()
+            FROM aios.character_instance ci,
+                 aios.timeline rt,
+                 aios.world rw
+            LEFT JOIN aios.dag_node previous_source_head
+              ON previous_source_head.node_id=rs.source_head_node_id
+            WHERE ci.instance_id=rs.instance_id
+              AND rt.timeline_id=rs.timeline_id
+              AND rw.world_id=rs.world_id
+              AND ci.character_id=$3
+              AND rt.session_id IS NOT DISTINCT FROM $4
+              AND rt.user_name IS NOT DISTINCT FROM $5
+              AND rt.scope_key=$6
+              AND (
+                    rs.source_timeline_id=$1
+                    OR (
+                        rs.source_timeline_id IS NULL
+                        AND rw.anchor_timeline_id=$1
+                    )
+                  )
+              AND (
+                    previous_source_head.event_id IS NULL
+                    OR previous_source_head.event_id <= $7
+                  )
+            """,
+            timeline_id,
+            node_id,
+            req.character_id,
+            req.session_id,
+            req.user_name,
+            req.scope_key or settings.default_scope,
+            event_id,
+        )
     except Exception as exc:
         await db.execute(
             """
