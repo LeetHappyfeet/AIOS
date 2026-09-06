@@ -214,8 +214,14 @@ class HUDAssembler:
             mode="memory",
             focus_text=focus_text,
             goals=goals,
-            max_hops=max(2, int(hud_profile.entity_hops)),
-            limit=hud_profile.semantic_retrieval_limit,
+            max_hops=max(
+                3 if hud_profile.deep_memory_limit > 0 else 2,
+                int(hud_profile.entity_hops),
+            ),
+            limit=min(
+                250,
+                hud_profile.semantic_retrieval_limit + max(0, hud_profile.deep_memory_limit),
+            ),
         )
         topology_beliefs = await self.retriever.retrieve_character_knowledge(
             context,
@@ -248,19 +254,44 @@ class HUDAssembler:
         topology_knowledge = (
             topology_memories + topology_beliefs + topology_goals + topology_events
         )
-        if topology_knowledge:
-            seen: set[Any] = set()
-            knowledge = []
-            for item in topology_knowledge:
-                proposition_id = item.get("proposition_id")
-                if proposition_id in seen:
-                    continue
-                seen.add(proposition_id)
-                knowledge.append(item)
-        else:
-            # Projection is asynchronous. Do not make a live character appear to
-            # lose memory while semantic topology catches up.
-            knowledge = await self._knowledge(context, scorer)
+
+        # Projection is asynchronous and may be partially complete. Fill only
+        # missing semantic sections from authoritative flat character knowledge;
+        # topology-ranked sections keep priority whenever they exist.
+        missing_modes = {
+            "memory": not topology_memories,
+            "belief": not topology_beliefs,
+            "goal": not topology_goals,
+            "event": not topology_events,
+        }
+        legacy_knowledge = (
+            await self._knowledge(context, scorer)
+            if any(missing_modes.values())
+            else []
+        )
+
+        merged = list(topology_knowledge)
+        for item in legacy_knowledge:
+            kind = str(item.get("claim_kind") or "BELIEF").upper()
+            if (
+                (kind in {"MEMORY", "RELATIONSHIP"} and missing_modes["memory"])
+                or (kind == "EVENT" and (missing_modes["memory"] or missing_modes["event"]))
+                or (kind == "GOAL" and missing_modes["goal"])
+                or (
+                    kind not in {"MEMORY", "RELATIONSHIP", "EVENT", "GOAL", "RULE"}
+                    and missing_modes["belief"]
+                )
+            ):
+                merged.append(item)
+
+        seen: set[Any] = set()
+        knowledge = []
+        for item in merged:
+            proposition_id = item.get("proposition_id")
+            if proposition_id in seen:
+                continue
+            seen.add(proposition_id)
+            knowledge.append(item)
 
         if not hud_profile.include_conflicts:
             for item in knowledge:
@@ -407,6 +438,7 @@ class HUDAssembler:
                 "world_lineage": list(context.lineage_world_ids),
                 "instance_lineage": list(context.lineage_instance_ids),
                 "topology_retrieval": bool(topology_knowledge),
+                "topology_partial_fallback": bool(legacy_knowledge),
                 "source_cursor_bounded": bool(
                     context.source_timeline_id and context.source_head_node_id
                 ),
