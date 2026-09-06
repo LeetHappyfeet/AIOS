@@ -11,6 +11,8 @@ from aios_app.hud.context import HUDContext, HUDContextResolver
 from aios_app.hud.relevance import HUDRelevanceScorer
 from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.profile import get_profile as get_hud_profile
+from aios_app.plugins.manager import PluginManager
+from aios_app.plugins.types import PluginRuntimeContext
 
 
 @dataclass(frozen=True)
@@ -86,11 +88,18 @@ class HUDAssembler:
     Relevance only ranks candidates that have already crossed those boundaries.
     """
 
-    def __init__(self, db: Database, *, budget: Optional[HUDBudget] = None):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        budget: Optional[HUDBudget] = None,
+        plugin_manager: Optional[PluginManager] = None,
+    ):
         self.db = db
         self.context_resolver = HUDContextResolver(db)
         self.retriever = TopologyRetriever(db)
         self.budget = budget or HUDBudget()
+        self.plugin_manager = plugin_manager or PluginManager()
 
     async def build(
         self,
@@ -101,6 +110,18 @@ class HUDAssembler:
     ) -> dict[str, Any]:
         context = await self.context_resolver.resolve(instance_id)
         raw_state = await self._runtime_state(instance_id)
+        plugin_snapshot = await self.plugin_manager.collect(
+            PluginRuntimeContext(
+                instance_id=context.instance_id,
+                character_id=context.character_id,
+                entity_id=context.entity_id,
+                world_id=context.world_id,
+                world_key=context.world_key,
+                timeline_id=context.timeline_id,
+                location_entity_id=context.location_entity_id,
+                raw_state=raw_state,
+            )
+        )
         hud_profile = await get_hud_profile(
             self.db,
             character_id=context.character_id,
@@ -170,7 +191,23 @@ class HUDAssembler:
             "",
         )
         goals = list(_json_value(raw_state.get("goals"), []))
-        scorer = HUDRelevanceScorer(context, focus_text=focus_text, goals=goals)
+        plugin_focus_text = " ".join(
+            str(signal.get("focus_text") or "")
+            for signal in sorted(
+                plugin_snapshot.get("retrieval_signals") or [],
+                key=lambda item: float(item.get("strength") or 0.0),
+                reverse=True,
+            )
+            if signal.get("focus_text")
+        )
+        retrieval_focus_text = " ".join(
+            part for part in (focus_text, plugin_focus_text) if part
+        )
+        scorer = HUDRelevanceScorer(
+            context,
+            focus_text=retrieval_focus_text,
+            goals=goals,
+        )
 
         section_caps = {
             "scene": hud_profile.scene_budget,
@@ -212,7 +249,7 @@ class HUDAssembler:
             context,
             scorer,
             mode="memory",
-            focus_text=focus_text,
+            focus_text=retrieval_focus_text,
             goals=goals,
             max_hops=max(
                 3 if hud_profile.deep_memory_limit > 0 else 2,
@@ -227,7 +264,7 @@ class HUDAssembler:
             context,
             scorer,
             mode="belief",
-            focus_text=focus_text,
+            focus_text=retrieval_focus_text,
             goals=goals,
             max_hops=max(2, int(hud_profile.entity_hops)),
             limit=hud_profile.semantic_retrieval_limit,
@@ -236,7 +273,7 @@ class HUDAssembler:
             context,
             scorer,
             mode="goal",
-            focus_text=focus_text,
+            focus_text=retrieval_focus_text,
             goals=goals,
             max_hops=max(1, int(hud_profile.entity_hops)),
             limit=min(hud_profile.semantic_retrieval_limit, 30),
@@ -245,7 +282,7 @@ class HUDAssembler:
             context,
             scorer,
             mode="event",
-            focus_text=focus_text,
+            focus_text=retrieval_focus_text,
             goals=goals,
             max_hops=max(2, int(hud_profile.entity_hops)),
             limit=min(hud_profile.semantic_retrieval_limit, 40),
@@ -254,7 +291,7 @@ class HUDAssembler:
             context,
             scorer,
             mode="rule",
-            focus_text=focus_text,
+            focus_text=retrieval_focus_text,
             goals=goals,
             max_hops=max(1, int(hud_profile.entity_hops)),
             limit=min(hud_profile.semantic_retrieval_limit, 30),
@@ -442,7 +479,16 @@ class HUDAssembler:
             "goals": goal_items,
             "rules": rule_items,
             "recent_events": event_items,
-            "actions": ["speak", "move", "inspect", "use_item", "wait", "custom"],
+            "plugins": plugin_snapshot.get("plugins") or {},
+            "plugin_sections": plugin_snapshot.get("sections") or [],
+            "actions": [
+                "speak", "move", "inspect", "use_item", "wait", "custom",
+                *[
+                    str(action.get("key"))
+                    for action in (plugin_snapshot.get("actions") or [])
+                    if action.get("key")
+                ],
+            ],
             "hud": {
                 "version": "hud-v1",
                 "profile_id": hud_profile.profile_id,
@@ -458,6 +504,9 @@ class HUDAssembler:
                     context.source_timeline_id and context.source_head_node_id
                 ),
                 "focus_text": focus_text,
+                "plugin_focus_text": plugin_focus_text,
+                "plugin_status": plugin_snapshot.get("status") or {},
+                "plugin_retrieval_signals": plugin_snapshot.get("retrieval_signals") or [],
             },
         }
 
