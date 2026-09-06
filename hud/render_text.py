@@ -14,6 +14,27 @@ def _name(value: Mapping[str, Any]) -> str:
     )
 
 
+def _render_plugin_field(field: Mapping[str, Any]) -> str:
+    label = str(field.get("label") or field.get("key") or "value")
+    value = field.get("value")
+    field_type = str(field.get("field_type") or "text")
+    unit = field.get("unit")
+
+    if field_type == "gauge":
+        minimum = field.get("minimum")
+        maximum = field.get("maximum")
+        if minimum is not None and maximum is not None:
+            rendered = f"{value} / {maximum}"
+        else:
+            rendered = str(value)
+    else:
+        rendered = str(value)
+
+    if unit:
+        rendered = f"{rendered} {unit}"
+    return f"{label}: {rendered}"
+
+
 def render_hud_text(frame: Mapping[str, Any]) -> str:
     """Deterministically render the canonical HUD JSON into an LLM-facing surface."""
 
@@ -49,6 +70,16 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("Physical: " + ", ".join(f"{k}={v}" for k, v in physical.items()))
     if emotional:
         lines.append("Emotion: " + ", ".join(f"{k}={v}" for k, v in emotional.items()))
+
+    plugin_sections = frame.get("plugin_sections") or []
+    for section in plugin_sections:
+        title = str(section.get("title") or section.get("key") or "PLUGIN")
+        fields = section.get("fields") or []
+        if not fields:
+            continue
+        lines.append(f"\n{title.upper()}:")
+        for field in fields:
+            lines.append("- " + _render_plugin_field(field))
 
     actors = scene.get("actors") or []
     objects = scene.get("objects") or []
