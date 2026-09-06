@@ -37,7 +37,7 @@ def choose_observation_scope(row: dict[str, Any]) -> TopologyDecision:
         cid = str(row["origin_character_id"])
         iid = row["character_instance_id"]
         scope_kind = "character"
-        scope_key = f"char:{cid}:instance:{iid}"
+        scope_key = f"char:{cid}"
         character_id = cid
         character_instance_id = iid
         world_id = row.get("world_id")
@@ -237,11 +237,13 @@ async def derive_claim_topology(
         SELECT
             ccr.*, cc.subject, cc.object, cc.raw_text,
             o.observation_id, o.proposition_id,
-            p.topic_key, p.canonical_text, p.subject_norm, p.object_norm
+            p.topic_key, p.canonical_text, p.subject_norm, p.object_norm,
+            ci.parent_instance_id, ci.forked_from_node_id
         FROM aios.claim_context_resolution ccr
         JOIN aios.claim_candidate cc ON cc.claim_id=ccr.claim_id
         JOIN aios.observation o ON o.claim_id=ccr.claim_id
         JOIN aios.proposition p ON p.proposition_id=o.proposition_id
+        LEFT JOIN aios.character_instance ci ON ci.instance_id=ccr.character_instance_id
         WHERE ccr.claim_id=$1
         """,
         claim_id,
@@ -259,6 +261,46 @@ async def derive_claim_topology(
         dag_node_id=None, proposition_id=None, claim_id=None, assertion_id=None,
         significance=1.0, meta={"resolver_version": RESOLVER_VERSION},
     )
+    branch_parent = root
+    if decision.scope_kind == "character" and decision.character_instance_id:
+        instance = await _upsert_node(
+            db, decision=decision, node_type="INSTANCE",
+            node_key=str(decision.character_instance_id),
+            label=f"character-instance:{decision.character_instance_id}",
+            timeline_id=data.get("timeline_id"),
+            dag_node_id=data.get("forked_from_node_id"),
+            proposition_id=None, claim_id=None, assertion_id=None,
+            significance=1.0,
+            meta={
+                "parent_instance_id": str(data["parent_instance_id"]) if data.get("parent_instance_id") else None,
+                "forked_from_node_id": str(data["forked_from_node_id"]) if data.get("forked_from_node_id") else None,
+            },
+        )
+        branch_parent = instance
+        if data.get("parent_instance_id"):
+            parent_instance = await _upsert_node(
+                db, decision=decision, node_type="INSTANCE",
+                node_key=str(data["parent_instance_id"]),
+                label=f"character-instance:{data['parent_instance_id']}",
+                timeline_id=None, dag_node_id=data.get("forked_from_node_id"),
+                proposition_id=None, claim_id=None, assertion_id=None,
+                significance=1.0,
+            )
+            await _upsert_edge(
+                db, decision=decision, parent=root, child=parent_instance,
+                edge_type="experiential_branch", significance=1.0,
+            )
+            await _upsert_edge(
+                db, decision=decision, parent=parent_instance, child=instance,
+                edge_type="forks_at", significance=1.0,
+                meta={"forked_from_node_id": str(data["forked_from_node_id"]) if data.get("forked_from_node_id") else None},
+            )
+        else:
+            await _upsert_edge(
+                db, decision=decision, parent=root, child=instance,
+                edge_type="experiential_branch", significance=1.0,
+            )
+
     anchor_key = str(data.get("dag_node_id") or data.get("observation_id"))
     anchor = await _upsert_node(
         db, decision=decision, node_type=decision.branch_kind.upper(),
@@ -276,7 +318,7 @@ async def derive_claim_topology(
         },
     )
     await _upsert_edge(
-        db, decision=decision, parent=root, child=anchor,
+        db, decision=decision, parent=branch_parent, child=anchor,
         edge_type="contains_branch", significance=decision.significance, claim_id=claim_id,
     )
 
