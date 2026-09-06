@@ -42,6 +42,28 @@ def initialize_backend(cfg: SemanticIndexConfig, *, warmup: bool = True) -> None
         cfg.epistemic_collection,
     ):
         _get_store(cfg, collection)
+
+    if (
+        cfg.drop_legacy_rag_collection
+        and cfg.legacy_rag_collection
+        and cfg.legacy_rag_collection not in {
+            cfg.source_collection,
+            cfg.proposition_collection,
+            cfg.epistemic_collection,
+        }
+    ):
+        client = _get_store(cfg, cfg.source_collection).client
+        try:
+            client.get_collection(cfg.legacy_rag_collection)
+        except Exception:
+            pass
+        else:
+            logger.info(
+                "Removing retired legacy RAG Qdrant collection [%s]",
+                cfg.legacy_rag_collection,
+            )
+            client.delete_collection(cfg.legacy_rag_collection)
+
     if warmup:
         vector = embedder.embed(["AIOS semantic index warmup"])[0]
         if len(vector) != embedder.dim:
