@@ -227,7 +227,7 @@ async def ensure_runtime_branch_world(
         anchor_timeline_id,
         anchor_node_id,
         character_id,
-        str(session_id) if session_id else null,
+        str(session_id) if session_id else None,
     )
     if created:
         return dict(created)
