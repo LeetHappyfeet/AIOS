@@ -173,7 +173,12 @@ async def source_node_retrieval_ready(
             count(DISTINCT CASE WHEN kae.processed_at IS NOT NULL THEN cc.claim_id END)
                 AS knowledge_ready,
             count(DISTINCT CASE WHEN stp.projected_at IS NOT NULL THEN cc.claim_id END)
-                AS topology_ready
+                AS topology_ready,
+            count(DISTINCT CASE
+                WHEN kae.processed_at IS NOT NULL
+                 AND astp.projected_at IS NOT NULL
+                THEN cc.claim_id
+            END) AS acquisition_topology_ready
         FROM aios.document_section ds
         LEFT JOIN aios.extracted_sentence es ON es.section_id=ds.section_id
         LEFT JOIN aios.claim_candidate cc ON cc.sentence_id=es.sentence_id
@@ -184,6 +189,9 @@ async def source_node_retrieval_ready(
         LEFT JOIN aios.semantic_topology_projection stp
           ON stp.claim_id=cc.claim_id
          AND stp.resolver_version='semantic-topology-v1'
+        LEFT JOIN aios.semantic_topology_projection astp
+          ON astp.acquisition_id=kae.acquisition_id
+         AND astp.resolver_version='semantic-topology-v1'
         WHERE ds.node_id=$1
         """,
         node_id,
@@ -197,6 +205,7 @@ async def source_node_retrieval_ready(
         and int(claim_counts["normalized"] or 0) == total
         and int(claim_counts["knowledge_ready"] or 0) == total
         and int(claim_counts["topology_ready"] or 0) == total
+        and int(claim_counts["acquisition_topology_ready"] or 0) == total
     )
 
 
@@ -352,6 +361,26 @@ async def enqueue_live_turn_work(
                 job_type="project_character_knowledge",
                 payload={"live_instance_id": str(instance_id)},
             ))
+        elif acquisition:
+            acquisition_topology = await db.fetchrow(
+                """
+                SELECT 1
+                FROM aios.semantic_topology_projection
+                WHERE acquisition_id=$1
+                  AND resolver_version='semantic-topology-v1'
+                  AND projected_at IS NOT NULL
+                """,
+                acquisition["acquisition_id"],
+            )
+            if not acquisition_topology:
+                queued += int(await _enqueue_live_job(
+                    db,
+                    job_type="derive_character_acquisition_topology",
+                    payload={
+                        "acquisition_id": str(acquisition["acquisition_id"]),
+                        "live_instance_id": str(instance_id),
+                    },
+                ))
 
         topology = await db.fetchrow(
             """
