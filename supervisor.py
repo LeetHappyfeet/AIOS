@@ -87,10 +87,9 @@ STAGES: List[Stage] = [
               FROM aios.pipeline_job pj
               WHERE pj.job_type = 'discover_characters'
                 AND pj.status IN ('queued', 'running')
-                AND pj.payload->>'character_id' = ie.character_id
           )
         ORDER BY ie.character_id
-        LIMIT $1
+        LIMIT 1
         """,
         payload_builder=character_id_payload,
         priority=10,
