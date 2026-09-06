@@ -9,8 +9,9 @@ def _context():
     world_id = uuid4()
     parent_id = uuid4()
     entity_id = uuid4()
+    instance_id = uuid4()
     return HUDContext(
-        instance_id=uuid4(),
+        instance_id=instance_id,
         character_id="natalie",
         entity_id=entity_id,
         world_id=world_id,
@@ -23,6 +24,7 @@ def _context():
         lifecycle_state="ready",
         location_entity_id=None,
         lineage_world_ids=(world_id, parent_id),
+        lineage_instance_ids=(instance_id,),
         scene_entity_ids=frozenset({entity_id}),
     )
 
@@ -97,3 +99,9 @@ def test_text_renderer_uses_canonical_hud_sections():
     assert "conflicts with: The door is open." in text
     assert "AVAILABLE ACTIONS: speak, inspect" in text
     assert "Stay inside this HUD's epistemic and branch boundaries." in text
+
+
+def test_instance_visibility_rejects_sibling_branch():
+    context = _context()
+    assert context.instance_visible(context.instance_id) is True
+    assert context.instance_visible(uuid4()) is False
