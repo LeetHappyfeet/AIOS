@@ -9,7 +9,7 @@ from .queue import CrawlQueue, CrawlTask
 from .worker import AccumulatorWorker
 
 
-queue = CrawlQueue()
+queue = CrawlQueue(OUTPUT_DIR / ".crawl_state.json")
 worker = AccumulatorWorker(queue)
 worker.start()
 
