@@ -256,14 +256,17 @@ def is_semantic_pivot(kind: Optional[str], *, role: str, predicate_family: str) 
 
 
 def infer_acquisition_mode(*, source_kind: Optional[str], speaker_role: Optional[str], node_kind: Optional[str]) -> str:
-    if source_kind and source_kind not in {"chat", "unknown"}:
-        return "source_document"
+    # DAG node kind is authoritative for the ingestion form. A chat source may
+    # have a vendor name such as "SillyTavern", which must not be mistaken for
+    # a document merely because the source string is not literally "chat".
     if node_kind == "chat_message":
         if speaker_role == "character":
             return "character_utterance"
         if speaker_role == "user":
             return "controller_utterance"
         return "chat_observation"
+    if source_kind and source_kind not in {"chat", "unknown"}:
+        return "source_document"
     return "observed_source"
 
 
