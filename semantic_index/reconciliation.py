@@ -326,8 +326,8 @@ async def _cluster_scope_rows(
             scope_key,
             MIN(scope_kind) AS scope_kind,
             MIN(character_id) AS character_id,
-            MIN(character_instance_id) AS character_instance_id,
-            MIN(world_id) AS world_id,
+            MIN(character_instance_id::text)::uuid AS character_instance_id,
+            MIN(world_id::text)::uuid AS world_id,
             MIN(source_id) AS source_id,
             array_agg(topology_node_id ORDER BY topology_node_id) AS member_nodes,
             COUNT(*) AS member_count
