@@ -221,7 +221,8 @@ async def _project_scope_rdf(
         SELECT n.topology_node_id, n.node_type, n.node_key, n.label, n.significance,
                e.edge_id, e.parent_node_id, e.edge_type,
                e.significance AS edge_significance,
-               e.inference_source, e.inference_status, e.inference_confidence
+               e.inference_source, e.inference_status, e.inference_confidence,
+               e.meta AS edge_meta
         FROM aios.semantic_topology_node n
         LEFT JOIN aios.semantic_topology_edge e
           ON e.scope_key=n.scope_key AND e.child_node_id=n.topology_node_id
@@ -268,6 +269,11 @@ async def _project_scope_rdf(
                         f"<{edge_iri}> <urn:aios:topology#inferenceConfidence> "
                         f"\"{float(row['inference_confidence'])}\"^^"
                         f"<http://www.w3.org/2001/XMLSchema#double> ."
+                    )
+                if row["edge_meta"]:
+                    triples.append(
+                        f"<{edge_iri}> <urn:aios:topology#inferenceMeta> "
+                        f"{json.dumps(json.dumps(dict(row['edge_meta']), sort_keys=True))} ."
                     )
 
     sparql = f"""
