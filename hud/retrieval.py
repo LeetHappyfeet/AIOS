@@ -139,6 +139,105 @@ class TopologyRetriever:
             self._semantic_seed_cache[cache_key] = []
             return []
 
+    async def _anchor_context(
+        self,
+        context: HUDContext,
+        proposition_ids: list[Any],
+    ) -> dict[Any, dict[str, Any]]:
+        if not proposition_ids:
+            return {}
+
+        rows = await self.db.fetch(
+            """
+            SELECT
+                sae.proposition_id,
+                sae.relationship_type,
+                sae.world_id,
+                sae.source_scope_key,
+                sae.target_scope_key,
+                sae.target_node_id,
+                sae.confidence,
+                sae.inference_source,
+                sae.inference_status,
+                sae.character_instance_id,
+                target.node_type AS target_type,
+                target.label AS target_label,
+                neighbor.topology_node_id AS context_node_id,
+                neighbor.node_type AS context_node_type,
+                neighbor.label AS context_label,
+                e.edge_type AS context_edge_type
+            FROM aios.semantic_anchor_edge sae
+            JOIN aios.semantic_topology_node target
+              ON target.topology_node_id=sae.target_node_id
+            LEFT JOIN aios.semantic_topology_edge e
+              ON e.scope_key=sae.target_scope_key
+             AND (
+                 e.parent_node_id=sae.target_node_id
+                 OR e.child_node_id=sae.target_node_id
+             )
+            LEFT JOIN aios.semantic_topology_node neighbor
+              ON neighbor.topology_node_id=CASE
+                  WHEN e.parent_node_id=sae.target_node_id THEN e.child_node_id
+                  ELSE e.parent_node_id
+              END
+             AND neighbor.scope_key=sae.target_scope_key
+            WHERE sae.source_scope_key=$1
+              AND sae.character_id=$2
+              AND sae.character_instance_id = ANY($3::uuid[])
+              AND sae.proposition_id = ANY($4::uuid[])
+            ORDER BY sae.confidence DESC, e.significance DESC NULLS LAST,
+                     neighbor.significance DESC NULLS LAST
+            """,
+            f"char:{context.character_id}",
+            context.character_id,
+            list(context.lineage_instance_ids),
+            proposition_ids,
+        )
+
+        anchors: dict[Any, dict[str, Any]] = {}
+        for row in rows:
+            proposition_id = row["proposition_id"]
+            entry = anchors.get(proposition_id)
+            if entry is None:
+                world_id = row["world_id"]
+                entry = {
+                    "relationship": row["relationship_type"],
+                    "world_id": world_id,
+                    "source_scope": row["source_scope_key"],
+                    "target_scope": row["target_scope_key"],
+                    "target_node_id": row["target_node_id"],
+                    "target_type": row["target_type"],
+                    "target_label": row["target_label"],
+                    "confidence": row["confidence"],
+                    "inference_source": row["inference_source"],
+                    "inference_status": row["inference_status"],
+                    "world_visible": context.world_visible(world_id),
+                    "world_context": [],
+                }
+                anchors[proposition_id] = entry
+
+            # World expansion is intentionally lineage-bounded. Explicitly
+            # acquired off-branch knowledge keeps its anchor metadata, but it
+            # does not gain neighboring facts from an invisible sibling world.
+            if not entry["world_visible"]:
+                continue
+            context_node_id = row["context_node_id"]
+            if context_node_id is None:
+                continue
+            if len(entry["world_context"]) >= 8:
+                continue
+            if any(item["node_id"] == context_node_id for item in entry["world_context"]):
+                continue
+            entry["world_context"].append(
+                {
+                    "node_id": context_node_id,
+                    "node_type": row["context_node_type"],
+                    "label": row["context_label"],
+                    "edge_type": row["context_edge_type"],
+                }
+            )
+        return anchors
+
     async def retrieve_character_knowledge(
         self,
         context: HUDContext,
@@ -381,10 +480,29 @@ class TopologyRetriever:
             row_limit,
         )
 
+        anchor_by_proposition = await self._anchor_context(
+            context,
+            [row["proposition_id"] for row in rows],
+        )
+
         result: list[dict[str, Any]] = []
         for rank, row in enumerate(rows):
             item = dict(row)
             item["text"] = item.pop("canonical_text")
+            anchor = anchor_by_proposition.get(item["proposition_id"])
+            if anchor:
+                item["anchor"] = {
+                    key: value
+                    for key, value in anchor.items()
+                    if key != "world_context"
+                }
+                item["world_context"] = list(anchor.get("world_context") or [])
+            candidate_world_id = (
+                anchor.get("world_id")
+                if anchor and anchor.get("world_id") is not None
+                else item.get("source_world_id")
+                or context.world_id
+            )
             score = scorer.score(
                 item,
                 rank=rank,
@@ -393,7 +511,7 @@ class TopologyRetriever:
                     f"{item.get('predicate_norm','')} {item.get('object_norm','')} "
                     f"{item.get('text','')}"
                 ),
-                candidate_world_id=context.world_id,
+                candidate_world_id=candidate_world_id,
                 candidate_entity_id=item.get("source_entity_id"),
                 epistemic_status=item.get("epistemic_status"),
                 confidence=item.get("effective_confidence") or item.get("confidence"),
