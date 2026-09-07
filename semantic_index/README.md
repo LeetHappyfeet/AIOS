@@ -77,3 +77,59 @@ separation.
 
 All labels remain advisory. In particular, branch-candidate classifications do
 not create worlds or experiential branches automatically.
+
+
+## Reconciliation and RDF promotion
+
+The semantic engine now has a reconciliation layer between advisory vector
+classification and authoritative runtime structures.
+
+The flow is:
+
+```text
+Qdrant neighbors
+    -> pairwise semantic relations
+    -> contradiction-aware clusters
+    -> cluster/boundary classifications
+    -> scope-safe reconciliation
+    -> semantic_topology_edge / SEMANTIC_CLUSTER nodes
+    -> RDF topology reprojection
+```
+
+Promotion is deliberately scope constrained. Two propositions can only receive
+a reconciled topology relation when both already exist in the same authorized
+topology scope. Character scopes are further partitioned by
+`character_instance_id`, preventing vector inference from bridging sibling
+experiential branches.
+
+High-confidence pairwise relations may become derived topology edges:
+
+- `semantic_equivalent`
+- `semantic_refinement`
+- `semantic_contradicts`
+- `semantic_same_topic`
+- `semantic_same_event`
+
+High-confidence cluster classifications materialize `SEMANTIC_CLUSTER` nodes
+inside each scope that contains at least two members of that cluster. Cluster
+boundaries then become derived semantic edges such as `state_transition`,
+`temporal_transition`, `topic_boundary`, `narrative_boundary`, and
+`contradiction_boundary`.
+
+Branch classifications remain proposals. They create
+`semantic_branch_candidate` records and `possible_*_branch` topology edges,
+but never call the runtime world/instance branching code.
+
+Every reconciled object receives a `semantic_reconciliation_receipt`.
+Topology edges record `inference_source`, `inference_status`, confidence,
+and classifier metadata. The same provenance is serialized into the scope's
+Fuseki topology graph as reified edge records.
+
+If Fuseki is temporarily unavailable, PostgreSQL reconciliation remains
+durable. Receipts without an RDF dataset/graph are retried by the Semantic
+Index service on subsequent passes.
+
+The authority rule remains unchanged: vector geometry discovers structure;
+classifiers interpret it; reconciliation may enrich derived topology/RDF; only
+the existing SQL/RDF epistemic and runtime layers decide truth, ownership,
+visibility, and actual branch creation.
