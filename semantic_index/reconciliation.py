@@ -137,7 +137,7 @@ async def _preferred_scope_nodes(
             SELECT
                 n.*,
                 row_number() OVER (
-                    PARTITION BY n.scope_key, n.proposition_id
+                    PARTITION BY n.scope_key, n.proposition_id, n.character_instance_id
                     ORDER BY
                         CASE n.node_type
                             WHEN 'TOPIC' THEN 0
