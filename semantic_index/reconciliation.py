@@ -342,7 +342,7 @@ async def _cluster_scope_rows(
             SELECT
                 n.*,
                 row_number() OVER (
-                    PARTITION BY n.scope_key, n.proposition_id
+                    PARTITION BY n.scope_key, n.proposition_id, n.character_instance_id
                     ORDER BY
                         CASE n.node_type
                             WHEN 'TOPIC' THEN 0
@@ -552,9 +552,6 @@ async def _branch_candidate(
     )
     if candidate_kind == "experiential" and scope["scope_kind"] != "character":
         return
-    if candidate_kind == "world" and scope.get("world_id") is None:
-        return
-
     await db.execute(
         """
         INSERT INTO aios.semantic_branch_candidate (
