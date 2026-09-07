@@ -13,6 +13,25 @@ RESOLVER_VERSION = "semantic-topology-v1"
 WORLD_GRAPH = "urn:aios:world:derived-topology"
 
 
+def _json_object(value: object) -> dict:
+    """Normalize JSON/JSONB values returned by asyncpg into a Python dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if decoded is None:
+            return {}
+        if not isinstance(decoded, dict):
+            raise ValueError("expected JSON object metadata")
+        return decoded
+    try:
+        return dict(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected object-like metadata") from exc
+
+
 @dataclass(frozen=True)
 class TopologyDecision:
     scope_kind: str
@@ -466,7 +485,7 @@ async def _project_scope_rdf(
                 if row["edge_meta"]:
                     triples.append(
                         f"<{edge_iri}> <urn:aios:topology#inferenceMeta> "
-                        f"{json.dumps(json.dumps(dict(row['edge_meta']), sort_keys=True))} ."
+                        f"{json.dumps(json.dumps(_json_object(row['edge_meta']), sort_keys=True))} ."
                     )
 
     anchor_rows = await db.fetch(
