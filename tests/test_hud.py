@@ -72,7 +72,19 @@ def test_text_renderer_uses_canonical_hud_sections():
             }
         ],
         "inventory": [{"display_name": "key", "quantity": 1, "equipped": False}],
-        "memories": [{"text": "Michael mentioned the basement."}],
+        "memories": [
+            {
+                "text": "Michael mentioned the basement.",
+                "anchor": {
+                    "relationship": "remembers",
+                    "target_label": "basement",
+                    "world_visible": True,
+                },
+                "world_context": [
+                    {"node_type": "LOCATION", "label": "old house", "edge_type": "about_topic"}
+                ],
+            }
+        ],
         "beliefs": [
             {
                 "text": "The door is locked.",
@@ -95,6 +107,7 @@ def test_text_renderer_uses_canonical_hud_sections():
     text = render_hud_text(frame)
 
     assert "ACTIVE MEMORY:" in text
+    assert "[remembers; about basement; context: old house]" in text
     assert "KNOWLEDGE / BELIEFS:" in text
     assert "conflicts with: The door is open." in text
     assert "AVAILABLE ACTIONS: speak, inspect" in text
@@ -105,3 +118,30 @@ def test_instance_visibility_rejects_sibling_branch():
     context = _context()
     assert context.instance_visible(context.instance_id) is True
     assert context.instance_visible(uuid4()) is False
+
+
+def test_text_renderer_withholds_invisible_world_neighbors():
+    frame = {
+        "identity": {"character_id": "natalie"},
+        "presence": {"world_key": "branch-a", "instance_id": uuid4(), "state_version": 1},
+        "state": {},
+        "scene": {},
+        "memories": [
+            {
+                "text": "A different branch contained a red door.",
+                "anchor": {
+                    "relationship": "perceived",
+                    "target_label": "red door",
+                    "world_visible": False,
+                },
+                "world_context": [
+                    {"node_type": "LOCATION", "label": "secret sibling location"}
+                ],
+            }
+        ],
+    }
+
+    text = render_hud_text(frame)
+
+    assert "anchored context outside visible world; neighbors withheld" in text
+    assert "secret sibling location" not in text
