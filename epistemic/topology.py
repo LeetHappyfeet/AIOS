@@ -219,7 +219,9 @@ async def _project_scope_rdf(
     rows = await db.fetch(
         """
         SELECT n.topology_node_id, n.node_type, n.node_key, n.label, n.significance,
-               e.parent_node_id, e.edge_type, e.significance AS edge_significance
+               e.edge_id, e.parent_node_id, e.edge_type,
+               e.significance AS edge_significance,
+               e.inference_source, e.inference_status, e.inference_confidence
         FROM aios.semantic_topology_node n
         LEFT JOIN aios.semantic_topology_edge e
           ON e.scope_key=n.scope_key AND e.child_node_id=n.topology_node_id
@@ -244,6 +246,29 @@ async def _project_scope_rdf(
             parent_iri = f"urn:aios:topology-node:{row['parent_node_id']}"
             pred = quote(str(row["edge_type"]), safe="")
             triples.append(f"<{parent_iri}> <urn:aios:topology#{pred}> <{node_iri}> .")
+            if row["edge_id"]:
+                edge_iri = f"urn:aios:topology-edge:{row['edge_id']}"
+                triples.append(f"<{scope_iri}> <urn:aios:topology#hasEdge> <{edge_iri}> .")
+                triples.append(f"<{edge_iri}> <urn:aios:topology#fromNode> <{parent_iri}> .")
+                triples.append(f"<{edge_iri}> <urn:aios:topology#toNode> <{node_iri}> .")
+                triples.append(
+                    f"<{edge_iri}> <urn:aios:topology#edgeType> "
+                    f"{json.dumps(str(row['edge_type']))} ."
+                )
+                triples.append(
+                    f"<{edge_iri}> <urn:aios:topology#inferenceSource> "
+                    f"{json.dumps(str(row['inference_source'] or 'deterministic'))} ."
+                )
+                triples.append(
+                    f"<{edge_iri}> <urn:aios:topology#inferenceStatus> "
+                    f"{json.dumps(str(row['inference_status'] or 'accepted'))} ."
+                )
+                if row["inference_confidence"] is not None:
+                    triples.append(
+                        f"<{edge_iri}> <urn:aios:topology#inferenceConfidence> "
+                        f"\"{float(row['inference_confidence'])}\"^^"
+                        f"<http://www.w3.org/2001/XMLSchema#double> ."
+                    )
 
     sparql = f"""
 CLEAR SILENT GRAPH <{graph}>;
