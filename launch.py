@@ -19,6 +19,7 @@ from aios_app.config import settings
 
 PYTHON = sys.executable
 DEFAULT_STARTUP_TIMEOUT = float(os.getenv("AIOS_STARTUP_TIMEOUT", "20"))
+CORE_STARTUP_TIMEOUT = float(os.getenv("AIOS_CORE_STARTUP_TIMEOUT", "60"))
 FAILURE_TAIL_LINES = int(os.getenv("AIOS_FAILURE_TAIL_LINES", "20"))
 
 
@@ -46,6 +47,7 @@ SERVICES = [
         "name": "Pipeline Runner",
         "cmd": [PYTHON, "-m", "aios_app.runner"],
         "required": True,
+        "startup_timeout": CORE_STARTUP_TIMEOUT,
         "readiness": {"type": "log", "marker": "Pipeline runner started"},
     },
     {
@@ -61,6 +63,7 @@ SERVICES = [
     {
         "name": "API",
         "required": True,
+        "startup_timeout": CORE_STARTUP_TIMEOUT,
         "cmd": [
             PYTHON,
             "-m",
