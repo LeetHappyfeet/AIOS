@@ -532,7 +532,7 @@ class HUDAssembler:
                 "topology_retrieval": bool(topology_knowledge),
                 "topology_partial_fallback": bool(legacy_knowledge),
                 "anchor_retrieval": anchored_knowledge_count > 0,
-                "anchor_partial_fallback": bool(topology_knowledge) and anchored_knowledge_count == 0,
+                "anchor_partial_fallback": bool(knowledge) and anchored_knowledge_count < len(knowledge),
                 "anchor_count": anchored_knowledge_count,
                 "anchor_invisible_count": invisible_anchor_count,
                 "world_context_count": visible_world_context_count,
