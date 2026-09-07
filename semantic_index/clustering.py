@@ -410,7 +410,7 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
          AND nr.neighbor_proposition_id=snc.neighbor_proposition_id
          AND nr.embedding_version=snc.embedding_version
          AND nr.classifier_version=$3
-         AND nr.status='candidate'
+         AND nr.status IN ('candidate','reconciled')
         WHERE snc.embedding_version=$1
           AND snc.status='candidate'
           AND snc.similarity >= $2
