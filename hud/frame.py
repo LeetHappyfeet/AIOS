@@ -347,6 +347,18 @@ class HUDAssembler:
             seen.add(proposition_id)
             knowledge.append(item)
 
+        anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
+        visible_world_context_count = sum(
+            len(item.get("world_context") or [])
+            for item in knowledge
+            if item.get("anchor", {}).get("world_visible")
+        )
+        invisible_anchor_count = sum(
+            1
+            for item in knowledge
+            if item.get("anchor") and not item["anchor"].get("world_visible", False)
+        )
+
         if not hud_profile.include_conflicts:
             for item in knowledge:
                 item["conflicts"] = []
@@ -357,6 +369,23 @@ class HUDAssembler:
                     "acquisition_mode", "predicate_family", "topology",
                 ):
                     item.pop(key, None)
+                anchor = item.get("anchor")
+                if anchor:
+                    item["anchor"] = {
+                        "relationship": anchor.get("relationship"),
+                        "target_type": anchor.get("target_type"),
+                        "target_label": anchor.get("target_label"),
+                        "world_visible": bool(anchor.get("world_visible")),
+                    }
+                if item.get("world_context"):
+                    item["world_context"] = [
+                        {
+                            "node_type": entry.get("node_type"),
+                            "label": entry.get("label"),
+                            "edge_type": entry.get("edge_type"),
+                        }
+                        for entry in item["world_context"]
+                    ]
         if not hud_profile.include_confidence:
             for item in knowledge:
                 for key in (
@@ -502,6 +531,11 @@ class HUDAssembler:
                 "instance_lineage": list(context.lineage_instance_ids),
                 "topology_retrieval": bool(topology_knowledge),
                 "topology_partial_fallback": bool(legacy_knowledge),
+                "anchor_retrieval": anchored_knowledge_count > 0,
+                "anchor_partial_fallback": bool(topology_knowledge) and anchored_knowledge_count == 0,
+                "anchor_count": anchored_knowledge_count,
+                "anchor_invisible_count": invisible_anchor_count,
+                "world_context_count": visible_world_context_count,
                 "source_cursor_bounded": bool(
                     context.source_timeline_id and context.source_head_node_id
                 ),
