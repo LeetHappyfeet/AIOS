@@ -651,3 +651,37 @@ async def derive_character_acquisition_topology(
         json.dumps({"branch_kind": "epistemic_transition"}),
     )
     return True
+
+
+async def reproject_existing_scope(
+    db: Database,
+    fuseki: FusekiClient,
+    *,
+    scope_key: str,
+) -> tuple[str, str] | None:
+    """Reproject one already-authorized topology scope after reconciliation."""
+    row = await db.fetchrow(
+        """
+        SELECT scope_kind, scope_key, character_id, character_instance_id,
+               world_id, source_id
+        FROM aios.semantic_topology_node
+        WHERE scope_key=$1
+        ORDER BY created_at
+        LIMIT 1
+        """,
+        scope_key,
+    )
+    if not row:
+        return None
+
+    decision = TopologyDecision(
+        scope_kind=row["scope_kind"],
+        scope_key=row["scope_key"],
+        branch_kind="semantic_reconciliation",
+        significance=0.7,
+        character_id=row["character_id"],
+        character_instance_id=row["character_instance_id"],
+        world_id=row["world_id"],
+        source_id=row["source_id"],
+    )
+    return await _project_scope_rdf(db, fuseki, decision=decision)
