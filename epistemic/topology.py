@@ -150,18 +150,41 @@ async def _upsert_edge(
     significance: float,
     claim_id: Optional[UUID] = None,
     assertion_id: Optional[UUID] = None,
+    inference_source: str = "deterministic",
+    inference_status: str = "accepted",
+    inference_confidence: Optional[float] = None,
     meta: Optional[dict] = None,
-) -> None:
-    await db.execute(
+) -> UUID:
+    row = await db.execute_returning_row(
         """
         INSERT INTO aios.semantic_topology_edge (
             scope_key, parent_node_id, child_node_id, edge_type,
-            significance, claim_id, assertion_id, meta
+            significance, claim_id, assertion_id,
+            inference_source, inference_status, inference_confidence, meta
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
         ON CONFLICT (scope_key, parent_node_id, child_node_id, edge_type) DO UPDATE
         SET significance=GREATEST(aios.semantic_topology_edge.significance, EXCLUDED.significance),
+            inference_source=CASE
+                WHEN aios.semantic_topology_edge.inference_source='deterministic'
+                THEN aios.semantic_topology_edge.inference_source
+                ELSE EXCLUDED.inference_source
+            END,
+            inference_status=CASE
+                WHEN aios.semantic_topology_edge.inference_source='deterministic'
+                THEN aios.semantic_topology_edge.inference_status
+                ELSE EXCLUDED.inference_status
+            END,
+            inference_confidence=CASE
+                WHEN aios.semantic_topology_edge.inference_source='deterministic'
+                THEN aios.semantic_topology_edge.inference_confidence
+                ELSE GREATEST(
+                    COALESCE(aios.semantic_topology_edge.inference_confidence,0),
+                    COALESCE(EXCLUDED.inference_confidence,0)
+                )
+            END,
             meta=aios.semantic_topology_edge.meta || EXCLUDED.meta
+        RETURNING edge_id
         """,
         decision.scope_key,
         parent,
@@ -170,8 +193,12 @@ async def _upsert_edge(
         significance,
         claim_id,
         assertion_id,
+        inference_source,
+        inference_status,
+        inference_confidence,
         json.dumps(meta or {}),
     )
+    return row["edge_id"]
 
 
 def _rdf_graph(decision: TopologyDecision) -> tuple[str, str]:
