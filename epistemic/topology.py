@@ -116,6 +116,7 @@ async def _upsert_node(
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
         ON CONFLICT (scope_key, node_type, node_key) DO UPDATE
         SET label=COALESCE(EXCLUDED.label, aios.semantic_topology_node.label),
+            acquisition_id=COALESCE(aios.semantic_topology_node.acquisition_id, EXCLUDED.acquisition_id),
             significance=GREATEST(aios.semantic_topology_node.significance, EXCLUDED.significance),
             updated_at=now(),
             meta=aios.semantic_topology_node.meta || EXCLUDED.meta
