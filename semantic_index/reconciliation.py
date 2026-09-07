@@ -180,6 +180,27 @@ async def _preferred_scope_nodes(
     return [dict(row) for row in rows]
 
 
+async def _safe_reproject_scope(
+    db: Database,
+    fuseki: FusekiClient,
+    *,
+    scope_key: str,
+) -> tuple[str, str] | None:
+    try:
+        return await reproject_existing_scope(
+            db,
+            fuseki,
+            scope_key=scope_key,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Semantic RDF projection failed for scope %s; will retry: %s",
+            scope_key,
+            exc,
+        )
+        return None
+
+
 async def reconcile_neighbor_relations_once(
     db: Database,
     fuseki: FusekiClient,
@@ -291,7 +312,7 @@ async def reconcile_neighbor_relations_once(
         )
 
     for scope_key in affected_scopes:
-        projected = await reproject_existing_scope(db, fuseki, scope_key=scope_key)
+        projected = await _safe_reproject_scope(db, fuseki, scope_key=scope_key)
         if not projected:
             continue
         dataset, graph = projected
@@ -469,7 +490,7 @@ async def reconcile_clusters_once(
             )
 
     for scope_key in affected_scopes:
-        projected = await reproject_existing_scope(db, fuseki, scope_key=scope_key)
+        projected = await _safe_reproject_scope(db, fuseki, scope_key=scope_key)
         if projected:
             dataset, graph = projected
             await db.execute(
@@ -737,7 +758,7 @@ async def reconcile_boundaries_once(
             )
 
     for scope_key in affected_scopes:
-        projected = await reproject_existing_scope(db, fuseki, scope_key=scope_key)
+        projected = await _safe_reproject_scope(db, fuseki, scope_key=scope_key)
         if projected:
             dataset, graph = projected
             await db.execute(
@@ -774,7 +795,7 @@ async def reproject_pending_reconciliation_once(
     for row in rows:
         scope_key = row["scope_key"]
         try:
-            projected = await reproject_existing_scope(
+            projected = await _safe_reproject_scope(
                 db,
                 fuseki,
                 scope_key=scope_key,
