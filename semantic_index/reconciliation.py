@@ -755,6 +755,56 @@ async def reconcile_boundaries_once(
     return written
 
 
+async def reproject_pending_reconciliation_once(
+    db: Database,
+    fuseki: FusekiClient,
+    cfg: SemanticIndexConfig,
+) -> int:
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT scope_key
+        FROM aios.semantic_reconciliation_receipt
+        WHERE rdf_dataset IS NULL
+        ORDER BY scope_key
+        LIMIT $1
+        """,
+        cfg.batch_size,
+    )
+    projected_count = 0
+    for row in rows:
+        scope_key = row["scope_key"]
+        try:
+            projected = await reproject_existing_scope(
+                db,
+                fuseki,
+                scope_key=scope_key,
+            )
+            if not projected:
+                continue
+            dataset, graph = projected
+            await db.execute(
+                """
+                UPDATE aios.semantic_reconciliation_receipt
+                SET rdf_dataset=$2,
+                    rdf_graph=$3,
+                    updated_at=now()
+                WHERE scope_key=$1
+                  AND rdf_dataset IS NULL
+                """,
+                scope_key,
+                dataset,
+                graph,
+            )
+            projected_count += 1
+        except Exception as exc:
+            logger.warning(
+                "Semantic RDF catch-up failed for scope %s: %s",
+                scope_key,
+                exc,
+            )
+    return projected_count
+
+
 async def reconcile_semantic_structure_once(
     db: Database,
     fuseki: FusekiClient,
@@ -763,13 +813,15 @@ async def reconcile_semantic_structure_once(
     pair_count = await reconcile_neighbor_relations_once(db, fuseki, cfg)
     cluster_count = await reconcile_clusters_once(db, fuseki, cfg)
     boundary_count = await reconcile_boundaries_once(db, fuseki, cfg)
-    total = pair_count + cluster_count + boundary_count
+    rdf_count = await reproject_pending_reconciliation_once(db, fuseki, cfg)
+    total = pair_count + cluster_count + boundary_count + rdf_count
     if total:
         logger.info(
             "Semantic reconciliation promoted %d pair relations, %d clusters, "
-            "and %d boundaries into scope-safe topology/RDF",
+            "and %d boundaries; reprojected %d RDF scopes",
             pair_count,
             cluster_count,
             boundary_count,
+            rdf_count,
         )
     return total
