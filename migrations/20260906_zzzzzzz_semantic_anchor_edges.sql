@@ -54,4 +54,15 @@ CREATE INDEX IF NOT EXISTS idx_semantic_anchor_acquisition
     ON aios.semantic_anchor_edge (acquisition_id)
     WHERE acquisition_id IS NOT NULL;
 
+-- Existing acquisition topology was projected before acquisition_id was
+-- persisted on topology nodes and before cross-scope anchors existed.
+-- Mark only those projections stale; the normal supervisor will rebuild them
+-- idempotently and reproject the /char RDF graphs with deterministic anchors.
+UPDATE aios.semantic_topology_projection
+SET projected_at=NULL,
+    updated_at=now(),
+    meta=meta || jsonb_build_object('reproject_reason','semantic_anchor_backfill')
+WHERE acquisition_id IS NOT NULL
+  AND projected_at IS NOT NULL;
+
 COMMIT;
