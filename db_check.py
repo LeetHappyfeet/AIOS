@@ -18,6 +18,7 @@ REQUIRED_TABLES = {
     "semantic_topology_node",
     "semantic_topology_edge",
     "semantic_topology_projection",
+    "semantic_anchor_edge",
     "semantic_neighbor_relation",
     "semantic_cluster_candidate",
     "semantic_cluster_membership",
