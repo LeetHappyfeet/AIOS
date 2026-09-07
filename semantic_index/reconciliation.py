@@ -41,6 +41,13 @@ BOUNDARY_EDGE_TYPES = {
 }
 
 
+def _scope_partition(row: Any) -> str:
+    if row["scope_kind"] == "character":
+        instance_id = row["character_instance_id"]
+        return f"{row['scope_key']}:instance:{instance_id or 'unresolved'}"
+    return str(row["scope_key"])
+
+
 def _decision_from_row(row: Any) -> TopologyDecision:
     return TopologyDecision(
         scope_kind=row["scope_kind"],
@@ -66,6 +73,7 @@ async def _record_receipt(
     source_kind: str,
     source_id: str,
     scope_key: str,
+    scope_partition_key: str,
     action: str,
     topology_node_id: UUID | None = None,
     topology_edge_id: UUID | None = None,
@@ -79,13 +87,13 @@ async def _record_receipt(
     await db.execute(
         """
         INSERT INTO aios.semantic_reconciliation_receipt (
-            receipt_key, source_kind, source_id, scope_key, action,
+            receipt_key, source_kind, source_id, scope_key, scope_partition_key, action,
             topology_node_id, topology_edge_id, rdf_dataset, rdf_graph,
             classifier_version, confidence, status, meta,
             reconciled_at, updated_at
         )
         VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,now(),now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,now(),now()
         )
         ON CONFLICT (receipt_key) DO UPDATE
         SET topology_node_id=COALESCE(EXCLUDED.topology_node_id, aios.semantic_reconciliation_receipt.topology_node_id),
@@ -104,6 +112,7 @@ async def _record_receipt(
         source_kind,
         source_id,
         scope_key,
+        scope_partition_key,
         action,
         topology_node_id,
         topology_edge_id,
@@ -157,6 +166,10 @@ async def _preferred_scope_nodes(
         JOIN chosen b
           ON b.scope_key=a.scope_key
          AND b.proposition_id=$3
+         AND (
+             a.scope_kind <> 'character'
+             OR a.character_instance_id=b.character_instance_id
+         )
         WHERE a.proposition_id=$2
           AND a.topology_node_id<>b.topology_node_id
         """,
@@ -212,7 +225,8 @@ async def reconcile_neighbor_relations_once(
         )
 
         for scope in scopes:
-            receipt_key = f"neighbor:{source_id}:{scope['scope_key']}"
+            partition_key = _scope_partition(scope)
+            receipt_key = f"neighbor:{source_id}:{partition_key}"
             exists = await db.fetchrow(
                 "SELECT 1 FROM aios.semantic_reconciliation_receipt WHERE receipt_key=$1",
                 receipt_key,
@@ -249,6 +263,7 @@ async def reconcile_neighbor_relations_once(
                 source_kind="neighbor_relation",
                 source_id=source_id,
                 scope_key=scope["scope_key"],
+                scope_partition_key=partition_key,
                 action=PAIR_EDGE_TYPES[row["relation"]],
                 topology_edge_id=edge_id,
                 classifier_version=NEIGHBOR_CLASSIFIER_VERSION,
@@ -326,14 +341,14 @@ async def _cluster_scope_rows(
             scope_key,
             MIN(scope_kind) AS scope_kind,
             MIN(character_id) AS character_id,
-            MIN(character_instance_id::text)::uuid AS character_instance_id,
+            character_instance_id,
             MIN(world_id::text)::uuid AS world_id,
             MIN(source_id) AS source_id,
             array_agg(topology_node_id ORDER BY topology_node_id) AS member_nodes,
             COUNT(*) AS member_count
         FROM ranked
         WHERE rn=1
-        GROUP BY scope_key
+        GROUP BY scope_key, character_instance_id
         HAVING COUNT(*) >= 2
         """,
         cluster_id,
@@ -378,7 +393,8 @@ async def reconcile_clusters_once(
         scopes = await _cluster_scope_rows(db, cluster_id=row["cluster_id"])
         for scope in scopes:
             source_id = str(row["classification_id"])
-            receipt_key = f"cluster:{source_id}:{scope['scope_key']}"
+            partition_key = _scope_partition(scope)
+            receipt_key = f"cluster:{source_id}:{partition_key}"
             exists = await db.fetchrow(
                 "SELECT 1 FROM aios.semantic_reconciliation_receipt WHERE receipt_key=$1",
                 receipt_key,
@@ -391,7 +407,7 @@ async def reconcile_clusters_once(
                 db,
                 decision=decision,
                 node_type="SEMANTIC_CLUSTER",
-                node_key=f"cluster:{row['cluster_key']}",
+                node_key=f"cluster:{row['cluster_key']}:{partition_key}",
                 label=row["classification"],
                 timeline_id=None,
                 dag_node_id=None,
@@ -432,6 +448,7 @@ async def reconcile_clusters_once(
                 source_kind="cluster",
                 source_id=source_id,
                 scope_key=scope["scope_key"],
+                scope_partition_key=partition_key,
                 action="materialize_semantic_cluster",
                 topology_node_id=cluster_node,
                 classifier_version=CLASSIFIER_VERSION,
@@ -473,7 +490,7 @@ async def reconcile_clusters_once(
 async def _cluster_node_for_scope(
     db: Database,
     *,
-    scope_key: str,
+    scope_partition_key: str,
     cluster_id: UUID,
 ) -> UUID | None:
     row = await db.fetchrow(
@@ -483,13 +500,13 @@ async def _cluster_node_for_scope(
         JOIN aios.semantic_cluster_classification cc
           ON cc.classification_id::text=r.source_id
         WHERE r.source_kind='cluster'
-          AND r.scope_key=$1
+          AND r.scope_partition_key=$1
           AND cc.cluster_id=$2
           AND r.topology_node_id IS NOT NULL
         ORDER BY r.reconciled_at DESC
         LIMIT 1
         """,
-        scope_key,
+        scope_partition_key,
         cluster_id,
     )
     return row["topology_node_id"] if row else None
@@ -520,16 +537,16 @@ async def _branch_candidate(
     await db.execute(
         """
         INSERT INTO aios.semantic_branch_candidate (
-            boundary_classification_id, run_id, scope_key, scope_kind,
+            boundary_classification_id, run_id, scope_key, scope_partition_key, scope_kind,
             candidate_kind, cluster_a_id, cluster_b_id,
             character_id, character_instance_id, world_id, timeline_id,
             confidence, status, reason, created_at, updated_at
         )
         VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-            'candidate',$13::jsonb,now(),now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+            'candidate',$14::jsonb,now(),now()
         )
-        ON CONFLICT (boundary_classification_id, scope_key, candidate_kind)
+        ON CONFLICT (boundary_classification_id, scope_partition_key, candidate_kind)
         DO UPDATE SET
             confidence=GREATEST(aios.semantic_branch_candidate.confidence, EXCLUDED.confidence),
             reason=aios.semantic_branch_candidate.reason || EXCLUDED.reason,
@@ -538,6 +555,7 @@ async def _branch_candidate(
         classification_id,
         run_id,
         scope["scope_key"],
+        _scope_partition(scope),
         scope["scope_kind"],
         candidate_kind,
         cluster_a_id,
@@ -591,21 +609,22 @@ async def reconcile_boundaries_once(
             """
             SELECT DISTINCT
                 ra.scope_key,
-                n.scope_kind,
-                n.character_id,
-                n.character_instance_id,
-                n.world_id,
-                n.source_id
+                ra.scope_partition_key,
+                na.scope_kind,
+                na.character_id,
+                na.character_instance_id,
+                na.world_id,
+                na.source_id
             FROM aios.semantic_reconciliation_receipt ra
             JOIN aios.semantic_cluster_classification cca
               ON cca.classification_id::text=ra.source_id
             JOIN aios.semantic_reconciliation_receipt rb
-              ON rb.scope_key=ra.scope_key
+              ON rb.scope_partition_key=ra.scope_partition_key
              AND rb.source_kind='cluster'
             JOIN aios.semantic_cluster_classification ccb
               ON ccb.classification_id::text=rb.source_id
-            JOIN aios.semantic_topology_node n
-              ON n.scope_key=ra.scope_key
+            JOIN aios.semantic_topology_node na
+              ON na.topology_node_id=ra.topology_node_id
             WHERE ra.source_kind='cluster'
               AND cca.cluster_id=$1
               AND ccb.cluster_id=$2
@@ -618,19 +637,20 @@ async def reconcile_boundaries_once(
             scope = dict(raw_scope)
             node_a = await _cluster_node_for_scope(
                 db,
-                scope_key=scope["scope_key"],
+                scope_partition_key=scope["scope_partition_key"],
                 cluster_id=row["cluster_a_id"],
             )
             node_b = await _cluster_node_for_scope(
                 db,
-                scope_key=scope["scope_key"],
+                scope_partition_key=scope["scope_partition_key"],
                 cluster_id=row["cluster_b_id"],
             )
             if node_a is None or node_b is None or node_a == node_b:
                 continue
 
             edge_type = BOUNDARY_EDGE_TYPES[row["classification"]]
-            receipt_key = f"boundary:{row['classification_id']}:{scope['scope_key']}"
+            partition_key = scope["scope_partition_key"]
+            receipt_key = f"boundary:{row['classification_id']}:{partition_key}"
             exists = await db.fetchrow(
                 "SELECT 1 FROM aios.semantic_reconciliation_receipt WHERE receipt_key=$1",
                 receipt_key,
@@ -674,6 +694,7 @@ async def reconcile_boundaries_once(
                 source_kind="boundary",
                 source_id=str(row["classification_id"]),
                 scope_key=scope["scope_key"],
+                scope_partition_key=partition_key,
                 action=edge_type,
                 topology_edge_id=edge_id,
                 classifier_version=CLASSIFIER_VERSION,
