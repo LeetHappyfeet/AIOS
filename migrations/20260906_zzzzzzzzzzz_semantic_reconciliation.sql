@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS aios.semantic_reconciliation_receipt (
     ),
     source_id text NOT NULL,
     scope_key text NOT NULL,
+    scope_partition_key text NOT NULL,
     action text NOT NULL,
     topology_node_id uuid REFERENCES aios.semantic_topology_node(topology_node_id) ON DELETE SET NULL,
     topology_edge_id uuid REFERENCES aios.semantic_topology_edge(edge_id) ON DELETE SET NULL,
@@ -47,7 +48,8 @@ CREATE TABLE IF NOT EXISTS aios.semantic_reconciliation_receipt (
 );
 
 CREATE INDEX IF NOT EXISTS idx_semantic_reconciliation_scope
-    ON aios.semantic_reconciliation_receipt (scope_key, source_kind, reconciled_at DESC);
+    ON aios.semantic_reconciliation_receipt
+       (scope_partition_key, source_kind, reconciled_at DESC);
 
 CREATE TABLE IF NOT EXISTS aios.semantic_branch_candidate (
     branch_candidate_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -56,6 +58,7 @@ CREATE TABLE IF NOT EXISTS aios.semantic_branch_candidate (
         ON DELETE CASCADE,
     run_id uuid NOT NULL REFERENCES aios.semantic_cluster_run(run_id) ON DELETE CASCADE,
     scope_key text NOT NULL,
+    scope_partition_key text NOT NULL,
     scope_kind text NOT NULL,
     candidate_kind text NOT NULL CHECK (
         candidate_kind IN ('experiential','world')
@@ -73,7 +76,7 @@ CREATE TABLE IF NOT EXISTS aios.semantic_branch_candidate (
     reason jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (boundary_classification_id, scope_key, candidate_kind)
+    UNIQUE (boundary_classification_id, scope_partition_key, candidate_kind)
 );
 
 CREATE INDEX IF NOT EXISTS idx_semantic_branch_candidate_status
