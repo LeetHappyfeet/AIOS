@@ -72,3 +72,15 @@ class SemanticIndexConfig:
     classifier_min_margin: float = float(
         os.getenv("AIOS_SEMANTIC_CLASSIFIER_MIN_MARGIN", "0.04")
     )
+
+    # Reconciliation thresholds. These govern promotion into derived topology/RDF,
+    # not truth or epistemic ownership.
+    reconcile_relation_min_confidence: float = float(
+        os.getenv("AIOS_SEMANTIC_RECONCILE_RELATION_MIN_CONFIDENCE", "0.80")
+    )
+    reconcile_cluster_min_confidence: float = float(
+        os.getenv("AIOS_SEMANTIC_RECONCILE_CLUSTER_MIN_CONFIDENCE", "0.60")
+    )
+    reconcile_boundary_min_confidence: float = float(
+        os.getenv("AIOS_SEMANTIC_RECONCILE_BOUNDARY_MIN_CONFIDENCE", "0.60")
+    )
