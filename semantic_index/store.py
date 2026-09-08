@@ -73,15 +73,18 @@ class QdrantStore:
         top_k: int,
         qdrant_filter: qm.Filter | None = None,
     ) -> list[tuple[str, float, dict[str, Any]]]:
-        hits = self.client.search(
+        response = self.client.query_points(
             collection_name=self.collection,
-            query_vector=vector,
+            query=vector,
             limit=top_k,
             query_filter=qdrant_filter,
             with_payload=True,
             with_vectors=False,
         )
-        return [(str(h.id), float(h.score), dict(h.payload or {})) for h in hits]
+        return [
+            (str(hit.id), float(hit.score), dict(hit.payload or {}))
+            for hit in response.points
+        ]
 
     def vector(self, point_id: str) -> list[float]:
         rows = self.client.retrieve(
