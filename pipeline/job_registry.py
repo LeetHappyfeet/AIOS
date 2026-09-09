@@ -5,6 +5,13 @@ from enum import Enum
 from typing import Mapping
 
 
+class SchedulingLane(str, Enum):
+    LIVE = "LIVE"
+    STRUCTURAL = "STRUCTURAL"
+    BACKGROUND = "BACKGROUND"
+    DEFAULT = "DEFAULT"
+
+
 class ResourceClass(str, Enum):
     FAST_SQL = "FAST_SQL"
     NLP = "NLP"
@@ -28,7 +35,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "discover_characters": JobSpec(ResourceClass.FAST_SQL, "character_id", True),
     "dag_to_document_section": JobSpec(ResourceClass.FAST_SQL, "node_id", True),
     "extract_claims": JobSpec(ResourceClass.NLP, "section_id", True, isolate_blocking=True),
-    "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
+    "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_id", True, isolate_blocking=True, requires_rdf_slot=True),
     "normalize_proposition": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
     "project_character_knowledge": JobSpec(ResourceClass.SEMANTIC, "global", True),
     "derive_claim_topology": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
@@ -48,3 +55,25 @@ def job_spec(job_type: str) -> JobSpec:
         job_type,
         JobSpec(ResourceClass.GLOBAL, "global", False),
     )
+
+
+def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
+    payload = payload or {}
+    if job_type in {
+        "resolve_claim_context",
+        "normalize_proposition",
+        "project_character_knowledge",
+    }:
+        return SchedulingLane.LIVE
+    if (
+        job_type == "derive_claim_topology"
+        and payload.get("semantic_backfill") == "proposition_leaves_20260909"
+    ):
+        return SchedulingLane.BACKGROUND
+    if job_type in {
+        "derive_claim_topology",
+        "derive_character_acquisition_topology",
+        "derive_world_assertion_topology",
+    }:
+        return SchedulingLane.STRUCTURAL
+    return SchedulingLane.DEFAULT
