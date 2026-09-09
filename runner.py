@@ -407,7 +407,10 @@ async def _execute_claimed_job(
 
     spec = job_spec(job_type)
     partition_key = await _resolve_partition_key(db, job)
-    lock_key = f"{spec.resource_class.value}:{partition_key}"
+    if partition_key.startswith(("char:", "source:", "world:")):
+        lock_key = f"semantic-scope:{partition_key}"
+    else:
+        lock_key = f"{spec.resource_class.value}:{partition_key}"
     lock_started = time.monotonic()
 
     heartbeat = asyncio.create_task(
