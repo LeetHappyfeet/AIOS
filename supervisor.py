@@ -237,9 +237,6 @@ STAGES: List[Stage] = [
     ),
 
     # -------------------------------------------------
-    # 3) claim_candidate -> normalized proposition/observation
-    # -------------------------------------------------
-    # -------------------------------------------------
     # 2b) claim_candidate -> contextual semantic frames
     # -------------------------------------------------
     Stage(
@@ -274,6 +271,9 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
+    # -------------------------------------------------
+    # 3) refined claim -> normalized proposition/observation
+    # -------------------------------------------------
     Stage(
         name="normalize_proposition",
         job_type="normalize_proposition",
@@ -292,6 +292,13 @@ STAGES: List[Stage] = [
             SELECT 1
             FROM aios.claim_context_resolution ccr
             WHERE ccr.claim_id=cc.claim_id
+              AND ccr.resolver_version='context-resolver-v2'
+        )
+          AND EXISTS (
+            SELECT 1
+            FROM aios.claim_semantic_frame_projection sfp
+            WHERE sfp.claim_id=cc.claim_id
+              AND sfp.decomposer_version='semantic-frame-v1'
         )
           AND NOT EXISTS (
             SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id
@@ -740,6 +747,7 @@ STAGES: List[Stage] = [
                 SELECT 1
                 FROM aios.claim_context_resolution ccr
                 WHERE ccr.claim_id=cc.claim_id
+                  AND ccr.resolver_version='context-resolver-v2'
             )
               AND NOT EXISTS (
                 SELECT 1
