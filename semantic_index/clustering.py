@@ -14,7 +14,23 @@ from .neighbor_classifier import NEIGHBOR_CLASSIFIER_VERSION
 
 logger = logging.getLogger("aios.semantic_clustering")
 
-ALGORITHM_VERSION = "semantic-cluster-v2"
+ALGORITHM_VERSION = "semantic-cluster-v3"
+
+# Only semantically interpreted relations that imply a coherent shared region
+# may fuse core components. Generic RELATED similarity is intentionally excluded:
+# in a large k-NN graph it percolates and collapses unrelated scopes/topics into
+# giant components.
+CORE_GLUE_RELATIONS = {
+    "EQUIVALENT",
+    "REFINES",
+    "SAME_TOPIC",
+    "SAME_EVENT",
+}
+
+# Fringe attachment may use broader similarity, but classified contradictions
+# remain hard exclusions.
+FRINGE_BLOCK_RELATIONS = {"CONTRADICTS"}
+
 
 
 @dataclass(frozen=True)
@@ -122,7 +138,7 @@ def _build_core_components(
     strong_edges = [
         edge for edge in edges
         if edge.similarity >= core_threshold
-        and edge.relation != "CONTRADICTS"
+        and edge.relation in CORE_GLUE_RELATIONS
     ]
     bridge_indexes = _bridge_edge_indexes(strong_edges)
 
@@ -159,7 +175,7 @@ def _attach_fringe(
     for edge in edges:
         all_nodes.add(edge.a)
         all_nodes.add(edge.b)
-        if edge.relation == "CONTRADICTS":
+        if edge.relation in FRINGE_BLOCK_RELATIONS:
             continue
         adjacency.setdefault(edge.a, []).append((edge.b, edge.similarity))
         adjacency.setdefault(edge.b, []).append((edge.a, edge.similarity))
