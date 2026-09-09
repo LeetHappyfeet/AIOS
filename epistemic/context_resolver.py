@@ -10,7 +10,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
 
-RESOLVER_VERSION = "context-resolver-v2"
+RESOLVER_VERSION = "context-resolver-v3"
 DATASET = "world"
 LIMINAL_GRAPH = "urn:aios:world:liminal"
 RDF_RECEIPT_PREDICATE = "world:contextResolverVersion"
