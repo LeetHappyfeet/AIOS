@@ -14,6 +14,7 @@ from aios_app.pipeline.jobs import (
     mark_done,
     mark_failed,
     recover_stale_running_jobs,
+    rebalance_queued_priorities,
 )
 
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
@@ -288,6 +289,13 @@ async def run_runner(poll_interval: float = 1.0) -> None:
         "pipeline_stale_running_seconds",
         1800,
     )
+    rebalanced = await rebalance_queued_priorities(db)
+    if rebalanced:
+        logger.info(
+            "Rebalanced priorities for %d queued pipeline jobs",
+            rebalanced,
+        )
+
     recovered = await recover_stale_running_jobs(
         db,
         stale_after_seconds=stale_after_seconds,
