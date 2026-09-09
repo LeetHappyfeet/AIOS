@@ -29,6 +29,16 @@ PAIR_EDGE_TYPES = {
     "SAME_EVENT": "semantic_same_event",
 }
 
+PIVOT_NODE_TYPES = {
+    "EVENT_REGION": "EVENT",
+    "STATE_SERIES": "STATE",
+    "MEMORY_REGION": "MEMORY",
+    "BELIEF_REGION": "CONCEPT",
+    "RULE_REGION": "RULE",
+    "GOAL_REGION": "GOAL",
+    "TOPIC_REGION": "CONCEPT",
+}
+
 BOUNDARY_EDGE_TYPES = {
     "SAME_REGION": "semantic_region_bridge",
     "TOPIC_SPLIT": "topic_boundary",
@@ -377,6 +387,42 @@ async def _cluster_scope_rows(
     return [dict(row) for row in rows]
 
 
+async def _semantic_pivot_parent(
+    db: Database,
+    *,
+    scope: dict[str, Any],
+) -> UUID | None:
+    if scope["scope_kind"] == "character" and scope.get("character_instance_id"):
+        row = await db.fetchrow(
+            """
+            SELECT topology_node_id
+            FROM aios.semantic_topology_node
+            WHERE scope_key=$1
+              AND node_type='INSTANCE'
+              AND node_key=$2
+            ORDER BY significance DESC, created_at
+            LIMIT 1
+            """,
+            scope["scope_key"],
+            str(scope["character_instance_id"]),
+        )
+        if row:
+            return row["topology_node_id"]
+
+    row = await db.fetchrow(
+        """
+        SELECT topology_node_id
+        FROM aios.semantic_topology_node
+        WHERE scope_key=$1
+          AND node_type='ROOT'
+        ORDER BY significance DESC, created_at
+        LIMIT 1
+        """,
+        scope["scope_key"],
+    )
+    return row["topology_node_id"] if row else None
+
+
 async def reconcile_clusters_once(
     db: Database,
     fuseki: FusekiClient,
@@ -424,10 +470,14 @@ async def reconcile_clusters_once(
                 continue
 
             decision = _decision_from_row(scope)
+            pivot_node_type = PIVOT_NODE_TYPES.get(
+                row["classification"],
+                "SEMANTIC_CLUSTER",
+            )
             cluster_node = await _upsert_node(
                 db,
                 decision=decision,
-                node_type="SEMANTIC_CLUSTER",
+                node_type=pivot_node_type,
                 node_key=f"cluster:{row['cluster_key']}:{partition_key}",
                 label=row["classification"],
                 timeline_id=None,
@@ -443,8 +493,34 @@ async def reconcile_clusters_once(
                     "cluster_id": str(row["cluster_id"]),
                     "cluster_key": str(row["cluster_key"]),
                     "member_count": int(row["member_count"]),
+                    "semantic_pivot": pivot_node_type != "SEMANTIC_CLUSTER",
                 },
             )
+
+            structural_parent = await _semantic_pivot_parent(
+                db,
+                scope=scope,
+            )
+            if structural_parent is not None:
+                await _upsert_edge(
+                    db,
+                    decision=decision,
+                    parent=structural_parent,
+                    child=cluster_node,
+                    edge_type=(
+                        "contains_semantic_pivot"
+                        if pivot_node_type != "SEMANTIC_CLUSTER"
+                        else "contains_semantic_cluster"
+                    ),
+                    significance=max(0.5, float(row["confidence"])),
+                    inference_source="semantic_cluster_classifier",
+                    inference_status="accepted",
+                    inference_confidence=float(row["confidence"]),
+                    meta={
+                        "classification": row["classification"],
+                        "cluster_id": str(row["cluster_id"]),
+                    },
+                )
 
             for member_node in scope["member_nodes"]:
                 await _upsert_edge(
@@ -452,7 +528,11 @@ async def reconcile_clusters_once(
                     decision=decision,
                     parent=cluster_node,
                     child=member_node,
-                    edge_type="semantic_cluster_member",
+                    edge_type=(
+                        "semantic_pivot_member"
+                        if pivot_node_type != "SEMANTIC_CLUSTER"
+                        else "semantic_cluster_member"
+                    ),
                     significance=max(0.45, float(row["confidence"])),
                     inference_source="semantic_cluster_classifier",
                     inference_status="accepted",
@@ -470,7 +550,11 @@ async def reconcile_clusters_once(
                 source_id=source_id,
                 scope_key=scope["scope_key"],
                 scope_partition_key=partition_key,
-                action="materialize_semantic_cluster",
+                action=(
+                    "materialize_semantic_pivot"
+                    if pivot_node_type != "SEMANTIC_CLUSTER"
+                    else "materialize_semantic_cluster"
+                ),
                 topology_node_id=cluster_node,
                 classifier_version=CLASSIFIER_VERSION,
                 confidence=float(row["confidence"]),
