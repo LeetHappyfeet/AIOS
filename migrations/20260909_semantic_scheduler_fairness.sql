@@ -90,6 +90,26 @@ WHERE status='queued'
   AND job_type='derive_claim_topology'
   AND payload->>'semantic_backfill'='proposition_leaves_20260909';
 
+UPDATE aios.pipeline_job
+SET status='queued',
+    run_after=now(),
+    worker_id=NULL,
+    claimed_at=NULL,
+    heartbeat_at=NULL,
+    lease_expires_at=NULL,
+    updated_at=now(),
+    last_error=CASE
+        WHEN COALESCE(last_error,'')='' THEN
+            '[requeued legacy pre-lease running job]'
+        ELSE
+            last_error || ' [requeued legacy pre-lease running job]'
+    END
+WHERE status='running'
+  AND worker_id IS NULL
+  AND claimed_at IS NULL
+  AND heartbeat_at IS NULL
+  AND lease_expires_at IS NULL;
+
 CREATE INDEX IF NOT EXISTS ix_pipeline_job_scheduler_lane
     ON aios.pipeline_job (resource_class, scheduling_lane, priority, created_at)
     WHERE status='queued';
