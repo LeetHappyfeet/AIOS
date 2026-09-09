@@ -153,6 +153,44 @@ async def mark_failed(
     )
 
 
+
+
+async def recover_stale_running_jobs(
+    db: Database,
+    *,
+    stale_after_seconds: int,
+) -> int:
+    """
+    Requeue orphaned running jobs whose ownership has gone stale.
+
+    updated_at is the current lease surrogate until pipeline_job grows an
+    explicit heartbeat/lease column. The threshold should therefore remain
+    comfortably above normal job runtimes.
+    """
+    row = await db.execute_returning_row(
+        """
+        WITH recovered AS (
+            UPDATE aios.pipeline_job
+            SET status='queued',
+                run_after=now(),
+                updated_at=now(),
+                last_error=CASE
+                    WHEN COALESCE(last_error,'') = '' THEN
+                        '[recovered stale running job]'
+                    ELSE
+                        last_error || ' [recovered stale running job]'
+                END
+            WHERE status='running'
+              AND updated_at < now() - make_interval(secs => $1)
+            RETURNING job_id
+        )
+        SELECT COUNT(*)::integer AS cnt FROM recovered
+        """,
+        stale_after_seconds,
+    )
+    return int(row["cnt"]) if row else 0
+
+
 # ---------------------------------------------------------------------
 # Optional retry helper
 # ---------------------------------------------------------------------
