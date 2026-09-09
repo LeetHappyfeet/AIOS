@@ -31,6 +31,8 @@ class Stage:
     eligibility_sql: str
     payload_builder: Callable[[Dict[str, object]], Dict[str, object]]
     priority: int = 100
+    queue_limit: int = 64
+    critical: bool = False
 
 
 # =================================================
@@ -105,6 +107,8 @@ STAGES: List[Stage] = [
         """,
         payload_builder=character_id_payload,
         priority=10,
+        queue_limit=8,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -139,6 +143,8 @@ STAGES: List[Stage] = [
         """,
         payload_builder=world_id_payload,
         priority=20,
+        queue_limit=8,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -181,6 +187,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=node_id_payload,
+        priority=20,
+        queue_limit=48,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -208,6 +217,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=section_id_payload,
+        priority=25,
+        queue_limit=48,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -245,6 +257,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=claim_id_payload,
+        priority=35,
+        queue_limit=96,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -280,6 +295,8 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=claim_id_payload,
+        priority=75,
+        queue_limit=64,
     ),
 
 
@@ -316,6 +333,8 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=claim_id_payload,
+        priority=80,
+        queue_limit=64,
     ),
 
     # Explicit world assertions are the only observation-derived path that may
@@ -344,6 +363,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=assertion_id_payload,
+        priority=45,
+        queue_limit=32,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -370,6 +392,8 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+        priority=90,
+        queue_limit=1,
     ),
 
     # -------------------------------------------------
@@ -399,6 +423,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+        priority=30,
+        queue_limit=4,
+        critical=True,
     ),
 
 
@@ -432,6 +459,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=acquisition_id_payload,
+        priority=40,
+        queue_limit=48,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -479,6 +509,8 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+        priority=60,
+        queue_limit=2,
     ),
 
     # -------------------------------------------------
@@ -516,6 +548,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=section_id_payload,
+        priority=25,
+        queue_limit=48,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -559,6 +594,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+        priority=28,
+        queue_limit=1,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -606,6 +644,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=claim_id_payload,
+        priority=30,
+        queue_limit=96,
+        critical=True,
     ),
 ]
 
@@ -619,6 +660,18 @@ async def queued_job_count(db: Database) -> int:
         "SELECT COUNT(*) AS cnt FROM aios.pipeline_job WHERE status = 'queued'"
     )
     return int(row["cnt"])
+
+
+async def queued_job_counts_by_type(db: Database) -> dict[str, int]:
+    rows = await db.fetch(
+        """
+        SELECT job_type, COUNT(*) AS cnt
+        FROM aios.pipeline_job
+        WHERE status='queued'
+        GROUP BY job_type
+        """
+    )
+    return {str(row["job_type"]): int(row["cnt"]) for row in rows}
 
 
 # =================================================
@@ -665,25 +718,58 @@ async def run_supervisor() -> None:
     try:
         while True:
             qcnt = await queued_job_count(db)
-            if qcnt >= max_queued_backlog:
-                await asyncio.sleep(poll_interval)
-                continue
+            queued_by_type = await queued_job_counts_by_type(db)
+            critical_reserve = getattr(
+                settings,
+                "supervisor_critical_queue_reserve",
+                128,
+            )
+            hard_cap = max_queued_backlog + critical_reserve
 
             remaining = max_jobs_per_cycle
             scheduled = 0
 
-            for stage in STAGES:
+            # Higher-priority stages get first admission, independent of source
+            # order in STAGES. This keeps prerequisite/HUD work moving while
+            # background projections drain at bounded depth.
+            for stage in sorted(STAGES, key=lambda value: value.priority):
                 if remaining <= 0:
                     break
+
+                stage_queued = queued_by_type.get(stage.job_type, 0)
+                stage_capacity = max(0, stage.queue_limit - stage_queued)
+                if stage_capacity <= 0:
+                    continue
+
+                # Normal/background work obeys the soft global cap. Critical
+                # work may use the reserved band, but never exceed the hard cap.
+                global_capacity = (
+                    max(0, hard_cap - qcnt)
+                    if stage.critical
+                    else max(0, max_queued_backlog - qcnt)
+                )
+                if global_capacity <= 0:
+                    continue
+
+                allowed = min(
+                    batch_size,
+                    remaining,
+                    stage_capacity,
+                    global_capacity,
+                )
+                if allowed <= 0:
+                    continue
 
                 try:
                     n = await enqueue_stage_jobs(
                         db,
                         stage,
-                        batch_size=min(batch_size, remaining),
+                        batch_size=allowed,
                     )
                     scheduled += n
                     remaining -= n
+                    qcnt += n
+                    queued_by_type[stage.job_type] = stage_queued + n
                 except Exception:
                     logger.exception("Stage '%s' enqueue failed", stage.name)
 
