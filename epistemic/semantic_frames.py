@@ -13,12 +13,13 @@ from aios_app.db import Database
 
 logger = logging.getLogger("aios.epistemic.semantic_frames")
 
-DECOMPOSER_VERSION = "semantic-frame-v1"
-REFERENT_RESOLVER_VERSION = "local-dag-referent-v1"
+DECOMPOSER_VERSION = "semantic-frame-v2"
+REFERENT_RESOLVER_VERSION = "local-dag-referent-v2"
 
 _NLP = None
 
 PRONOUN_PERSON = {"he", "him", "his", "she", "her", "hers", "they", "them", "their", "theirs"}
+RELATIVE_PRONOUNS = {"who", "whom", "whose", "which", "that"}
 PRONOUN_NEUTRAL = {"it", "its", "this", "that", "these", "those"}
 
 PROPOSITION_PREDICATES = {
@@ -174,11 +175,21 @@ def _discourse_mode(doc, root, canonical_predicate: Optional[str]) -> str:
 
 def decompose_sentence(sentence: str) -> list[FrameDraft]:
     doc = _get_nlp()(sentence)
-    roots = [
-        tok for tok in doc
-        if tok.pos_ in {"VERB", "AUX", "ADJ", "NOUN"}
-        and (tok.dep_ in CLAUSE_DEPS or tok is doc[:].root)
-    ]
+    def is_frame_root(tok) -> bool:
+        if tok.dep_ not in CLAUSE_DEPS:
+            return False
+        if tok.pos_ in {"VERB", "AUX"}:
+            return True
+        if tok.pos_ in {"ADJ", "NOUN"}:
+            # Nominal/adjectival predicates are valid only when they head a
+            # genuine copular clause. Coordination alone must never create a
+            # semantic predicate (e.g. "eyes and ears" -> ear()).
+            has_copula = any(child.dep_ == "cop" for child in tok.children)
+            has_subject = any(child.dep_ in SUBJECT_DEPS for child in tok.children)
+            return has_copula and has_subject
+        return False
+
+    roots = [tok for tok in doc if is_frame_root(tok)]
     roots = sorted(dict.fromkeys(roots), key=lambda t: t.i)
     root_to_index = {tok.i: idx for idx, tok in enumerate(roots)}
 
@@ -213,7 +224,31 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
 
         predicate, predicate_confidence, construction = _canonical_predicate(root, object_token)
         polarity = -1 if _negated(root) else 1
-        subject = _phrase(subject_token)
+
+        # Relative-clause pronouns have a local syntactic antecedent. Resolve
+        # them before cross-sentence/DAG coreference.
+        local_relative_antecedent = None
+        if (
+            root.dep_ == "relcl"
+            and subject_token is not None
+            and subject_token.lower_ in RELATIVE_PRONOUNS
+        ):
+            local_relative_antecedent = _phrase(root.head)
+            subject = local_relative_antecedent
+        else:
+            subject = _phrase(subject_token)
+
+        # Passive/reporting predicates do not make their grammatical theme the
+        # believer/reporter. "X is believed to be Y" means an implicit source
+        # reports/believes proposition(X is Y).
+        passive_reporting = (
+            predicate in {"believe", "think", "say", "report", "claim"}
+            and subject_token is not None
+            and subject_token.dep_ in {"nsubjpass", "csubjpass"}
+            and object_frame_index is not None
+        )
+        if passive_reporting:
+            subject = None
 
         # For proposition-taking frames, do not flatten the subordinate clause
         # into a literal object; preserve it as object_frame_id after insertion.
@@ -247,8 +282,8 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
                 modality=_modality(root),
                 tense=str(root.morph.get("Tense")[0]) if root.morph.get("Tense") else None,
                 aspect=str(root.morph.get("Aspect")[0]) if root.morph.get("Aspect") else None,
-                frame_role="main" if root is doc[:].root else root.dep_.lower(),
-                discourse_mode=_discourse_mode(doc, root, predicate),
+                frame_role="main" if root.dep_ == "ROOT" else root.dep_.lower(),
+                discourse_mode=("reported_claim" if passive_reporting else _discourse_mode(doc, root, predicate)),
                 extraction_confidence=0.92 if subject and predicate else 0.72 if predicate else 0.45,
                 predicate_confidence=predicate_confidence,
                 canonical_text=canonical,
@@ -256,6 +291,8 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
                     "root_text": root.text,
                     "root_dep": root.dep_,
                     "construction": construction,
+                    "local_relative_antecedent": local_relative_antecedent,
+                    "passive_reporting": passive_reporting,
                     "named_entities": named_entities,
                 },
             )
@@ -373,7 +410,13 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
 
     row = await db.fetchrow(
         """
-        SELECT cc.raw_text, t.world_id
+        SELECT
+            cc.raw_text, t.world_id,
+            dn.character_id, dn.speaker_id,
+            dn.speaker_role::text AS speaker_role,
+            dn.recipient_id,
+            COALESCE(NULLIF(dn.viewpoint_id,''), NULLIF(dn.payload->>'viewpoint_id','')) AS viewpoint_id,
+            COALESCE(NULLIF(dn.payload->>'identity_ruleset',''), 'character-id-v1') AS identity_ruleset
         FROM aios.claim_candidate cc
         JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
         JOIN aios.document_section ds ON ds.section_id=es.section_id
