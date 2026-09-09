@@ -37,7 +37,17 @@ END
 WHERE resource_class IS NULL;
 
 ALTER TABLE aios.pipeline_job
-    ALTER COLUMN resource_class SET DEFAULT 'GLOBAL';
+    ALTER COLUMN resource_class SET DEFAULT 'GLOBAL',
+    ALTER COLUMN resource_class SET NOT NULL;
+
+ALTER TABLE aios.pipeline_job
+    DROP CONSTRAINT IF EXISTS ck_pipeline_job_resource_class;
+
+ALTER TABLE aios.pipeline_job
+    ADD CONSTRAINT ck_pipeline_job_resource_class
+    CHECK (resource_class IN (
+        'FAST_SQL','NLP','SEMANTIC','VECTOR','RDF','RECONCILIATION','GLOBAL'
+    ));
 
 DROP INDEX IF EXISTS aios.ux_pipeline_job_global_active;
 
