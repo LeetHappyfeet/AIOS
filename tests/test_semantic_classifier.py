@@ -77,3 +77,11 @@ def test_ambiguous_boundary_remains_unresolved():
     )
     assert label == "UNRESOLVED"
     assert confidence == 0.56
+
+
+def test_json_object_accepts_asyncpg_text_json():
+    from aios_app.semantic_index.classifier import _json_object
+
+    assert _json_object('{"claim_kinds":{"EVENT":3}}') == {
+        "claim_kinds": {"EVENT": 3}
+    }
