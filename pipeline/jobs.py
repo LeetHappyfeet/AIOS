@@ -89,7 +89,7 @@ async def enqueue_job(
     payload: Dict[str, Any],
     priority: int = 100,
     run_after: Optional[datetime] = None,
-) -> UUID:
+) -> Optional[UUID]:
     """
     Enqueue a new pipeline job.
 
@@ -125,6 +125,7 @@ async def enqueue_job(
             $6,
             $7
         )
+        ON CONFLICT DO NOTHING
         RETURNING job_id
         """,
         job_type,
@@ -136,6 +137,8 @@ async def enqueue_job(
         partition_key,
     )
 
+    if not row:
+        return None
     return row["job_id"]
 
 
