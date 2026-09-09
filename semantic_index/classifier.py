@@ -36,6 +36,25 @@ BOUNDARY_LABELS = (
 )
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    """Normalize JSON/JSONB values returned by asyncpg into a Python dict."""
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if decoded is None:
+            return {}
+        if not isinstance(decoded, Mapping):
+            raise ValueError("expected JSON object metadata")
+        return dict(decoded)
+    try:
+        return dict(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected object-like metadata") from exc
+
+
 @dataclass(frozen=True)
 class BoundaryFeatures:
     mean_similarity: float
@@ -376,7 +395,7 @@ async def classify_latest_clusters_once(
 
     written = 0
     for row in cluster_rows:
-        meta = dict(row["meta"] or {})
+        meta = _json_object(row["meta"])
         label, confidence, feature_scores = _cluster_region_classification(meta)
         await db.execute(
             """
@@ -427,8 +446,8 @@ async def classify_latest_clusters_once(
     )
 
     for row in boundaries:
-        meta_a = dict(row["meta_a"] or {})
-        meta_b = dict(row["meta_b"] or {})
+        meta_a = _json_object(row["meta_a"])
+        meta_b = _json_object(row["meta_b"])
         temporal_overlap, temporal_separation = _time_relation(meta_a, meta_b)
         conflicts = await _cross_cluster_conflicts(
             db,
