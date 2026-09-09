@@ -164,7 +164,13 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             cc.claim_id,
             COALESCE(sf.resolved_subject, sf.subject_text, cc.subject) AS subject,
             COALESCE(sf.predicate_canonical, cc.predicate) AS predicate,
-            COALESCE(sf.resolved_object, sf.object_text, cc.object) AS object,
+            CASE
+                WHEN sf.frame_id IS NOT NULL
+                    THEN COALESCE(sf.resolved_object, sf.object_text, child_sf.canonical_text)
+                ELSE cc.object
+            END AS object,
+            sf.polarity AS semantic_polarity,
+            sf.modality AS semantic_modality,
             cc.raw_text,
             cc.confidence, cc.extraction_rule, cc.extraction_ver, cc.created_at,
             sf.frame_id AS semantic_frame_id,
@@ -202,6 +208,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
         LEFT JOIN aios.claim_semantic_frame_projection sfp ON sfp.claim_id=cc.claim_id
         LEFT JOIN aios.claim_semantic_frame sf ON sf.frame_id=sfp.primary_frame_id
+        LEFT JOIN aios.claim_semantic_frame child_sf ON child_sf.frame_id=sf.object_frame_id
         WHERE cc.claim_id=$1
         """,
         claim_id,
@@ -220,6 +227,8 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         predicate=row["predicate"],
         object_value=row["object"],
         raw_text=row["raw_text"],
+        polarity=int(row["semantic_polarity"]) if row["semantic_polarity"] in (-1, 1) else None,
+        modality=row["semantic_modality"] or "asserted",
         meta={
             "normalizer_version": NORMALIZER_VERSION,
             "extraction_version": row["extraction_ver"],
