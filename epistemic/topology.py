@@ -329,6 +329,75 @@ async def _find_world_topic_anchor(
     return dict(row) if row else None
 
 
+async def _find_source_topic_anchor(
+    db: Database,
+    *,
+    source_id: str,
+    proposition_id: UUID,
+) -> Optional[dict[str, Any]]:
+    row = await db.fetchrow(
+        """
+        SELECT topology_node_id, scope_key
+        FROM aios.semantic_topology_node
+        WHERE scope_kind='source'
+          AND source_id=$1
+          AND proposition_id=$2
+        ORDER BY
+            CASE node_type
+                WHEN 'TOPIC' THEN 0
+                WHEN 'EVENT' THEN 1
+                WHEN 'SEMANTIC_PIVOT' THEN 2
+                ELSE 3
+            END,
+            significance DESC,
+            created_at
+        LIMIT 1
+        """,
+        source_id,
+        proposition_id,
+    )
+    return dict(row) if row else None
+
+
+async def _anchor_character_node_to_source(
+    db: Database,
+    *,
+    source_scope_key: str,
+    source_node_id: UUID,
+    source_id: str,
+    character_id: str,
+    character_instance_id: UUID,
+    world_id: Optional[UUID],
+    proposition_id: UUID,
+    acquisition_id: UUID,
+    acquisition_mode: Optional[str],
+    dag_node_id: Optional[UUID],
+) -> bool:
+    target = await _find_source_topic_anchor(
+        db,
+        source_id=source_id,
+        proposition_id=proposition_id,
+    )
+    if not target:
+        return False
+    await _upsert_anchor_edge(
+        db,
+        source_scope_key=source_scope_key,
+        source_node_id=source_node_id,
+        target_scope_key=target["scope_key"],
+        target_node_id=target["topology_node_id"],
+        relationship_type=_acquisition_anchor_relationship(acquisition_mode),
+        character_id=character_id,
+        character_instance_id=character_instance_id,
+        world_id=world_id,
+        proposition_id=proposition_id,
+        acquisition_id=acquisition_id,
+        dag_node_id=dag_node_id,
+        meta={"anchor_policy": "source_same_proposition"},
+    )
+    return True
+
+
 async def _anchor_character_node_to_world(
     db: Database,
     *,
@@ -408,6 +477,57 @@ async def _backfill_character_anchors_for_world_topic(
             acquisition_id=row["acquisition_id"],
             dag_node_id=row["dag_node_id"],
             meta={"anchor_policy": "world_topic_backfill"},
+        )
+        touched.add(row["scope_key"])
+    return touched
+
+
+async def _backfill_source_anchors_for_world_topic(
+    db: Database,
+    *,
+    world_id: UUID,
+    proposition_id: UUID,
+    target_scope_key: str,
+    target_node_id: UUID,
+) -> set[str]:
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT
+            n.topology_node_id,
+            n.scope_key,
+            n.source_id,
+            n.dag_node_id
+        FROM aios.semantic_topology_node n
+        JOIN aios.claim_context_resolution ccr
+          ON ccr.claim_id=n.claim_id
+        WHERE n.scope_kind='source'
+          AND n.proposition_id=$1
+          AND ccr.world_id=$2
+          AND n.source_id IS NOT NULL
+        ORDER BY n.scope_key, n.topology_node_id
+        """,
+        proposition_id,
+        world_id,
+    )
+    touched: set[str] = set()
+    for row in rows:
+        await _upsert_anchor_edge(
+            db,
+            source_scope_key=row["scope_key"],
+            source_node_id=row["topology_node_id"],
+            target_scope_key=target_scope_key,
+            target_node_id=target_node_id,
+            relationship_type="reports_about",
+            character_id=None,
+            character_instance_id=None,
+            world_id=world_id,
+            proposition_id=proposition_id,
+            acquisition_id=None,
+            dag_node_id=row["dag_node_id"],
+            meta={
+                "anchor_policy": "source_world_same_proposition",
+                "source_id": row["source_id"],
+            },
         )
         touched.add(row["scope_key"])
     return touched
@@ -768,6 +888,13 @@ async def derive_world_assertion_topology(
         target_scope_key=decision.scope_key,
         target_node_id=topic,
     )
+    touched_source_scopes = await _backfill_source_anchors_for_world_topic(
+        db,
+        world_id=data["world_id"],
+        proposition_id=data["proposition_id"],
+        target_scope_key=decision.scope_key,
+        target_node_id=topic,
+    )
 
     dataset, graph = await _project_scope_rdf(db, fuseki, decision=decision)
     await db.execute(
@@ -783,11 +910,11 @@ async def derive_world_assertion_topology(
         projection_key, assertion_id, decision.scope_key, dataset, graph,
         RESOLVER_VERSION, json.dumps({"branch_kind": "world_assertion"}),
     )
-    for character_scope in touched_character_scopes:
+    for anchored_scope in touched_character_scopes | touched_source_scopes:
         await reproject_existing_scope(
             db,
             fuseki,
-            scope_key=character_scope,
+            scope_key=anchored_scope,
         )
     return True
 
@@ -893,18 +1020,39 @@ async def derive_character_acquisition_topology(
         claim_id=data.get("claim_id"),
     )
 
-    await _anchor_character_node_to_world(
-        db,
-        source_scope_key=decision.scope_key,
-        source_node_id=acquisition,
-        character_id=data["character_id"],
-        character_instance_id=data["instance_id"],
-        world_id=decision.world_id,
-        proposition_id=data["proposition_id"],
-        acquisition_id=acquisition_id,
-        acquisition_mode=data.get("acquisition_mode"),
-        dag_node_id=data.get("dag_node_id"),
-    )
+    # Provenance and world referent are independent cross-scope facts.
+    # Anchor to the exact source first when one exists; this must not depend
+    # on an identical proposition already being asserted in /world.
+    if data.get("source_id"):
+        await _anchor_character_node_to_source(
+            db,
+            source_scope_key=decision.scope_key,
+            source_node_id=acquisition,
+            source_id=str(data["source_id"]),
+            character_id=data["character_id"],
+            character_instance_id=data["instance_id"],
+            world_id=decision.world_id,
+            proposition_id=data["proposition_id"],
+            acquisition_id=acquisition_id,
+            acquisition_mode=data.get("acquisition_mode"),
+            dag_node_id=data.get("dag_node_id"),
+        )
+
+    # A separate world anchor is added only when an authoritative world
+    # topology referent for the same proposition already exists.
+    if decision.world_id:
+        await _anchor_character_node_to_world(
+            db,
+            source_scope_key=decision.scope_key,
+            source_node_id=acquisition,
+            character_id=data["character_id"],
+            character_instance_id=data["instance_id"],
+            world_id=decision.world_id,
+            proposition_id=data["proposition_id"],
+            acquisition_id=acquisition_id,
+            acquisition_mode=data.get("acquisition_mode"),
+            dag_node_id=data.get("dag_node_id"),
+        )
 
     if data.get("source_id") or data.get("source_key"):
         source_key = str(data.get("source_id") or data.get("source_key"))
