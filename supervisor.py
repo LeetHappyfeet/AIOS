@@ -51,6 +51,13 @@ def claim_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"claim_id": str(row["claim_id"])}
 
 
+def resolver_claim_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "claim_id": str(row["claim_id"]),
+        "admission_band": str(row.get("admission_band") or "backlog"),
+    }
+
+
 def semantic_backfill_claim_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {
         "claim_id": str(row["claim_id"]),
@@ -668,41 +675,71 @@ STAGES: List[Stage] = [
         name="resolve_claim_context",
         job_type="resolve_claim_context",
         eligibility_sql="""
-        SELECT cc.claim_id
-        FROM aios.claim_candidate cc
-        WHERE EXISTS (
-            SELECT 1
-            FROM aios.rdf_promotion_log base
-            WHERE base.claim_id=cc.claim_id
-              AND base.rdf_dataset='world'
-              AND base.rdf_graph='urn:aios:world:liminal'
-              AND base.rdf_predicate='rdf:type'
-              AND base.rdf_object='world:Claim'
+        WITH eligible AS (
+            SELECT cc.claim_id, cc.created_at
+            FROM aios.claim_candidate cc
+            WHERE EXISTS (
+                SELECT 1
+                FROM aios.rdf_promotion_log base
+                WHERE base.claim_id=cc.claim_id
+                  AND base.rdf_dataset='world'
+                  AND base.rdf_graph='urn:aios:world:liminal'
+                  AND base.rdf_predicate='rdf:type'
+                  AND base.rdf_object='world:Claim'
+            )
+              AND EXISTS (
+                SELECT 1
+                FROM aios.rdf_promotion_log cls
+                WHERE cls.claim_id=cc.claim_id
+                  AND cls.rdf_dataset='world'
+                  AND cls.rdf_graph='urn:aios:world:liminal'
+                  AND cls.rdf_predicate='world:contentKind'
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM aios.claim_context_resolution ccr
+                WHERE ccr.claim_id=cc.claim_id
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM aios.pipeline_job pj
+                WHERE pj.job_type='resolve_claim_context'
+                  AND pj.status IN ('queued','running')
+                  AND pj.payload->>'claim_id'=cc.claim_id::text
+            )
+        ),
+        quotas AS (
+            SELECT
+                floor($1::numeric * 0.75)::integer AS backlog_quota,
+                $1 - floor($1::numeric * 0.75)::integer AS fresh_quota
+        ),
+        backlog AS (
+            SELECT e.claim_id, e.created_at, 'backlog'::text AS admission_band
+            FROM eligible e
+            ORDER BY e.created_at ASC, e.claim_id
+            LIMIT (SELECT backlog_quota FROM quotas)
+        ),
+        fresh AS (
+            SELECT e.claim_id, e.created_at, 'fresh'::text AS admission_band
+            FROM eligible e
+            WHERE NOT EXISTS (
+                SELECT 1 FROM backlog b WHERE b.claim_id=e.claim_id
+            )
+            ORDER BY e.created_at DESC, e.claim_id
+            LIMIT (SELECT fresh_quota FROM quotas)
         )
-          AND EXISTS (
-            SELECT 1
-            FROM aios.rdf_promotion_log cls
-            WHERE cls.claim_id=cc.claim_id
-              AND cls.rdf_dataset='world'
-              AND cls.rdf_graph='urn:aios:world:liminal'
-              AND cls.rdf_predicate='world:contentKind'
-        )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM aios.claim_context_resolution ccr
-            WHERE ccr.claim_id=cc.claim_id
-        )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM aios.pipeline_job pj
-            WHERE pj.job_type='resolve_claim_context'
-              AND pj.status IN ('queued','running')
-              AND pj.payload->>'claim_id'=cc.claim_id::text
-        )
-        ORDER BY cc.created_at
+        SELECT claim_id, admission_band
+        FROM (
+            SELECT claim_id, created_at, admission_band, 0 AS band_order
+            FROM backlog
+            UNION ALL
+            SELECT claim_id, created_at, admission_band, 1 AS band_order
+            FROM fresh
+        ) selected
+        ORDER BY band_order, created_at
         LIMIT $1
         """,
-        payload_builder=claim_id_payload,
+        payload_builder=resolver_claim_payload,
         priority=30,
         queue_limit=256,
         critical=True,
