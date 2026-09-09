@@ -13,7 +13,7 @@ class SemanticIndexConfig:
         "AIOS_QDRANT_SOURCE_COLLECTION", "source_sections_v1"
     )
     frame_collection: str = os.getenv(
-        "AIOS_QDRANT_FRAME_COLLECTION", "semantic_frames_v1"
+        "AIOS_QDRANT_FRAME_COLLECTION", "semantic_frames_v2"
     )
     proposition_collection: str = os.getenv(
         "AIOS_QDRANT_PROPOSITION_COLLECTION", "propositions_v1"
