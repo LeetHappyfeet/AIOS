@@ -674,6 +674,37 @@ async def queued_job_counts_by_type(db: Database) -> dict[str, int]:
     return {str(row["job_type"]): int(row["cnt"]) for row in rows}
 
 
+def stage_admission_capacity(
+    *,
+    stage: Stage,
+    total_queued: int,
+    stage_queued: int,
+    batch_size: int,
+    remaining_cycle: int,
+    soft_cap: int,
+    critical_reserve: int,
+) -> int:
+    stage_capacity = max(0, stage.queue_limit - stage_queued)
+    if stage_capacity <= 0 or remaining_cycle <= 0:
+        return 0
+
+    hard_cap = soft_cap + critical_reserve
+    global_capacity = (
+        max(0, hard_cap - total_queued)
+        if stage.critical
+        else max(0, soft_cap - total_queued)
+    )
+    if global_capacity <= 0:
+        return 0
+
+    return min(
+        batch_size,
+        remaining_cycle,
+        stage_capacity,
+        global_capacity,
+    )
+
+
 # =================================================
 # Supervisor internals
 # =================================================
@@ -724,7 +755,6 @@ async def run_supervisor() -> None:
                 "supervisor_critical_queue_reserve",
                 128,
             )
-            hard_cap = max_queued_backlog + critical_reserve
 
             remaining = max_jobs_per_cycle
             scheduled = 0
@@ -737,25 +767,14 @@ async def run_supervisor() -> None:
                     break
 
                 stage_queued = queued_by_type.get(stage.job_type, 0)
-                stage_capacity = max(0, stage.queue_limit - stage_queued)
-                if stage_capacity <= 0:
-                    continue
-
-                # Normal/background work obeys the soft global cap. Critical
-                # work may use the reserved band, but never exceed the hard cap.
-                global_capacity = (
-                    max(0, hard_cap - qcnt)
-                    if stage.critical
-                    else max(0, max_queued_backlog - qcnt)
-                )
-                if global_capacity <= 0:
-                    continue
-
-                allowed = min(
-                    batch_size,
-                    remaining,
-                    stage_capacity,
-                    global_capacity,
+                allowed = stage_admission_capacity(
+                    stage=stage,
+                    total_queued=qcnt,
+                    stage_queued=stage_queued,
+                    batch_size=batch_size,
+                    remaining_cycle=remaining,
+                    soft_cap=max_queued_backlog,
+                    critical_reserve=critical_reserve,
                 )
                 if allowed <= 0:
                     continue
