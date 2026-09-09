@@ -390,6 +390,8 @@ async def resolve_claim_context(
             sf.predicate_confidence,
             sf.entity_confidence,
             sf.referent_confidence,
+            sf.subject_kind_guess AS semantic_subject_kind,
+            sf.object_kind_guess AS semantic_object_kind,
             sf.resolution_status AS frame_resolution_status,
             sf.discourse_mode,
             n.node_id, n.timeline_id, n.kind::text AS node_kind,
@@ -456,13 +458,21 @@ async def resolve_claim_context(
     subject_known_character = await _known_character(db, row["subject"])
     object_known_character = await _known_character(db, row["object"])
 
-    subject_kind = classify_entity_kind(
-        row["subject"], role="subject", predicate_family=family,
-        is_known_character=subject_known_character,
+    subject_kind = (
+        row["semantic_subject_kind"]
+        if row["semantic_subject_kind"] not in {None, "UNKNOWN"}
+        else classify_entity_kind(
+            row["subject"], role="subject", predicate_family=family,
+            is_known_character=subject_known_character,
+        )
     )
-    object_kind = classify_entity_kind(
-        row["object"], role="object", predicate_family=family,
-        is_known_character=object_known_character,
+    object_kind = (
+        row["semantic_object_kind"]
+        if row["semantic_object_kind"] not in {None, "UNKNOWN"}
+        else classify_entity_kind(
+            row["object"], role="object", predicate_family=family,
+            is_known_character=object_known_character,
+        )
     )
 
     origin_character_id = row["character_id"]
