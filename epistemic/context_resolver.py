@@ -680,7 +680,12 @@ async def _write_liminal_context(fuseki: FusekiClient, context: ClaimContext) ->
     clear_semantics = f"""
 PREFIX world: <urn:aios:world#>
 
-DELETE WHERE {{
+DELETE {{
+  GRAPH <{LIMINAL_GRAPH}> {{
+    <{claim_iri}> ?p ?o .
+  }}
+}}
+WHERE {{
   GRAPH <{LIMINAL_GRAPH}> {{
     <{claim_iri}> ?p ?o .
     FILTER (?p IN (
