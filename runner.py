@@ -640,9 +640,27 @@ async def _scheduler_metrics_loop(db: Database) -> None:
             )
             """
         )
+        resolver_bands = await db.fetch(
+            """
+            SELECT
+                COALESCE(payload->>'admission_band','legacy') AS admission_band,
+                status,
+                COUNT(*)::integer AS n
+            FROM aios.pipeline_job
+            WHERE job_type='resolve_claim_context'
+              AND status IN ('queued','running')
+            GROUP BY 1,2
+            ORDER BY 1,2
+            """
+        )
+        band_summary = ",".join(
+            f"{row['admission_band']}:{row['status']}={row['n']}"
+            for row in resolver_bands
+        ) or "empty"
         logger.info(
-            "Scheduler queues %s resolver_eligible_not_admitted=%s",
+            "Scheduler queues %s resolver_bands=%s resolver_eligible_not_admitted=%s",
             summary,
+            band_summary,
             int(resolver_row["n"]) if resolver_row else 0,
         )
 
