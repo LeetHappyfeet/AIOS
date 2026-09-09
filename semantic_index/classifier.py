@@ -360,27 +360,17 @@ async def classify_latest_clusters_once(
     db: Database,
     cfg: SemanticIndexConfig,
 ) -> int:
-    run = await db.fetchrow(
-        """
-        SELECT run_id
-        FROM aios.semantic_cluster_run
-        WHERE embedding_version=$1
-          AND status='done'
-        ORDER BY completed_at DESC
-        LIMIT 1
-        """,
-        cfg.embedding_version,
-    )
-    if not run:
-        return 0
-    run_id = run["run_id"]
-
+    # Resume any unclassified candidate from completed runs. Restricting this
+    # stage to a single latest run makes a classifier crash strand older valid
+    # clusters forever after the next clustering watermark advances.
     cluster_rows = await db.fetch(
         """
-        SELECT cluster_id, meta
+        SELECT c.run_id, c.cluster_id, c.meta
         FROM aios.semantic_cluster_candidate c
-        WHERE c.run_id=$1
+        JOIN aios.semantic_cluster_run r ON r.run_id=c.run_id
+        WHERE c.embedding_version=$1
           AND c.status='candidate'
+          AND r.status='done'
           AND NOT EXISTS (
               SELECT 1
               FROM aios.semantic_cluster_classification cc
@@ -388,9 +378,12 @@ async def classify_latest_clusters_once(
                 AND cc.cluster_id=c.cluster_id
                 AND cc.classifier_version=$2
           )
+        ORDER BY r.completed_at DESC NULLS LAST, c.created_at
+        LIMIT $3
         """,
-        run_id,
+        cfg.embedding_version,
         CLASSIFIER_VERSION,
+        cfg.batch_size,
     )
 
     written = 0
@@ -406,7 +399,7 @@ async def classify_latest_clusters_once(
             VALUES ($1,$2,$3,$4,$5,'candidate',$6::jsonb,$7::jsonb)
             ON CONFLICT DO NOTHING
             """,
-            run_id,
+            row["run_id"],
             row["cluster_id"],
             label,
             confidence,
@@ -419,6 +412,7 @@ async def classify_latest_clusters_once(
     boundaries = await db.fetch(
         """
         SELECT
+            b.run_id,
             b.cluster_a_id,
             b.cluster_b_id,
             b.edge_count,
@@ -431,7 +425,12 @@ async def classify_latest_clusters_once(
           ON a.cluster_id=b.cluster_a_id
         JOIN aios.semantic_cluster_candidate c
           ON c.cluster_id=b.cluster_b_id
-        WHERE b.run_id=$1
+        JOIN aios.semantic_cluster_run r
+          ON r.run_id=b.run_id
+        WHERE r.embedding_version=$1
+          AND r.status='done'
+          AND a.status='candidate'
+          AND c.status='candidate'
           AND NOT EXISTS (
               SELECT 1
               FROM aios.semantic_boundary_classification bc
@@ -440,9 +439,12 @@ async def classify_latest_clusters_once(
                 AND bc.cluster_b_id=b.cluster_b_id
                 AND bc.classifier_version=$2
           )
+        ORDER BY r.completed_at DESC NULLS LAST, b.created_at
+        LIMIT $3
         """,
-        run_id,
+        cfg.embedding_version,
         CLASSIFIER_VERSION,
+        cfg.batch_size,
     )
 
     for row in boundaries:
@@ -534,7 +536,7 @@ async def classify_latest_clusters_once(
             VALUES ($1,$2,$3,$4,$5,$6,'candidate',$7::jsonb,$8::jsonb)
             ON CONFLICT DO NOTHING
             """,
-            run_id,
+            row["run_id"],
             row["cluster_a_id"],
             row["cluster_b_id"],
             label,
