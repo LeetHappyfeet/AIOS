@@ -301,7 +301,11 @@ async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
 
     if kind in {"node_id", "section_id", "claim_id", "character_id", "world_id"}:
         value = payload.get(kind)
-        return f"{kind}:{value}" if value else f"job:{job['job_id']}"
+        if not value:
+            return f"job:{job['job_id']}"
+        if kind == "claim_id":
+            return f"claim:{value}"
+        return f"{kind}:{value}"
 
     if kind == "claim_scope" and payload.get("claim_id"):
         claim_id = payload["claim_id"]
