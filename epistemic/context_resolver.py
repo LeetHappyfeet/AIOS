@@ -484,9 +484,17 @@ async def resolve_claim_context(
         speaker_type=speaker_type,
         origin_character_id=origin_character_id,
     )
-    epistemic_scope = "character" if viewpoint_id == origin_character_id and origin_character_id else (
-        "speaker" if viewpoint_id else "source"
-    )
+    discourse_mode = row["discourse_mode"] or "narrated_observation"
+    if (
+        discourse_mode in {"character_mental_state", "character_speech"}
+        and viewpoint_id == origin_character_id
+        and origin_character_id
+    ):
+        epistemic_scope = "character"
+    elif discourse_mode == "narrated_observation" and row["node_kind"] == "chat_message":
+        epistemic_scope = "narrative"
+    else:
+        epistemic_scope = "speaker" if viewpoint_id else "source"
 
     source_kind = row["explicit_source_kind"] or row["source_type"] or row["ingest_source"]
     acquisition_mode = infer_acquisition_mode(
