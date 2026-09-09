@@ -31,15 +31,13 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
             structured = await analyze_neighbors_once(db, cfg)
             neighbor_classified = await classify_neighbor_relations_once(db, cfg)
 
-            # Do not cluster a partially interpreted neighbor graph. Drain
-            # pairwise relation work first so contradiction edges cannot act
-            # as ordinary semantic glue in an early run.
-            if neighbor_classified == 0:
-                clustered = await cluster_neighbors_once(db, cfg)
-                classified = await classify_latest_clusters_once(db, cfg)
-            else:
-                clustered = 0
-                classified = 0
+            # Clustering is watermark-driven and excludes classified
+            # CONTRADICTS relations from semantic glue. Do not wait for the
+            # global neighbor-classification queue to drain: on a live system
+            # that queue may never reach zero, which would starve clustering
+            # and reconciliation indefinitely.
+            clustered = await cluster_neighbors_once(db, cfg)
+            classified = await classify_latest_clusters_once(db, cfg)
 
             reconciled = await reconcile_semantic_structure_once(
                 db,
