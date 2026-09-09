@@ -24,6 +24,7 @@ from aios_app.pipeline.job_registry import ResourceClass, SchedulingLane, job_sp
 
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
 from aios_app.pipeline.worker import run_claim_extraction_for_section
+from aios_app.epistemic.semantic_frames import decompose_claim_frames
 from aios_app.char.discover_characters_worker import run_worker as run_discover_character
 
 from aios_app.rdf.fuseki import FusekiClient
@@ -74,6 +75,18 @@ async def handle_extract_claims(db: Database, job: Dict[str, Any]) -> None:
 # -------------------------------------------------
 # Epistemic handlers
 # -------------------------------------------------
+
+async def handle_decompose_claim_frames(db: Database, job: Dict[str, Any]) -> None:
+    claim_id = UUID(job["payload"]["claim_id"])
+    exists = await db.fetchrow(
+        "SELECT 1 FROM aios.claim_candidate WHERE claim_id=$1",
+        claim_id,
+    )
+    if not exists:
+        logger.warning("Skipping stale decompose_claim_frames job for missing claim %s", claim_id)
+        return
+    await decompose_claim_frames(db, claim_id=claim_id)
+
 
 async def handle_normalize_proposition(db: Database, job: Dict[str, Any]) -> None:
     claim_id = UUID(job["payload"]["claim_id"])
@@ -220,6 +233,7 @@ JOB_HANDLERS.update(
         "extract_claims": handle_extract_claims,
         "rdf_liminal_promote": handle_rdf_liminal_promote,
         "rdf_liminal_classify": handle_rdf_liminal_classify,
+        "decompose_claim_frames": handle_decompose_claim_frames,
         "resolve_claim_context": handle_resolve_claim_context,
         "normalize_proposition": handle_normalize_proposition,
         "rdf_epistemic_project": handle_rdf_epistemic_project,
