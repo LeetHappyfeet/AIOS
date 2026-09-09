@@ -155,6 +155,65 @@ async def mark_failed(
 
 
 
+async def rebalance_queued_priorities(db: Database) -> int:
+    """
+    Apply the current pipeline priority policy to jobs already in the queue.
+
+    Eligibility is authoritative, so changing priority never changes what work
+    a job represents; it only changes runner admission order.
+    """
+    row = await db.execute_returning_row(
+        """
+        WITH changed AS (
+            UPDATE aios.pipeline_job
+            SET priority = CASE job_type
+                WHEN 'discover_characters' THEN 10
+                WHEN 'project_world_topology' THEN 20
+                WHEN 'dag_to_document_section' THEN 20
+                WHEN 'extract_claims' THEN 25
+                WHEN 'rdf_liminal_promote' THEN 25
+                WHEN 'rdf_liminal_classify' THEN 28
+                WHEN 'resolve_claim_context' THEN 30
+                WHEN 'project_character_knowledge' THEN 30
+                WHEN 'normalize_proposition' THEN 35
+                WHEN 'derive_character_acquisition_topology' THEN 40
+                WHEN 'derive_world_assertion_topology' THEN 45
+                WHEN 'resolve_generated_facts' THEN 60
+                WHEN 'rdf_epistemic_project' THEN 75
+                WHEN 'derive_claim_topology' THEN 80
+                WHEN 'assign_narratives' THEN 90
+                ELSE priority
+            END,
+            updated_at = CASE
+                WHEN priority <> CASE job_type
+                    WHEN 'discover_characters' THEN 10
+                    WHEN 'project_world_topology' THEN 20
+                    WHEN 'dag_to_document_section' THEN 20
+                    WHEN 'extract_claims' THEN 25
+                    WHEN 'rdf_liminal_promote' THEN 25
+                    WHEN 'rdf_liminal_classify' THEN 28
+                    WHEN 'resolve_claim_context' THEN 30
+                    WHEN 'project_character_knowledge' THEN 30
+                    WHEN 'normalize_proposition' THEN 35
+                    WHEN 'derive_character_acquisition_topology' THEN 40
+                    WHEN 'derive_world_assertion_topology' THEN 45
+                    WHEN 'resolve_generated_facts' THEN 60
+                    WHEN 'rdf_epistemic_project' THEN 75
+                    WHEN 'derive_claim_topology' THEN 80
+                    WHEN 'assign_narratives' THEN 90
+                    ELSE priority
+                END THEN now()
+                ELSE updated_at
+            END
+            WHERE status='queued'
+            RETURNING 1
+        )
+        SELECT COUNT(*)::integer AS cnt FROM changed
+        """
+    )
+    return int(row["cnt"]) if row else 0
+
+
 async def recover_stale_running_jobs(
     db: Database,
     *,
