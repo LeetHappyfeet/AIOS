@@ -92,7 +92,10 @@ def _span_text(tokens: Iterable) -> Optional[str]:
 def _phrase(token) -> Optional[str]:
     if token is None:
         return None
-    tokens = [t for t in token.subtree if t.dep_ not in CLAUSE_DEPS or t is token]
+    tokens = [
+        t for t in token.subtree
+        if t.dep_ not in CLAUSE_DEPS or t.i == token.i
+    ]
     return _span_text(tokens)
 
 
@@ -100,12 +103,20 @@ def _find_subject(root):
     subjects = [c for c in root.children if c.dep_ in SUBJECT_DEPS]
     if subjects:
         return subjects[0]
+
     if root.dep_ in {"conj", "xcomp", "ccomp", "advcl"}:
+        # spaCy Token wrappers must be compared by token index, not Python
+        # object identity. Using `head is not head.head` can loop forever at
+        # the dependency root because two wrappers may represent the same token.
         head = root.head
-        while head is not None and head is not head.head:
+        seen: set[int] = set()
+        while head is not None and head.i not in seen:
+            seen.add(head.i)
             inherited = [c for c in head.children if c.dep_ in SUBJECT_DEPS]
             if inherited:
                 return inherited[0]
+            if head.i == head.head.i:
+                break
             head = head.head
     return None
 
@@ -220,7 +231,7 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
         object_frame_index = root_to_index.get(child_clause.i) if child_clause is not None else None
 
         parent_index = None
-        if root.head is not root and root.head.i in root_to_index:
+        if root.head.i != root.i and root.head.i in root_to_index:
             parent_index = root_to_index[root.head.i]
 
         predicate, predicate_confidence, construction = _canonical_predicate(root, object_token)
