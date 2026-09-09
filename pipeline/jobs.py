@@ -8,6 +8,7 @@ from uuid import UUID
 from datetime import datetime
 
 from ..db import Database
+from .job_registry import job_spec
 
 
 # ---------------------------------------------------------------------
@@ -35,14 +36,16 @@ async def enqueue_job(
             payload,
             priority,
             run_after,
-            status
+            status,
+            resource_class
         )
         VALUES (
             $1,
             $2::jsonb,
             $3,
             COALESCE($4, now()),
-            'queued'
+            'queued',
+            $5
         )
         RETURNING job_id
         """,
@@ -50,6 +53,7 @@ async def enqueue_job(
         json.dumps(payload),
         priority,
         run_after,
+        job_spec(job_type).resource_class.value,
     )
 
     return row["job_id"]
@@ -59,16 +63,14 @@ async def enqueue_job(
 # Atomic fetch + claim
 # ---------------------------------------------------------------------
 
-async def fetch_next_job(db: Database) -> Optional[Dict[str, Any]]:
-    """
-    Atomically claim the next runnable job.
-
-    The previous implementation selected FOR UPDATE through one pooled
-    connection and then marked the job running through another connection.
-    The row lock was therefore released before the state transition, allowing
-    multiple runners to claim the same job. This single UPDATE statement keeps
-    selection, SKIP LOCKED, and the queued→running transition atomic.
-    """
+async def fetch_next_job(
+    db: Database,
+    *,
+    worker_id: str,
+    resource_class: str,
+    lease_seconds: int,
+) -> Optional[Dict[str, Any]]:
+    """Atomically lease the next runnable job for one execution class."""
 
     row = await db.execute_returning_row(
         """
@@ -77,6 +79,7 @@ async def fetch_next_job(db: Database) -> Optional[Dict[str, Any]]:
             FROM aios.pipeline_job
             WHERE status = 'queued'
               AND run_after <= now()
+              AND resource_class = $1
             ORDER BY priority ASC, created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -84,11 +87,19 @@ async def fetch_next_job(db: Database) -> Optional[Dict[str, Any]]:
         UPDATE aios.pipeline_job pj
         SET status = 'running',
             attempts = pj.attempts + 1,
+            worker_id = $2,
+            claimed_at = now(),
+            heartbeat_at = now(),
+            lease_expires_at = now() + make_interval(secs => $3),
             updated_at = now()
         FROM next_job nj
         WHERE pj.job_id = nj.job_id
-        RETURNING pj.job_id, pj.job_type, pj.payload
-        """
+        RETURNING pj.job_id, pj.job_type, pj.payload, pj.resource_class,
+                  pj.worker_id, pj.claimed_at, pj.lease_expires_at
+        """,
+        resource_class,
+        worker_id,
+        lease_seconds,
     )
 
     if not row:
@@ -99,6 +110,31 @@ async def fetch_next_job(db: Database) -> Optional[Dict[str, Any]]:
         job["payload"] = json.loads(job["payload"])
 
     return job
+
+
+async def heartbeat_job(
+    db: Database,
+    *,
+    job_id: UUID,
+    worker_id: str,
+    lease_seconds: int,
+) -> bool:
+    row = await db.execute_returning_row(
+        """
+        UPDATE aios.pipeline_job
+        SET heartbeat_at=now(),
+            lease_expires_at=now() + make_interval(secs => $3),
+            updated_at=now()
+        WHERE job_id=$1
+          AND status='running'
+          AND worker_id=$2
+        RETURNING job_id
+        """,
+        job_id,
+        worker_id,
+        lease_seconds,
+    )
+    return bool(row)
 
 
 # ---------------------------------------------------------------------
@@ -123,15 +159,20 @@ async def mark_running(db: Database, job_id: UUID) -> None:
     )
 
 
-async def mark_done(db: Database, job_id: UUID) -> None:
+async def mark_done(db: Database, job_id: UUID, *, worker_id: Optional[str] = None) -> None:
     await db.execute(
         """
         UPDATE aios.pipeline_job
         SET status = 'done',
+            worker_id=NULL,
+            heartbeat_at=NULL,
+            lease_expires_at=NULL,
             updated_at = now()
         WHERE job_id = $1
+          AND ($2::text IS NULL OR worker_id=$2)
         """,
         job_id,
+        worker_id,
     )
 
 
@@ -139,17 +180,24 @@ async def mark_failed(
     db: Database,
     job_id: UUID,
     error: str,
+    *,
+    worker_id: Optional[str] = None,
 ) -> None:
     await db.execute(
         """
         UPDATE aios.pipeline_job
         SET status = 'failed',
             last_error = $2,
+            worker_id=NULL,
+            heartbeat_at=NULL,
+            lease_expires_at=NULL,
             updated_at = now()
         WHERE job_id = $1
+          AND ($3::text IS NULL OR worker_id=$3)
         """,
         job_id,
         error[:2000],
+        worker_id,
     )
 
 
@@ -213,12 +261,10 @@ async def recover_stale_running_jobs(
     *,
     stale_after_seconds: int,
 ) -> int:
-    """
-    Requeue orphaned running jobs whose ownership has gone stale.
+    """Requeue jobs whose explicit worker lease has expired.
 
-    updated_at is the current lease surrogate until pipeline_job grows an
-    explicit heartbeat/lease column. The threshold should therefore remain
-    comfortably above normal job runtimes.
+    The legacy updated_at fallback is retained only for pre-migration running
+    rows that do not yet have lease metadata.
     """
     row = await db.execute_returning_row(
         """
@@ -226,15 +272,25 @@ async def recover_stale_running_jobs(
             UPDATE aios.pipeline_job
             SET status='queued',
                 run_after=now(),
+                worker_id=NULL,
+                claimed_at=NULL,
+                heartbeat_at=NULL,
+                lease_expires_at=NULL,
                 updated_at=now(),
                 last_error=CASE
                     WHEN COALESCE(last_error,'') = '' THEN
-                        '[recovered stale running job]'
+                        '[recovered expired worker lease]'
                     ELSE
-                        last_error || ' [recovered stale running job]'
+                        last_error || ' [recovered expired worker lease]'
                 END
             WHERE status='running'
-              AND updated_at < now() - make_interval(secs => $1)
+              AND (
+                    lease_expires_at < now()
+                    OR (
+                        lease_expires_at IS NULL
+                        AND updated_at < now() - make_interval(secs => $1)
+                    )
+              )
             RETURNING job_id
         )
         SELECT COUNT(*)::integer AS cnt FROM recovered
@@ -259,6 +315,10 @@ async def retry_failed_job(
         UPDATE aios.pipeline_job
         SET status = 'queued',
             run_after = now() + make_interval(secs => $2),
+            worker_id=NULL,
+            claimed_at=NULL,
+            heartbeat_at=NULL,
+            lease_expires_at=NULL,
             updated_at = now()
         WHERE job_id = $1
         """,
