@@ -67,6 +67,18 @@ class Settings(BaseModel):
         os.getenv("AIOS_SUPERVISOR_MAX_JOBS_PER_CYCLE", "50")
     )
 
+    supervisor_max_queued_backlog: int = int(
+        os.getenv("AIOS_SUPERVISOR_MAX_QUEUED_BACKLOG", "500")
+    )
+
+    supervisor_critical_queue_reserve: int = int(
+        os.getenv("AIOS_SUPERVISOR_CRITICAL_QUEUE_RESERVE", "128")
+    )
+
+    pipeline_stale_running_seconds: int = int(
+        os.getenv("AIOS_PIPELINE_STALE_RUNNING_SECONDS", "1800")
+    )
+
     runner_poll_interval: float = float(
         os.getenv("AIOS_RUNNER_POLL_INTERVAL", "1.0")
     )
