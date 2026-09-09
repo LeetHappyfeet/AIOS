@@ -239,6 +239,41 @@ STAGES: List[Stage] = [
     # -------------------------------------------------
     # 3) claim_candidate -> normalized proposition/observation
     # -------------------------------------------------
+    # -------------------------------------------------
+    # 2b) claim_candidate -> contextual semantic frames
+    # -------------------------------------------------
+    Stage(
+        name="decompose_claim_frames",
+        job_type="decompose_claim_frames",
+        eligibility_sql="""
+        SELECT cc.claim_id
+        FROM aios.claim_candidate cc
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        WHERE ie.superseded_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.claim_semantic_frame_projection sfp
+              WHERE sfp.claim_id=cc.claim_id
+                AND sfp.decomposer_version='semantic-frame-v1'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.pipeline_job pj
+              WHERE pj.job_type='decompose_claim_frames'
+                AND pj.status IN ('queued','running')
+                AND pj.payload->>'claim_id'=cc.claim_id::text
+          )
+        ORDER BY cc.created_at
+        LIMIT $1
+        """,
+        payload_builder=claim_id_payload,
+        priority=27,
+        queue_limit=128,
+        critical=True,
+    ),
+
     Stage(
         name="normalize_proposition",
         job_type="normalize_proposition",
@@ -694,6 +729,12 @@ STAGES: List[Stage] = [
                   AND cls.rdf_dataset='world'
                   AND cls.rdf_graph='urn:aios:world:liminal'
                   AND cls.rdf_predicate='world:contentKind'
+            )
+              AND EXISTS (
+                SELECT 1
+                FROM aios.claim_semantic_frame_projection sfp
+                WHERE sfp.claim_id=cc.claim_id
+                  AND sfp.decomposer_version='semantic-frame-v1'
             )
               AND NOT EXISTS (
                 SELECT 1
