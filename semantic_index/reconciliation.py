@@ -19,6 +19,26 @@ from .neighbor_classifier import NEIGHBOR_CLASSIFIER_VERSION
 
 logger = logging.getLogger("aios.semantic_reconciliation")
 
+
+def _json_object(value: Any) -> dict[str, Any]:
+    """Normalize JSON/JSONB values returned by asyncpg into a Python dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if decoded is None:
+            return {}
+        if not isinstance(decoded, dict):
+            raise ValueError("expected JSON object metadata")
+        return decoded
+    try:
+        return dict(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected object-like metadata") from exc
+
+
 RECONCILER_VERSION = "semantic-reconciliation-v1"
 
 PAIR_EDGE_TYPES = {
@@ -285,7 +305,7 @@ async def reconcile_neighbor_relations_once(
                     "reconciler_version": RECONCILER_VERSION,
                     "classifier_version": NEIGHBOR_CLASSIFIER_VERSION,
                     "relation": row["relation"],
-                    "features": dict(row["features"] or {}),
+                    "features": _json_object(row["features"]),
                 },
             )
             await _record_receipt(
@@ -786,7 +806,7 @@ async def reconcile_boundaries_once(
                     "reconciler_version": RECONCILER_VERSION,
                     "classification": row["classification"],
                     "classifier_version": CLASSIFIER_VERSION,
-                    "feature_scores": dict(row["feature_scores"] or {}),
+                    "feature_scores": _json_object(row["feature_scores"]),
                 },
             )
 
@@ -822,7 +842,7 @@ async def reconcile_boundaries_once(
                     cluster_b_id=row["cluster_b_id"],
                     classification=row["classification"],
                     confidence=float(row["confidence"]),
-                    evidence=dict(row["evidence"] or {}),
+                    evidence=_json_object(row["evidence"]),
                 )
 
             affected_scopes.add(scope["scope_key"])
