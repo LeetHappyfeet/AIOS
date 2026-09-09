@@ -181,7 +181,12 @@ async def rebalance_queued_priorities(db: Database) -> int:
                     WHEN 'derive_world_assertion_topology' THEN 45
                     WHEN 'resolve_generated_facts' THEN 60
                     WHEN 'rdf_epistemic_project' THEN 75
-                    WHEN 'derive_claim_topology' THEN 80
+                    WHEN 'derive_claim_topology' THEN
+                        CASE
+                            WHEN payload->>'semantic_backfill'='proposition_leaves_20260909'
+                            THEN 18
+                            ELSE 80
+                        END
                     WHEN 'assign_narratives' THEN 90
                     ELSE priority
                 END AS desired_priority
