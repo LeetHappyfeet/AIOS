@@ -523,6 +523,25 @@ async def _resource_worker(
         )
 
 
+async def _scheduler_metrics_loop(db: Database) -> None:
+    while True:
+        await asyncio.sleep(30)
+        rows = await db.fetch(
+            """
+            SELECT resource_class, status, COUNT(*)::integer AS n
+            FROM aios.pipeline_job
+            WHERE status IN ('queued','running')
+            GROUP BY resource_class, status
+            ORDER BY resource_class, status
+            """
+        )
+        summary = ",".join(
+            f"{row['resource_class']}:{row['status']}={row['n']}"
+            for row in rows
+        ) or "empty"
+        logger.info("Scheduler queues %s", summary)
+
+
 async def _lease_recovery_loop(db: Database) -> None:
     interval = max(15, min(settings.pipeline_lease_seconds // 2, 60))
     while True:
@@ -570,7 +589,8 @@ async def run_runner(poll_interval: float = 1.0) -> None:
 
     rdf_gate = asyncio.Semaphore(max(1, settings.runner_rdf_workers))
     tasks: list[asyncio.Task] = [
-        asyncio.create_task(_lease_recovery_loop(db), name="lease-recovery")
+        asyncio.create_task(_lease_recovery_loop(db), name="lease-recovery"),
+        asyncio.create_task(_scheduler_metrics_loop(db), name="scheduler-metrics"),
     ]
     for resource_class, count in limits.items():
         for worker_index in range(count):
