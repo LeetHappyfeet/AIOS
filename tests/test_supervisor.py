@@ -57,3 +57,11 @@ def test_character_acquisition_topology_has_reserved_capacity():
     stage = _stage("derive_character_acquisition_topology")
     assert stage.critical is True
     assert stage.queue_limit <= 64
+
+
+def test_semantic_backfill_outranks_live_topology_enrichment():
+    backfill = _stage("backfill_semantic_proposition_leaves")
+    normal = _stage("derive_claim_topology")
+    assert backfill.priority < normal.priority
+    assert backfill.critical is True
+    assert backfill.queue_limit > normal.queue_limit
