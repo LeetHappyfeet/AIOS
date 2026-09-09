@@ -292,7 +292,7 @@ STAGES: List[Stage] = [
             SELECT 1
             FROM aios.claim_context_resolution ccr
             WHERE ccr.claim_id=cc.claim_id
-              AND ccr.resolver_version='context-resolver-v2'
+              AND ccr.resolver_version='context-resolver-v3'
         )
           AND EXISTS (
             SELECT 1
@@ -761,7 +761,7 @@ STAGES: List[Stage] = [
                 SELECT 1
                 FROM aios.claim_context_resolution ccr
                 WHERE ccr.claim_id=cc.claim_id
-                  AND ccr.resolver_version='context-resolver-v2'
+                  AND ccr.resolver_version='context-resolver-v3'
             )
               AND NOT EXISTS (
                 SELECT 1
