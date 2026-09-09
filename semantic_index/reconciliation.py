@@ -232,6 +232,21 @@ async def reconcile_neighbor_relations_once(
           AND r.status='candidate'
           AND r.confidence >= $3
           AND r.relation = ANY($4::text[])
+          AND EXISTS (
+              SELECT 1
+              FROM aios.semantic_topology_node a
+              JOIN aios.semantic_topology_node b
+                ON b.scope_key=a.scope_key
+               AND b.node_type='PROPOSITION'
+               AND b.proposition_id=r.neighbor_proposition_id
+               AND (
+                   a.scope_kind <> 'character'
+                   OR a.character_instance_id=b.character_instance_id
+               )
+              WHERE a.node_type='PROPOSITION'
+                AND a.proposition_id=r.proposition_id
+                AND a.topology_node_id<>b.topology_node_id
+          )
         ORDER BY r.confidence DESC, r.created_at
         LIMIT $5
         """,
