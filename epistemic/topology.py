@@ -310,7 +310,7 @@ async def _find_world_topic_anchor(
         WHERE scope_kind='world'
           AND world_id=$1
           AND proposition_id=$2
-          AND node_type='TOPIC'
+          AND node_type='PROPOSITION'
         ORDER BY
             CASE
                 WHEN scope_key=$3 THEN 0
@@ -344,10 +344,11 @@ async def _find_source_topic_anchor(
           AND proposition_id=$2
         ORDER BY
             CASE node_type
-                WHEN 'TOPIC' THEN 0
-                WHEN 'EVENT' THEN 1
-                WHEN 'SEMANTIC_PIVOT' THEN 2
-                ELSE 3
+                WHEN 'PROPOSITION' THEN 0
+                WHEN 'TOPIC' THEN 1
+                WHEN 'EVENT' THEN 2
+                WHEN 'SEMANTIC_PIVOT' THEN 3
+                ELSE 4
             END,
             significance DESC,
             created_at
@@ -756,9 +757,10 @@ async def derive_claim_topology(
 
     topic = await _upsert_node(
         db, decision=decision, node_type="TOPIC", node_key=str(data["topic_key"]),
-        label=data.get("canonical_text"), timeline_id=data.get("timeline_id"),
-        dag_node_id=data.get("dag_node_id"), proposition_id=data.get("proposition_id"),
-        claim_id=claim_id, assertion_id=None, significance=0.8,
+        label=str(data["topic_key"]), timeline_id=data.get("timeline_id"),
+        dag_node_id=None, proposition_id=None,
+        claim_id=None, assertion_id=None, significance=0.8,
+        meta={"semantic_role": "topic_group"},
     )
     await _upsert_edge(
         db, decision=decision, parent=anchor, child=topic,
@@ -767,6 +769,20 @@ async def derive_claim_topology(
             else "about_topic"
         ),
         significance=decision.significance, claim_id=claim_id,
+    )
+    proposition = await _upsert_node(
+        db, decision=decision, node_type="PROPOSITION",
+        node_key=str(data["proposition_id"]),
+        label=data.get("canonical_text"), timeline_id=data.get("timeline_id"),
+        dag_node_id=data.get("dag_node_id"),
+        proposition_id=data.get("proposition_id"),
+        claim_id=claim_id, assertion_id=None, significance=0.82,
+        meta={"semantic_role": "proposition_leaf", "topic_key": str(data["topic_key"])},
+    )
+    await _upsert_edge(
+        db, decision=decision, parent=topic, child=proposition,
+        edge_type="topic_contains_proposition",
+        significance=0.82, claim_id=claim_id,
     )
 
     for role, value, kind, is_pivot in (
@@ -869,9 +885,19 @@ async def derive_world_assertion_topology(
     )
     topic = await _upsert_node(
         db, decision=decision, node_type="TOPIC", node_key=str(data["topic_key"]),
+        label=str(data["topic_key"]), timeline_id=None,
+        dag_node_id=None, proposition_id=None,
+        claim_id=None, assertion_id=None, significance=0.85,
+        meta={"semantic_role": "topic_group"},
+    )
+    proposition = await _upsert_node(
+        db, decision=decision, node_type="PROPOSITION",
+        node_key=str(data["proposition_id"]),
         label=data["canonical_text"], timeline_id=None,
-        dag_node_id=data["generated_at_node_id"], proposition_id=data["proposition_id"],
-        claim_id=None, assertion_id=assertion_id, significance=0.85,
+        dag_node_id=data["generated_at_node_id"],
+        proposition_id=data["proposition_id"],
+        claim_id=None, assertion_id=assertion_id, significance=0.88,
+        meta={"semantic_role": "proposition_leaf", "topic_key": str(data["topic_key"])},
     )
     await _upsert_edge(
         db, decision=decision, parent=root, child=assertion,
@@ -880,6 +906,11 @@ async def derive_world_assertion_topology(
     await _upsert_edge(
         db, decision=decision, parent=assertion, child=topic,
         edge_type="asserts_topic", significance=0.95, assertion_id=assertion_id,
+    )
+    await _upsert_edge(
+        db, decision=decision, parent=topic, child=proposition,
+        edge_type="topic_contains_proposition", significance=0.88,
+        assertion_id=assertion_id,
     )
     touched_character_scopes = await _backfill_character_anchors_for_world_topic(
         db,
@@ -1010,13 +1041,29 @@ async def derive_character_acquisition_topology(
 
     topic = await _upsert_node(
         db, decision=decision, node_type="TOPIC", node_key=str(data["topic_key"]),
+        label=str(data["topic_key"]), timeline_id=None,
+        dag_node_id=None, proposition_id=None,
+        claim_id=None, assertion_id=None, significance=0.85,
+        meta={"semantic_role": "topic_group"},
+    )
+    proposition = await _upsert_node(
+        db, decision=decision, node_type="PROPOSITION",
+        node_key=str(data["proposition_id"]),
         label=data["canonical_text"], timeline_id=None,
-        dag_node_id=data.get("dag_node_id"), proposition_id=data["proposition_id"],
-        claim_id=data.get("claim_id"), assertion_id=None, significance=0.85,
+        dag_node_id=data.get("dag_node_id"),
+        proposition_id=data["proposition_id"],
+        claim_id=data.get("claim_id"), assertion_id=None, significance=0.88,
+        acquisition_id=acquisition_id,
+        meta={"semantic_role": "proposition_leaf", "topic_key": str(data["topic_key"])},
     )
     await _upsert_edge(
         db, decision=decision, parent=acquisition, child=topic,
         edge_type="epistemic_transition", significance=0.95,
+        claim_id=data.get("claim_id"),
+    )
+    await _upsert_edge(
+        db, decision=decision, parent=topic, child=proposition,
+        edge_type="topic_contains_proposition", significance=0.88,
         claim_id=data.get("claim_id"),
     )
 
