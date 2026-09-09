@@ -354,9 +354,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=semantic_backfill_claim_payload,
-        priority=18,
-        queue_limit=256,
-        critical=True,
+        priority=95,
+        queue_limit=32,
+        critical=False,
     ),
 
     # -------------------------------------------------
@@ -704,7 +704,7 @@ STAGES: List[Stage] = [
         """,
         payload_builder=claim_id_payload,
         priority=30,
-        queue_limit=96,
+        queue_limit=256,
         critical=True,
     ),
 ]
