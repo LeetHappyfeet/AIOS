@@ -66,9 +66,9 @@ async def enqueue_job(
 async def fetch_next_job(
     db: Database,
     *,
-    worker_id: str,
-    resource_class: str,
-    lease_seconds: int,
+    worker_id: str = "legacy-dispatcher",
+    resource_class: Optional[str] = None,
+    lease_seconds: int = 120,
 ) -> Optional[Dict[str, Any]]:
     """Atomically lease the next runnable job for one execution class."""
 
@@ -79,7 +79,7 @@ async def fetch_next_job(
             FROM aios.pipeline_job
             WHERE status = 'queued'
               AND run_after <= now()
-              AND resource_class = $1
+              AND ($1::text IS NULL OR resource_class = $1)
             ORDER BY priority ASC, created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
