@@ -917,14 +917,14 @@ async def derive_world_assertion_topology(
         world_id=data["world_id"],
         proposition_id=data["proposition_id"],
         target_scope_key=decision.scope_key,
-        target_node_id=topic,
+        target_node_id=proposition,
     )
     touched_source_scopes = await _backfill_source_anchors_for_world_topic(
         db,
         world_id=data["world_id"],
         proposition_id=data["proposition_id"],
         target_scope_key=decision.scope_key,
-        target_node_id=topic,
+        target_node_id=proposition,
     )
 
     dataset, graph = await _project_scope_rdf(db, fuseki, decision=decision)
