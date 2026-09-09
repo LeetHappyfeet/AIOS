@@ -611,7 +611,11 @@ async def _log_rdf_context(db: Database, context: ClaimContext) -> None:
             rdf_predicate, rdf_object, promoted_by, promotion_meta
         )
         VALUES ($1,$2,$3,$4,$5,$6,'context_resolver',$7::jsonb)
-        ON CONFLICT (claim_id, rdf_dataset, rdf_graph, rdf_predicate) DO NOTHING
+        ON CONFLICT (claim_id, rdf_dataset, rdf_graph, rdf_predicate) DO UPDATE
+        SET rdf_object=EXCLUDED.rdf_object,
+            promoted_by=EXCLUDED.promoted_by,
+            promotion_meta=EXCLUDED.promotion_meta,
+            promoted_at=now()
         """,
         context.claim_id,
         DATASET,
@@ -664,6 +668,28 @@ async def _write_liminal_context(fuseki: FusekiClient, context: ClaimContext) ->
         triples.append(f"<{claim_iri}> world:originTimeline <urn:aios:timeline:{context.timeline_id}> .")
     if context.acquisition_mode:
         triples.append(f"<{claim_iri}> world:acquisitionMode {_sparql_lit(context.acquisition_mode)} .")
+
+    clear_semantics = f"""
+PREFIX world: <urn:aios:world#>
+
+DELETE WHERE {{
+  GRAPH <{LIMINAL_GRAPH}> {{
+    <{claim_iri}> ?p ?o .
+    FILTER (?p IN (
+      world:claimKind,
+      world:predicateFamily,
+      world:epistemicScope,
+      world:contextResolverVersion,
+      world:subjectIsPivot,
+      world:objectIsPivot,
+      world:subjectKind,
+      world:objectKind,
+      world:acquisitionMode
+    ))
+  }}
+}}
+""".strip()
+    fuseki.update(DATASET, clear_semantics)
 
     sparql = f"""
 PREFIX world: <urn:aios:world#>
