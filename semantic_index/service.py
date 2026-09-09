@@ -38,6 +38,7 @@ def initialize_backend(cfg: SemanticIndexConfig, *, warmup: bool = True) -> None
     embedder = _get_embedder(cfg)
     for collection in (
         cfg.source_collection,
+        cfg.frame_collection,
         cfg.proposition_collection,
         cfg.epistemic_collection,
     ):
@@ -48,6 +49,7 @@ def initialize_backend(cfg: SemanticIndexConfig, *, warmup: bool = True) -> None
         and cfg.legacy_rag_collection
         and cfg.legacy_rag_collection not in {
             cfg.source_collection,
+            cfg.frame_collection,
             cfg.proposition_collection,
             cfg.epistemic_collection,
         }
@@ -69,10 +71,11 @@ def initialize_backend(cfg: SemanticIndexConfig, *, warmup: bool = True) -> None
         if len(vector) != embedder.dim:
             raise RuntimeError("semantic embedding dimension mismatch")
     logger.info(
-        "Semantic index initialized [model=%s dim=%d source=%s propositions=%s epistemic=%s]",
+        "Semantic index initialized [model=%s dim=%d source=%s frames=%s propositions=%s epistemic=%s]",
         cfg.embedding_model,
         embedder.dim,
         cfg.source_collection,
+        cfg.frame_collection,
         cfg.proposition_collection,
         cfg.epistemic_collection,
     )
@@ -185,6 +188,112 @@ async def index_source_sections_once(db: Database, cfg: SemanticIndexConfig) -> 
             collection=cfg.source_collection, vector_hash=vector_hash,
         )
     logger.info("Indexed %d source sections into Qdrant [%s]", len(rows), cfg.source_collection)
+    return len(rows)
+
+
+async def index_semantic_frames_once(db: Database, cfg: SemanticIndexConfig) -> int:
+    rows = await db.fetch(
+        """
+        SELECT
+            f.frame_id, f.claim_id, f.frame_index,
+            f.resolved_subject, f.subject_text, f.predicate_canonical,
+            f.predicate_surface, f.resolved_object, f.object_text,
+            f.subject_entity_key, f.object_entity_key,
+            f.subject_kind_guess, f.object_kind_guess,
+            f.polarity, f.modality, f.discourse_mode, f.frame_role,
+            f.resolution_status, f.frame_confidence, f.predicate_confidence,
+            f.entity_confidence, f.referent_confidence, f.canonical_text,
+            f.created_at, ccr.world_id, ccr.timeline_id, ccr.dag_node_id,
+            ccr.origin_character_id, ccr.epistemic_scope
+        FROM aios.claim_semantic_frame f
+        LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=f.claim_id
+        WHERE f.decomposer_version='semantic-frame-v1'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.semantic_vector_index_state s
+              WHERE s.object_type='semantic_frame'
+                AND s.object_key=f.frame_id::text
+                AND s.qdrant_collection=$2
+                AND s.embedding_model=$3
+                AND s.embedding_version=$4
+          )
+        ORDER BY f.created_at, f.frame_index
+        LIMIT $1
+        """,
+        cfg.batch_size,
+        cfg.frame_collection,
+        cfg.embedding_model,
+        cfg.embedding_version,
+    )
+    if not rows:
+        return 0
+
+    texts = [
+        " | ".join(filter(None, [
+            f"subject: {r['resolved_subject'] or r['subject_text']}" if (r["resolved_subject"] or r["subject_text"]) else None,
+            f"predicate: {r['predicate_canonical'] or r['predicate_surface']}" if (r["predicate_canonical"] or r["predicate_surface"]) else None,
+            f"object: {r['resolved_object'] or r['object_text']}" if (r["resolved_object"] or r["object_text"]) else None,
+            f"mode: {r['discourse_mode']}" if r["discourse_mode"] else None,
+            f"role: {r['frame_role']}" if r["frame_role"] else None,
+            f"text: {r['canonical_text']}" if r["canonical_text"] else None,
+        ]))
+        for r in rows
+    ]
+    hashes = [stable_text_hash(t) for t in texts]
+    vectors = _get_embedder(cfg).embed(texts)
+    points = []
+    for row, vector, vector_hash in zip(rows, vectors, hashes):
+        payload = {
+            "object_type": "semantic_frame",
+            "frame_id": str(row["frame_id"]),
+            "claim_id": str(row["claim_id"]),
+            "frame_index": int(row["frame_index"]),
+            "subject_entity_key": row["subject_entity_key"],
+            "object_entity_key": row["object_entity_key"],
+            "subject_kind": row["subject_kind_guess"],
+            "object_kind": row["object_kind_guess"],
+            "predicate": row["predicate_canonical"] or row["predicate_surface"],
+            "polarity": int(row["polarity"]),
+            "modality": row["modality"],
+            "discourse_mode": row["discourse_mode"],
+            "frame_role": row["frame_role"],
+            "resolution_status": row["resolution_status"],
+            "frame_confidence": float(row["frame_confidence"]),
+            "predicate_confidence": float(row["predicate_confidence"]),
+            "entity_confidence": float(row["entity_confidence"]),
+            "referent_confidence": float(row["referent_confidence"]),
+            "world_id": str(row["world_id"]) if row["world_id"] else None,
+            "timeline_id": str(row["timeline_id"]) if row["timeline_id"] else None,
+            "node_id": str(row["dag_node_id"]) if row["dag_node_id"] else None,
+            "origin_character_id": row["origin_character_id"],
+            "epistemic_scope": row["epistemic_scope"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "embedding_version": cfg.embedding_version,
+            "vector_hash": vector_hash,
+        }
+        points.append(
+            qm.PointStruct(
+                id=str(row["frame_id"]),
+                vector=vector,
+                payload={k: v for k, v in payload.items() if v is not None},
+            )
+        )
+
+    _get_store(cfg, cfg.frame_collection).upsert(points)
+    for row, vector_hash in zip(rows, hashes):
+        await _mark_indexed(
+            db,
+            cfg,
+            object_type="semantic_frame",
+            object_key=str(row["frame_id"]),
+            collection=cfg.frame_collection,
+            vector_hash=vector_hash,
+        )
+    logger.info(
+        "Indexed %d semantic frames into Qdrant [%s]",
+        len(rows),
+        cfg.frame_collection,
+    )
     return len(rows)
 
 
@@ -388,6 +497,7 @@ async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -
 
 async def index_once(db: Database, cfg: SemanticIndexConfig) -> int:
     source = await index_source_sections_once(db, cfg)
+    frames = await index_semantic_frames_once(db, cfg)
     propositions = await index_propositions_once(db, cfg)
     epistemic = await index_epistemic_objects_once(db, cfg)
-    return source + propositions + epistemic
+    return source + frames + propositions + epistemic
