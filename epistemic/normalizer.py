@@ -211,8 +211,8 @@ async def _normalize_frame_propositions(
                 semantic_role, confidence, meta
             )
             VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
-            ON CONFLICT (observation_id, proposition_id) DO UPDATE
-            SET frame_id=EXCLUDED.frame_id,
+            ON CONFLICT (observation_id, frame_id) DO UPDATE
+            SET proposition_id=EXCLUDED.proposition_id,
                 is_primary=EXCLUDED.is_primary,
                 semantic_role=EXCLUDED.semantic_role,
                 confidence=EXCLUDED.confidence,
