@@ -289,13 +289,6 @@ async def run_runner(poll_interval: float = 1.0) -> None:
         "pipeline_stale_running_seconds",
         1800,
     )
-    rebalanced = await rebalance_queued_priorities(db)
-    if rebalanced:
-        logger.info(
-            "Rebalanced priorities for %d queued pipeline jobs",
-            rebalanced,
-        )
-
     recovered = await recover_stale_running_jobs(
         db,
         stale_after_seconds=stale_after_seconds,
@@ -305,6 +298,13 @@ async def run_runner(poll_interval: float = 1.0) -> None:
             "Recovered %d stale running pipeline jobs older than %ds",
             recovered,
             stale_after_seconds,
+        )
+
+    rebalanced = await rebalance_queued_priorities(db)
+    if rebalanced:
+        logger.info(
+            "Rebalanced priorities for %d queued pipeline jobs",
+            rebalanced,
         )
 
     logger.info("Pipeline runner started")
