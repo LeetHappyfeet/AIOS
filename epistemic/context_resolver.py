@@ -378,7 +378,11 @@ async def resolve_claim_context(
             cc.claim_id,
             COALESCE(sf.resolved_subject, sf.subject_text, cc.subject) AS subject,
             COALESCE(sf.predicate_canonical, cc.predicate) AS predicate,
-            COALESCE(sf.resolved_object, sf.object_text, cc.object) AS object,
+            CASE
+                WHEN sf.frame_id IS NOT NULL
+                    THEN COALESCE(sf.resolved_object, sf.object_text, child_sf.canonical_text)
+                ELSE cc.object
+            END AS object,
             cc.raw_text,
             cc.confidence, cc.extraction_rule,
             sf.frame_id AS semantic_frame_id,
@@ -438,6 +442,7 @@ async def resolve_claim_context(
         LEFT JOIN aios.source_document sd ON sd.document_id=ds.document_id
         LEFT JOIN aios.claim_semantic_frame_projection sfp ON sfp.claim_id=cc.claim_id
         LEFT JOIN aios.claim_semantic_frame sf ON sf.frame_id=sfp.primary_frame_id
+        LEFT JOIN aios.claim_semantic_frame child_sf ON child_sf.frame_id=sf.object_frame_id
         WHERE cc.claim_id=$1
         """,
         claim_id,
