@@ -207,7 +207,7 @@ async def index_semantic_frames_once(db: Database, cfg: SemanticIndexConfig) -> 
             ccr.origin_character_id, ccr.epistemic_scope
         FROM aios.claim_semantic_frame f
         LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=f.claim_id
-        WHERE f.decomposer_version='semantic-frame-v1'
+        WHERE f.decomposer_version='semantic-frame-v2'
           AND NOT EXISTS (
               SELECT 1
               FROM aios.semantic_vector_index_state s
