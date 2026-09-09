@@ -20,7 +20,7 @@ from aios_app.pipeline.jobs import (
     recover_stale_running_jobs,
     rebalance_queued_priorities,
 )
-from aios_app.pipeline.job_registry import ResourceClass, job_spec
+from aios_app.pipeline.job_registry import ResourceClass, SchedulingLane, job_spec
 
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
 from aios_app.pipeline.worker import run_claim_extraction_for_section
@@ -493,6 +493,66 @@ async def _execute_claimed_job(
             pass
 
 
+def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
+    """Return preferred and fallback lanes for one semantic worker.
+
+    With four default workers this reserves two low-latency lanes for live
+    epistemic construction, one for structural work, and one for background
+    maintenance. Fallbacks keep the pool fully utilized when a lane is empty.
+    """
+    live = SchedulingLane.LIVE.value
+    structural = SchedulingLane.STRUCTURAL.value
+    background = SchedulingLane.BACKGROUND.value
+    default = SchedulingLane.DEFAULT.value
+
+    if worker_index in (0, 1):
+        return [live], [live, structural, default, background]
+    if worker_index == 2:
+        return [structural], [structural, live, default, background]
+    return [background], [background, structural, live, default]
+
+
+async def _claim_for_worker(
+    db: Database,
+    *,
+    worker_id: str,
+    resource_class: ResourceClass,
+    worker_index: int,
+    claim_gate: asyncio.Lock,
+) -> Optional[Dict[str, Any]]:
+    preferred: Optional[list[str]] = None
+    fallback: Optional[list[str]] = None
+    if resource_class == ResourceClass.SEMANTIC:
+        preferred, fallback = _semantic_lane_order(worker_index)
+
+    # Serialize only the short local claim operation. This lets the first
+    # worker's queued->running transition become visible before the next local
+    # worker selects work, preventing same-partition claim convoys.
+    async with claim_gate:
+        job = await fetch_next_job(
+            db,
+            worker_id=worker_id,
+            resource_class=resource_class.value,
+            lease_seconds=settings.pipeline_lease_seconds,
+            scheduling_lanes=preferred,
+            prefer_uncontended=True,
+        )
+        if (
+            not job
+            and fallback is not None
+            and fallback != preferred
+        ):
+            job = await fetch_next_job(
+                db,
+                worker_id=worker_id,
+                resource_class=resource_class.value,
+                lease_seconds=settings.pipeline_lease_seconds,
+                scheduling_lanes=fallback,
+                prefer_uncontended=True,
+            )
+        return job
+
+
 async def _resource_worker(
     db: Database,
     *,
@@ -500,17 +560,19 @@ async def _resource_worker(
     worker_index: int,
     poll_interval: float,
     rdf_gate: asyncio.Semaphore,
+    claim_gate: asyncio.Lock,
 ) -> None:
     worker_id = (
         f"{socket.gethostname()}:{os.getpid()}:"
         f"{resource_class.value}:{worker_index}"
     )
     while True:
-        job = await fetch_next_job(
+        job = await _claim_for_worker(
             db,
             worker_id=worker_id,
-            resource_class=resource_class.value,
-            lease_seconds=settings.pipeline_lease_seconds,
+            resource_class=resource_class,
+            worker_index=worker_index,
+            claim_gate=claim_gate,
         )
         if not job:
             await asyncio.sleep(poll_interval)
@@ -528,15 +590,15 @@ async def _scheduler_metrics_loop(db: Database) -> None:
         await asyncio.sleep(30)
         rows = await db.fetch(
             """
-            SELECT resource_class, status, COUNT(*)::integer AS n
+            SELECT resource_class, scheduling_lane, status, COUNT(*)::integer AS n
             FROM aios.pipeline_job
             WHERE status IN ('queued','running')
-            GROUP BY resource_class, status
-            ORDER BY resource_class, status
+            GROUP BY resource_class, scheduling_lane, status
+            ORDER BY resource_class, scheduling_lane, status
             """
         )
         summary = ",".join(
-            f"{row['resource_class']}:{row['status']}={row['n']}"
+            f"{row['resource_class']}/{row['scheduling_lane']}:{row['status']}={row['n']}"
             for row in rows
         ) or "empty"
         logger.info("Scheduler queues %s", summary)
@@ -588,6 +650,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
     )
 
     rdf_gate = asyncio.Semaphore(max(1, settings.runner_rdf_workers))
+    claim_gate = asyncio.Lock()
     tasks: list[asyncio.Task] = [
         asyncio.create_task(_lease_recovery_loop(db), name="lease-recovery"),
         asyncio.create_task(_scheduler_metrics_loop(db), name="scheduler-metrics"),
@@ -602,6 +665,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
                         worker_index=worker_index,
                         poll_interval=poll_interval,
                         rdf_gate=rdf_gate,
+                        claim_gate=claim_gate,
                     ),
                     name=f"{resource_class.value}-{worker_index}",
                 )
