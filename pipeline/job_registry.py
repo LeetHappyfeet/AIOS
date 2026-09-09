@@ -35,6 +35,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "discover_characters": JobSpec(ResourceClass.FAST_SQL, "character_id", True),
     "dag_to_document_section": JobSpec(ResourceClass.FAST_SQL, "node_id", True),
     "extract_claims": JobSpec(ResourceClass.NLP, "section_id", True, isolate_blocking=True),
+    "decompose_claim_frames": JobSpec(ResourceClass.NLP, "claim_id", True, isolate_blocking=True),
     "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_id", True, isolate_blocking=True, requires_rdf_slot=True),
     "normalize_proposition": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
     "project_character_knowledge": JobSpec(ResourceClass.SEMANTIC, "global", True),
@@ -60,6 +61,7 @@ def job_spec(job_type: str) -> JobSpec:
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
     if job_type in {
+        "decompose_claim_frames",
         "resolve_claim_context",
         "normalize_proposition",
         "project_character_knowledge",
