@@ -9,7 +9,7 @@ from uuid import UUID
 
 from aios_app.db import Database
 
-NORMALIZER_VERSION = "proposition-v1"
+NORMALIZER_VERSION = "proposition-v2"
 
 # Different objects for these predicates are usually competing values for one
 # semantic slot. Open-ended predicates are deliberately excluded.
@@ -161,8 +161,18 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
     row = await db.fetchrow(
         """
         SELECT
-            cc.claim_id, cc.subject, cc.predicate, cc.object, cc.raw_text,
+            cc.claim_id,
+            COALESCE(sf.resolved_subject, sf.subject_text, cc.subject) AS subject,
+            COALESCE(sf.predicate_canonical, cc.predicate) AS predicate,
+            COALESCE(sf.resolved_object, sf.object_text, cc.object) AS object,
+            cc.raw_text,
             cc.confidence, cc.extraction_rule, cc.extraction_ver, cc.created_at,
+            sf.frame_id AS semantic_frame_id,
+            sf.frame_confidence,
+            sf.predicate_confidence,
+            sf.entity_confidence,
+            sf.referent_confidence,
+            sf.discourse_mode,
             ds.document_id, n.node_id, n.timeline_id,
             n.speaker_id, n.speaker_role::text AS speaker_role, n.recipient_id,
             ccr.origin_character_id AS character_id,
@@ -190,6 +200,8 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         LEFT JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         LEFT JOIN aios.source_document sd ON sd.document_id=ds.document_id
         LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
+        LEFT JOIN aios.claim_semantic_frame_projection sfp ON sfp.claim_id=cc.claim_id
+        LEFT JOIN aios.claim_semantic_frame sf ON sf.frame_id=sfp.primary_frame_id
         WHERE cc.claim_id=$1
         """,
         claim_id,
@@ -211,6 +223,12 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         meta={
             "normalizer_version": NORMALIZER_VERSION,
             "extraction_version": row["extraction_ver"],
+            "semantic_frame_id": str(row["semantic_frame_id"]) if row["semantic_frame_id"] else None,
+            "frame_confidence": float(row["frame_confidence"] or 0.0),
+            "predicate_confidence": float(row["predicate_confidence"] or 0.0),
+            "entity_confidence": float(row["entity_confidence"] or 0.0),
+            "referent_confidence": float(row["referent_confidence"] or 0.0),
+            "discourse_mode": row["discourse_mode"],
         },
     )
 
@@ -288,7 +306,13 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             "predicate_family": row["predicate_family"],
             "subject_is_pivot": bool(row["subject_is_pivot"]),
             "object_is_pivot": bool(row["object_is_pivot"]),
-            "context_resolver_version": "context-resolver-v1",
+            "context_resolver_version": "context-resolver-v2",
+            "semantic_frame_id": str(row["semantic_frame_id"]) if row["semantic_frame_id"] else None,
+            "frame_confidence": float(row["frame_confidence"] or 0.0),
+            "predicate_confidence": float(row["predicate_confidence"] or 0.0),
+            "entity_confidence": float(row["entity_confidence"] or 0.0),
+            "referent_confidence": float(row["referent_confidence"] or 0.0),
+            "discourse_mode": row["discourse_mode"],
             "semantic_pivot_resolved": (
                 "character-pivot-v1" in (row["extraction_rule"] or "")
                 or bool(row["subject_is_pivot"])
@@ -352,7 +376,8 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             float(row["confidence"] or 0.0),
             row["node_id"],
             json.dumps({
-                "source": "context-resolver-v1",
+                "source": "context-resolver-v2",
+                "semantic_frame_id": str(row["semantic_frame_id"]) if row["semantic_frame_id"] else None,
                 "origin_character_id": row["character_id"],
                 "world_id": str(row["resolved_world_id"]) if row["resolved_world_id"] else None,
                 "claim_kind": row["claim_kind"],
