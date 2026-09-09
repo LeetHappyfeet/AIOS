@@ -605,7 +605,46 @@ async def _scheduler_metrics_loop(db: Database) -> None:
             f"{row['resource_class']}/{row['scheduling_lane']}:{row['status']}={row['n']}"
             for row in rows
         ) or "empty"
-        logger.info("Scheduler queues %s", summary)
+        resolver_row = await db.fetchrow(
+            """
+            SELECT COUNT(*)::integer AS n
+            FROM aios.claim_candidate cc
+            WHERE EXISTS (
+                SELECT 1
+                FROM aios.rdf_promotion_log base
+                WHERE base.claim_id=cc.claim_id
+                  AND base.rdf_dataset='world'
+                  AND base.rdf_graph='urn:aios:world:liminal'
+                  AND base.rdf_predicate='rdf:type'
+                  AND base.rdf_object='world:Claim'
+            )
+              AND EXISTS (
+                SELECT 1
+                FROM aios.rdf_promotion_log cls
+                WHERE cls.claim_id=cc.claim_id
+                  AND cls.rdf_dataset='world'
+                  AND cls.rdf_graph='urn:aios:world:liminal'
+                  AND cls.rdf_predicate='world:contentKind'
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM aios.claim_context_resolution ccr
+                WHERE ccr.claim_id=cc.claim_id
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM aios.pipeline_job pj
+                WHERE pj.job_type='resolve_claim_context'
+                  AND pj.status IN ('queued','running')
+                  AND pj.payload->>'claim_id'=cc.claim_id::text
+            )
+            """
+        )
+        logger.info(
+            "Scheduler queues %s resolver_eligible_not_admitted=%s",
+            summary,
+            int(resolver_row["n"]) if resolver_row else 0,
+        )
 
 
 async def _lease_recovery_loop(db: Database) -> None:
