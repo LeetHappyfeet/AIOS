@@ -305,7 +305,13 @@ def _norm(value: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().lower())
 
 
-def _guess_kind(value: Optional[str], named_entities: list[dict]) -> Optional[str]:
+def _guess_kind(
+    value: Optional[str],
+    named_entities: list[dict],
+    *,
+    predicate: Optional[str] = None,
+    object_text: Optional[str] = None,
+) -> Optional[str]:
     clean = _norm(value)
     if not clean:
         return None
@@ -315,6 +321,18 @@ def _guess_kind(value: Optional[str], named_entities: list[dict]) -> Optional[st
             if label == "PERSON":
                 return "PERSON"
             if label in {"GPE", "LOC", "FAC"}:
+                # NER is a prior, not identity authority. Proper names are
+                # sometimes mislabeled as places; semantic complements such as
+                # "an ICU nurse" or "an American citizen" are stronger PERSON
+                # evidence for definition/identity clauses.
+                human_roles = {
+                    "person", "man", "woman", "boy", "girl", "male", "female",
+                    "nurse", "doctor", "citizen", "soldier", "officer", "parent",
+                    "mother", "father", "brother", "sister", "teacher", "student",
+                }
+                object_words = set(re.findall(r"[a-z]+", _norm(object_text)))
+                if predicate == "be_definition_of" and object_words & human_roles:
+                    return "PERSON"
                 return "LOCATION"
             if label == "ORG":
                 return "ORGANIZATION"
@@ -500,7 +518,12 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
     inserted: dict[int, UUID] = {}
     for draft in drafts:
         named_entities = draft.meta.get("named_entities", [])
-        subject_kind = _guess_kind(draft.subject, named_entities)
+        subject_kind = _guess_kind(
+            draft.subject,
+            named_entities,
+            predicate=draft.predicate_canonical,
+            object_text=draft.object_text,
+        )
         object_kind = _guess_kind(draft.object_text, named_entities)
         result = await db.execute_returning_row(
             """
