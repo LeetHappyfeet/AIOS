@@ -8,12 +8,79 @@ from uuid import UUID
 from datetime import datetime
 
 from ..db import Database
-from .job_registry import job_spec
+from .job_registry import SchedulingLane, job_spec, scheduling_lane
 
 
 # ---------------------------------------------------------------------
 # Enqueue
 # ---------------------------------------------------------------------
+
+
+async def _partition_key_for_enqueue(
+    db: Database,
+    *,
+    job_type: str,
+    payload: Dict[str, Any],
+) -> Optional[str]:
+    if payload.get("claim_id"):
+        claim_id = str(payload["claim_id"])
+        if job_type in {"resolve_claim_context", "normalize_proposition"}:
+            return f"claim:{claim_id}"
+        if job_type in {"derive_claim_topology", "rdf_epistemic_project"}:
+            row = await db.fetchrow(
+                """
+                SELECT CASE
+                    WHEN epistemic_scope='character'
+                         AND origin_character_id IS NOT NULL
+                         AND character_instance_id IS NOT NULL
+                        THEN 'char:' || origin_character_id
+                    WHEN source_id IS NOT NULL
+                        THEN 'source:' || source_id
+                    WHEN world_id IS NOT NULL
+                        THEN 'world:' || world_id::text || ':observed'
+                    ELSE 'claim:' || claim_id::text
+                END AS scope_key
+                FROM aios.claim_context_resolution
+                WHERE claim_id=$1::uuid
+                """,
+                claim_id,
+            )
+            if row:
+                return str(row["scope_key"])
+            return f"claim:{claim_id}"
+
+    if payload.get("acquisition_id"):
+        acquisition_id = str(payload["acquisition_id"])
+        row = await db.fetchrow(
+            """
+            SELECT 'char:' || ci.character_id AS scope_key
+            FROM aios.knowledge_acquisition_event kae
+            JOIN aios.character_instance ci ON ci.instance_id=kae.instance_id
+            WHERE kae.acquisition_id=$1::uuid
+            """,
+            acquisition_id,
+        )
+        return str(row["scope_key"]) if row else f"acquisition:{acquisition_id}"
+
+    if payload.get("assertion_id"):
+        assertion_id = str(payload["assertion_id"])
+        row = await db.fetchrow(
+            """
+            SELECT 'world:' || world_id::text || ':asserted' AS scope_key
+            FROM aios.world_proposition_assertion
+            WHERE assertion_id=$1::uuid
+            """,
+            assertion_id,
+        )
+        return str(row["scope_key"]) if row else f"assertion:{assertion_id}"
+
+    for key in ("world_id", "character_id", "section_id", "node_id"):
+        if payload.get(key):
+            return f"{key}:{payload[key]}"
+
+    return None
+
+
 
 async def enqueue_job(
     db: Database,
@@ -29,6 +96,13 @@ async def enqueue_job(
     This is the ONLY blessed way to create jobs.
     Status will ALWAYS start as 'queued'.
     """
+    lane = scheduling_lane(job_type, payload).value
+    partition_key = await _partition_key_for_enqueue(
+        db,
+        job_type=job_type,
+        payload=payload,
+    )
+
     row = await db.execute_returning_row(
         """
         INSERT INTO aios.pipeline_job (
@@ -37,7 +111,9 @@ async def enqueue_job(
             priority,
             run_after,
             status,
-            resource_class
+            resource_class,
+            scheduling_lane,
+            partition_key
         )
         VALUES (
             $1,
@@ -45,7 +121,9 @@ async def enqueue_job(
             $3,
             COALESCE($4, now()),
             'queued',
-            $5
+            $5,
+            $6,
+            $7
         )
         RETURNING job_id
         """,
@@ -54,6 +132,8 @@ async def enqueue_job(
         priority,
         run_after,
         job_spec(job_type).resource_class.value,
+        lane,
+        partition_key,
     )
 
     return row["job_id"]
@@ -69,18 +149,42 @@ async def fetch_next_job(
     worker_id: str = "legacy-dispatcher",
     resource_class: Optional[str] = None,
     lease_seconds: int = 120,
+    scheduling_lanes: Optional[list[str]] = None,
+    prefer_uncontended: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    """Atomically lease the next runnable job for one execution class."""
+    """Atomically lease the next runnable job for one execution class.
+
+    Lane filtering protects live epistemic work from maintenance starvation.
+    Jobs whose partition is already running are ranked after uncontended jobs
+    so workers spread across independent semantic trees before convoying.
+    """
 
     row = await db.execute_returning_row(
         """
         WITH next_job AS (
-            SELECT job_id
-            FROM aios.pipeline_job
-            WHERE status = 'queued'
-              AND run_after <= now()
-              AND ($1::text IS NULL OR resource_class = $1)
-            ORDER BY priority ASC, created_at ASC
+            SELECT q.job_id
+            FROM aios.pipeline_job q
+            WHERE q.status = 'queued'
+              AND q.run_after <= now()
+              AND ($1::text IS NULL OR q.resource_class = $1)
+              AND (
+                    $4::text[] IS NULL
+                    OR q.scheduling_lane = ANY($4::text[])
+              )
+            ORDER BY
+                CASE
+                    WHEN $5::boolean
+                     AND q.partition_key IS NOT NULL
+                     AND EXISTS (
+                        SELECT 1
+                        FROM aios.pipeline_job active
+                        WHERE active.status='running'
+                          AND active.partition_key=q.partition_key
+                     )
+                    THEN 1 ELSE 0
+                END ASC,
+                q.priority ASC,
+                q.created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
@@ -95,11 +199,14 @@ async def fetch_next_job(
         FROM next_job nj
         WHERE pj.job_id = nj.job_id
         RETURNING pj.job_id, pj.job_type, pj.payload, pj.resource_class,
-                  pj.worker_id, pj.claimed_at, pj.lease_expires_at
+                  pj.scheduling_lane, pj.partition_key, pj.worker_id,
+                  pj.claimed_at, pj.lease_expires_at
         """,
         resource_class,
         worker_id,
         lease_seconds,
+        scheduling_lanes,
+        prefer_uncontended,
     )
 
     if not row:
@@ -232,7 +339,7 @@ async def rebalance_queued_priorities(db: Database) -> int:
                     WHEN 'derive_claim_topology' THEN
                         CASE
                             WHEN payload->>'semantic_backfill'='proposition_leaves_20260909'
-                            THEN 18
+                            THEN 95
                             ELSE 80
                         END
                     WHEN 'assign_narratives' THEN 90
