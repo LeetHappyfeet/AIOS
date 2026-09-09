@@ -164,28 +164,10 @@ async def rebalance_queued_priorities(db: Database) -> int:
     """
     row = await db.execute_returning_row(
         """
-        WITH changed AS (
-            UPDATE aios.pipeline_job
-            SET priority = CASE job_type
-                WHEN 'discover_characters' THEN 10
-                WHEN 'project_world_topology' THEN 20
-                WHEN 'dag_to_document_section' THEN 20
-                WHEN 'extract_claims' THEN 25
-                WHEN 'rdf_liminal_promote' THEN 25
-                WHEN 'rdf_liminal_classify' THEN 28
-                WHEN 'resolve_claim_context' THEN 30
-                WHEN 'project_character_knowledge' THEN 30
-                WHEN 'normalize_proposition' THEN 35
-                WHEN 'derive_character_acquisition_topology' THEN 40
-                WHEN 'derive_world_assertion_topology' THEN 45
-                WHEN 'resolve_generated_facts' THEN 60
-                WHEN 'rdf_epistemic_project' THEN 75
-                WHEN 'derive_claim_topology' THEN 80
-                WHEN 'assign_narratives' THEN 90
-                ELSE priority
-            END,
-            updated_at = CASE
-                WHEN priority <> CASE job_type
+        WITH desired AS (
+            SELECT
+                job_id,
+                CASE job_type
                     WHEN 'discover_characters' THEN 10
                     WHEN 'project_world_topology' THEN 20
                     WHEN 'dag_to_document_section' THEN 20
@@ -202,11 +184,18 @@ async def rebalance_queued_priorities(db: Database) -> int:
                     WHEN 'derive_claim_topology' THEN 80
                     WHEN 'assign_narratives' THEN 90
                     ELSE priority
-                END THEN now()
-                ELSE updated_at
-            END
+                END AS desired_priority
+            FROM aios.pipeline_job
             WHERE status='queued'
-            RETURNING 1
+        ),
+        changed AS (
+            UPDATE aios.pipeline_job pj
+            SET priority=d.desired_priority,
+                updated_at=now()
+            FROM desired d
+            WHERE pj.job_id=d.job_id
+              AND pj.priority IS DISTINCT FROM d.desired_priority
+            RETURNING pj.job_id
         )
         SELECT COUNT(*)::integer AS cnt FROM changed
         """
