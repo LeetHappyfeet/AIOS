@@ -158,12 +158,16 @@ def _canonical_predicate(root, object_token) -> tuple[str, float, Optional[str]]
     return lemma, 0.82 if lemma else 0.4, None
 
 
-def _discourse_mode(doc, root) -> str:
+def _discourse_mode(doc, root, canonical_predicate: Optional[str]) -> str:
     text = root.sent.text.strip()
+    predicate = (canonical_predicate or root.lemma_ or "").lower()
     if '"' in text or "“" in text or "”" in text:
-        if root.lemma_.lower() in {"say", "tell", "ask", "reply"}:
+        if predicate in {"say", "tell", "ask", "reply", "report", "claim"}:
             return "character_speech"
-    if root.lemma_.lower() in {"think", "believe", "know", "remember", "fear", "want"}:
+    if predicate in {
+        "think", "believe", "know", "remember", "fear", "want",
+        "suspect", "assume", "intend", "plan",
+    }:
         return "character_mental_state"
     return "narrated_observation"
 
@@ -244,7 +248,7 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
                 tense=str(root.morph.get("Tense")[0]) if root.morph.get("Tense") else None,
                 aspect=str(root.morph.get("Aspect")[0]) if root.morph.get("Aspect") else None,
                 frame_role="main" if root is doc[:].root else root.dep_.lower(),
-                discourse_mode=_discourse_mode(doc, root),
+                discourse_mode=_discourse_mode(doc, root, predicate),
                 extraction_confidence=0.92 if subject and predicate else 0.72 if predicate else 0.45,
                 predicate_confidence=predicate_confidence,
                 canonical_text=canonical,
@@ -497,8 +501,8 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
         )
 
     # Prefer the root/main frame, but require semantic content. This keeps the
-    # legacy one-proposition path useful while all subordinate frames remain
-    # durable for Qdrant and later proposition fan-out.
+    # legacy primary pointer useful while all subordinate frames remain
+    # durable for proposition fan-out and Qdrant.
     primary = await db.fetchrow(
         """
         SELECT frame_id
