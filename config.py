@@ -84,4 +84,26 @@ class Settings(BaseModel):
     )
 
 
+
+    pipeline_lease_seconds: int = int(
+        os.getenv("AIOS_PIPELINE_LEASE_SECONDS", "120")
+    )
+
+    pipeline_heartbeat_seconds: int = int(
+        os.getenv("AIOS_PIPELINE_HEARTBEAT_SECONDS", "30")
+    )
+
+    runner_fast_sql_workers: int = int(os.getenv("AIOS_RUNNER_FAST_SQL_WORKERS", "4"))
+    runner_nlp_workers: int = int(os.getenv("AIOS_RUNNER_NLP_WORKERS", "1"))
+    runner_semantic_workers: int = int(os.getenv("AIOS_RUNNER_SEMANTIC_WORKERS", "4"))
+    runner_vector_workers: int = int(os.getenv("AIOS_RUNNER_VECTOR_WORKERS", "1"))
+    runner_rdf_workers: int = int(os.getenv("AIOS_RUNNER_RDF_WORKERS", "1"))
+    runner_reconciliation_workers: int = int(
+        os.getenv("AIOS_RUNNER_RECONCILIATION_WORKERS", "1")
+    )
+    runner_global_workers: int = int(os.getenv("AIOS_RUNNER_GLOBAL_WORKERS", "1"))
+
+    db_pool_min_size: int = int(os.getenv("AIOS_DB_POOL_MIN_SIZE", "1"))
+    db_pool_max_size: int = int(os.getenv("AIOS_DB_POOL_MAX_SIZE", "24"))
+
 settings = Settings()
