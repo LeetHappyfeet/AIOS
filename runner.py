@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
+import time
 from typing import Callable, Awaitable, Dict, Any
 from uuid import UUID
 
@@ -11,11 +14,13 @@ from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.pipeline.jobs import (
     fetch_next_job,
+    heartbeat_job,
     mark_done,
     mark_failed,
     recover_stale_running_jobs,
     rebalance_queued_priorities,
 )
+from aios_app.pipeline.job_registry import ResourceClass, job_spec
 
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
 from aios_app.pipeline.worker import run_claim_extraction_for_section
@@ -277,76 +282,298 @@ async def _mark_origin_event_error(
 
 
 # -------------------------------------------------
-# Runner loop
+# Parallel execution scheduler
 # -------------------------------------------------
 
+def _new_database() -> Database:
+    return Database(
+        settings.db_dsn,
+        min_size=settings.db_pool_min_size,
+        max_size=settings.db_pool_max_size,
+    )
+
+
+async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
+    job_type = str(job["job_type"])
+    payload = job.get("payload") or {}
+    spec = job_spec(job_type)
+    kind = spec.partition_kind
+
+    if kind in {"node_id", "section_id", "claim_id", "character_id", "world_id"}:
+        value = payload.get(kind)
+        return f"{kind}:{value}" if value else f"job:{job['job_id']}"
+
+    if kind == "claim_scope" and payload.get("claim_id"):
+        claim_id = payload["claim_id"]
+        row = await db.fetchrow(
+            """
+            SELECT CASE
+                WHEN ccr.epistemic_scope='character'
+                     AND ccr.origin_character_id IS NOT NULL
+                     AND ccr.character_instance_id IS NOT NULL
+                    THEN 'char:' || ccr.origin_character_id
+                WHEN ccr.source_id IS NOT NULL
+                    THEN 'source:' || ccr.source_id
+                WHEN ccr.world_id IS NOT NULL
+                    THEN 'world:' || ccr.world_id::text || ':observed'
+                ELSE 'claim:' || ccr.claim_id::text
+            END AS scope_key
+            FROM aios.claim_context_resolution ccr
+            WHERE ccr.claim_id=$1::uuid
+            """,
+            claim_id,
+        )
+        return str(row["scope_key"]) if row else f"claim:{claim_id}"
+
+    if kind == "acquisition_scope" and payload.get("acquisition_id"):
+        acquisition_id = payload["acquisition_id"]
+        row = await db.fetchrow(
+            """
+            SELECT 'char:' || ci.character_id AS scope_key
+            FROM aios.knowledge_acquisition_event kae
+            JOIN aios.character_instance ci ON ci.instance_id=kae.instance_id
+            WHERE kae.acquisition_id=$1::uuid
+            """,
+            acquisition_id,
+        )
+        return str(row["scope_key"]) if row else f"acquisition:{acquisition_id}"
+
+    if kind == "assertion_scope" and payload.get("assertion_id"):
+        assertion_id = payload["assertion_id"]
+        row = await db.fetchrow(
+            """
+            SELECT 'world:' || world_id::text || ':asserted' AS scope_key
+            FROM aios.world_proposition_assertion
+            WHERE assertion_id=$1::uuid
+            """,
+            assertion_id,
+        )
+        return str(row["scope_key"]) if row else f"assertion:{assertion_id}"
+
+    return f"global:{job_type}"
+
+
+async def _heartbeat_loop(
+    db: Database,
+    *,
+    job_id: UUID,
+    worker_id: str,
+) -> None:
+    interval = max(5, settings.pipeline_heartbeat_seconds)
+    while True:
+        await asyncio.sleep(interval)
+        alive = await heartbeat_job(
+            db,
+            job_id=job_id,
+            worker_id=worker_id,
+            lease_seconds=settings.pipeline_lease_seconds,
+        )
+        if not alive:
+            return
+
+
+def _run_isolated_handler(job_type: str, job: Dict[str, Any]) -> None:
+    """Run blocking/NLP/RDF handlers on a private event loop and DB pool."""
+
+    async def _run() -> None:
+        db = _new_database()
+        await db.connect()
+        try:
+            handler = JOB_HANDLERS[job_type]
+            await handler(db, job)
+        finally:
+            await db.close()
+
+    asyncio.run(_run())
+
+
+async def _execute_claimed_job(
+    db: Database,
+    *,
+    job: Dict[str, Any],
+    worker_id: str,
+) -> None:
+    job_id = job["job_id"]
+    job_type = str(job["job_type"])
+    handler = JOB_HANDLERS.get(job_type)
+    if not handler:
+        await mark_failed(
+            db,
+            job_id,
+            f"No handler for job_type={job_type}",
+            worker_id=worker_id,
+        )
+        return
+
+    spec = job_spec(job_type)
+    partition_key = await _resolve_partition_key(db, job)
+    lock_key = f"{spec.resource_class.value}:{partition_key}"
+    lock_started = time.monotonic()
+
+    heartbeat = asyncio.create_task(
+        _heartbeat_loop(db, job_id=job_id, worker_id=worker_id)
+    )
+    try:
+        async with db.connection() as lock_conn:
+            await lock_conn.execute(
+                "SELECT pg_advisory_lock(hashtextextended($1, 0))",
+                lock_key,
+            )
+            lock_wait = time.monotonic() - lock_started
+            started = time.monotonic()
+            try:
+                await db.execute(
+                    """
+                    UPDATE aios.pipeline_job
+                    SET partition_key=$2, updated_at=now()
+                    WHERE job_id=$1 AND worker_id=$3
+                    """,
+                    job_id,
+                    partition_key,
+                    worker_id,
+                )
+                if spec.isolate_blocking:
+                    await asyncio.to_thread(_run_isolated_handler, job_type, job)
+                else:
+                    await handler(db, job)
+                await mark_done(db, job_id, worker_id=worker_id)
+                logger.info(
+                    "Job done id=%s type=%s resource=%s partition=%s "
+                    "lock_wait=%.3fs runtime=%.3fs",
+                    job_id,
+                    job_type,
+                    spec.resource_class.value,
+                    partition_key,
+                    lock_wait,
+                    time.monotonic() - started,
+                )
+            finally:
+                await lock_conn.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                    lock_key,
+                )
+    except Exception as exc:
+        logger.exception(
+            "Job %s (%s) failed resource=%s partition=%s",
+            job_id,
+            job_type,
+            spec.resource_class.value,
+            partition_key,
+        )
+        error = repr(exc)
+        try:
+            await _mark_origin_event_error(
+                db,
+                job_type=job_type,
+                payload=job.get("payload") or {},
+                error=error,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to propagate job %s error to originating ingest_event",
+                job_id,
+            )
+        await mark_failed(db, job_id, error, worker_id=worker_id)
+    finally:
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
+
+
+async def _resource_worker(
+    db: Database,
+    *,
+    resource_class: ResourceClass,
+    worker_index: int,
+    poll_interval: float,
+) -> None:
+    worker_id = (
+        f"{socket.gethostname()}:{os.getpid()}:"
+        f"{resource_class.value}:{worker_index}"
+    )
+    while True:
+        job = await fetch_next_job(
+            db,
+            worker_id=worker_id,
+            resource_class=resource_class.value,
+            lease_seconds=settings.pipeline_lease_seconds,
+        )
+        if not job:
+            await asyncio.sleep(poll_interval)
+            continue
+        await _execute_claimed_job(db, job=job, worker_id=worker_id)
+
+
+async def _lease_recovery_loop(db: Database) -> None:
+    interval = max(15, min(settings.pipeline_lease_seconds // 2, 60))
+    while True:
+        await asyncio.sleep(interval)
+        recovered = await recover_stale_running_jobs(
+            db,
+            stale_after_seconds=settings.pipeline_stale_running_seconds,
+        )
+        if recovered:
+            logger.warning("Recovered %d expired pipeline worker leases", recovered)
+
+
+def _worker_limits() -> dict[ResourceClass, int]:
+    return {
+        ResourceClass.FAST_SQL: max(0, settings.runner_fast_sql_workers),
+        ResourceClass.NLP: max(0, settings.runner_nlp_workers),
+        ResourceClass.SEMANTIC: max(0, settings.runner_semantic_workers),
+        ResourceClass.VECTOR: max(0, settings.runner_vector_workers),
+        ResourceClass.RDF: max(0, settings.runner_rdf_workers),
+        ResourceClass.RECONCILIATION: max(0, settings.runner_reconciliation_workers),
+        ResourceClass.GLOBAL: max(0, settings.runner_global_workers),
+    }
+
+
 async def run_runner(poll_interval: float = 1.0) -> None:
-    db = Database(settings.db_dsn)
+    db = _new_database()
     await db.connect()
 
-    stale_after_seconds = getattr(
-        settings,
-        "pipeline_stale_running_seconds",
-        1800,
-    )
     recovered = await recover_stale_running_jobs(
         db,
-        stale_after_seconds=stale_after_seconds,
+        stale_after_seconds=settings.pipeline_stale_running_seconds,
     )
     if recovered:
-        logger.warning(
-            "Recovered %d stale running pipeline jobs older than %ds",
-            recovered,
-            stale_after_seconds,
-        )
+        logger.warning("Recovered %d stale/expired pipeline jobs", recovered)
 
     rebalanced = await rebalance_queued_priorities(db)
     if rebalanced:
-        logger.info(
-            "Rebalanced priorities for %d queued pipeline jobs",
-            rebalanced,
-        )
+        logger.info("Rebalanced priorities for %d queued pipeline jobs", rebalanced)
 
-    logger.info("Pipeline runner started")
+    limits = _worker_limits()
+    logger.info(
+        "Pipeline runner started scheduler=%s",
+        ",".join(f"{resource.value}:{count}" for resource, count in limits.items()),
+    )
+
+    tasks: list[asyncio.Task] = [
+        asyncio.create_task(_lease_recovery_loop(db), name="lease-recovery")
+    ]
+    for resource_class, count in limits.items():
+        for worker_index in range(count):
+            tasks.append(
+                asyncio.create_task(
+                    _resource_worker(
+                        db,
+                        resource_class=resource_class,
+                        worker_index=worker_index,
+                        poll_interval=poll_interval,
+                    ),
+                    name=f"{resource_class.value}-{worker_index}",
+                )
+            )
 
     try:
-        while True:
-            # fetch_next_job() atomically moves queued → running, so there is no
-            # lock gap between selecting and claiming a job.
-            job = await fetch_next_job(db)
-            if not job:
-                await asyncio.sleep(poll_interval)
-                continue
-
-            job_id = job["job_id"]
-            job_type = job["job_type"]
-            handler = JOB_HANDLERS.get(job_type)
-
-            if not handler:
-                await mark_failed(db, job_id, f"No handler for job_type={job_type}")
-                continue
-
-            try:
-                await handler(db, job)
-                await mark_done(db, job_id)
-            except Exception as exc:
-                logger.exception("Job %s (%s) failed", job_id, job_type)
-                error = repr(exc)
-                try:
-                    await _mark_origin_event_error(
-                        db,
-                        job_type=job_type,
-                        payload=job.get("payload") or {},
-                        error=error,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to propagate job %s error to originating ingest_event",
-                        job_id,
-                    )
-                await mark_failed(db, job_id, error)
-
+        await asyncio.gather(*tasks)
     finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await db.close()
 
 
