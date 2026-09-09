@@ -75,15 +75,14 @@ CREATE INDEX IF NOT EXISTS idx_claim_semantic_frame_canonical
 CREATE TABLE IF NOT EXISTS aios.observation_proposition (
     observation_id uuid NOT NULL REFERENCES aios.observation(observation_id) ON DELETE CASCADE,
     proposition_id uuid NOT NULL REFERENCES aios.proposition(proposition_id) ON DELETE CASCADE,
-    frame_id uuid REFERENCES aios.claim_semantic_frame(frame_id) ON DELETE SET NULL,
+    frame_id uuid NOT NULL REFERENCES aios.claim_semantic_frame(frame_id) ON DELETE CASCADE,
     is_primary boolean NOT NULL DEFAULT false,
     semantic_role text NOT NULL DEFAULT 'derived_frame',
     confidence double precision NOT NULL DEFAULT 0.0
         CHECK (confidence >= 0.0 AND confidence <= 1.0),
     meta jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (observation_id, proposition_id),
-    UNIQUE (observation_id, frame_id)
+    PRIMARY KEY (observation_id, frame_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_observation_proposition_proposition
