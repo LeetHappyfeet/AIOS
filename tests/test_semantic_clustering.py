@@ -56,3 +56,22 @@ def test_fringe_requires_multiple_supporting_links():
     assert u(4) in drafts[0].members
     assert u(5) not in drafts[0].members
     assert u(5) in outliers
+
+
+def test_related_edges_do_not_form_core_components():
+    from uuid import UUID
+    from aios_app.semantic_index.clustering import Edge, _build_core_components
+
+    a = UUID("00000000-0000-0000-0000-000000000001")
+    b = UUID("00000000-0000-0000-0000-000000000002")
+    c = UUID("00000000-0000-0000-0000-000000000003")
+    edges = [
+        Edge(a, b, 0.95, "RELATED"),
+        Edge(b, c, 0.95, "RELATED"),
+        Edge(c, a, 0.95, "RELATED"),
+    ]
+    assert _build_core_components(
+        edges,
+        core_threshold=0.82,
+        min_cluster_size=3,
+    ) == []
