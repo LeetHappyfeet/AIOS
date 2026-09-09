@@ -656,9 +656,11 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
             UPDATE aios.semantic_cluster_candidate
             SET status='stale', updated_at=now()
             WHERE embedding_version=$1
-              AND algorithm_version=$2
-              AND run_id <> $3
               AND status='candidate'
+              AND (
+                  algorithm_version <> $2
+                  OR run_id <> $3
+              )
             """,
             cfg.embedding_version,
             ALGORITHM_VERSION,
