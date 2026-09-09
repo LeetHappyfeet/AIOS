@@ -23,7 +23,7 @@ END
 WHERE scheduling_lane IS NULL;
 
 UPDATE aios.pipeline_job
-SET partition_key='claim:' || payload->>'claim_id'
+SET partition_key='claim:' || (payload->>'claim_id')
 WHERE partition_key IS NULL
   AND job_type IN ('resolve_claim_context','normalize_proposition')
   AND payload ? 'claim_id';
@@ -61,15 +61,15 @@ WHERE pj.partition_key IS NULL
   AND pj.payload->>'assertion_id'=a.assertion_id::text;
 
 UPDATE aios.pipeline_job
-SET partition_key='world_id:' || payload->>'world_id'
+SET partition_key='world_id:' || (payload->>'world_id')
 WHERE partition_key IS NULL AND payload ? 'world_id';
 
 UPDATE aios.pipeline_job
-SET partition_key='section_id:' || payload->>'section_id'
+SET partition_key='section_id:' || (payload->>'section_id')
 WHERE partition_key IS NULL AND payload ? 'section_id';
 
 UPDATE aios.pipeline_job
-SET partition_key='node_id:' || payload->>'node_id'
+SET partition_key='node_id:' || (payload->>'node_id')
 WHERE partition_key IS NULL AND payload ? 'node_id';
 
 ALTER TABLE aios.pipeline_job
