@@ -413,7 +413,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             "predicate_family": row["predicate_family"],
             "subject_is_pivot": bool(row["subject_is_pivot"]),
             "object_is_pivot": bool(row["object_is_pivot"]),
-            "context_resolver_version": "context-resolver-v2",
+            "context_resolver_version": "context-resolver-v3",
             "semantic_frame_id": str(row["semantic_frame_id"]) if row["semantic_frame_id"] else None,
             "frame_confidence": float(row["frame_confidence"] or 0.0),
             "predicate_confidence": float(row["predicate_confidence"] or 0.0),
@@ -493,7 +493,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             float(row["confidence"] or 0.0),
             row["node_id"],
             json.dumps({
-                "source": "context-resolver-v2",
+                "source": "context-resolver-v3",
                 "semantic_frame_id": str(row["semantic_frame_id"]) if row["semantic_frame_id"] else None,
                 "origin_character_id": row["character_id"],
                 "world_id": str(row["resolved_world_id"]) if row["resolved_world_id"] else None,
