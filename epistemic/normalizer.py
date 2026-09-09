@@ -173,7 +173,7 @@ async def _normalize_frame_propositions(
         FROM aios.claim_semantic_frame f
         LEFT JOIN aios.claim_semantic_frame child ON child.frame_id=f.object_frame_id
         WHERE f.claim_id=$1
-          AND f.decomposer_version='semantic-frame-v1'
+          AND f.decomposer_version='semantic-frame-v2'
         ORDER BY f.frame_index
         """,
         claim_id,
@@ -256,13 +256,6 @@ async def _normalize_frame_propositions(
 
 async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
     """Convert one immutable claim observation into a normalized proposition."""
-    existing = await db.fetchrow(
-        "SELECT proposition_id FROM aios.observation WHERE claim_id=$1",
-        claim_id,
-    )
-    if existing:
-        return existing["proposition_id"]
-
     row = await db.fetchrow(
         """
         SELECT
