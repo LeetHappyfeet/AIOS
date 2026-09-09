@@ -289,7 +289,7 @@ async def _recent_antecedents(db: Database, claim_id: UUID, limit: int = 5) -> l
     rows = await db.fetch(
         """
         WITH current AS (
-            SELECT es.section_id, es.sentence_index, dn.timeline_id, dn.node_id
+            SELECT es.section_id, es.sentence_index, dn.timeline_id, dn.node_id, dn.created_at
             FROM aios.claim_candidate cc
             JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
             JOIN aios.document_section ds ON ds.section_id=es.section_id
@@ -310,11 +310,15 @@ async def _recent_antecedents(db: Database, claim_id: UUID, limit: int = 5) -> l
         JOIN aios.claim_semantic_frame f ON f.claim_id=cc.claim_id
         WHERE (
             (es.section_id=cur.section_id AND es.sentence_index < cur.sentence_index)
-            OR dn.node_id <> cur.node_id
+            OR (
+                dn.node_id <> cur.node_id
+                AND dn.created_at <= cur.created_at
+            )
         )
           AND f.decomposer_version=$2
         ORDER BY
             CASE WHEN es.section_id=cur.section_id THEN 0 ELSE 1 END,
+            dn.created_at DESC,
             es.sentence_index DESC,
             f.frame_index DESC
         LIMIT $3
