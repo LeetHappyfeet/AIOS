@@ -163,48 +163,28 @@ async def _preferred_scope_nodes(
 ) -> list[dict[str, Any]]:
     rows = await db.fetch(
         """
-        WITH ranked AS (
-            SELECT
-                n.*,
-                row_number() OVER (
-                    PARTITION BY n.scope_key, n.proposition_id, n.character_instance_id
-                    ORDER BY
-                        CASE n.node_type
-                            WHEN 'PROPOSITION' THEN 0
-                            WHEN 'TOPIC' THEN 1
-                            WHEN 'WORLD_ASSERTION' THEN 2
-                            WHEN 'ACQUISITION' THEN 2
-                            ELSE 3
-                        END,
-                        n.significance DESC,
-                        n.created_at
-                ) AS rn
-            FROM aios.semantic_topology_node n
-            WHERE n.proposition_id = ANY($1::uuid[])
-        ),
-        chosen AS (
-            SELECT * FROM ranked WHERE rn=1
-        )
         SELECT
-            a.scope_key, a.scope_kind,
+            a.scope_key,
+            a.scope_kind,
             COALESCE(a.character_id,b.character_id) AS character_id,
             COALESCE(a.character_instance_id,b.character_instance_id) AS character_instance_id,
             COALESCE(a.world_id,b.world_id) AS world_id,
             COALESCE(a.source_id,b.source_id) AS source_id,
             a.topology_node_id AS a_node,
             b.topology_node_id AS b_node
-        FROM chosen a
-        JOIN chosen b
+        FROM aios.semantic_topology_node a
+        JOIN aios.semantic_topology_node b
           ON b.scope_key=a.scope_key
-         AND b.proposition_id=$3
+         AND b.node_type='PROPOSITION'
+         AND b.proposition_id=$2
          AND (
              a.scope_kind <> 'character'
              OR a.character_instance_id=b.character_instance_id
          )
-        WHERE a.proposition_id=$2
+        WHERE a.node_type='PROPOSITION'
+          AND a.proposition_id=$1
           AND a.topology_node_id<>b.topology_node_id
         """,
-        [proposition_a, proposition_b],
         proposition_a,
         proposition_b,
     )
@@ -369,39 +349,22 @@ async def _cluster_scope_rows(
 ) -> list[dict[str, Any]]:
     rows = await db.fetch(
         """
-        WITH ranked AS (
-            SELECT
-                n.*,
-                row_number() OVER (
-                    PARTITION BY n.scope_key, n.proposition_id, n.character_instance_id
-                    ORDER BY
-                        CASE n.node_type
-                            WHEN 'TOPIC' THEN 0
-                            WHEN 'WORLD_ASSERTION' THEN 1
-                            WHEN 'ACQUISITION' THEN 1
-                            ELSE 2
-                        END,
-                        n.significance DESC,
-                        n.created_at
-                ) AS rn
-            FROM aios.semantic_topology_node n
-            JOIN aios.semantic_cluster_membership m
-              ON m.proposition_id=n.proposition_id
-            WHERE m.cluster_id=$1
-        )
         SELECT
-            scope_key,
-            MIN(scope_kind) AS scope_kind,
-            MIN(character_id) AS character_id,
-            character_instance_id,
-            MIN(world_id::text)::uuid AS world_id,
-            MIN(source_id) AS source_id,
-            array_agg(topology_node_id ORDER BY topology_node_id) AS member_nodes,
-            COUNT(*) AS member_count
-        FROM ranked
-        WHERE rn=1
-        GROUP BY scope_key, character_instance_id
-        HAVING COUNT(*) >= 2
+            n.scope_key,
+            MIN(n.scope_kind) AS scope_kind,
+            MIN(n.character_id) AS character_id,
+            n.character_instance_id,
+            MIN(n.world_id::text)::uuid AS world_id,
+            MIN(n.source_id) AS source_id,
+            array_agg(n.topology_node_id ORDER BY n.topology_node_id) AS member_nodes,
+            COUNT(DISTINCT n.proposition_id) AS member_count
+        FROM aios.semantic_topology_node n
+        JOIN aios.semantic_cluster_membership m
+          ON m.proposition_id=n.proposition_id
+        WHERE m.cluster_id=$1
+          AND n.node_type='PROPOSITION'
+        GROUP BY n.scope_key, n.character_instance_id
+        HAVING COUNT(DISTINCT n.proposition_id) >= 2
         """,
         cluster_id,
     )
