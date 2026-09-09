@@ -58,3 +58,11 @@ def test_cluster_classifications_promote_to_typed_pivots():
     assert PIVOT_NODE_TYPES["EVENT_REGION"] == "EVENT"
     assert PIVOT_NODE_TYPES["STATE_SERIES"] == "STATE"
     assert PIVOT_NODE_TYPES["BELIEF_REGION"] == "CONCEPT"
+
+
+def test_reconciliation_json_object_accepts_text_json():
+    from aios_app.semantic_index.reconciliation import _json_object
+
+    assert _json_object('{"relation":"SAME_EVENT"}') == {
+        "relation": "SAME_EVENT"
+    }
