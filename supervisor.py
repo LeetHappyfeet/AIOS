@@ -816,13 +816,14 @@ async def enqueue_stage_jobs(
     count = 0
     for row in rows:
         payload = stage.payload_builder(dict(row))
-        await enqueue_job(
+        job_id = await enqueue_job(
             db,
             job_type=stage.job_type,
             payload=payload,
             priority=stage.priority,
         )
-        count += 1
+        if job_id is not None:
+            count += 1
 
     return count
 
