@@ -186,10 +186,21 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
         child_clause = next(
             (
                 c for c in root.children
-                if c.dep_ in {"ccomp", "xcomp", "advcl"} and c.i in root_to_index
+                if c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"}
+                and c.i in root_to_index
             ),
             None,
         )
+        if child_clause is None and object_token is not None:
+            child_clause = next(
+                (
+                    c for c in object_token.subtree
+                    if c.i != object_token.i
+                    and c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"}
+                    and c.i in root_to_index
+                ),
+                None,
+            )
         object_frame_index = root_to_index.get(child_clause.i) if child_clause is not None else None
 
         parent_index = None
