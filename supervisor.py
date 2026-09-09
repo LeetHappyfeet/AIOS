@@ -254,7 +254,7 @@ STAGES: List[Stage] = [
               SELECT 1
               FROM aios.claim_semantic_frame_projection sfp
               WHERE sfp.claim_id=cc.claim_id
-                AND sfp.decomposer_version='semantic-frame-v1'
+                AND sfp.decomposer_version='semantic-frame-v2'
           )
           AND NOT EXISTS (
               SELECT 1 FROM aios.pipeline_job pj
@@ -298,10 +298,24 @@ STAGES: List[Stage] = [
             SELECT 1
             FROM aios.claim_semantic_frame_projection sfp
             WHERE sfp.claim_id=cc.claim_id
-              AND sfp.decomposer_version='semantic-frame-v1'
+              AND sfp.decomposer_version='semantic-frame-v2'
         )
-          AND NOT EXISTS (
-            SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id
+          AND (
+            NOT EXISTS (
+                SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM aios.observation o
+                JOIN aios.claim_semantic_frame sf
+                  ON sf.claim_id=o.claim_id
+                 AND sf.decomposer_version='semantic-frame-v2'
+                LEFT JOIN aios.observation_proposition op
+                  ON op.observation_id=o.observation_id
+                 AND op.frame_id=sf.frame_id
+                WHERE o.claim_id=cc.claim_id
+                  AND op.frame_id IS NULL
+            )
         )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
@@ -741,7 +755,7 @@ STAGES: List[Stage] = [
                 SELECT 1
                 FROM aios.claim_semantic_frame_projection sfp
                 WHERE sfp.claim_id=cc.claim_id
-                  AND sfp.decomposer_version='semantic-frame-v1'
+                  AND sfp.decomposer_version='semantic-frame-v2'
             )
               AND NOT EXISTS (
                 SELECT 1
