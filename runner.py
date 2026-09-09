@@ -392,6 +392,7 @@ async def _execute_claimed_job(
     *,
     job: Dict[str, Any],
     worker_id: str,
+    rdf_gate: asyncio.Semaphore,
 ) -> None:
     job_id = job["job_id"]
     job_type = str(job["job_type"])
@@ -435,10 +436,17 @@ async def _execute_claimed_job(
                     partition_key,
                     worker_id,
                 )
-                if spec.isolate_blocking:
-                    await asyncio.to_thread(_run_isolated_handler, job_type, job)
+                async def _invoke_handler() -> None:
+                    if spec.isolate_blocking:
+                        await asyncio.to_thread(_run_isolated_handler, job_type, job)
+                    else:
+                        await handler(db, job)
+
+                if spec.requires_rdf_slot:
+                    async with rdf_gate:
+                        await _invoke_handler()
                 else:
-                    await handler(db, job)
+                    await _invoke_handler()
                 await mark_done(db, job_id, worker_id=worker_id)
                 logger.info(
                     "Job done id=%s type=%s resource=%s partition=%s "
@@ -491,6 +499,7 @@ async def _resource_worker(
     resource_class: ResourceClass,
     worker_index: int,
     poll_interval: float,
+    rdf_gate: asyncio.Semaphore,
 ) -> None:
     worker_id = (
         f"{socket.gethostname()}:{os.getpid()}:"
@@ -506,7 +515,12 @@ async def _resource_worker(
         if not job:
             await asyncio.sleep(poll_interval)
             continue
-        await _execute_claimed_job(db, job=job, worker_id=worker_id)
+        await _execute_claimed_job(
+            db,
+            job=job,
+            worker_id=worker_id,
+            rdf_gate=rdf_gate,
+        )
 
 
 async def _lease_recovery_loop(db: Database) -> None:
@@ -554,6 +568,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
         ",".join(f"{resource.value}:{count}" for resource, count in limits.items()),
     )
 
+    rdf_gate = asyncio.Semaphore(max(1, settings.runner_rdf_workers))
     tasks: list[asyncio.Task] = [
         asyncio.create_task(_lease_recovery_loop(db), name="lease-recovery")
     ]
@@ -566,6 +581,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
                         resource_class=resource_class,
                         worker_index=worker_index,
                         poll_interval=poll_interval,
+                        rdf_gate=rdf_gate,
                     ),
                     name=f"{resource_class.value}-{worker_index}",
                 )
