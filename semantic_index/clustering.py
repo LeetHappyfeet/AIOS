@@ -381,6 +381,23 @@ def _config_signature(cfg: SemanticIndexConfig) -> str:
 
 
 async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
+    # Retire interrupted runs from superseded clustering algorithms. They can
+    # never be resumed by the current worker and otherwise remain misleadingly
+    # "running" forever.
+    await db.execute(
+        """
+        UPDATE aios.semantic_cluster_run
+        SET status='failed',
+            completed_at=COALESCE(completed_at, now()),
+            meta=meta || jsonb_build_object(
+                'recovery_reason',
+                'superseded_algorithm_interrupted'
+            )
+        WHERE status='running'
+          AND algorithm_version <> $1
+        """,
+        ALGORITHM_VERSION,
+    )
     watermark = await db.fetchrow(
         """
         SELECT MAX(analyzed_at) AS watermark
