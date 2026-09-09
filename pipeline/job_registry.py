@@ -21,23 +21,24 @@ class JobSpec:
     partition_kind: str
     idempotent: bool
     isolate_blocking: bool = False
+    requires_rdf_slot: bool = False
 
 
 JOB_SPECS: Mapping[str, JobSpec] = {
     "discover_characters": JobSpec(ResourceClass.FAST_SQL, "character_id", True),
     "dag_to_document_section": JobSpec(ResourceClass.FAST_SQL, "node_id", True),
     "extract_claims": JobSpec(ResourceClass.NLP, "section_id", True, isolate_blocking=True),
-    "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True),
+    "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
     "normalize_proposition": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
     "project_character_knowledge": JobSpec(ResourceClass.SEMANTIC, "global", True),
-    "derive_claim_topology": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True),
-    "derive_character_acquisition_topology": JobSpec(ResourceClass.SEMANTIC, "acquisition_scope", True),
-    "derive_world_assertion_topology": JobSpec(ResourceClass.SEMANTIC, "assertion_scope", True),
+    "derive_claim_topology": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
+    "derive_character_acquisition_topology": JobSpec(ResourceClass.SEMANTIC, "acquisition_scope", True, isolate_blocking=True, requires_rdf_slot=True),
+    "derive_world_assertion_topology": JobSpec(ResourceClass.SEMANTIC, "assertion_scope", True, isolate_blocking=True, requires_rdf_slot=True),
     "resolve_generated_facts": JobSpec(ResourceClass.RECONCILIATION, "global", True),
-    "rdf_epistemic_project": JobSpec(ResourceClass.RDF, "claim_scope", True, isolate_blocking=True),
-    "rdf_liminal_promote": JobSpec(ResourceClass.RDF, "section_id", True, isolate_blocking=True),
-    "rdf_liminal_classify": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True),
-    "project_world_topology": JobSpec(ResourceClass.RDF, "world_id", True, isolate_blocking=True),
+    "rdf_epistemic_project": JobSpec(ResourceClass.RDF, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
+    "rdf_liminal_promote": JobSpec(ResourceClass.RDF, "section_id", True, isolate_blocking=True, requires_rdf_slot=True),
+    "rdf_liminal_classify": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
+    "project_world_topology": JobSpec(ResourceClass.RDF, "world_id", True, isolate_blocking=True, requires_rdf_slot=True),
     "assign_narratives": JobSpec(ResourceClass.GLOBAL, "global", True),
 }
 
