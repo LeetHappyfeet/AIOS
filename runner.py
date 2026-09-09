@@ -13,6 +13,7 @@ from aios_app.pipeline.jobs import (
     fetch_next_job,
     mark_done,
     mark_failed,
+    recover_stale_running_jobs,
 )
 
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
@@ -281,6 +282,22 @@ async def _mark_origin_event_error(
 async def run_runner(poll_interval: float = 1.0) -> None:
     db = Database(settings.db_dsn)
     await db.connect()
+
+    stale_after_seconds = getattr(
+        settings,
+        "pipeline_stale_running_seconds",
+        1800,
+    )
+    recovered = await recover_stale_running_jobs(
+        db,
+        stale_after_seconds=stale_after_seconds,
+    )
+    if recovered:
+        logger.warning(
+            "Recovered %d stale running pipeline jobs older than %ds",
+            recovered,
+            stale_after_seconds,
+        )
 
     logger.info("Pipeline runner started")
 
