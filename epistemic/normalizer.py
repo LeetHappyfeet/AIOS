@@ -149,6 +149,111 @@ async def ensure_proposition(
     return row["proposition_id"]
 
 
+async def _normalize_frame_propositions(
+    db: Database,
+    *,
+    claim_id: UUID,
+    observation_id: UUID,
+    primary_frame_id: Optional[UUID],
+    primary_proposition_id: UUID,
+    raw_text: str,
+    source_weight: float,
+) -> list[UUID]:
+    frames = await db.fetch(
+        """
+        SELECT
+            f.frame_id, f.frame_index,
+            COALESCE(f.resolved_subject, f.subject_text) AS subject,
+            COALESCE(f.predicate_canonical, f.predicate_surface) AS predicate,
+            COALESCE(f.resolved_object, f.object_text, child.canonical_text) AS object,
+            f.polarity, f.modality, f.frame_role, f.discourse_mode,
+            f.frame_confidence, f.predicate_confidence,
+            f.entity_confidence, f.referent_confidence,
+            f.resolution_status
+        FROM aios.claim_semantic_frame f
+        LEFT JOIN aios.claim_semantic_frame child ON child.frame_id=f.object_frame_id
+        WHERE f.claim_id=$1
+          AND f.decomposer_version='semantic-frame-v1'
+        ORDER BY f.frame_index
+        """,
+        claim_id,
+    )
+
+    proposition_ids: list[UUID] = []
+    for frame in frames:
+        is_primary = frame["frame_id"] == primary_frame_id
+        proposition_id = primary_proposition_id if is_primary else await ensure_proposition(
+            db,
+            subject=frame["subject"],
+            predicate=frame["predicate"],
+            object_value=frame["object"],
+            raw_text=raw_text,
+            polarity=int(frame["polarity"]) if frame["polarity"] in (-1, 1) else None,
+            modality=frame["modality"] or "asserted",
+            meta={
+                "normalizer_version": NORMALIZER_VERSION,
+                "semantic_frame_id": str(frame["frame_id"]),
+                "frame_role": frame["frame_role"],
+                "discourse_mode": frame["discourse_mode"],
+                "resolution_status": frame["resolution_status"],
+                "frame_confidence": float(frame["frame_confidence"] or 0.0),
+                "predicate_confidence": float(frame["predicate_confidence"] or 0.0),
+                "entity_confidence": float(frame["entity_confidence"] or 0.0),
+                "referent_confidence": float(frame["referent_confidence"] or 0.0),
+            },
+        )
+        proposition_ids.append(proposition_id)
+
+        await db.execute(
+            """
+            INSERT INTO aios.observation_proposition (
+                observation_id, proposition_id, frame_id, is_primary,
+                semantic_role, confidence, meta
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+            ON CONFLICT (observation_id, proposition_id) DO UPDATE
+            SET frame_id=EXCLUDED.frame_id,
+                is_primary=EXCLUDED.is_primary,
+                semantic_role=EXCLUDED.semantic_role,
+                confidence=EXCLUDED.confidence,
+                meta=EXCLUDED.meta
+            """,
+            observation_id,
+            proposition_id,
+            frame["frame_id"],
+            is_primary,
+            frame["frame_role"] or "derived_frame",
+            float(frame["frame_confidence"] or 0.0),
+            json.dumps({
+                "claim_id": str(claim_id),
+                "semantic_frame_id": str(frame["frame_id"]),
+            }),
+        )
+
+        await db.execute(
+            """
+            INSERT INTO aios.proposition_evidence (
+                proposition_id, observation_id, evidence_role,
+                source_weight, confidence, meta
+            )
+            VALUES ($1,$2,'support',$3,$4,$5::jsonb)
+            ON CONFLICT (proposition_id, observation_id, evidence_role) DO NOTHING
+            """,
+            proposition_id,
+            observation_id,
+            source_weight,
+            float(frame["frame_confidence"] or 0.0),
+            json.dumps({
+                "claim_id": str(claim_id),
+                "semantic_frame_id": str(frame["frame_id"]),
+            }),
+        )
+
+        await _detect_conflicts(db, proposition_id=proposition_id)
+
+    return proposition_ids
+
+
 async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
     """Convert one immutable claim observation into a normalized proposition."""
     existing = await db.fetchrow(
@@ -358,6 +463,16 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         json.dumps({"claim_id": str(claim_id)}),
     )
 
+    await _normalize_frame_propositions(
+        db,
+        claim_id=claim_id,
+        observation_id=observation["observation_id"],
+        primary_frame_id=row["semantic_frame_id"],
+        primary_proposition_id=proposition_id,
+        raw_text=row["raw_text"],
+        source_weight=source_weight,
+    )
+
     # A character-scoped observation belongs only to that resolved character
     # instance. This creates the SQL-side acquisition event used by the HUD
     # knowledge projection; it does not assert the proposition in the world.
@@ -394,7 +509,6 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             }),
         )
 
-    await _detect_conflicts(db, proposition_id=proposition_id)
     return proposition_id
 
 
