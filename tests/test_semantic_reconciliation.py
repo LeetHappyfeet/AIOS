@@ -50,3 +50,11 @@ def test_branch_classifications_remain_possible_edges():
         "possible_experiential_branch"
     )
     assert BOUNDARY_EDGE_TYPES["WORLD_BRANCH_CANDIDATE"] == "possible_world_branch"
+
+
+def test_cluster_classifications_promote_to_typed_pivots():
+    from aios_app.semantic_index.reconciliation import PIVOT_NODE_TYPES
+
+    assert PIVOT_NODE_TYPES["EVENT_REGION"] == "EVENT"
+    assert PIVOT_NODE_TYPES["STATE_SERIES"] == "STATE"
+    assert PIVOT_NODE_TYPES["BELIEF_REGION"] == "CONCEPT"
