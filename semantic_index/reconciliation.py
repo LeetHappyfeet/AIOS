@@ -170,10 +170,11 @@ async def _preferred_scope_nodes(
                     PARTITION BY n.scope_key, n.proposition_id, n.character_instance_id
                     ORDER BY
                         CASE n.node_type
-                            WHEN 'TOPIC' THEN 0
-                            WHEN 'WORLD_ASSERTION' THEN 1
-                            WHEN 'ACQUISITION' THEN 1
-                            ELSE 2
+                            WHEN 'PROPOSITION' THEN 0
+                            WHEN 'TOPIC' THEN 1
+                            WHEN 'WORLD_ASSERTION' THEN 2
+                            WHEN 'ACQUISITION' THEN 2
+                            ELSE 3
                         END,
                         n.significance DESC,
                         n.created_at
