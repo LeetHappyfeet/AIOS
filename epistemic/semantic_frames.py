@@ -10,6 +10,7 @@ from uuid import UUID
 import spacy
 
 from aios_app.db import Database
+from aios_app.epistemic.pivots import resolve_subject_pivot
 
 logger = logging.getLogger("aios.epistemic.semantic_frames")
 
@@ -392,6 +393,52 @@ def _choose_antecedent(value: Optional[str], candidates: list[dict]) -> tuple[Op
     return value, None, 0.20
 
 
+def _resolve_participant_phrase(
+    value: Optional[str],
+    *,
+    character_id: Optional[str],
+    speaker_id: Optional[str],
+    speaker_role: Optional[str],
+    recipient_id: Optional[str],
+    viewpoint_id: Optional[str],
+    ruleset_id: str,
+) -> tuple[Optional[str], bool]:
+    clean = (value or "").strip()
+    if not clean:
+        return value, False
+
+    lower = clean.lower()
+    first_person = {"i", "me", "my", "mine", "myself"}
+    second_person = {"you", "your", "yours", "yourself"}
+    token = lower.split()[0]
+
+    if token not in first_person | second_person:
+        return value, False
+
+    pivot_subject = "i" if token in first_person else "you"
+    pivot = resolve_subject_pivot(
+        pivot_subject,
+        character_id=character_id,
+        speaker_id=speaker_id,
+        speaker_role=speaker_role,
+        recipient_id=recipient_id,
+        viewpoint_id=viewpoint_id,
+        ruleset_id=ruleset_id,
+    )
+    if not pivot.resolved or not pivot.subject:
+        return value, False
+
+    if lower == token:
+        return pivot.subject, True
+
+    # Preserve possessive/relational noun phrase while replacing the identity
+    # pivot, e.g. "your coat" -> "<recipient>'s coat".
+    suffix = clean[len(clean.split()[0]):].strip()
+    possessive = token in {"my", "mine", "your", "yours"}
+    replacement = f"{pivot.subject}'s" if possessive else pivot.subject
+    return (f"{replacement} {suffix}".strip(), True)
+
+
 def _entity_key(kind: Optional[str], value: Optional[str], world_id: Optional[UUID]) -> Optional[str]:
     clean = _norm(value)
     if not clean or clean in PRONOUN_PERSON | PRONOUN_NEUTRAL:
@@ -501,6 +548,29 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
         frame_id = inserted[draft.index]
         subject_resolved, subject_key, subject_ref_conf = _choose_antecedent(draft.subject, antecedents)
         object_resolved, object_key, object_ref_conf = _choose_antecedent(draft.object_text, antecedents)
+
+        subject_resolved, subject_pivoted = _resolve_participant_phrase(
+            subject_resolved,
+            character_id=row["character_id"],
+            speaker_id=row["speaker_id"],
+            speaker_role=row["speaker_role"],
+            recipient_id=row["recipient_id"],
+            viewpoint_id=row["viewpoint_id"],
+            ruleset_id=row["identity_ruleset"],
+        )
+        object_resolved, object_pivoted = _resolve_participant_phrase(
+            object_resolved,
+            character_id=row["character_id"],
+            speaker_id=row["speaker_id"],
+            speaker_role=row["speaker_role"],
+            recipient_id=row["recipient_id"],
+            viewpoint_id=row["viewpoint_id"],
+            ruleset_id=row["identity_ruleset"],
+        )
+        if subject_pivoted:
+            subject_ref_conf = max(subject_ref_conf, 0.98)
+        if object_pivoted:
+            object_ref_conf = max(object_ref_conf, 0.98)
 
         frame_row = await db.fetchrow(
             "SELECT subject_kind_guess, object_kind_guess, object_frame_id FROM aios.claim_semantic_frame WHERE frame_id=$1",
