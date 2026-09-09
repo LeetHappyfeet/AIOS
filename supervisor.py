@@ -51,6 +51,13 @@ def claim_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"claim_id": str(row["claim_id"])}
 
 
+def semantic_backfill_claim_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "claim_id": str(row["claim_id"]),
+        "semantic_backfill": "proposition_leaves_20260909",
+    }
+
+
 def character_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"character_id": str(row["character_id"])}
 
@@ -299,6 +306,58 @@ STAGES: List[Stage] = [
         queue_limit=64,
     ),
 
+
+    # -------------------------------------------------
+    # 4a) one-time semantic proposition-leaf topology backfill
+    # -------------------------------------------------
+    # The 20260909 migration invalidates existing projections so TOPIC nodes can
+    # be rebuilt with explicit PROPOSITION children. Admit this migration work
+    # ahead of ordinary enrichment, but only while the migration marker exists.
+    Stage(
+        name="backfill_semantic_proposition_leaves",
+        job_type="derive_claim_topology",
+        eligibility_sql="""
+        SELECT DISTINCT o.claim_id
+        FROM aios.observation o
+        JOIN aios.semantic_topology_projection stp
+          ON stp.claim_id=o.claim_id
+        JOIN aios.claim_context_resolution ccr
+          ON ccr.claim_id=o.claim_id
+        JOIN aios.claim_candidate cc
+          ON cc.claim_id=o.claim_id
+        JOIN aios.extracted_sentence es
+          ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds
+          ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn
+          ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie
+          ON ie.event_id=dn.event_id
+        WHERE ie.superseded_at IS NULL
+          AND stp.projected_at IS NULL
+          AND stp.resolver_version='semantic-topology-v1'
+          AND stp.meta->>'reproject_reason'='semantic_proposition_leaves_20260909'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.semantic_topology_node n
+              WHERE n.scope_key=stp.scope_key
+                AND n.node_type='PROPOSITION'
+                AND n.proposition_id=o.proposition_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.pipeline_job pj
+              WHERE pj.job_type='derive_claim_topology'
+                AND pj.status IN ('queued','running')
+                AND pj.payload->>'claim_id'=o.claim_id::text
+          )
+        ORDER BY o.claim_id
+        LIMIT $1
+        """,
+        payload_builder=semantic_backfill_claim_payload,
+        priority=18,
+        queue_limit=256,
+        critical=True,
+    ),
 
     # -------------------------------------------------
     # 4b) normalized observation -> derived semantic topology
