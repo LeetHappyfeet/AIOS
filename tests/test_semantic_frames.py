@@ -47,3 +47,10 @@ def test_passive_reporting_does_not_make_theme_the_believer():
     assert belief.object_frame_index == child.index
     assert child.subject is not None
     assert "pretti" in child.subject.lower()
+
+
+def test_xcomp_subject_inheritance_does_not_loop():
+    frames = decompose_sentence("Stop hurting people!")
+    assert frames
+    assert any(f.predicate_canonical == "stop" for f in frames)
+    assert any(f.predicate_canonical == "hurt" for f in frames)
