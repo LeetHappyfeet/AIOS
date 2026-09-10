@@ -13,6 +13,25 @@ RESOLVER_VERSION = "semantic-topology-v1"
 WORLD_GRAPH = "urn:aios:world:derived-topology"
 
 
+def _json_object(value: object) -> dict:
+    """Normalize JSON/JSONB values returned by asyncpg into a Python dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if decoded is None:
+            return {}
+        if not isinstance(decoded, dict):
+            raise ValueError("expected JSON object metadata")
+        return decoded
+    try:
+        return dict(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected object-like metadata") from exc
+
+
 @dataclass(frozen=True)
 class TopologyDecision:
     scope_kind: str
@@ -102,6 +121,7 @@ async def _upsert_node(
     claim_id: Optional[UUID],
     assertion_id: Optional[UUID],
     significance: float,
+    acquisition_id: Optional[UUID] = None,
     meta: Optional[dict] = None,
 ) -> UUID:
     row = await db.execute_returning_row(
@@ -110,11 +130,12 @@ async def _upsert_node(
             scope_key, scope_kind, node_type, node_key, label,
             character_id, character_instance_id, world_id, source_id,
             timeline_id, dag_node_id, proposition_id, claim_id, assertion_id,
-            significance, meta
+            acquisition_id, significance, meta
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
         ON CONFLICT (scope_key, node_type, node_key) DO UPDATE
         SET label=COALESCE(EXCLUDED.label, aios.semantic_topology_node.label),
+            acquisition_id=COALESCE(aios.semantic_topology_node.acquisition_id, EXCLUDED.acquisition_id),
             significance=GREATEST(aios.semantic_topology_node.significance, EXCLUDED.significance),
             updated_at=now(),
             meta=aios.semantic_topology_node.meta || EXCLUDED.meta
@@ -134,6 +155,7 @@ async def _upsert_node(
         proposition_id,
         claim_id,
         assertion_id,
+        acquisition_id,
         significance,
         json.dumps(meta or {}),
     )
@@ -150,18 +172,41 @@ async def _upsert_edge(
     significance: float,
     claim_id: Optional[UUID] = None,
     assertion_id: Optional[UUID] = None,
+    inference_source: str = "deterministic",
+    inference_status: str = "accepted",
+    inference_confidence: Optional[float] = None,
     meta: Optional[dict] = None,
-) -> None:
-    await db.execute(
+) -> UUID:
+    row = await db.execute_returning_row(
         """
         INSERT INTO aios.semantic_topology_edge (
             scope_key, parent_node_id, child_node_id, edge_type,
-            significance, claim_id, assertion_id, meta
+            significance, claim_id, assertion_id,
+            inference_source, inference_status, inference_confidence, meta
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
         ON CONFLICT (scope_key, parent_node_id, child_node_id, edge_type) DO UPDATE
         SET significance=GREATEST(aios.semantic_topology_edge.significance, EXCLUDED.significance),
+            inference_source=CASE
+                WHEN aios.semantic_topology_edge.inference_source='deterministic'
+                THEN aios.semantic_topology_edge.inference_source
+                ELSE EXCLUDED.inference_source
+            END,
+            inference_status=CASE
+                WHEN aios.semantic_topology_edge.inference_source='deterministic'
+                THEN aios.semantic_topology_edge.inference_status
+                ELSE EXCLUDED.inference_status
+            END,
+            inference_confidence=CASE
+                WHEN aios.semantic_topology_edge.inference_source='deterministic'
+                THEN aios.semantic_topology_edge.inference_confidence
+                ELSE GREATEST(
+                    COALESCE(aios.semantic_topology_edge.inference_confidence,0),
+                    COALESCE(EXCLUDED.inference_confidence,0)
+                )
+            END,
             meta=aios.semantic_topology_edge.meta || EXCLUDED.meta
+        RETURNING edge_id
         """,
         decision.scope_key,
         parent,
@@ -170,8 +215,323 @@ async def _upsert_edge(
         significance,
         claim_id,
         assertion_id,
+        inference_source,
+        inference_status,
+        inference_confidence,
         json.dumps(meta or {}),
     )
+    return row["edge_id"]
+
+
+def _acquisition_anchor_relationship(acquisition_mode: Optional[str]) -> str:
+    mode = (acquisition_mode or "").strip().lower()
+    if "remember" in mode or "recall" in mode:
+        return "remembers"
+    if any(token in mode for token in ("read", "learn", "document", "source")):
+        return "learned_from"
+    if any(token in mode for token in ("observe", "perceive", "utterance", "chat", "heard", "saw")):
+        return "perceived"
+    return "references"
+
+
+async def _upsert_anchor_edge(
+    db: Database,
+    *,
+    source_scope_key: str,
+    source_node_id: UUID,
+    target_scope_key: str,
+    target_node_id: UUID,
+    relationship_type: str,
+    character_id: Optional[str],
+    character_instance_id: Optional[UUID],
+    world_id: Optional[UUID],
+    proposition_id: Optional[UUID],
+    acquisition_id: Optional[UUID],
+    dag_node_id: Optional[UUID],
+    confidence: float = 1.0,
+    inference_source: str = "deterministic",
+    inference_status: str = "accepted",
+    meta: Optional[dict] = None,
+) -> UUID:
+    row = await db.execute_returning_row(
+        """
+        INSERT INTO aios.semantic_anchor_edge (
+            source_scope_key, source_node_id, target_scope_key, target_node_id,
+            relationship_type, character_id, character_instance_id, world_id,
+            proposition_id, acquisition_id, dag_node_id, confidence,
+            inference_source, inference_status, meta
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+        ON CONFLICT (source_node_id, target_node_id, relationship_type) DO UPDATE
+        SET confidence=GREATEST(aios.semantic_anchor_edge.confidence, EXCLUDED.confidence),
+            inference_source=CASE
+                WHEN aios.semantic_anchor_edge.inference_source='deterministic'
+                THEN aios.semantic_anchor_edge.inference_source
+                ELSE EXCLUDED.inference_source
+            END,
+            inference_status=CASE
+                WHEN aios.semantic_anchor_edge.inference_source='deterministic'
+                THEN aios.semantic_anchor_edge.inference_status
+                ELSE EXCLUDED.inference_status
+            END,
+            meta=aios.semantic_anchor_edge.meta || EXCLUDED.meta,
+            updated_at=now()
+        RETURNING anchor_edge_id
+        """,
+        source_scope_key,
+        source_node_id,
+        target_scope_key,
+        target_node_id,
+        relationship_type,
+        character_id,
+        character_instance_id,
+        world_id,
+        proposition_id,
+        acquisition_id,
+        dag_node_id,
+        confidence,
+        inference_source,
+        inference_status,
+        json.dumps(meta or {}),
+    )
+    return row["anchor_edge_id"]
+
+
+async def _find_world_topic_anchor(
+    db: Database,
+    *,
+    world_id: UUID,
+    proposition_id: UUID,
+) -> Optional[dict[str, Any]]:
+    row = await db.fetchrow(
+        """
+        SELECT topology_node_id, scope_key
+        FROM aios.semantic_topology_node
+        WHERE scope_kind='world'
+          AND world_id=$1
+          AND proposition_id=$2
+          AND node_type='PROPOSITION'
+        ORDER BY
+            CASE
+                WHEN scope_key=$3 THEN 0
+                WHEN scope_key=$4 THEN 1
+                ELSE 2
+            END,
+            significance DESC,
+            created_at
+        LIMIT 1
+        """,
+        world_id,
+        proposition_id,
+        f"world:{world_id}:asserted",
+        f"world:{world_id}:observed",
+    )
+    return dict(row) if row else None
+
+
+async def _find_source_topic_anchor(
+    db: Database,
+    *,
+    source_id: str,
+    proposition_id: UUID,
+) -> Optional[dict[str, Any]]:
+    row = await db.fetchrow(
+        """
+        SELECT topology_node_id, scope_key
+        FROM aios.semantic_topology_node
+        WHERE scope_kind='source'
+          AND source_id=$1
+          AND proposition_id=$2
+        ORDER BY
+            CASE node_type
+                WHEN 'PROPOSITION' THEN 0
+                WHEN 'TOPIC' THEN 1
+                WHEN 'EVENT' THEN 2
+                WHEN 'SEMANTIC_PIVOT' THEN 3
+                ELSE 4
+            END,
+            significance DESC,
+            created_at
+        LIMIT 1
+        """,
+        source_id,
+        proposition_id,
+    )
+    return dict(row) if row else None
+
+
+async def _anchor_character_node_to_source(
+    db: Database,
+    *,
+    source_scope_key: str,
+    source_node_id: UUID,
+    source_id: str,
+    character_id: str,
+    character_instance_id: UUID,
+    world_id: Optional[UUID],
+    proposition_id: UUID,
+    acquisition_id: UUID,
+    acquisition_mode: Optional[str],
+    dag_node_id: Optional[UUID],
+) -> bool:
+    target = await _find_source_topic_anchor(
+        db,
+        source_id=source_id,
+        proposition_id=proposition_id,
+    )
+    if not target:
+        return False
+    await _upsert_anchor_edge(
+        db,
+        source_scope_key=source_scope_key,
+        source_node_id=source_node_id,
+        target_scope_key=target["scope_key"],
+        target_node_id=target["topology_node_id"],
+        relationship_type=_acquisition_anchor_relationship(acquisition_mode),
+        character_id=character_id,
+        character_instance_id=character_instance_id,
+        world_id=world_id,
+        proposition_id=proposition_id,
+        acquisition_id=acquisition_id,
+        dag_node_id=dag_node_id,
+        meta={"anchor_policy": "source_same_proposition"},
+    )
+    return True
+
+
+async def _anchor_character_node_to_world(
+    db: Database,
+    *,
+    source_scope_key: str,
+    source_node_id: UUID,
+    character_id: str,
+    character_instance_id: UUID,
+    world_id: UUID,
+    proposition_id: UUID,
+    acquisition_id: UUID,
+    acquisition_mode: Optional[str],
+    dag_node_id: Optional[UUID],
+) -> bool:
+    target = await _find_world_topic_anchor(
+        db,
+        world_id=world_id,
+        proposition_id=proposition_id,
+    )
+    if not target:
+        return False
+    await _upsert_anchor_edge(
+        db,
+        source_scope_key=source_scope_key,
+        source_node_id=source_node_id,
+        target_scope_key=target["scope_key"],
+        target_node_id=target["topology_node_id"],
+        relationship_type=_acquisition_anchor_relationship(acquisition_mode),
+        character_id=character_id,
+        character_instance_id=character_instance_id,
+        world_id=world_id,
+        proposition_id=proposition_id,
+        acquisition_id=acquisition_id,
+        dag_node_id=dag_node_id,
+        meta={"anchor_policy": "world_topic_same_proposition"},
+    )
+    return True
+
+
+async def _backfill_character_anchors_for_world_topic(
+    db: Database,
+    *,
+    world_id: UUID,
+    proposition_id: UUID,
+    target_scope_key: str,
+    target_node_id: UUID,
+) -> set[str]:
+    rows = await db.fetch(
+        """
+        SELECT n.topology_node_id, n.scope_key, n.character_id,
+               n.character_instance_id, n.dag_node_id, n.acquisition_id,
+               kae.acquisition_mode
+        FROM aios.semantic_topology_node n
+        JOIN aios.knowledge_acquisition_event kae
+          ON kae.acquisition_id=n.acquisition_id
+        WHERE n.scope_kind='character'
+          AND n.node_type='EPISTEMIC_TRANSITION'
+          AND n.world_id=$1
+          AND n.proposition_id=$2
+          AND n.acquisition_id IS NOT NULL
+        """,
+        world_id,
+        proposition_id,
+    )
+    touched: set[str] = set()
+    for row in rows:
+        await _upsert_anchor_edge(
+            db,
+            source_scope_key=row["scope_key"],
+            source_node_id=row["topology_node_id"],
+            target_scope_key=target_scope_key,
+            target_node_id=target_node_id,
+            relationship_type=_acquisition_anchor_relationship(row["acquisition_mode"]),
+            character_id=row["character_id"],
+            character_instance_id=row["character_instance_id"],
+            world_id=world_id,
+            proposition_id=proposition_id,
+            acquisition_id=row["acquisition_id"],
+            dag_node_id=row["dag_node_id"],
+            meta={"anchor_policy": "world_topic_backfill"},
+        )
+        touched.add(row["scope_key"])
+    return touched
+
+
+async def _backfill_source_anchors_for_world_topic(
+    db: Database,
+    *,
+    world_id: UUID,
+    proposition_id: UUID,
+    target_scope_key: str,
+    target_node_id: UUID,
+) -> set[str]:
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT
+            n.topology_node_id,
+            n.scope_key,
+            n.source_id,
+            n.dag_node_id
+        FROM aios.semantic_topology_node n
+        JOIN aios.claim_context_resolution ccr
+          ON ccr.claim_id=n.claim_id
+        WHERE n.scope_kind='source'
+          AND n.proposition_id=$1
+          AND ccr.world_id=$2
+          AND n.source_id IS NOT NULL
+        ORDER BY n.scope_key, n.topology_node_id
+        """,
+        proposition_id,
+        world_id,
+    )
+    touched: set[str] = set()
+    for row in rows:
+        await _upsert_anchor_edge(
+            db,
+            source_scope_key=row["scope_key"],
+            source_node_id=row["topology_node_id"],
+            target_scope_key=target_scope_key,
+            target_node_id=target_node_id,
+            relationship_type="reports_about",
+            character_id=None,
+            character_instance_id=None,
+            world_id=world_id,
+            proposition_id=proposition_id,
+            acquisition_id=None,
+            dag_node_id=row["dag_node_id"],
+            meta={
+                "anchor_policy": "source_world_same_proposition",
+                "source_id": row["source_id"],
+            },
+        )
+        touched.add(row["scope_key"])
+    return touched
 
 
 def _rdf_graph(decision: TopologyDecision) -> tuple[str, str]:
@@ -192,7 +552,10 @@ async def _project_scope_rdf(
     rows = await db.fetch(
         """
         SELECT n.topology_node_id, n.node_type, n.node_key, n.label, n.significance,
-               e.parent_node_id, e.edge_type, e.significance AS edge_significance
+               e.edge_id, e.parent_node_id, e.edge_type,
+               e.significance AS edge_significance,
+               e.inference_source, e.inference_status, e.inference_confidence,
+               e.meta AS edge_meta
         FROM aios.semantic_topology_node n
         LEFT JOIN aios.semantic_topology_edge e
           ON e.scope_key=n.scope_key AND e.child_node_id=n.topology_node_id
@@ -217,6 +580,76 @@ async def _project_scope_rdf(
             parent_iri = f"urn:aios:topology-node:{row['parent_node_id']}"
             pred = quote(str(row["edge_type"]), safe="")
             triples.append(f"<{parent_iri}> <urn:aios:topology#{pred}> <{node_iri}> .")
+            if row["edge_id"]:
+                edge_iri = f"urn:aios:topology-edge:{row['edge_id']}"
+                triples.append(f"<{scope_iri}> <urn:aios:topology#hasEdge> <{edge_iri}> .")
+                triples.append(f"<{edge_iri}> <urn:aios:topology#fromNode> <{parent_iri}> .")
+                triples.append(f"<{edge_iri}> <urn:aios:topology#toNode> <{node_iri}> .")
+                triples.append(
+                    f"<{edge_iri}> <urn:aios:topology#edgeType> "
+                    f"{json.dumps(str(row['edge_type']))} ."
+                )
+                triples.append(
+                    f"<{edge_iri}> <urn:aios:topology#inferenceSource> "
+                    f"{json.dumps(str(row['inference_source'] or 'deterministic'))} ."
+                )
+                triples.append(
+                    f"<{edge_iri}> <urn:aios:topology#inferenceStatus> "
+                    f"{json.dumps(str(row['inference_status'] or 'accepted'))} ."
+                )
+                if row["inference_confidence"] is not None:
+                    triples.append(
+                        f"<{edge_iri}> <urn:aios:topology#inferenceConfidence> "
+                        f"\"{float(row['inference_confidence'])}\"^^"
+                        f"<http://www.w3.org/2001/XMLSchema#double> ."
+                    )
+                if row["edge_meta"]:
+                    triples.append(
+                        f"<{edge_iri}> <urn:aios:topology#inferenceMeta> "
+                        f"{json.dumps(json.dumps(_json_object(row['edge_meta']), sort_keys=True))} ."
+                    )
+
+    anchor_rows = await db.fetch(
+        """
+        SELECT anchor_edge_id, source_node_id, target_node_id,
+               relationship_type, target_scope_key, confidence,
+               inference_source, inference_status, meta
+        FROM aios.semantic_anchor_edge
+        WHERE source_scope_key=$1
+        ORDER BY created_at, anchor_edge_id
+        """,
+        decision.scope_key,
+    )
+    for anchor in anchor_rows:
+        source_iri = f"urn:aios:topology-node:{anchor['source_node_id']}"
+        target_iri = f"urn:aios:topology-node:{anchor['target_node_id']}"
+        edge_iri = f"urn:aios:semantic-anchor:{anchor['anchor_edge_id']}"
+        pred = quote(str(anchor["relationship_type"]), safe="")
+        triples.append(f"<{source_iri}> <urn:aios:anchor#{pred}> <{target_iri}> .")
+        triples.append(f"<{scope_iri}> <urn:aios:anchor#hasAnchor> <{edge_iri}> .")
+        triples.append(f"<{edge_iri}> <urn:aios:anchor#fromNode> <{source_iri}> .")
+        triples.append(f"<{edge_iri}> <urn:aios:anchor#toNode> <{target_iri}> .")
+        triples.append(
+            f"<{edge_iri}> <urn:aios:anchor#targetScope> "
+            f"{json.dumps(str(anchor['target_scope_key']))} ."
+        )
+        triples.append(
+            f"<{edge_iri}> <urn:aios:anchor#relationshipType> "
+            f"{json.dumps(str(anchor['relationship_type']))} ."
+        )
+        triples.append(
+            f"<{edge_iri}> <urn:aios:anchor#confidence> "
+            f"\"{float(anchor['confidence'])}\"^^"
+            f"<http://www.w3.org/2001/XMLSchema#double> ."
+        )
+        triples.append(
+            f"<{edge_iri}> <urn:aios:anchor#inferenceSource> "
+            f"{json.dumps(str(anchor['inference_source']))} ."
+        )
+        triples.append(
+            f"<{edge_iri}> <urn:aios:anchor#inferenceStatus> "
+            f"{json.dumps(str(anchor['inference_status']))} ."
+        )
 
     sparql = f"""
 CLEAR SILENT GRAPH <{graph}>;
@@ -324,9 +757,10 @@ async def derive_claim_topology(
 
     topic = await _upsert_node(
         db, decision=decision, node_type="TOPIC", node_key=str(data["topic_key"]),
-        label=data.get("canonical_text"), timeline_id=data.get("timeline_id"),
-        dag_node_id=data.get("dag_node_id"), proposition_id=data.get("proposition_id"),
-        claim_id=claim_id, assertion_id=None, significance=0.8,
+        label=str(data["topic_key"]), timeline_id=data.get("timeline_id"),
+        dag_node_id=None, proposition_id=None,
+        claim_id=None, assertion_id=None, significance=0.8,
+        meta={"semantic_role": "topic_group"},
     )
     await _upsert_edge(
         db, decision=decision, parent=anchor, child=topic,
@@ -335,6 +769,20 @@ async def derive_claim_topology(
             else "about_topic"
         ),
         significance=decision.significance, claim_id=claim_id,
+    )
+    proposition = await _upsert_node(
+        db, decision=decision, node_type="PROPOSITION",
+        node_key=str(data["proposition_id"]),
+        label=data.get("canonical_text"), timeline_id=data.get("timeline_id"),
+        dag_node_id=data.get("dag_node_id"),
+        proposition_id=data.get("proposition_id"),
+        claim_id=claim_id, assertion_id=None, significance=0.82,
+        meta={"semantic_role": "proposition_leaf", "topic_key": str(data["topic_key"])},
+    )
+    await _upsert_edge(
+        db, decision=decision, parent=topic, child=proposition,
+        edge_type="topic_contains_proposition",
+        significance=0.82, claim_id=claim_id,
     )
 
     for role, value, kind, is_pivot in (
@@ -437,9 +885,19 @@ async def derive_world_assertion_topology(
     )
     topic = await _upsert_node(
         db, decision=decision, node_type="TOPIC", node_key=str(data["topic_key"]),
+        label=str(data["topic_key"]), timeline_id=None,
+        dag_node_id=None, proposition_id=None,
+        claim_id=None, assertion_id=None, significance=0.85,
+        meta={"semantic_role": "topic_group"},
+    )
+    proposition = await _upsert_node(
+        db, decision=decision, node_type="PROPOSITION",
+        node_key=str(data["proposition_id"]),
         label=data["canonical_text"], timeline_id=None,
-        dag_node_id=data["generated_at_node_id"], proposition_id=data["proposition_id"],
-        claim_id=None, assertion_id=assertion_id, significance=0.85,
+        dag_node_id=data["generated_at_node_id"],
+        proposition_id=data["proposition_id"],
+        claim_id=None, assertion_id=assertion_id, significance=0.88,
+        meta={"semantic_role": "proposition_leaf", "topic_key": str(data["topic_key"])},
     )
     await _upsert_edge(
         db, decision=decision, parent=root, child=assertion,
@@ -449,6 +907,26 @@ async def derive_world_assertion_topology(
         db, decision=decision, parent=assertion, child=topic,
         edge_type="asserts_topic", significance=0.95, assertion_id=assertion_id,
     )
+    await _upsert_edge(
+        db, decision=decision, parent=topic, child=proposition,
+        edge_type="topic_contains_proposition", significance=0.88,
+        assertion_id=assertion_id,
+    )
+    touched_character_scopes = await _backfill_character_anchors_for_world_topic(
+        db,
+        world_id=data["world_id"],
+        proposition_id=data["proposition_id"],
+        target_scope_key=decision.scope_key,
+        target_node_id=proposition,
+    )
+    touched_source_scopes = await _backfill_source_anchors_for_world_topic(
+        db,
+        world_id=data["world_id"],
+        proposition_id=data["proposition_id"],
+        target_scope_key=decision.scope_key,
+        target_node_id=proposition,
+    )
+
     dataset, graph = await _project_scope_rdf(db, fuseki, decision=decision)
     await db.execute(
         """
@@ -463,6 +941,12 @@ async def derive_world_assertion_topology(
         projection_key, assertion_id, decision.scope_key, dataset, graph,
         RESOLVER_VERSION, json.dumps({"branch_kind": "world_assertion"}),
     )
+    for anchored_scope in touched_character_scopes | touched_source_scopes:
+        await reproject_existing_scope(
+            db,
+            fuseki,
+            scope_key=anchored_scope,
+        )
     return True
 
 
@@ -540,6 +1024,7 @@ async def derive_character_acquisition_topology(
         label=data.get("canonical_text"), timeline_id=None,
         dag_node_id=data.get("dag_node_id"), proposition_id=data["proposition_id"],
         claim_id=data.get("claim_id"), assertion_id=None, significance=0.95,
+        acquisition_id=acquisition_id,
         meta={
             "acquisition_id": str(acquisition_id),
             "acquisition_mode": data["acquisition_mode"],
@@ -556,15 +1041,65 @@ async def derive_character_acquisition_topology(
 
     topic = await _upsert_node(
         db, decision=decision, node_type="TOPIC", node_key=str(data["topic_key"]),
+        label=str(data["topic_key"]), timeline_id=None,
+        dag_node_id=None, proposition_id=None,
+        claim_id=None, assertion_id=None, significance=0.85,
+        meta={"semantic_role": "topic_group"},
+    )
+    proposition = await _upsert_node(
+        db, decision=decision, node_type="PROPOSITION",
+        node_key=str(data["proposition_id"]),
         label=data["canonical_text"], timeline_id=None,
-        dag_node_id=data.get("dag_node_id"), proposition_id=data["proposition_id"],
-        claim_id=data.get("claim_id"), assertion_id=None, significance=0.85,
+        dag_node_id=data.get("dag_node_id"),
+        proposition_id=data["proposition_id"],
+        claim_id=data.get("claim_id"), assertion_id=None, significance=0.88,
+        acquisition_id=acquisition_id,
+        meta={"semantic_role": "proposition_leaf", "topic_key": str(data["topic_key"])},
     )
     await _upsert_edge(
         db, decision=decision, parent=acquisition, child=topic,
         edge_type="epistemic_transition", significance=0.95,
         claim_id=data.get("claim_id"),
     )
+    await _upsert_edge(
+        db, decision=decision, parent=topic, child=proposition,
+        edge_type="topic_contains_proposition", significance=0.88,
+        claim_id=data.get("claim_id"),
+    )
+
+    # Provenance and world referent are independent cross-scope facts.
+    # Anchor to the exact source first when one exists; this must not depend
+    # on an identical proposition already being asserted in /world.
+    if data.get("source_id"):
+        await _anchor_character_node_to_source(
+            db,
+            source_scope_key=decision.scope_key,
+            source_node_id=acquisition,
+            source_id=str(data["source_id"]),
+            character_id=data["character_id"],
+            character_instance_id=data["instance_id"],
+            world_id=decision.world_id,
+            proposition_id=data["proposition_id"],
+            acquisition_id=acquisition_id,
+            acquisition_mode=data.get("acquisition_mode"),
+            dag_node_id=data.get("dag_node_id"),
+        )
+
+    # A separate world anchor is added only when an authoritative world
+    # topology referent for the same proposition already exists.
+    if decision.world_id:
+        await _anchor_character_node_to_world(
+            db,
+            source_scope_key=decision.scope_key,
+            source_node_id=acquisition,
+            character_id=data["character_id"],
+            character_instance_id=data["instance_id"],
+            world_id=decision.world_id,
+            proposition_id=data["proposition_id"],
+            acquisition_id=acquisition_id,
+            acquisition_mode=data.get("acquisition_mode"),
+            dag_node_id=data.get("dag_node_id"),
+        )
 
     if data.get("source_id") or data.get("source_key"):
         source_key = str(data.get("source_id") or data.get("source_key"))
@@ -599,3 +1134,37 @@ async def derive_character_acquisition_topology(
         json.dumps({"branch_kind": "epistemic_transition"}),
     )
     return True
+
+
+async def reproject_existing_scope(
+    db: Database,
+    fuseki: FusekiClient,
+    *,
+    scope_key: str,
+) -> tuple[str, str] | None:
+    """Reproject one already-authorized topology scope after reconciliation."""
+    row = await db.fetchrow(
+        """
+        SELECT scope_kind, scope_key, character_id, character_instance_id,
+               world_id, source_id
+        FROM aios.semantic_topology_node
+        WHERE scope_key=$1
+        ORDER BY created_at
+        LIMIT 1
+        """,
+        scope_key,
+    )
+    if not row:
+        return None
+
+    decision = TopologyDecision(
+        scope_kind=row["scope_kind"],
+        scope_key=row["scope_key"],
+        branch_kind="semantic_reconciliation",
+        significance=0.7,
+        character_id=row["character_id"],
+        character_instance_id=row["character_instance_id"],
+        world_id=row["world_id"],
+        source_id=row["source_id"],
+    )
+    return await _project_scope_rdf(db, fuseki, decision=decision)

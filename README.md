@@ -2,7 +2,7 @@
 
 AIOS is an epistemic runtime and memory architecture for language-model agents. It turns raw observations—chat, documents, web material, and other ingested text—into provenance-preserving temporal records, normalized claims, RDF knowledge, character-specific epistemic state, concrete runtime worlds, and finally a bounded HUD that can be consumed by either an LLM or a human-facing client.
 
-The project has moved beyond its original “RAG sidecar” phase. The RDF/epistemic pipeline and the first complete character/world runtime are now in place. Current development is focused on the **HUD assembly layer**: deciding what a character should perceive, remember, believe, carry, care about, and be allowed to act on at a particular moment without leaking information across characters, worlds, timelines, or branches.
+The project has retired its original monolithic RAG sidecar in favor of a semantic index and semantic-structure engine. The RDF/epistemic pipeline and the first complete character/world runtime are now in place. Current development is focused on the **HUD assembly layer**: deciding what a character should perceive, remember, believe, carry, care about, and be allowed to act on at a particular moment without leaking information across characters, worlds, timelines, or branches.
 
 > **Development status:** the ingestion → DAG → claim → RDF → context-resolution → character/world runtime chain is implemented. The active development frontier is the branch-aware RPG/agent HUD and the clients that consume it.
 
@@ -27,7 +27,7 @@ AIOS therefore separates:
 - **runtime state** — the concrete character instance currently acting in a world;
 - **presentation/attention** — the bounded HUD assembled for a human or LLM.
 
-RAG remains useful as a similarity oracle, but vector similarity is not treated as truth and is not allowed to decide epistemic visibility by itself.
+The Semantic Index uses Qdrant heavily as a similarity oracle across source sections, normalized propositions, and epistemic objects. Vector geometry proposes candidates and structure; it never decides truth or epistemic visibility by itself.
 
 ## Architecture
 
@@ -234,7 +234,7 @@ This separation makes the pipeline replayable and keeps HTTP ingestion from pret
 
 **Apache Jena Fuseki** provides RDF semantic workspaces. AIOS uses separate `/world` and `/char` datasets/graphs so world semantics and character epistemics can be reasoned about without conflating them.
 
-**Qdrant** provides vector similarity/retrieval support. It is a retrieval aid, not an authority on truth, chronology, world membership, or character knowledge.
+**Qdrant / Semantic Index** maintains separate source, proposition, and epistemic vector spaces. It supports source retrieval, semantic-neighbor discovery, clustering/split candidates, topology seeding, and HUD attention. PostgreSQL/RDF remain authoritative for truth, chronology, branches, worlds, and character knowledge.
 
 ## Running the development branch
 

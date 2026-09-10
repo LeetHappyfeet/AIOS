@@ -31,6 +31,8 @@ class Stage:
     eligibility_sql: str
     payload_builder: Callable[[Dict[str, object]], Dict[str, object]]
     priority: int = 100
+    queue_limit: int = 64
+    critical: bool = False
 
 
 # =================================================
@@ -47,6 +49,20 @@ def section_id_payload(row: Dict[str, object]) -> Dict[str, object]:
 
 def claim_id_payload(row: Dict[str, object]) -> Dict[str, object]:
     return {"claim_id": str(row["claim_id"])}
+
+
+def resolver_claim_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "claim_id": str(row["claim_id"]),
+        "admission_band": str(row.get("admission_band") or "backlog"),
+    }
+
+
+def semantic_backfill_claim_payload(row: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "claim_id": str(row["claim_id"]),
+        "semantic_backfill": "proposition_leaves_20260909",
+    }
 
 
 def character_id_payload(row: Dict[str, object]) -> Dict[str, object]:
@@ -105,6 +121,8 @@ STAGES: List[Stage] = [
         """,
         payload_builder=character_id_payload,
         priority=10,
+        queue_limit=8,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -139,6 +157,8 @@ STAGES: List[Stage] = [
         """,
         payload_builder=world_id_payload,
         priority=20,
+        queue_limit=8,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -150,7 +170,9 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT n.node_id
         FROM aios.dag_node n
+        JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         WHERE n.message_text IS NOT NULL
+          AND ie.superseded_at IS NULL
           AND (
               (
                   n.kind = 'paragraph'
@@ -179,6 +201,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=node_id_payload,
+        priority=20,
+        queue_limit=48,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -192,7 +217,9 @@ STAGES: List[Stage] = [
         FROM aios.document_section ds
         JOIN aios.dag_node n
           ON n.node_id = ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         WHERE ds.claims_extracted_at IS NULL
+          AND ie.superseded_at IS NULL
           AND NOT EXISTS (
               SELECT 1
               FROM aios.pipeline_job pj
@@ -204,10 +231,48 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=section_id_payload,
+        priority=25,
+        queue_limit=48,
+        critical=True,
     ),
 
     # -------------------------------------------------
-    # 3) claim_candidate -> normalized proposition/observation
+    # 2b) claim_candidate -> contextual semantic frames
+    # -------------------------------------------------
+    Stage(
+        name="decompose_claim_frames",
+        job_type="decompose_claim_frames",
+        eligibility_sql="""
+        SELECT cc.claim_id
+        FROM aios.claim_candidate cc
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        WHERE ie.superseded_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.claim_semantic_frame_projection sfp
+              WHERE sfp.claim_id=cc.claim_id
+                AND sfp.decomposer_version='semantic-frame-v2'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.pipeline_job pj
+              WHERE pj.job_type='decompose_claim_frames'
+                AND pj.status IN ('queued','running')
+                AND pj.payload->>'claim_id'=cc.claim_id::text
+          )
+        ORDER BY cc.created_at
+        LIMIT $1
+        """,
+        payload_builder=claim_id_payload,
+        priority=27,
+        queue_limit=128,
+        critical=True,
+    ),
+
+    # -------------------------------------------------
+    # 3) refined claim -> normalized proposition/observation
     # -------------------------------------------------
     Stage(
         name="normalize_proposition",
@@ -221,13 +286,36 @@ STAGES: List[Stage] = [
           ON ds.section_id = es.section_id
         JOIN aios.dag_node n
           ON n.node_id = ds.node_id
-        WHERE EXISTS (
+        JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+        WHERE ie.superseded_at IS NULL
+          AND EXISTS (
             SELECT 1
             FROM aios.claim_context_resolution ccr
             WHERE ccr.claim_id=cc.claim_id
+              AND ccr.resolver_version='context-resolver-v3'
         )
-          AND NOT EXISTS (
-            SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id
+          AND EXISTS (
+            SELECT 1
+            FROM aios.claim_semantic_frame_projection sfp
+            WHERE sfp.claim_id=cc.claim_id
+              AND sfp.decomposer_version='semantic-frame-v2'
+        )
+          AND (
+            NOT EXISTS (
+                SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM aios.observation o
+                JOIN aios.claim_semantic_frame sf
+                  ON sf.claim_id=o.claim_id
+                 AND sf.decomposer_version='semantic-frame-v2'
+                LEFT JOIN aios.observation_proposition op
+                  ON op.observation_id=o.observation_id
+                 AND op.frame_id=sf.frame_id
+                WHERE o.claim_id=cc.claim_id
+                  AND op.frame_id IS NULL
+            )
         )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
@@ -239,6 +327,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=claim_id_payload,
+        priority=35,
+        queue_limit=96,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -250,7 +341,13 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT o.claim_id
         FROM aios.observation o
-        WHERE NOT EXISTS (
+        JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        WHERE ie.superseded_at IS NULL
+          AND NOT EXISTS (
             SELECT 1
             FROM aios.rdf_promotion_log rpl
             WHERE rpl.claim_id=o.claim_id
@@ -268,8 +365,62 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=claim_id_payload,
+        priority=75,
+        queue_limit=64,
     ),
 
+
+    # -------------------------------------------------
+    # 4a) one-time semantic proposition-leaf topology backfill
+    # -------------------------------------------------
+    # The 20260909 migration invalidates existing projections so TOPIC nodes can
+    # be rebuilt with explicit PROPOSITION children. Admit this migration work
+    # ahead of ordinary enrichment, but only while the migration marker exists.
+    Stage(
+        name="backfill_semantic_proposition_leaves",
+        job_type="derive_claim_topology",
+        eligibility_sql="""
+        SELECT DISTINCT o.claim_id
+        FROM aios.observation o
+        JOIN aios.semantic_topology_projection stp
+          ON stp.claim_id=o.claim_id
+        JOIN aios.claim_context_resolution ccr
+          ON ccr.claim_id=o.claim_id
+        JOIN aios.claim_candidate cc
+          ON cc.claim_id=o.claim_id
+        JOIN aios.extracted_sentence es
+          ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds
+          ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn
+          ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie
+          ON ie.event_id=dn.event_id
+        WHERE ie.superseded_at IS NULL
+          AND stp.projected_at IS NULL
+          AND stp.resolver_version='semantic-topology-v1'
+          AND stp.meta->>'reproject_reason'='semantic_proposition_leaves_20260909'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.semantic_topology_node n
+              WHERE n.scope_key=stp.scope_key
+                AND n.node_type='PROPOSITION'
+                AND n.proposition_id=o.proposition_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.pipeline_job pj
+              WHERE pj.job_type='derive_claim_topology'
+                AND pj.status IN ('queued','running')
+                AND pj.payload->>'claim_id'=o.claim_id::text
+          )
+        ORDER BY o.claim_id
+        LIMIT $1
+        """,
+        payload_builder=semantic_backfill_claim_payload,
+        priority=95,
+        queue_limit=32,
+        critical=False,
+    ),
 
     # -------------------------------------------------
     # 4b) normalized observation -> derived semantic topology
@@ -281,7 +432,13 @@ STAGES: List[Stage] = [
         SELECT o.claim_id
         FROM aios.observation o
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-        WHERE NOT EXISTS (
+        JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        WHERE ie.superseded_at IS NULL
+          AND NOT EXISTS (
             SELECT 1
             FROM aios.semantic_topology_projection stp
             WHERE stp.claim_id=o.claim_id
@@ -298,6 +455,8 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=claim_id_payload,
+        priority=80,
+        queue_limit=64,
     ),
 
     # Explicit world assertions are the only observation-derived path that may
@@ -326,6 +485,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=assertion_id_payload,
+        priority=45,
+        queue_limit=32,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -352,6 +514,8 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+        priority=90,
+        queue_limit=1,
     ),
 
     # -------------------------------------------------
@@ -363,8 +527,15 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT 1
         WHERE EXISTS (
-            SELECT 1 FROM aios.knowledge_acquisition_event
-            WHERE processed_at IS NULL
+            SELECT 1
+            FROM aios.knowledge_acquisition_event kae
+            LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+            LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+            LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+            LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+            LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+            WHERE kae.processed_at IS NULL
+              AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
         )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
@@ -374,6 +545,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+        priority=30,
+        queue_limit=4,
+        critical=True,
     ),
 
 
@@ -383,7 +557,13 @@ STAGES: List[Stage] = [
         eligibility_sql="""
         SELECT kae.acquisition_id
         FROM aios.knowledge_acquisition_event kae
+        LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+        LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+        LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE kae.proposition_id IS NOT NULL
+          AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
           AND NOT EXISTS (
             SELECT 1
             FROM aios.semantic_topology_projection stp
@@ -401,6 +581,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=acquisition_id_payload,
+        priority=40,
+        queue_limit=48,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -448,6 +631,8 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+        priority=60,
+        queue_limit=2,
     ),
 
     # -------------------------------------------------
@@ -466,6 +651,7 @@ STAGES: List[Stage] = [
         JOIN aios.ingest_event ie
           ON ie.event_id = n.event_id
         WHERE ds.claims_extracted_at IS NOT NULL
+          AND ie.superseded_at IS NULL
           AND ie.rdf_processed_at IS NULL
           AND NOT EXISTS (
               SELECT 1
@@ -484,6 +670,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=section_id_payload,
+        priority=25,
+        queue_limit=48,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -527,6 +716,9 @@ STAGES: List[Stage] = [
         LIMIT $1
         """,
         payload_builder=empty_payload,
+        priority=28,
+        queue_limit=1,
+        critical=True,
     ),
 
     # -------------------------------------------------
@@ -539,41 +731,81 @@ STAGES: List[Stage] = [
         name="resolve_claim_context",
         job_type="resolve_claim_context",
         eligibility_sql="""
-        SELECT cc.claim_id
-        FROM aios.claim_candidate cc
-        WHERE EXISTS (
-            SELECT 1
-            FROM aios.rdf_promotion_log base
-            WHERE base.claim_id=cc.claim_id
-              AND base.rdf_dataset='world'
-              AND base.rdf_graph='urn:aios:world:liminal'
-              AND base.rdf_predicate='rdf:type'
-              AND base.rdf_object='world:Claim'
+        WITH eligible AS (
+            SELECT cc.claim_id, cc.created_at
+            FROM aios.claim_candidate cc
+            WHERE EXISTS (
+                SELECT 1
+                FROM aios.rdf_promotion_log base
+                WHERE base.claim_id=cc.claim_id
+                  AND base.rdf_dataset='world'
+                  AND base.rdf_graph='urn:aios:world:liminal'
+                  AND base.rdf_predicate='rdf:type'
+                  AND base.rdf_object='world:Claim'
+            )
+              AND EXISTS (
+                SELECT 1
+                FROM aios.rdf_promotion_log cls
+                WHERE cls.claim_id=cc.claim_id
+                  AND cls.rdf_dataset='world'
+                  AND cls.rdf_graph='urn:aios:world:liminal'
+                  AND cls.rdf_predicate='world:contentKind'
+            )
+              AND EXISTS (
+                SELECT 1
+                FROM aios.claim_semantic_frame_projection sfp
+                WHERE sfp.claim_id=cc.claim_id
+                  AND sfp.decomposer_version='semantic-frame-v2'
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM aios.claim_context_resolution ccr
+                WHERE ccr.claim_id=cc.claim_id
+                  AND ccr.resolver_version='context-resolver-v3'
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM aios.pipeline_job pj
+                WHERE pj.job_type='resolve_claim_context'
+                  AND pj.status IN ('queued','running')
+                  AND pj.payload->>'claim_id'=cc.claim_id::text
+            )
+        ),
+        quotas AS (
+            SELECT
+                floor($1::numeric * 0.75)::integer AS backlog_quota,
+                $1 - floor($1::numeric * 0.75)::integer AS fresh_quota
+        ),
+        backlog AS (
+            SELECT e.claim_id, e.created_at, 'backlog'::text AS admission_band
+            FROM eligible e
+            ORDER BY e.created_at ASC, e.claim_id
+            LIMIT (SELECT backlog_quota FROM quotas)
+        ),
+        fresh AS (
+            SELECT e.claim_id, e.created_at, 'fresh'::text AS admission_band
+            FROM eligible e
+            WHERE NOT EXISTS (
+                SELECT 1 FROM backlog b WHERE b.claim_id=e.claim_id
+            )
+            ORDER BY e.created_at DESC, e.claim_id
+            LIMIT (SELECT fresh_quota FROM quotas)
         )
-          AND EXISTS (
-            SELECT 1
-            FROM aios.rdf_promotion_log cls
-            WHERE cls.claim_id=cc.claim_id
-              AND cls.rdf_dataset='world'
-              AND cls.rdf_graph='urn:aios:world:liminal'
-              AND cls.rdf_predicate='world:contentKind'
-        )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM aios.claim_context_resolution ccr
-            WHERE ccr.claim_id=cc.claim_id
-        )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM aios.pipeline_job pj
-            WHERE pj.job_type='resolve_claim_context'
-              AND pj.status IN ('queued','running')
-              AND pj.payload->>'claim_id'=cc.claim_id::text
-        )
-        ORDER BY cc.created_at
+        SELECT claim_id, admission_band
+        FROM (
+            SELECT claim_id, created_at, admission_band, 0 AS band_order
+            FROM backlog
+            UNION ALL
+            SELECT claim_id, created_at, admission_band, 1 AS band_order
+            FROM fresh
+        ) selected
+        ORDER BY band_order, created_at
         LIMIT $1
         """,
-        payload_builder=claim_id_payload,
+        payload_builder=resolver_claim_payload,
+        priority=30,
+        queue_limit=256,
+        critical=True,
     ),
 ]
 
@@ -587,6 +819,49 @@ async def queued_job_count(db: Database) -> int:
         "SELECT COUNT(*) AS cnt FROM aios.pipeline_job WHERE status = 'queued'"
     )
     return int(row["cnt"])
+
+
+async def queued_job_counts_by_type(db: Database) -> dict[str, int]:
+    rows = await db.fetch(
+        """
+        SELECT job_type, COUNT(*) AS cnt
+        FROM aios.pipeline_job
+        WHERE status='queued'
+        GROUP BY job_type
+        """
+    )
+    return {str(row["job_type"]): int(row["cnt"]) for row in rows}
+
+
+def stage_admission_capacity(
+    *,
+    stage: Stage,
+    total_queued: int,
+    stage_queued: int,
+    batch_size: int,
+    remaining_cycle: int,
+    soft_cap: int,
+    critical_reserve: int,
+) -> int:
+    stage_capacity = max(0, stage.queue_limit - stage_queued)
+    if stage_capacity <= 0 or remaining_cycle <= 0:
+        return 0
+
+    hard_cap = soft_cap + critical_reserve
+    global_capacity = (
+        max(0, hard_cap - total_queued)
+        if stage.critical
+        else max(0, soft_cap - total_queued)
+    )
+    if global_capacity <= 0:
+        return 0
+
+    return min(
+        batch_size,
+        remaining_cycle,
+        stage_capacity,
+        global_capacity,
+    )
 
 
 # =================================================
@@ -604,13 +879,14 @@ async def enqueue_stage_jobs(
     count = 0
     for row in rows:
         payload = stage.payload_builder(dict(row))
-        await enqueue_job(
+        job_id = await enqueue_job(
             db,
             job_type=stage.job_type,
             payload=payload,
             priority=stage.priority,
         )
-        count += 1
+        if job_id is not None:
+            count += 1
 
     return count
 
@@ -633,25 +909,46 @@ async def run_supervisor() -> None:
     try:
         while True:
             qcnt = await queued_job_count(db)
-            if qcnt >= max_queued_backlog:
-                await asyncio.sleep(poll_interval)
-                continue
+            queued_by_type = await queued_job_counts_by_type(db)
+            critical_reserve = getattr(
+                settings,
+                "supervisor_critical_queue_reserve",
+                128,
+            )
 
             remaining = max_jobs_per_cycle
             scheduled = 0
 
-            for stage in STAGES:
+            # Higher-priority stages get first admission, independent of source
+            # order in STAGES. This keeps prerequisite/HUD work moving while
+            # background projections drain at bounded depth.
+            for stage in sorted(STAGES, key=lambda value: value.priority):
                 if remaining <= 0:
                     break
+
+                stage_queued = queued_by_type.get(stage.job_type, 0)
+                allowed = stage_admission_capacity(
+                    stage=stage,
+                    total_queued=qcnt,
+                    stage_queued=stage_queued,
+                    batch_size=batch_size,
+                    remaining_cycle=remaining,
+                    soft_cap=max_queued_backlog,
+                    critical_reserve=critical_reserve,
+                )
+                if allowed <= 0:
+                    continue
 
                 try:
                     n = await enqueue_stage_jobs(
                         db,
                         stage,
-                        batch_size=min(batch_size, remaining),
+                        batch_size=allowed,
                     )
                     scheduled += n
                     remaining -= n
+                    qcnt += n
+                    queued_by_type[stage.job_type] = stage_queued + n
                 except Exception:
                     logger.exception("Stage '%s' enqueue failed", stage.name)
 

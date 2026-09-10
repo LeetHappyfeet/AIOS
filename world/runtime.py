@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from uuid import UUID
@@ -9,6 +12,30 @@ from aios_app.db import Database
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.hud.frame import HUDAssembler
 from aios_app.hud.render_text import render_hud_text
+from aios_app.hud.readiness import (
+    ensure_readiness_row,
+    enqueue_live_turn_work,
+    readiness_state,
+    save_prepared_snapshot,
+    set_retrieval_ready,
+    source_node_retrieval_ready,
+)
+logger = logging.getLogger("aios.world.runtime")
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if not isinstance(decoded, dict):
+            raise ValueError("expected JSON object")
+        return decoded
+    return dict(value)
+
+
 from aios_app.world.topology import (
     ensure_character_root_world,
     ensure_runtime_branch_world,
@@ -216,6 +243,23 @@ class WorldRuntimeService:
             source_timeline_id,
             source_head_node_id,
         )
+        try:
+            await ensure_readiness_row(self.db, instance_id=instance_id, live=True)
+            if await source_node_retrieval_ready(
+                self.db,
+                instance_id=instance_id,
+                node_id=source_head_node_id,
+            ):
+                await self.prepare_frame(instance_id, wait_ms=0)
+            else:
+                await enqueue_live_turn_work(
+                    self.db,
+                    instance_id=instance_id,
+                    node_id=source_head_node_id,
+                )
+        except Exception:
+            logger.exception("Failed to prewarm HUD for live instance %s", instance_id)
+
         return await self._activation_result(instance_id)
 
     async def get_state(self, instance_id: UUID) -> Dict[str, Any]:
@@ -236,16 +280,124 @@ class WorldRuntimeService:
             raise RuntimeNotFound(f"Unknown runtime instance {instance_id}")
         return dict(row)
 
-    async def build_frame(
+    async def prepare_frame(
         self,
         instance_id: UUID,
         *,
+        through_node_id: Optional[UUID] = None,
         recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
+        wait_ms: int = 1200,
     ) -> Dict[str, Any]:
-        """Coordinate construction of the canonical branch-aware RPG HUD."""
+        """
+        Prepare one generation-consistent HUD snapshot.
+
+        The source DAG cursor is the perceived-input watermark. A snapshot is
+        generation-ready only when retrieval has caught up through that node and
+        runtime state did not change while the frame was assembled.
+        """
+        await ensure_readiness_row(self.db, instance_id=instance_id, live=True)
+        state = await self.get_state(instance_id)
+        target_node_id = through_node_id or state.get("source_head_node_id")
+        ready = await readiness_state(self.db, instance_id=instance_id)
+
+        # A generation retry/swipe may intentionally ask for the exact source
+        # node used by the previous generation after the rendered character
+        # reply has advanced the active source head.  Replaying the retained
+        # prepared snapshot is safe because it does not rebuild against newer
+        # source context and therefore cannot leak the reply being replaced.
+        replay_cached = (
+            through_node_id is not None
+            and through_node_id != state.get("source_head_node_id")
+            and ready.get("prepared_source_node_id") == through_node_id
+            and ready.get("prepared_state_version") == state.get("state_version")
+            and ready.get("hud_json") is not None
+        )
+        if replay_cached:
+            frame = _json_object(ready["hud_json"])
+            frame.setdefault("hud", {})["cache"] = "replayed"
+            freshness = frame["hud"].setdefault("freshness", {})
+            freshness["replayed_snapshot"] = True
+            freshness["active_source_head_node_id"] = (
+                str(state["source_head_node_id"])
+                if state.get("source_head_node_id") else None
+            )
+            freshness["requested_source_node_id"] = str(through_node_id)
+            return frame
+
+        if through_node_id is not None:
+            target = await self.db.fetchrow(
+                "SELECT timeline_id, event_id FROM aios.dag_node WHERE node_id=$1",
+                through_node_id,
+            )
+            head = None
+            if state.get("source_head_node_id"):
+                head = await self.db.fetchrow(
+                    "SELECT timeline_id, event_id FROM aios.dag_node WHERE node_id=$1",
+                    state["source_head_node_id"],
+                )
+            if not target:
+                raise RuntimeNotFound(f"Unknown source node {through_node_id}")
+            if (
+                not head
+                or target["timeline_id"] != state.get("source_timeline_id")
+                or target["event_id"] != head["event_id"]
+                or through_node_id != state.get("source_head_node_id")
+            ):
+                raise RuntimeConflict(
+                    "requested preparation node is not the current active source head"
+                )
+
+        exact_cached = (
+            ready.get("status") == "ready"
+            and ready.get("prepared_source_node_id") == target_node_id
+            and ready.get("prepared_state_version") == state.get("state_version")
+            and ready.get("hud_json") is not None
+        )
+        if exact_cached:
+            frame = _json_object(ready["hud_json"])
+            frame.setdefault("hud", {})["cache"] = "prepared"
+            return frame
+
+        await self.db.execute(
+            """
+            UPDATE aios.character_hud_readiness
+            SET status='preparing', last_error=NULL, updated_at=now()
+            WHERE instance_id=$1
+            """,
+            instance_id,
+        )
+
+        deadline = time.monotonic() + max(0, min(int(wait_ms), 10000)) / 1000.0
+        retrieval_ready = await source_node_retrieval_ready(
+            self.db,
+            instance_id=instance_id,
+            node_id=target_node_id,
+        )
+        while not retrieval_ready:
+            await enqueue_live_turn_work(
+                self.db,
+                instance_id=instance_id,
+                node_id=target_node_id,
+            )
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.03)
+            retrieval_ready = await source_node_retrieval_ready(
+                self.db,
+                instance_id=instance_id,
+                node_id=target_node_id,
+            )
+
+        if retrieval_ready:
+            await set_retrieval_ready(
+                self.db,
+                instance_id=instance_id,
+                node_id=target_node_id,
+            )
+
         try:
-            return await self.hud.build(
+            frame = await self.hud.build(
                 instance_id,
                 recent_limit=recent_limit,
                 token_budget=token_budget,
@@ -253,19 +405,99 @@ class WorldRuntimeService:
         except LookupError as exc:
             raise RuntimeNotFound(str(exc)) from exc
 
+        after = await self.get_state(instance_id)
+        coordinates_stable = (
+            after.get("state_version") == state.get("state_version")
+            and after.get("source_head_node_id") == state.get("source_head_node_id")
+        )
+        # Generation consistency is a coordinate guarantee, not a promise that
+        # every background semantic enrichment stage has completed. A stable
+        # HUD may therefore be used immediately while topology_current remains
+        # false and is upgraded asynchronously on a later preparation.
+        generation_ready = bool(
+            coordinates_stable
+            and after.get("source_head_node_id") == target_node_id
+        )
+        frame.setdefault("hud", {})
+        frame["hud"]["generation_ready"] = generation_ready
+        frame["hud"]["freshness"] = {
+            "runtime_state_version": after.get("state_version"),
+            "source_head_node_id": str(after["source_head_node_id"])
+                if after.get("source_head_node_id") else None,
+            "requested_source_node_id": str(target_node_id) if target_node_id else None,
+            "retrieval_ready_node_id": str(target_node_id)
+                if retrieval_ready and target_node_id else None,
+            "source_current": after.get("source_head_node_id") == target_node_id,
+            "runtime_current": coordinates_stable,
+            "topology_current": retrieval_ready,
+        }
+        frame["hud"]["cache"] = "rebuilt"
+
+        if generation_ready:
+            text = render_hud_text(frame)
+            await save_prepared_snapshot(
+                self.db,
+                instance_id=instance_id,
+                source_node_id=target_node_id,
+                state_version=int(after["state_version"]),
+                hud_json=frame,
+                hud_text=text,
+            )
+        else:
+            await self.db.execute(
+                """
+                UPDATE aios.character_hud_readiness
+                SET status='dirty',
+                    last_error=CASE
+                        WHEN $2 THEN 'runtime/source coordinates changed during HUD assembly'
+                        ELSE 'HUD snapshot was not generation-consistent'
+                    END,
+                    updated_at=now()
+                WHERE instance_id=$1
+                """,
+                instance_id,
+                not coordinates_stable,
+            )
+        return frame
+
+    async def build_frame(
+        self,
+        instance_id: UUID,
+        *,
+        recent_limit: Optional[int] = None,
+        token_budget: Optional[int] = None,
+        wait_ms: int = 1200,
+    ) -> Dict[str, Any]:
+        """Return a prepared HUD when possible, rebuilding only dirty coordinates."""
+        return await self.prepare_frame(
+            instance_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
+            wait_ms=wait_ms,
+        )
+
     async def render_text_frame(
         self,
         instance_id: UUID,
         *,
         recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
+        wait_ms: int = 1200,
     ) -> str:
         """Render exactly the same canonical HUD returned by build_frame()."""
         frame = await self.build_frame(
             instance_id,
             recent_limit=recent_limit,
             token_budget=token_budget,
+            wait_ms=wait_ms,
         )
+        ready = await readiness_state(self.db, instance_id=instance_id)
+        if (
+            frame.get("hud", {}).get("generation_ready")
+            and ready.get("hud_text")
+            and ready.get("prepared_state_version") == frame.get("presence", {}).get("state_version")
+        ):
+            return ready["hud_text"]
         return render_hud_text(frame)
 
     async def apply_action(

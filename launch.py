@@ -19,6 +19,7 @@ from aios_app.config import settings
 
 PYTHON = sys.executable
 DEFAULT_STARTUP_TIMEOUT = float(os.getenv("AIOS_STARTUP_TIMEOUT", "20"))
+CORE_STARTUP_TIMEOUT = float(os.getenv("AIOS_CORE_STARTUP_TIMEOUT", "60"))
 FAILURE_TAIL_LINES = int(os.getenv("AIOS_FAILURE_TAIL_LINES", "20"))
 
 
@@ -30,10 +31,11 @@ SERVICES = [
         "readiness": {"type": "log", "marker": "AIOS_READY service=accumulator"},
     },
     {
-        "name": "RAG",
-        "cmd": [PYTHON, "-m", "aios_app.rag.cli"],
+        "name": "Semantic Index",
+        "cmd": [PYTHON, "-m", "aios_app.semantic_index.cli"],
         "required": False,
-        "readiness": {"type": "log", "marker": "AIOS_READY service=rag"},
+        "startup_timeout": float(os.getenv("AIOS_SEMANTIC_INDEX_STARTUP_TIMEOUT", "120")),
+        "readiness": {"type": "log", "marker": "AIOS_READY service=semantic_index"},
     },
     {
         "name": "Supervisor",
@@ -45,6 +47,7 @@ SERVICES = [
         "name": "Pipeline Runner",
         "cmd": [PYTHON, "-m", "aios_app.runner"],
         "required": True,
+        "startup_timeout": CORE_STARTUP_TIMEOUT,
         "readiness": {"type": "log", "marker": "Pipeline runner started"},
     },
     {
@@ -60,6 +63,7 @@ SERVICES = [
     {
         "name": "API",
         "required": True,
+        "startup_timeout": CORE_STARTUP_TIMEOUT,
         "cmd": [
             PYTHON,
             "-m",
@@ -75,6 +79,22 @@ SERVICES = [
             "url": f"http://127.0.0.1:{settings.api_port}/healthz",
         },
     },
+]
+
+
+STARTUP_STAGES = [
+    (
+        "Core services",
+        {"Accumulator", "Supervisor", "Pipeline Runner", "API"},
+    ),
+    (
+        "UI",
+        {"UI"},
+    ),
+    (
+        "Semantic Index",
+        {"Semantic Index"},
+    ),
 ]
 
 
@@ -196,6 +216,98 @@ def _print_failure_tail(runtime: ServiceRuntime) -> None:
         print(f"  [{runtime.name}] {line}", flush=True)
 
 
+def _start_service(
+    spec: dict,
+    runtimes: List[ServiceRuntime],
+    output_queue: "queue.Queue[tuple[str, str]]",
+) -> ServiceRuntime:
+    process = subprocess.Popen(
+        spec["cmd"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    runtime = ServiceRuntime(
+        spec=spec,
+        process=process,
+        started_at=time.monotonic(),
+    )
+    runtimes.append(runtime)
+    print(
+        _format_state(runtime.name, "STARTING", f"pid={process.pid}"),
+        flush=True,
+    )
+    threading.Thread(
+        target=_stream_output,
+        args=(runtime, output_queue),
+        daemon=True,
+        name=f"aios-launch-{runtime.name}",
+    ).start()
+    return runtime
+
+
+def _wait_for_stage(
+    stage_runtimes: List[ServiceRuntime],
+    all_runtimes: List[ServiceRuntime],
+    output_queue: "queue.Queue[tuple[str, str]]",
+) -> None:
+    runtime_by_name = {runtime.name: runtime for runtime in all_runtimes}
+
+    while any(runtime.state == "STARTING" for runtime in stage_runtimes):
+        _drain_output(output_queue, runtime_by_name)
+        now = time.monotonic()
+
+        for runtime in stage_runtimes:
+            if runtime.state != "STARTING":
+                continue
+
+            code = runtime.process.poll()
+            if code is not None:
+                runtime.state = "FAILED" if runtime.required else "DEGRADED"
+                print(
+                    _format_state(
+                        runtime.name,
+                        runtime.state,
+                        f"exited code={code}",
+                    ),
+                    flush=True,
+                )
+                if runtime.required:
+                    _print_failure_tail(runtime)
+                    raise RuntimeError(
+                        f"{runtime.name} exited during startup with code {code}"
+                    )
+                continue
+
+            if _readiness_probe(runtime):
+                _mark_ready(runtime)
+                continue
+
+            timeout = float(
+                runtime.spec.get("startup_timeout", DEFAULT_STARTUP_TIMEOUT)
+            )
+            if now - runtime.started_at >= timeout:
+                runtime.state = "FAILED" if runtime.required else "DEGRADED"
+                print(
+                    _format_state(
+                        runtime.name,
+                        runtime.state,
+                        f"readiness timeout after {timeout:.1f}s",
+                    ),
+                    flush=True,
+                )
+                if runtime.required:
+                    _print_failure_tail(runtime)
+                    raise RuntimeError(
+                        f"{runtime.name} did not become ready within {timeout:.1f}s"
+                    )
+
+        time.sleep(0.05)
+
+    _drain_output(output_queue, runtime_by_name)
+
+
 def _terminate_all(runtimes: List[ServiceRuntime]) -> None:
     for runtime in runtimes:
         if runtime.process.poll() is not None:
@@ -238,86 +350,18 @@ def main() -> None:
     print("\n🚀 Launching AIOS service processes...\n")
 
     try:
-        for spec in SERVICES:
-            process = subprocess.Popen(
-                spec["cmd"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            runtime = ServiceRuntime(
-                spec=spec,
-                process=process,
-                started_at=time.monotonic(),
-            )
-            runtimes.append(runtime)
-            print(
-                _format_state(runtime.name, "STARTING", f"pid={process.pid}"),
-                flush=True,
-            )
-            threading.Thread(
-                target=_stream_output,
-                args=(runtime, output_queue),
-                daemon=True,
-                name=f"aios-launch-{runtime.name}",
-            ).start()
+        specs_by_name = {str(spec["name"]): spec for spec in SERVICES}
+
+        for stage_name, stage_names in STARTUP_STAGES:
+            print(f"\n▶ Starting {stage_name}...\n", flush=True)
+            stage_runtimes = [
+                _start_service(specs_by_name[name], runtimes, output_queue)
+                for name in stage_names
+            ]
+            print(f"\nWaiting for {stage_name.lower()} readiness...\n", flush=True)
+            _wait_for_stage(stage_runtimes, runtimes, output_queue)
 
         runtime_by_name = {runtime.name: runtime for runtime in runtimes}
-        print("\nWaiting for service readiness...\n", flush=True)
-
-        while any(runtime.state == "STARTING" for runtime in runtimes):
-            _drain_output(output_queue, runtime_by_name)
-            now = time.monotonic()
-
-            for runtime in runtimes:
-                if runtime.state != "STARTING":
-                    continue
-
-                code = runtime.process.poll()
-                if code is not None:
-                    runtime.state = "FAILED" if runtime.required else "DEGRADED"
-                    print(
-                        _format_state(
-                            runtime.name,
-                            runtime.state,
-                            f"exited code={code}",
-                        ),
-                        flush=True,
-                    )
-                    if runtime.required:
-                        _print_failure_tail(runtime)
-                        raise RuntimeError(
-                            f"{runtime.name} exited during startup with code {code}"
-                        )
-                    continue
-
-                if _readiness_probe(runtime):
-                    _mark_ready(runtime)
-                    continue
-
-                timeout = float(
-                    runtime.spec.get("startup_timeout", DEFAULT_STARTUP_TIMEOUT)
-                )
-                if now - runtime.started_at >= timeout:
-                    runtime.state = "FAILED" if runtime.required else "DEGRADED"
-                    print(
-                        _format_state(
-                            runtime.name,
-                            runtime.state,
-                            f"readiness timeout after {timeout:.1f}s",
-                        ),
-                        flush=True,
-                    )
-                    if runtime.required:
-                        _print_failure_tail(runtime)
-                        raise RuntimeError(
-                            f"{runtime.name} did not become ready within {timeout:.1f}s"
-                        )
-
-            time.sleep(0.05)
-
-        _drain_output(output_queue, runtime_by_name)
 
         required = [runtime for runtime in runtimes if runtime.required]
         optional = [runtime for runtime in runtimes if not runtime.required]

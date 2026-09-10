@@ -52,6 +52,8 @@ from aios_app.epistemic.weights import (
 from aios_app.epistemic.knowledge import acquire_document
 from aios_app.epistemic.search import epistemic_search, document_epistemic_summary
 from aios_app.external_observation import persist_external_observation
+from aios_app.hud.readiness import mark_matching_runtime_dirty
+from aios_app.hud.render_text import render_hud_text
 
 logger = logging.getLogger("aios.main")
 
@@ -79,11 +81,13 @@ world_runtime = WorldRuntimeService(db)
 @app.on_event("startup")
 async def startup() -> None:
     await db.connect()
+    await world_runtime.hud.plugin_manager.startup()
     logger.info("Database connected")
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    await world_runtime.hud.plugin_manager.shutdown()
     await db.close()
     logger.info("Database closed")
 
@@ -151,6 +155,15 @@ async def ingest(req: IngestIn) -> IngestOut:
         resolved_viewpoint_id = req.speaker_id
 
     payload: Dict[str, Any] = dict(req.payload or {})
+    client_source = str(payload.get("source") or settings.source_name)
+    source_message_id = payload.get("message_id")
+    source_event_id = (
+        f"{req.speaker_type}:{source_message_id}"
+        if client_source.lower() == "sillytavern" and source_message_id is not None
+        else None
+    )
+    source_kind = "sillytavern_chat" if source_event_id else None
+
     payload.update(
         {
             "text": req.text,
@@ -180,6 +193,8 @@ async def ingest(req: IngestIn) -> IngestOut:
             INSERT INTO aios.ingest_event (
                 event_time,
                 source,
+                source_kind,
+                source_event_id,
                 kind,
                 session_id,
                 speaker_id,
@@ -195,23 +210,27 @@ async def ingest(req: IngestIn) -> IngestOut:
             VALUES (
                 now(),
                 $1,
-                $2::aios.event_kind,
+                $2,
                 $3,
-                $4,
-                $5::aios.actor_type,
+                $4::aios.event_kind,
+                $5,
                 $6,
-                $7,
+                $7::aios.actor_type,
                 $8,
                 $9,
                 $10,
-                $11::jsonb,
-                $12
+                $11,
+                $12,
+                $13::jsonb,
+                $14
             )
             ON CONFLICT (dedupe_key) DO UPDATE
             SET dedupe_key = EXCLUDED.dedupe_key
             RETURNING event_id
             """,
             settings.source_name,
+            source_kind,
+            source_event_id,
             req.kind or "other",
             req.session_id,
             req.speaker_id,
@@ -232,6 +251,20 @@ async def ingest(req: IngestIn) -> IngestOut:
 
     event_id = int(ev["event_id"])
 
+    # Re-selecting a previously seen swipe may hit the text dedupe key and
+    # reuse its immutable event row. Reactivate that row before superseding the
+    # currently selected alternative.
+    if source_event_id:
+        await db.execute(
+            """
+            UPDATE aios.ingest_event
+            SET superseded_at=NULL,
+                superseded_by_event_id=NULL
+            WHERE event_id=$1
+            """,
+            event_id,
+        )
+
     try:
         # -------------------------------------------------
         # Timeline resolution (STRUCTURAL ONLY)
@@ -250,10 +283,60 @@ async def ingest(req: IngestIn) -> IngestOut:
         )
 
         # -------------------------------------------------
+        # Source-slot supersession / DAG branch replacement
+        # -------------------------------------------------
+        # Clients such as SillyTavern reuse one stable message_id while a user
+        # swipes/regenerates alternatives. Preserve every alternative as
+        # immutable provenance, but only the newest alternative remains active.
+        replacement_parent_node_id = None
+        if source_event_id:
+            prior = await db.fetchrow(
+                """
+                SELECT ie.event_id, dn.node_id,
+                       de.parent_node_id
+                FROM aios.ingest_event ie
+                LEFT JOIN aios.dag_node dn ON dn.event_id=ie.event_id
+                LEFT JOIN LATERAL (
+                    SELECT parent_node_id
+                    FROM aios.dag_edge
+                    WHERE child_node_id=dn.node_id
+                    ORDER BY created_at
+                    LIMIT 1
+                ) de ON true
+                WHERE ie.session_id=$1
+                  AND ie.source=$2
+                  AND ie.source_event_id=$3
+                  AND ie.event_id<>$4
+                  AND ie.superseded_at IS NULL
+                ORDER BY ie.event_id DESC
+                LIMIT 1
+                """,
+                req.session_id,
+                settings.source_name,
+                source_event_id,
+                event_id,
+            )
+            if prior:
+                replacement_parent_node_id = prior["parent_node_id"]
+                await db.execute(
+                    """
+                    UPDATE aios.ingest_event
+                    SET superseded_at=now(),
+                        superseded_by_event_id=$2
+                    WHERE event_id=$1
+                      AND superseded_at IS NULL
+                    """,
+                    prior["event_id"],
+                    event_id,
+                )
+                payload["supersedes_event_id"] = int(prior["event_id"])
+                payload["source_branch_mode"] = "replacement"
+
+        # -------------------------------------------------
         # DAG append
         # -------------------------------------------------
-        # add_node_and_edge also flips the durable DAG stage latch on the
-        # originating ingest_event.
+        # Replacement alternatives attach to the same parent as the message
+        # they supersede instead of chaining after the discarded response.
         node_id, _ = await add_node_and_edge(
             db,
             timeline_id=timeline_id,
@@ -266,7 +349,8 @@ async def ingest(req: IngestIn) -> IngestOut:
             message_text=message_text,
             payload=payload,
             viewpoint_id=resolved_viewpoint_id,
-            edge_type="next",
+            parent_node_id=replacement_parent_node_id,
+            edge_type="alternative" if replacement_parent_node_id else "next",
         )
 
         # -------------------------------------------------
@@ -298,14 +382,17 @@ async def ingest(req: IngestIn) -> IngestOut:
                         AND rw.anchor_timeline_id=$1
                     )
                   )
-              AND COALESCE(
-                    (
-                        SELECT dn.event_id
-                        FROM aios.dag_node dn
-                        WHERE dn.node_id=rs.source_head_node_id
-                    ),
-                    -1
-                  ) <= $7
+              AND (
+                    COALESCE(
+                        (
+                            SELECT dn.event_id
+                            FROM aios.dag_node dn
+                            WHERE dn.node_id=rs.source_head_node_id
+                        ),
+                        -1
+                    ) <= $7
+                    OR $8::boolean
+                  )
             """,
             timeline_id,
             node_id,
@@ -314,6 +401,18 @@ async def ingest(req: IngestIn) -> IngestOut:
             req.user_name,
             req.scope_key or settings.default_scope,
             event_id,
+            bool(source_event_id),
+        )
+
+        await mark_matching_runtime_dirty(
+            db,
+            character_id=req.character_id,
+            session_id=req.session_id,
+            user_name=req.user_name,
+            scope_key=req.scope_key or settings.default_scope,
+            source_timeline_id=timeline_id,
+            source_head_node_id=node_id,
+            source_head_event_id=event_id,
         )
     except Exception as exc:
         await db.execute(
@@ -434,6 +533,7 @@ async def get_instance_frame(
     instance_id: UUID,
     recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
+    wait_ms: int = 1200,
 ):
     """Build the canonical branch-aware RPG HUD for this runtime instance."""
     try:
@@ -441,7 +541,46 @@ async def get_instance_frame(
             instance_id,
             recent_limit=recent_limit,
             token_budget=token_budget,
+            wait_ms=wait_ms,
         )
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+
+
+@app.post("/instance/{instance_id}/prepare")
+async def prepare_instance_frame(
+    instance_id: UUID,
+    through_node_id: Optional[UUID] = None,
+    recent_limit: Optional[int] = None,
+    token_budget: Optional[int] = None,
+    wait_ms: int = 2500,
+):
+    """
+    Prepare a generation-consistent HUD through an exact source DAG node.
+
+    This advances only latency-critical retrieval work. Background RDF,
+    narrative clustering, web accumulation, and unrelated instances are not
+    part of the generation barrier.
+    """
+    try:
+        frame = await world_runtime.prepare_frame(
+            instance_id,
+            through_node_id=through_node_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
+            wait_ms=wait_ms,
+        )
+        return {
+            "instance_id": instance_id,
+            "generation_ready": bool(frame.get("hud", {}).get("generation_ready")),
+            "freshness": frame.get("hud", {}).get("freshness", {}),
+            "frame": frame,
+            "text": render_hud_text(frame),
+        }
+    except RuntimeConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -528,15 +667,20 @@ async def get_instance_text_frame(
     instance_id: UUID,
     recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
+    wait_ms: int = 1200,
 ):
     try:
+        frame = await world_runtime.build_frame(
+            instance_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
+            wait_ms=wait_ms,
+        )
         return {
             "instance_id": instance_id,
-            "text": await world_runtime.render_text_frame(
-                instance_id,
-                recent_limit=recent_limit,
-                token_budget=token_budget,
-            ),
+            "generation_ready": bool(frame.get("hud", {}).get("generation_ready")),
+            "freshness": frame.get("hud", {}).get("freshness", {}),
+            "text": render_hud_text(frame),
         }
     except RuntimeNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

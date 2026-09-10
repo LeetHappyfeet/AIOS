@@ -14,6 +14,58 @@ def _name(value: Mapping[str, Any]) -> str:
     )
 
 
+def _render_plugin_field(field: Mapping[str, Any]) -> str:
+    label = str(field.get("label") or field.get("key") or "value")
+    value = field.get("value")
+    field_type = str(field.get("field_type") or "text")
+    unit = field.get("unit")
+
+    if field_type == "gauge":
+        minimum = field.get("minimum")
+        maximum = field.get("maximum")
+        if minimum is not None and maximum is not None:
+            rendered = f"{value} / {maximum}"
+        else:
+            rendered = str(value)
+    else:
+        rendered = str(value)
+
+    if unit:
+        rendered = f"{rendered} {unit}"
+    return f"{label}: {rendered}"
+
+
+
+def _knowledge_annotation(item: Mapping[str, Any]) -> str:
+    anchor = item.get("anchor") or {}
+    if not anchor:
+        return ""
+
+    relationship = str(anchor.get("relationship") or "references").replace("_", " ")
+    target_label = anchor.get("target_label")
+    visible = bool(anchor.get("world_visible"))
+
+    bits = [relationship]
+    if target_label:
+        bits.append(f"about {target_label}")
+
+    if visible:
+        labels = []
+        for entry in item.get("world_context") or []:
+            label = entry.get("label")
+            if not label or label == target_label or label in labels:
+                continue
+            labels.append(str(label))
+            if len(labels) >= 3:
+                break
+        if labels:
+            bits.append("context: " + ", ".join(labels))
+    else:
+        bits.append("anchored context outside visible world; neighbors withheld")
+
+    return " [" + "; ".join(bits) + "]"
+
+
 def render_hud_text(frame: Mapping[str, Any]) -> str:
     """Deterministically render the canonical HUD JSON into an LLM-facing surface."""
 
@@ -50,6 +102,16 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if emotional:
         lines.append("Emotion: " + ", ".join(f"{k}={v}" for k, v in emotional.items()))
 
+    plugin_sections = frame.get("plugin_sections") or []
+    for section in plugin_sections:
+        title = str(section.get("title") or section.get("key") or "PLUGIN")
+        fields = section.get("fields") or []
+        if not fields:
+            continue
+        lines.append(f"\n{title.upper()}:")
+        for field in fields:
+            lines.append("- " + _render_plugin_field(field))
+
     actors = scene.get("actors") or []
     objects = scene.get("objects") or []
     if actors:
@@ -85,7 +147,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if memories:
         lines.append("\nACTIVE MEMORY:")
         for item in memories:
-            lines.append(f"- {item.get('text', '')}")
+            lines.append(f"-{_knowledge_annotation(item)} {item.get('text', '')}")
 
     beliefs = frame.get("beliefs") or []
     if beliefs:
@@ -94,7 +156,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             status = item.get("epistemic_status") or "known"
             confidence = item.get("effective_confidence")
             suffix = f" confidence={confidence:.2f}" if isinstance(confidence, (float, int)) else ""
-            lines.append(f"- [{status}{suffix}] {item.get('text', '')}")
+            lines.append(
+                f"- [{status}{suffix}]{_knowledge_annotation(item)} {item.get('text', '')}"
+            )
             for conflict in item.get("conflicts") or []:
                 lines.append(f"  ! conflicts with: {conflict.get('text', '')}")
 
@@ -103,14 +167,15 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("\nGOALS:")
         for goal in goals:
             text = goal.get("text") if isinstance(goal, dict) else str(goal)
-            lines.append(f"- {text}")
+            annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
+            lines.append(f"-{annotation} {text}")
 
     rules = frame.get("rules") or []
     if rules:
         lines.append("\nWORLD RULES:")
         for rule in rules:
             text = rule.get("text") or rule.get("rule_key") or str(rule)
-            lines.append(f"- {text}")
+            lines.append(f"-{_knowledge_annotation(rule)} {text}")
 
     recent = frame.get("recent_events") or []
     if recent:

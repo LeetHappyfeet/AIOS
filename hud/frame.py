@@ -9,7 +9,10 @@ from aios_app.db import Database
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
 from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.profile import get_profile as get_hud_profile
+from aios_app.plugins.manager import PluginManager
+from aios_app.plugins.types import PluginRuntimeContext
 
 
 @dataclass(frozen=True)
@@ -85,10 +88,18 @@ class HUDAssembler:
     Relevance only ranks candidates that have already crossed those boundaries.
     """
 
-    def __init__(self, db: Database, *, budget: Optional[HUDBudget] = None):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        budget: Optional[HUDBudget] = None,
+        plugin_manager: Optional[PluginManager] = None,
+    ):
         self.db = db
         self.context_resolver = HUDContextResolver(db)
+        self.retriever = TopologyRetriever(db)
         self.budget = budget or HUDBudget()
+        self.plugin_manager = plugin_manager or PluginManager()
 
     async def build(
         self,
@@ -99,6 +110,18 @@ class HUDAssembler:
     ) -> dict[str, Any]:
         context = await self.context_resolver.resolve(instance_id)
         raw_state = await self._runtime_state(instance_id)
+        plugin_snapshot = await self.plugin_manager.collect(
+            PluginRuntimeContext(
+                instance_id=context.instance_id,
+                character_id=context.character_id,
+                entity_id=context.entity_id,
+                world_id=context.world_id,
+                world_key=context.world_key,
+                timeline_id=context.timeline_id,
+                location_entity_id=context.location_entity_id,
+                raw_state=raw_state,
+            )
+        )
         hud_profile = await get_hud_profile(
             self.db,
             character_id=context.character_id,
@@ -135,10 +158,12 @@ class HUDAssembler:
                 SELECT dn.node_id, dn.event_id, dn.event_time, dn.speaker_id,
                        dn.speaker_role, dn.message_text, dn.payload
                 FROM aios.dag_node dn
+                JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
                 JOIN aios.dag_node source_head
                   ON source_head.node_id=$2
                  AND source_head.timeline_id=$1
                 WHERE dn.timeline_id=$1
+                  AND ie.superseded_at IS NULL
                   AND dn.event_id <= source_head.event_id
                 ORDER BY dn.event_id DESC
                 LIMIT $3
@@ -168,7 +193,23 @@ class HUDAssembler:
             "",
         )
         goals = list(_json_value(raw_state.get("goals"), []))
-        scorer = HUDRelevanceScorer(context, focus_text=focus_text, goals=goals)
+        plugin_focus_text = " ".join(
+            str(signal.get("focus_text") or "")
+            for signal in sorted(
+                plugin_snapshot.get("retrieval_signals") or [],
+                key=lambda item: float(item.get("strength") or 0.0),
+                reverse=True,
+            )
+            if signal.get("focus_text")
+        )
+        retrieval_focus_text = " ".join(
+            part for part in (focus_text, plugin_focus_text) if part
+        )
+        scorer = HUDRelevanceScorer(
+            context,
+            focus_text=retrieval_focus_text,
+            goals=goals,
+        )
 
         section_caps = {
             "scene": hud_profile.scene_budget,
@@ -206,7 +247,118 @@ class HUDAssembler:
             if hud_profile.include_inventory
             else []
         )
-        knowledge = await self._knowledge(context, scorer)
+        topology_memories = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="memory",
+            focus_text=retrieval_focus_text,
+            goals=goals,
+            max_hops=max(
+                3 if hud_profile.deep_memory_limit > 0 else 2,
+                int(hud_profile.entity_hops),
+            ),
+            limit=min(
+                250,
+                hud_profile.semantic_retrieval_limit + max(0, hud_profile.deep_memory_limit),
+            ),
+        )
+        topology_beliefs = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="belief",
+            focus_text=retrieval_focus_text,
+            goals=goals,
+            max_hops=max(2, int(hud_profile.entity_hops)),
+            limit=hud_profile.semantic_retrieval_limit,
+        )
+        topology_goals = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="goal",
+            focus_text=retrieval_focus_text,
+            goals=goals,
+            max_hops=max(1, int(hud_profile.entity_hops)),
+            limit=min(hud_profile.semantic_retrieval_limit, 30),
+        )
+        topology_events = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="event",
+            focus_text=retrieval_focus_text,
+            goals=goals,
+            max_hops=max(2, int(hud_profile.entity_hops)),
+            limit=min(hud_profile.semantic_retrieval_limit, 40),
+        )
+        topology_rules = await self.retriever.retrieve_character_knowledge(
+            context,
+            scorer,
+            mode="rule",
+            focus_text=retrieval_focus_text,
+            goals=goals,
+            max_hops=max(1, int(hud_profile.entity_hops)),
+            limit=min(hud_profile.semantic_retrieval_limit, 30),
+        )
+
+        topology_knowledge = (
+            topology_memories
+            + topology_beliefs
+            + topology_goals
+            + topology_events
+            + topology_rules
+        )
+
+        # Projection is asynchronous and may be partially complete. Fill only
+        # missing semantic sections from authoritative flat character knowledge;
+        # topology-ranked sections keep priority whenever they exist.
+        missing_modes = {
+            "memory": not topology_memories,
+            "belief": not topology_beliefs,
+            "goal": not topology_goals,
+            "event": not topology_events,
+            "rule": not topology_rules,
+        }
+        legacy_knowledge = (
+            await self._knowledge(context, scorer)
+            if any(missing_modes.values())
+            else []
+        )
+
+        merged = list(topology_knowledge)
+        for item in legacy_knowledge:
+            kind = str(item.get("claim_kind") or "BELIEF").upper()
+            if (
+                (kind == "MEMORY" and missing_modes["memory"])
+                or (kind == "EVENT" and (missing_modes["memory"] or missing_modes["event"]))
+                or (kind == "GOAL" and missing_modes["goal"])
+                or (kind == "RULE" and missing_modes["rule"])
+                or (
+                    kind not in {"MEMORY", "RELATIONSHIP", "EVENT", "GOAL", "RULE"}
+                    and missing_modes["belief"]
+                )
+            ):
+                merged.append(item)
+
+        seen: set[Any] = set()
+        knowledge = []
+        for item in merged:
+            proposition_id = item.get("proposition_id")
+            if proposition_id in seen:
+                continue
+            seen.add(proposition_id)
+            knowledge.append(item)
+
+        anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
+        visible_world_context_count = sum(
+            len(item.get("world_context") or [])
+            for item in knowledge
+            if item.get("anchor", {}).get("world_visible")
+        )
+        invisible_anchor_count = sum(
+            1
+            for item in knowledge
+            if item.get("anchor") and not item["anchor"].get("world_visible", False)
+        )
+
         if not hud_profile.include_conflicts:
             for item in knowledge:
                 item["conflicts"] = []
@@ -214,9 +366,26 @@ class HUDAssembler:
             for item in knowledge:
                 for key in (
                     "source_entity_id", "source_world_id", "source_node_id",
-                    "acquisition_mode", "predicate_family",
+                    "acquisition_mode", "predicate_family", "topology",
                 ):
                     item.pop(key, None)
+                anchor = item.get("anchor")
+                if anchor:
+                    item["anchor"] = {
+                        "relationship": anchor.get("relationship"),
+                        "target_type": anchor.get("target_type"),
+                        "target_label": anchor.get("target_label"),
+                        "world_visible": bool(anchor.get("world_visible")),
+                    }
+                if item.get("world_context"):
+                    item["world_context"] = [
+                        {
+                            "node_type": entry.get("node_type"),
+                            "label": entry.get("label"),
+                            "edge_type": entry.get("edge_type"),
+                        }
+                        for entry in item["world_context"]
+                    ]
         if not hud_profile.include_confidence:
             for item in knowledge:
                 for key in (
@@ -341,19 +510,39 @@ class HUDAssembler:
             "goals": goal_items,
             "rules": rule_items,
             "recent_events": event_items,
-            "actions": ["speak", "move", "inspect", "use_item", "wait", "custom"],
+            "plugins": plugin_snapshot.get("plugins") or {},
+            "plugin_sections": plugin_snapshot.get("sections") or [],
+            "actions": [
+                "speak", "move", "inspect", "use_item", "wait", "custom",
+                *[
+                    str(action.get("key"))
+                    for action in (plugin_snapshot.get("actions") or [])
+                    if action.get("key")
+                ],
+            ],
             "hud": {
                 "version": "hud-v1",
                 "profile_id": hud_profile.profile_id,
                 "profile_name": hud_profile.profile_name,
-                "selection": "branch-aware/entity-centered/deterministic",
+                "selection": "branch-aware/topology-guided/entity-centered/deterministic",
                 "token_budget": resolved_total,
                 "section_token_budgets": section_caps,
                 "world_lineage": list(context.lineage_world_ids),
+                "instance_lineage": list(context.lineage_instance_ids),
+                "topology_retrieval": bool(topology_knowledge),
+                "topology_partial_fallback": bool(legacy_knowledge),
+                "anchor_retrieval": anchored_knowledge_count > 0,
+                "anchor_partial_fallback": bool(knowledge) and anchored_knowledge_count < len(knowledge),
+                "anchor_count": anchored_knowledge_count,
+                "anchor_invisible_count": invisible_anchor_count,
+                "world_context_count": visible_world_context_count,
                 "source_cursor_bounded": bool(
                     context.source_timeline_id and context.source_head_node_id
                 ),
                 "focus_text": focus_text,
+                "plugin_focus_text": plugin_focus_text,
+                "plugin_status": plugin_snapshot.get("status") or {},
+                "plugin_retrieval_signals": plugin_snapshot.get("retrieval_signals") or [],
             },
         }
 
@@ -636,6 +825,18 @@ class HUDAssembler:
                    OR pc.proposition_b_id=p.proposition_id
             ) conflicts ON true
             WHERE ck.instance_id=$1
+              AND EXISTS (
+                  SELECT 1
+                  FROM aios.knowledge_acquisition_event kae
+                  LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+                  LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                  LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+                  LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                  LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+                  WHERE kae.instance_id=ck.instance_id
+                    AND kae.proposition_id=ck.proposition_id
+                    AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+              )
             ORDER BY ck.updated_at DESC
             LIMIT 250
             """,

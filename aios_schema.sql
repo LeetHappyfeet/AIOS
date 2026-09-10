@@ -1554,6 +1554,41 @@ CREATE INDEX idx_semantic_topology_projection_acquisition ON aios.semantic_topol
 
 
 --
+-- Live HUD generation readiness (2026-09-06)
+--
+
+CREATE TABLE aios.character_hud_readiness (
+    instance_id uuid NOT NULL,
+    source_timeline_id uuid,
+    source_head_node_id uuid,
+    source_head_event_id bigint,
+    retrieval_ready_node_id uuid,
+    retrieval_ready_event_id bigint,
+    prepared_source_node_id uuid,
+    prepared_source_event_id bigint,
+    prepared_state_version bigint,
+    status text DEFAULT 'dirty'::text NOT NULL,
+    live boolean DEFAULT false NOT NULL,
+    dirty_since timestamp with time zone,
+    prepared_at timestamp with time zone,
+    last_error text,
+    hud_json jsonb,
+    hud_text text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT character_hud_readiness_pkey PRIMARY KEY (instance_id),
+    CONSTRAINT character_hud_readiness_status_check CHECK ((status = ANY (ARRAY['cold'::text, 'dirty'::text, 'preparing'::text, 'ready'::text, 'error'::text]))),
+    CONSTRAINT character_hud_readiness_instance_id_fkey FOREIGN KEY (instance_id) REFERENCES aios.character_instance(instance_id) ON DELETE CASCADE,
+    CONSTRAINT character_hud_readiness_source_timeline_id_fkey FOREIGN KEY (source_timeline_id) REFERENCES aios.timeline(timeline_id) ON DELETE SET NULL,
+    CONSTRAINT character_hud_readiness_source_head_node_id_fkey FOREIGN KEY (source_head_node_id) REFERENCES aios.dag_node(node_id) ON DELETE SET NULL,
+    CONSTRAINT character_hud_readiness_retrieval_ready_node_id_fkey FOREIGN KEY (retrieval_ready_node_id) REFERENCES aios.dag_node(node_id) ON DELETE SET NULL,
+    CONSTRAINT character_hud_readiness_prepared_source_node_id_fkey FOREIGN KEY (prepared_source_node_id) REFERENCES aios.dag_node(node_id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_character_hud_readiness_live ON aios.character_hud_readiness USING btree (live, status, updated_at DESC);
+CREATE INDEX idx_character_hud_readiness_source ON aios.character_hud_readiness USING btree (source_timeline_id, source_head_event_id);
+
+
+--
 -- PostgreSQL database dump complete
 --
 

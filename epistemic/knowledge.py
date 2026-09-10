@@ -8,6 +8,25 @@ from aios_app.db import Database
 from .weights import calculate_weights
 
 
+def _json_object(value: object) -> dict:
+    """Normalize asyncpg JSON/JSONB results to a Python mapping."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        if decoded is None:
+            return {}
+        if not isinstance(decoded, dict):
+            raise ValueError("expected JSON object metadata")
+        return decoded
+    try:
+        return dict(value)  # asyncpg codecs/custom mappings may already be mapping-like
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expected object-like metadata") from exc
+
+
 async def record_acquisition(
     db: Database,
     *,
@@ -70,16 +89,32 @@ async def project_knowledge_acquisitions_once(
     db: Database,
     *,
     limit: int = 200,
+    instance_id: Optional[UUID] = None,
 ) -> int:
     rows = await db.fetch(
         """
         SELECT *
         FROM aios.knowledge_acquisition_event
         WHERE processed_at IS NULL
+          AND ($2::uuid IS NULL OR instance_id=$2)
+          AND (
+              claim_id IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM aios.claim_candidate cc
+                  JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                  JOIN aios.document_section ds ON ds.section_id=es.section_id
+                  JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                  JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+                  WHERE cc.claim_id=aios.knowledge_acquisition_event.claim_id
+                    AND ie.superseded_at IS NULL
+              )
+          )
         ORDER BY created_at
         LIMIT $1
         """,
         limit,
+        instance_id,
     )
     projected = 0
 
@@ -94,7 +129,7 @@ async def project_knowledge_acquisitions_once(
                 continue
             proposition_id = obs["proposition_id"]
 
-        acquisition_meta = dict(row["meta"] or {})
+        acquisition_meta = _json_object(row["meta"])
         source = await db.fetchrow(
             """
             SELECT o.source_key
@@ -154,7 +189,7 @@ async def project_knowledge_acquisitions_once(
             row["dag_node_id"],
             row["created_at"],
             json.dumps({
-                **(row["meta"] or {}),
+                **acquisition_meta,
                 "weight_profile_character_id": weights["profile_character_id"],
             }),
             weights["base_confidence"],

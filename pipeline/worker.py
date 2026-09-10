@@ -25,18 +25,28 @@ WORKER_VERSION = "v4-spacy-sections"
 # spaCy
 # =================================================
 
-NLP = spacy.load("en_core_web_sm", disable=["ner", "textcat"])
+_NLP = None
+
+
+def _get_nlp():
+    """Load spaCy on first claim-extraction work, not during runner startup."""
+    global _NLP
+    if _NLP is None:
+        logger.info("Loading spaCy model en_core_web_sm for claim extraction")
+        _NLP = spacy.load("en_core_web_sm", disable=["ner", "textcat"])
+        logger.info("spaCy claim extraction model ready")
+    return _NLP
 
 
 def split_sentences(text: str) -> List[str]:
     if not text:
         return []
-    doc = NLP(text)
+    doc = _get_nlp()(text)
     return [s.text.strip() for s in doc.sents if s.text.strip()]
 
 
 def extract_spo(sentence: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    doc = NLP(sentence)
+    doc = _get_nlp()(sentence)
 
     subject = predicate = obj = None
     root = doc[:].root

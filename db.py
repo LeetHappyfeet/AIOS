@@ -2,13 +2,16 @@
 
 import json
 import asyncpg
+from contextlib import asynccontextmanager
 from typing import Optional, Any, Dict
 from uuid import UUID
 
 
 class Database:
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 24):
         self._dsn = dsn
+        self._min_size = min_size
+        self._max_size = max_size
         self.pool: Optional[asyncpg.Pool] = None
 
     # -------------------------------------------------
@@ -18,14 +21,21 @@ class Database:
     async def connect(self) -> None:
         self.pool = await asyncpg.create_pool(
             dsn=self._dsn,
-            min_size=1,
-            max_size=10,
+            min_size=self._min_size,
+            max_size=self._max_size,
         )
 
     async def close(self) -> None:
         if self.pool:
             await self.pool.close()
             self.pool = None
+
+    @asynccontextmanager
+    async def connection(self):
+        """Hold one pooled PostgreSQL session across a critical section."""
+        assert self.pool
+        async with self.pool.acquire() as con:
+            yield con
 
     # -------------------------------------------------
     # Basic query helpers

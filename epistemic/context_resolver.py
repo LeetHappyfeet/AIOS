@@ -10,7 +10,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
 
-RESOLVER_VERSION = "context-resolver-v1"
+RESOLVER_VERSION = "context-resolver-v3"
 DATASET = "world"
 LIMINAL_GRAPH = "urn:aios:world:liminal"
 RDF_RECEIPT_PREDICATE = "world:contextResolverVersion"
@@ -328,7 +328,7 @@ async def resolve_claim_context(
         "SELECT * FROM aios.claim_context_resolution WHERE claim_id=$1",
         claim_id,
     )
-    if existing:
+    if existing and existing["resolver_version"] == RESOLVER_VERSION:
         context = ClaimContext(
             claim_id=claim_id,
             claim_kind=existing["claim_kind"],
@@ -375,8 +375,25 @@ async def resolve_claim_context(
     row = await db.fetchrow(
         """
         SELECT
-            cc.claim_id, cc.subject, cc.predicate, cc.object, cc.raw_text,
+            cc.claim_id,
+            COALESCE(sf.resolved_subject, sf.subject_text, cc.subject) AS subject,
+            COALESCE(sf.predicate_canonical, cc.predicate) AS predicate,
+            CASE
+                WHEN sf.frame_id IS NOT NULL
+                    THEN COALESCE(sf.resolved_object, sf.object_text, child_sf.canonical_text)
+                ELSE cc.object
+            END AS object,
+            cc.raw_text,
             cc.confidence, cc.extraction_rule,
+            sf.frame_id AS semantic_frame_id,
+            sf.frame_confidence,
+            sf.predicate_confidence,
+            sf.entity_confidence,
+            sf.referent_confidence,
+            sf.subject_kind_guess AS semantic_subject_kind,
+            sf.object_kind_guess AS semantic_object_kind,
+            sf.resolution_status AS frame_resolution_status,
+            sf.discourse_mode,
             n.node_id, n.timeline_id, n.kind::text AS node_kind,
             n.character_id, n.speaker_id, n.speaker_role::text AS speaker_role,
             n.recipient_id,
@@ -391,15 +408,32 @@ async def resolve_claim_context(
             ie.source_kind AS explicit_source_kind,
             ie.target_character_id,
             ie.target_world_id,
-            (
-                SELECT ci.instance_id
-                FROM aios.character_instance ci
-                WHERE ci.character_id=n.character_id
-                  AND ci.world_id=t.world_id
-                ORDER BY
-                    CASE WHEN ci.current_world_id=t.world_id THEN 0 ELSE 1 END,
-                    ci.created_at
-                LIMIT 1
+            COALESCE(
+                (
+                    SELECT ci.instance_id
+                    FROM aios.character_instance ci
+                    JOIN aios.character_runtime_state rs
+                      ON rs.instance_id=ci.instance_id
+                    JOIN aios.timeline rt
+                      ON rt.timeline_id=rs.timeline_id
+                    WHERE ci.character_id=n.character_id
+                      AND rs.source_timeline_id=n.timeline_id
+                      AND rt.session_id IS NOT DISTINCT FROM t.session_id
+                      AND rt.user_name IS NOT DISTINCT FROM t.user_name
+                      AND rt.scope_key=t.scope_key
+                    ORDER BY rs.updated_at DESC, ci.created_at DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT ci.instance_id
+                    FROM aios.character_instance ci
+                    WHERE ci.character_id=n.character_id
+                      AND ci.world_id=t.world_id
+                    ORDER BY
+                        CASE WHEN ci.current_world_id=t.world_id THEN 0 ELSE 1 END,
+                        ci.created_at
+                    LIMIT 1
+                )
             ) AS character_instance_id
         FROM aios.claim_candidate cc
         JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
@@ -408,6 +442,9 @@ async def resolve_claim_context(
         LEFT JOIN aios.timeline t ON t.timeline_id=n.timeline_id
         LEFT JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         LEFT JOIN aios.source_document sd ON sd.document_id=ds.document_id
+        LEFT JOIN aios.claim_semantic_frame_projection sfp ON sfp.claim_id=cc.claim_id
+        LEFT JOIN aios.claim_semantic_frame sf ON sf.frame_id=sfp.primary_frame_id
+        LEFT JOIN aios.claim_semantic_frame child_sf ON child_sf.frame_id=sf.object_frame_id
         WHERE cc.claim_id=$1
         """,
         claim_id,
@@ -421,13 +458,21 @@ async def resolve_claim_context(
     subject_known_character = await _known_character(db, row["subject"])
     object_known_character = await _known_character(db, row["object"])
 
-    subject_kind = classify_entity_kind(
-        row["subject"], role="subject", predicate_family=family,
-        is_known_character=subject_known_character,
+    subject_kind = (
+        row["semantic_subject_kind"]
+        if row["semantic_subject_kind"] not in {None, "UNKNOWN"}
+        else classify_entity_kind(
+            row["subject"], role="subject", predicate_family=family,
+            is_known_character=subject_known_character,
+        )
     )
-    object_kind = classify_entity_kind(
-        row["object"], role="object", predicate_family=family,
-        is_known_character=object_known_character,
+    object_kind = (
+        row["semantic_object_kind"]
+        if row["semantic_object_kind"] not in {None, "UNKNOWN"}
+        else classify_entity_kind(
+            row["object"], role="object", predicate_family=family,
+            is_known_character=object_known_character,
+        )
     )
 
     origin_character_id = row["character_id"]
@@ -439,9 +484,17 @@ async def resolve_claim_context(
         speaker_type=speaker_type,
         origin_character_id=origin_character_id,
     )
-    epistemic_scope = "character" if viewpoint_id == origin_character_id and origin_character_id else (
-        "speaker" if viewpoint_id else "source"
-    )
+    discourse_mode = row["discourse_mode"] or "narrated_observation"
+    if (
+        discourse_mode in {"character_mental_state", "character_speech"}
+        and viewpoint_id == origin_character_id
+        and origin_character_id
+    ):
+        epistemic_scope = "character"
+    elif discourse_mode == "narrated_observation" and row["node_kind"] == "chat_message":
+        epistemic_scope = "narrative"
+    else:
+        epistemic_scope = "speaker" if viewpoint_id else "source"
 
     source_kind = row["explicit_source_kind"] or row["source_type"] or row["ingest_source"]
     acquisition_mode = infer_acquisition_mode(
@@ -458,8 +511,14 @@ async def resolve_claim_context(
         value not in {None, "UNKNOWN"}
         for value in (claim_kind, family, subject_kind, object_kind)
     ) / 4.0
-    extraction_score = max(0.0, min(1.0, float(row["confidence"] or 0.0)))
-    confidence = min(1.0, 0.50 * lineage_score + 0.35 * semantic_score + 0.15 * extraction_score)
+    extraction_score = max(
+        0.0,
+        min(
+            1.0,
+            float(row["frame_confidence"] or row["confidence"] or 0.0),
+        ),
+    )
+    confidence = min(1.0, 0.45 * lineage_score + 0.40 * semantic_score + 0.15 * extraction_score)
 
     context = ClaimContext(
         claim_id=claim_id,
@@ -501,7 +560,31 @@ async def resolve_claim_context(
             $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
             $21,$22,$23,$24::jsonb
         )
-        ON CONFLICT (claim_id) DO NOTHING
+        ON CONFLICT (claim_id) DO UPDATE
+        SET claim_kind=EXCLUDED.claim_kind,
+            subject_kind=EXCLUDED.subject_kind,
+            object_kind=EXCLUDED.object_kind,
+            predicate_family=EXCLUDED.predicate_family,
+            origin_character_id=EXCLUDED.origin_character_id,
+            character_instance_id=EXCLUDED.character_instance_id,
+            speaker_id=EXCLUDED.speaker_id,
+            speaker_type=EXCLUDED.speaker_type,
+            viewpoint_id=EXCLUDED.viewpoint_id,
+            source_id=EXCLUDED.source_id,
+            source_kind=EXCLUDED.source_kind,
+            target_character_id=EXCLUDED.target_character_id,
+            target_world_id=EXCLUDED.target_world_id,
+            world_id=EXCLUDED.world_id,
+            timeline_id=EXCLUDED.timeline_id,
+            dag_node_id=EXCLUDED.dag_node_id,
+            epistemic_scope=EXCLUDED.epistemic_scope,
+            acquisition_mode=EXCLUDED.acquisition_mode,
+            subject_is_pivot=EXCLUDED.subject_is_pivot,
+            object_is_pivot=EXCLUDED.object_is_pivot,
+            confidence=EXCLUDED.confidence,
+            resolver_version=EXCLUDED.resolver_version,
+            meta=EXCLUDED.meta,
+            resolved_at=now()
         """,
         claim_id, claim_kind, subject_kind, object_kind, family,
         origin_character_id, context.character_instance_id,
@@ -510,7 +593,16 @@ async def resolve_claim_context(
         context.target_world_id, context.world_id, context.timeline_id,
         context.dag_node_id, epistemic_scope, acquisition_mode,
         context.subject_is_pivot, context.object_is_pivot, confidence,
-        RESOLVER_VERSION, json.dumps(context.as_meta()),
+        RESOLVER_VERSION, json.dumps({
+            **context.as_meta(),
+            "semantic_frame_id": str(row["semantic_frame_id"]) if row["semantic_frame_id"] else None,
+            "frame_resolution_status": row["frame_resolution_status"],
+            "discourse_mode": row["discourse_mode"],
+            "frame_confidence": float(row["frame_confidence"] or 0.0),
+            "predicate_confidence": float(row["predicate_confidence"] or 0.0),
+            "entity_confidence": float(row["entity_confidence"] or 0.0),
+            "referent_confidence": float(row["referent_confidence"] or 0.0),
+        }),
     )
 
     await _write_liminal_context(fuseki, context)
@@ -527,7 +619,11 @@ async def _log_rdf_context(db: Database, context: ClaimContext) -> None:
             rdf_predicate, rdf_object, promoted_by, promotion_meta
         )
         VALUES ($1,$2,$3,$4,$5,$6,'context_resolver',$7::jsonb)
-        ON CONFLICT (claim_id, rdf_dataset, rdf_graph, rdf_predicate) DO NOTHING
+        ON CONFLICT (claim_id, rdf_dataset, rdf_graph, rdf_predicate) DO UPDATE
+        SET rdf_object=EXCLUDED.rdf_object,
+            promoted_by=EXCLUDED.promoted_by,
+            promotion_meta=EXCLUDED.promotion_meta,
+            promoted_at=now()
         """,
         context.claim_id,
         DATASET,
@@ -580,6 +676,33 @@ async def _write_liminal_context(fuseki: FusekiClient, context: ClaimContext) ->
         triples.append(f"<{claim_iri}> world:originTimeline <urn:aios:timeline:{context.timeline_id}> .")
     if context.acquisition_mode:
         triples.append(f"<{claim_iri}> world:acquisitionMode {_sparql_lit(context.acquisition_mode)} .")
+
+    clear_semantics = f"""
+PREFIX world: <urn:aios:world#>
+
+DELETE {{
+  GRAPH <{LIMINAL_GRAPH}> {{
+    <{claim_iri}> ?p ?o .
+  }}
+}}
+WHERE {{
+  GRAPH <{LIMINAL_GRAPH}> {{
+    <{claim_iri}> ?p ?o .
+    FILTER (?p IN (
+      world:claimKind,
+      world:predicateFamily,
+      world:epistemicScope,
+      world:contextResolverVersion,
+      world:subjectIsPivot,
+      world:objectIsPivot,
+      world:subjectKind,
+      world:objectKind,
+      world:acquisitionMode
+    ))
+  }}
+}}
+""".strip()
+    fuseki.update(DATASET, clear_semantics)
 
     sparql = f"""
 PREFIX world: <urn:aios:world#>
