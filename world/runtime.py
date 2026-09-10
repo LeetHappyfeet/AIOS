@@ -5,13 +5,14 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Dict, Optional
 from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.hud.frame import HUDAssembler
 from aios_app.hud.render_text import render_hud_text
+from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.hud.readiness import (
     ensure_readiness_row,
     enqueue_live_turn_work,
@@ -69,6 +70,34 @@ class WorldRuntimeService:
     def __init__(self, db: Database):
         self.db = db
         self.hud = HUDAssembler(db)
+        self._hud_builds: AsyncSingleFlight[
+            tuple[UUID, Optional[UUID], int, Optional[int], Optional[int]],
+            Dict[str, Any],
+        ] = AsyncSingleFlight()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+
+    def _spawn_background(self, awaitable: Awaitable[Any], *, label: str) -> None:
+        """Run non-critical enrichment without extending live request latency."""
+        task = asyncio.create_task(awaitable)
+        self._background_tasks.add(task)
+
+        def _finished(done: asyncio.Task[Any]) -> None:
+            self._background_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                exc = done.exception()
+            except asyncio.CancelledError:
+                return
+            if exc is not None:
+                logger.error(
+                    "Background runtime task failed [%s]: %s",
+                    label,
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_finished)
 
     async def activate_character(
         self,
@@ -292,20 +321,17 @@ class WorldRuntimeService:
         """
         Prepare one generation-consistent HUD snapshot.
 
-        The source DAG cursor is the perceived-input watermark. A snapshot is
-        generation-ready only when retrieval has caught up through that node and
-        runtime state did not change while the frame was assembled.
+        Live generation is gated by exact source/runtime coordinates, not by
+        completion of every semantic enrichment stage. ``wait_ms`` remains in
+        the public contract for compatibility but no longer delays HUD assembly;
+        incomplete enrichment is queued and reported through topology_current.
         """
+        request_started = time.perf_counter()
         await ensure_readiness_row(self.db, instance_id=instance_id, live=True)
         state = await self.get_state(instance_id)
         target_node_id = through_node_id or state.get("source_head_node_id")
         ready = await readiness_state(self.db, instance_id=instance_id)
 
-        # A generation retry/swipe may intentionally ask for the exact source
-        # node used by the previous generation after the rendered character
-        # reply has advanced the active source head.  Replaying the retained
-        # prepared snapshot is safe because it does not rebuild against newer
-        # source context and therefore cannot leak the reply being replaced.
         replay_cached = (
             through_node_id is not None
             and through_node_id != state.get("source_head_node_id")
@@ -359,6 +385,51 @@ class WorldRuntimeService:
             frame.setdefault("hud", {})["cache"] = "prepared"
             return frame
 
+        if wait_ms:
+            logger.debug(
+                "HUD wait_ms=%s ignored for live semantic completion; enrichment is asynchronous",
+                wait_ms,
+            )
+
+        build_key = (
+            instance_id,
+            target_node_id,
+            int(state.get("state_version") or 0),
+            recent_limit,
+            token_budget,
+        )
+        frame = await self._hud_builds.run(
+            build_key,
+            lambda: self._build_generation_frame(
+                instance_id=instance_id,
+                state=state,
+                target_node_id=target_node_id,
+                recent_limit=recent_limit,
+                token_budget=token_budget,
+            ),
+        )
+        logger.debug(
+            "HUD request instance=%s node=%s total_request_ms=%.1f active_builds=%d",
+            instance_id,
+            target_node_id,
+            (time.perf_counter() - request_started) * 1000.0,
+            self._hud_builds.active(),
+        )
+        return frame
+
+    async def _build_generation_frame(
+        self,
+        *,
+        instance_id: UUID,
+        state: Dict[str, Any],
+        target_node_id: Optional[UUID],
+        recent_limit: Optional[int],
+        token_budget: Optional[int],
+    ) -> Dict[str, Any]:
+        started = time.perf_counter()
+        timings: dict[str, float] = {}
+
+        status_started = time.perf_counter()
         await self.db.execute(
             """
             UPDATE aios.character_hud_readiness
@@ -367,35 +438,35 @@ class WorldRuntimeService:
             """,
             instance_id,
         )
+        timings["status"] = (time.perf_counter() - status_started) * 1000.0
 
-        deadline = time.monotonic() + max(0, min(int(wait_ms), 10000)) / 1000.0
-        retrieval_ready = await source_node_retrieval_ready(
+        semantic_started = time.perf_counter()
+        semantic_current = await source_node_retrieval_ready(
             self.db,
             instance_id=instance_id,
             node_id=target_node_id,
         )
-        while not retrieval_ready:
-            await enqueue_live_turn_work(
-                self.db,
-                instance_id=instance_id,
-                node_id=target_node_id,
-            )
-            if time.monotonic() >= deadline:
-                break
-            await asyncio.sleep(0.03)
-            retrieval_ready = await source_node_retrieval_ready(
-                self.db,
-                instance_id=instance_id,
-                node_id=target_node_id,
-            )
+        timings["semantic_check"] = (time.perf_counter() - semantic_started) * 1000.0
 
-        if retrieval_ready:
+        readiness_started = time.perf_counter()
+        if semantic_current:
             await set_retrieval_ready(
                 self.db,
                 instance_id=instance_id,
                 node_id=target_node_id,
             )
+        else:
+            self._spawn_background(
+                enqueue_live_turn_work(
+                    self.db,
+                    instance_id=instance_id,
+                    node_id=target_node_id,
+                ),
+                label=f"live-enrichment:{instance_id}:{target_node_id}",
+            )
+        timings["readiness_update"] = (time.perf_counter() - readiness_started) * 1000.0
 
+        hud_started = time.perf_counter()
         try:
             frame = await self.hud.build(
                 instance_id,
@@ -404,16 +475,23 @@ class WorldRuntimeService:
             )
         except LookupError as exc:
             raise RuntimeNotFound(str(exc)) from exc
+        except Exception:
+            logger.exception(
+                "HUD assembly failed instance=%s node=%s elapsed_ms=%.1f",
+                instance_id,
+                target_node_id,
+                (time.perf_counter() - started) * 1000.0,
+            )
+            raise
+        timings["hud_build"] = (time.perf_counter() - hud_started) * 1000.0
 
+        state_started = time.perf_counter()
         after = await self.get_state(instance_id)
+        timings["coordinate_recheck"] = (time.perf_counter() - state_started) * 1000.0
         coordinates_stable = (
             after.get("state_version") == state.get("state_version")
             and after.get("source_head_node_id") == state.get("source_head_node_id")
         )
-        # Generation consistency is a coordinate guarantee, not a promise that
-        # every background semantic enrichment stage has completed. A stable
-        # HUD may therefore be used immediately while topology_current remains
-        # false and is upgraded asynchronously on a later preparation.
         generation_ready = bool(
             coordinates_stable
             and after.get("source_head_node_id") == target_node_id
@@ -426,13 +504,14 @@ class WorldRuntimeService:
                 if after.get("source_head_node_id") else None,
             "requested_source_node_id": str(target_node_id) if target_node_id else None,
             "retrieval_ready_node_id": str(target_node_id)
-                if retrieval_ready and target_node_id else None,
+                if semantic_current and target_node_id else None,
             "source_current": after.get("source_head_node_id") == target_node_id,
             "runtime_current": coordinates_stable,
-            "topology_current": retrieval_ready,
+            "topology_current": semantic_current,
         }
         frame["hud"]["cache"] = "rebuilt"
 
+        snapshot_started = time.perf_counter()
         if generation_ready:
             text = render_hud_text(frame)
             await save_prepared_snapshot(
@@ -458,6 +537,26 @@ class WorldRuntimeService:
                 instance_id,
                 not coordinates_stable,
             )
+        timings["snapshot"] = (time.perf_counter() - snapshot_started) * 1000.0
+        total_ms = (time.perf_counter() - started) * 1000.0
+
+        log = logger.info if total_ms >= 250.0 else logger.debug
+        log(
+            "HUD build instance=%s node=%s generation_ready=%s topology_current=%s "
+            "status_ms=%.1f semantic_check_ms=%.1f readiness_update_ms=%.1f "
+            "hud_build_ms=%.1f coordinate_recheck_ms=%.1f snapshot_ms=%.1f total_ms=%.1f",
+            instance_id,
+            target_node_id,
+            generation_ready,
+            semantic_current,
+            timings["status"],
+            timings["semantic_check"],
+            timings["readiness_update"],
+            timings["hud_build"],
+            timings["coordinate_recheck"],
+            timings["snapshot"],
+            total_ms,
+        )
         return frame
 
     async def build_frame(
