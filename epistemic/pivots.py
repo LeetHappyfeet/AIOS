@@ -56,17 +56,18 @@ def resolve_subject_pivot(
 
     Core invariant:
         first-person language resolves to the already-resolved viewpoint_id.
-        character_id is the active character context, not automatically the
-        physical speaker or first-person identity.
+        character_id is the active character context and, for an actual
+        character-role utterance, is the semantic viewpoint/memory owner even
+        when speaker_id is a transport/provenance identity such as a voice or
+        connector identifier.
 
-    speaker_id remains provenance: who supplied the text. A character memory
-    owner exists only when the effective viewpoint is that character; a human
-    using a character as an augmentation/search context must not silently write
+    An explicit viewpoint_id remains authoritative. This prevents a human using
+    a character as an augmentation/search context from silently writing their
     first-person statements into the character memory chain.
 
-    Named subjects are never rewritten merely because the chain has a
-    character owner. The owner controls epistemic/RDF scope, not proposition
-    subject identity.
+    speaker_id remains provenance: who supplied the text. Named subjects are
+    never rewritten merely because the chain has a character owner. The owner
+    controls epistemic/RDF scope, not proposition subject identity.
     """
     clean_subject = _norm(subject)
     key = clean_subject.lower() if clean_subject else None
@@ -75,13 +76,20 @@ def resolve_subject_pivot(
     explicit_viewpoint = _norm(viewpoint_id)
     recipient = _norm(recipient_id)
 
+    # For genuine character-role utterances, character_id is the semantic
+    # identity. speaker_id may be a transport/provenance identifier (for
+    # example ``alice-voice``) and must not displace the character viewpoint.
+    # Explicit viewpoint always wins so controller/user impersonation remains
+    # safely outside the character's memory ownership unless deliberately set.
     effective_viewpoint = explicit_viewpoint or (
-        (speaker or character) if speaker_role == "character" else speaker
+        character if speaker_role == "character" and character else speaker
     )
     first_person_identity = effective_viewpoint
     memory_owner = (
         character
-        if character and effective_viewpoint == character
+        if character
+        and speaker_role == "character"
+        and effective_viewpoint == character
         else None
     )
 
