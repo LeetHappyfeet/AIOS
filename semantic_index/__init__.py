@@ -10,6 +10,7 @@ from .relation_validator import validate_neighbor_relation as _validate_neighbor
 from .validation_adapter import validated_neighbor_classifier as _validated_neighbor_classifier
 
 _original_neighbor_classifier = _neighbor_classifier.classify_neighbor_relations_once
+_neighbor_classifier.NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v2-matrix"
 _neighbor_classifier.classify_neighbor_pair = _validate_neighbor_relation
 
 
