@@ -102,6 +102,7 @@ class TopologyRetriever:
         self._semantic_seed_flights: AsyncSingleFlight[
             tuple[str, str, tuple[str, ...]], list[str]
         ] = AsyncSingleFlight()
+        self._semantic_seed_deferred: set[tuple[str, str, tuple[str, ...]]] = set()
 
     async def _query_semantic_seed_propositions(
         self,
@@ -137,6 +138,7 @@ class TopologyRetriever:
             self._semantic_seed_cache[cache_key] = []
             return []
         finally:
+            self._semantic_seed_deferred.discard(cache_key)
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             if elapsed_ms >= 500.0:
                 logger.warning("HUD semantic seed lookup took %.1f ms", elapsed_ms)
@@ -164,6 +166,8 @@ class TopologyRetriever:
         cached = self._semantic_seed_cache.get(cache_key)
         if cached is not None:
             return cached
+        if cache_key in self._semantic_seed_deferred:
+            return []
 
         try:
             return await asyncio.wait_for(
@@ -179,8 +183,9 @@ class TopologyRetriever:
             )
         except asyncio.TimeoutError:
             # The shielded single-flight task keeps running and populates the
-            # cache when it finishes. The current HUD degrades to lexical/
-            # topology seeds rather than inheriting model or Qdrant latency.
+            # cache when it finishes. Mark the key deferred so the other HUD
+            # semantic modes do not each pay the same timeout while it runs.
+            self._semantic_seed_deferred.add(cache_key)
             logger.debug(
                 "HUD semantic seed exceeded %.0f ms budget; using lexical/topology fallback",
                 SEMANTIC_SEED_WAIT_SECONDS * 1000.0,
