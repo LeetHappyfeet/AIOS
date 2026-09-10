@@ -4,7 +4,18 @@ from typing import Any
 
 from aios_app.epistemic.hypothesis_validation import evaluate_matrix
 
-RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v2"
+RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v3"
+
+
+def _contains_refinement(a: str | None, b: str | None) -> bool:
+    """Return true when one normalized object phrase strictly contains the other."""
+    if not a or not b:
+        return False
+    left = a.strip().lower()
+    right = b.strip().lower()
+    if left == right:
+        return False
+    return left in right or right in left
 
 
 def validate_neighbor_relation(
@@ -24,10 +35,16 @@ def validate_neighbor_relation(
     worlds_known = bool(a.get("world_id") and b.get("world_id"))
     both_events = a.get("claim_kind") == "EVENT" and b.get("claim_kind") == "EVENT"
     has_conflict = bool(conflict_type)
+    object_refinement = bool(
+        same_subject
+        and same_predicate
+        and same_polarity
+        and _contains_refinement(a.get("object_norm"), b.get("object_norm"))
+    )
 
-    # semantic_neighbor_relation is a single primary relation.  An already
+    # semantic_neighbor_relation is a single primary relation. An already
     # materialized proposition conflict is therefore negative evidence for the
-    # mutually-exclusive non-conflict labels.  This does not make the conflict
+    # mutually-exclusive non-conflict labels. This does not make the conflict
     # record infallible: it still has to survive the matrix and leave-one-axis
     # stability test against subject/predicate/object/world evidence.
     conflict_veto = -3 if has_conflict else 0
@@ -44,7 +61,9 @@ def validate_neighbor_relation(
         "REFINES": {
             "subject": 2 if same_subject else -2,
             "predicate": 2 if same_predicate else -1,
-            "object": 1 if not same_object else 0,
+            # A strict normalized containment relation is structural evidence
+            # for refinement; a merely different object is only weak evidence.
+            "object": 2 if object_refinement else (1 if not same_object else 0),
             "polarity": 2 if same_polarity else -3,
             "vector": 1 if similarity >= 0.78 else -1,
             "conflict": conflict_veto,
@@ -68,7 +87,7 @@ def validate_neighbor_relation(
             "subject": 1 if same_subject else 0,
             "predicate": 1 if same_predicate else 0,
             # Exclusive-object conflicts are supported by the same canonical
-            # subject/predicate pointing at incompatible objects.  Polarity
+            # subject/predicate pointing at incompatible objects. Polarity
             # disagreement is a separate contradiction signal.
             "object": 2 if (has_conflict and same_subject and same_predicate and not same_object) else 0,
             "polarity": 2 if not same_polarity else 0,
@@ -87,6 +106,10 @@ def validate_neighbor_relation(
         proposed = "CONTRADICTS"
     elif same_subject and same_predicate and same_object and same_polarity:
         proposed = "EQUIVALENT"
+    elif object_refinement:
+        # Refinement is more specific than SAME_TOPIC/RELATED and therefore
+        # must be proposed before those broad fallbacks.
+        proposed = "REFINES"
     elif both_events and same_timeline and similarity >= 0.80:
         proposed = "SAME_EVENT"
     elif same_topic:
@@ -113,6 +136,7 @@ def validate_neighbor_relation(
         "same_subject": same_subject,
         "same_predicate": same_predicate,
         "same_object": same_object,
+        "object_refinement": object_refinement,
         "same_polarity": same_polarity,
         "same_topic": same_topic,
         "same_timeline": same_timeline,
