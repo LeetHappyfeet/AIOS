@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+from typing import Any
+
 from aios_app.epistemic.hypothesis_validation import (
     MatrixOutcome,
     notify_evidence_change,
@@ -9,6 +13,21 @@ from aios_app.semantic_index.relation_validator import (
     RELATION_VERIFIER_VERSION,
     validate_neighbor_relation,
 )
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    """Normalize asyncpg JSON/JSONB values to a Python object mapping."""
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return dict(decoded) if isinstance(decoded, Mapping) else {}
+    return {}
 
 
 async def record_new_relation_decisions(db, *, limit: int = 500) -> int:
@@ -32,12 +51,12 @@ async def record_new_relation_decisions(db, *, limit: int = 500) -> int:
     )
     written = 0
     for row in rows:
-        features = dict(row["features"] or {})
-        verification = dict(features.get("adversarial_verification") or {})
+        features = _json_object(row["features"])
+        verification = _json_object(features.get("adversarial_verification"))
         relation = str(row["relation"])
         dtype = "event_identity" if relation == "SAME_EVENT" or features.get("both_events") else "proposition_relation"
         key = f"{row['proposition_id']}:{row['neighbor_proposition_id']}"
-        matrix = dict(verification.get("matrix") or {})
+        matrix = _json_object(verification.get("matrix"))
         outcome = MatrixOutcome(
             proposed_key=str(verification.get("proposed_key") or relation),
             winner_key=verification.get("winner_key"),
