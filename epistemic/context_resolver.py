@@ -177,7 +177,7 @@ def classify_predicate_family(predicate: Optional[str], raw_text: str = "") -> s
         return "MEMORY"
     if re.search(r"\b(believe|think|suspect|assume|know)\b", text):
         return "EPISTEMIC"
-    if re.search(r"\b(plan|intend|goal|trying to|wants? to)\b", text):
+    if re.search(r"\b(plan(?:s|ned|ning)?|intend(?:s|ed|ing)?|goal|trying to|wants? to)\b", text):
         return "GOAL"
 
     if pred:
