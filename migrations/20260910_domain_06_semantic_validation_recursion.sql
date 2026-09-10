@@ -147,7 +147,13 @@ BEGIN
         WHERE v.decision_type='epistemic_promotion'
     )
     UPDATE aios.world_proposition_assertion a
-    SET last_checked_at=NULL, updated_at=now()
+    SET last_checked_at=NULL,
+        epistemic_status=CASE
+            WHEN a.source_kind='generated_fill' AND a.epistemic_status='corroborated'
+            THEN 'provisional'
+            ELSE a.epistemic_status
+        END,
+        updated_at=now()
     FROM assertions s
     WHERE a.assertion_id::text=s.subject_key;
 END;
@@ -211,6 +217,14 @@ FOR EACH ROW EXECUTE FUNCTION aios.semantic_validation_conflict_trigger();
 CREATE OR REPLACE FUNCTION aios.semantic_validation_world_assertion_trigger()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF NEW.source_kind='generated_fill'
+       AND COALESCE(NEW.meta->>'resolution','') IN (
+           'adversarial_corroboration','adversarial_supersession','remain_provisional'
+       )
+    THEN
+        RETURN NEW;
+    END IF;
+
     PERFORM aios.mark_semantic_validation_stale(
         'world_proposition', NEW.world_id::text || ':' || NEW.proposition_id::text
     );
