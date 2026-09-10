@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from aios_app.db import Database
 from aios_app.hud.context import HUDContext
 from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.semantic_index.query import SemanticQueryService
 
 
 logger = logging.getLogger("aios.hud.retrieval")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
+SEMANTIC_SEED_WAIT_SECONDS = 0.25
 
 
 @dataclass(frozen=True)
@@ -95,8 +99,51 @@ class TopologyRetriever:
         self.db = db
         self.semantic = SemanticQueryService()
         self._semantic_seed_cache: dict[tuple[str, str, tuple[str, ...]], list[str]] = {}
+        self._semantic_seed_flights: AsyncSingleFlight[
+            tuple[str, str, tuple[str, ...]], list[str]
+        ] = AsyncSingleFlight()
 
-    def _semantic_seed_propositions(
+    async def _query_semantic_seed_propositions(
+        self,
+        context: HUDContext,
+        *,
+        query_text: str,
+        cache_key: tuple[str, str, tuple[str, ...]],
+    ) -> list[str]:
+        started = time.perf_counter()
+        try:
+            hits = await asyncio.to_thread(
+                self.semantic.search_epistemic,
+                query_text,
+                character_id=context.character_id,
+                instance_ids=context.lineage_instance_ids,
+            )
+            proposition_ids: list[str] = []
+            seen: set[str] = set()
+            for _, _, payload in hits:
+                proposition_id = str(payload.get("proposition_id") or "")
+                if proposition_id and proposition_id not in seen:
+                    seen.add(proposition_id)
+                    proposition_ids.append(proposition_id)
+            self._semantic_seed_cache[cache_key] = proposition_ids
+            if len(self._semantic_seed_cache) > 64:
+                self._semantic_seed_cache.pop(next(iter(self._semantic_seed_cache)))
+            return proposition_ids
+        except Exception as exc:
+            logger.debug(
+                "Semantic seed lookup unavailable; using topology/lexical fallback: %s",
+                exc,
+            )
+            self._semantic_seed_cache[cache_key] = []
+            return []
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            if elapsed_ms >= 500.0:
+                logger.warning("HUD semantic seed lookup took %.1f ms", elapsed_ms)
+            else:
+                logger.debug("HUD semantic seed lookup took %.1f ms", elapsed_ms)
+
+    async def _semantic_seed_propositions(
         self,
         context: HUDContext,
         *,
@@ -117,26 +164,27 @@ class TopologyRetriever:
         cached = self._semantic_seed_cache.get(cache_key)
         if cached is not None:
             return cached
+
         try:
-            hits = self.semantic.search_epistemic(
-                query_text,
-                character_id=context.character_id,
-                instance_ids=context.lineage_instance_ids,
+            return await asyncio.wait_for(
+                self._semantic_seed_flights.run(
+                    cache_key,
+                    lambda: self._query_semantic_seed_propositions(
+                        context,
+                        query_text=query_text,
+                        cache_key=cache_key,
+                    ),
+                ),
+                timeout=SEMANTIC_SEED_WAIT_SECONDS,
             )
-            proposition_ids = []
-            seen: set[str] = set()
-            for _, _, payload in hits:
-                proposition_id = str(payload.get("proposition_id") or "")
-                if proposition_id and proposition_id not in seen:
-                    seen.add(proposition_id)
-                    proposition_ids.append(proposition_id)
-            self._semantic_seed_cache[cache_key] = proposition_ids
-            if len(self._semantic_seed_cache) > 64:
-                self._semantic_seed_cache.pop(next(iter(self._semantic_seed_cache)))
-            return proposition_ids
-        except Exception as exc:
-            logger.debug("Semantic seed lookup unavailable; using topology/lexical fallback: %s", exc)
-            self._semantic_seed_cache[cache_key] = []
+        except asyncio.TimeoutError:
+            # The shielded single-flight task keeps running and populates the
+            # cache when it finishes. The current HUD degrades to lexical/
+            # topology seeds rather than inheriting model or Qdrant latency.
+            logger.debug(
+                "HUD semantic seed exceeded %.0f ms budget; using lexical/topology fallback",
+                SEMANTIC_SEED_WAIT_SECONDS * 1000.0,
+            )
             return []
 
     async def _anchor_context(
@@ -216,9 +264,6 @@ class TopologyRetriever:
                 }
                 anchors[proposition_id] = entry
 
-            # World expansion is intentionally lineage-bounded. Explicitly
-            # acquired off-branch knowledge keeps its anchor metadata, but it
-            # does not gain neighboring facts from an invisible sibling world.
             if not entry["world_visible"]:
                 continue
             context_node_id = row["context_node_id"]
@@ -249,6 +294,7 @@ class TopologyRetriever:
         max_hops: Optional[int] = None,
         limit: Optional[int] = None,
     ) -> list[dict[str, Any]]:
+        started = time.perf_counter()
         policy = POLICIES.get(mode)
         if policy is None:
             raise ValueError(f"unknown retrieval mode '{mode}'")
@@ -259,12 +305,16 @@ class TopologyRetriever:
         lineage_ids = list(context.lineage_instance_ids)
         lineage_keys = [str(value) for value in context.lineage_instance_ids]
         terms = _focus_terms(focus_text, " ".join(str(goal) for goal in goals))
-        semantic_seed_ids = self._semantic_seed_propositions(
+
+        semantic_started = time.perf_counter()
+        semantic_seed_ids = await self._semantic_seed_propositions(
             context,
             focus_text=focus_text,
             goals=goals,
         )
+        semantic_ms = (time.perf_counter() - semantic_started) * 1000.0
 
+        topology_started = time.perf_counter()
         rows = await self.db.fetch(
             """
             WITH RECURSIVE
@@ -479,11 +529,14 @@ class TopologyRetriever:
             bool(policy.retain_topic_history),
             row_limit,
         )
+        topology_ms = (time.perf_counter() - topology_started) * 1000.0
 
+        anchor_started = time.perf_counter()
         anchor_by_proposition = await self._anchor_context(
             context,
             [row["proposition_id"] for row in rows],
         )
+        anchor_ms = (time.perf_counter() - anchor_started) * 1000.0
 
         result: list[dict[str, Any]] = []
         for rank, row in enumerate(rows):
@@ -538,6 +591,7 @@ class TopologyRetriever:
             )
             result.append(item)
 
+        conflict_started = time.perf_counter()
         if result:
             proposition_ids = [item["proposition_id"] for item in result]
             conflict_rows = await self.db.fetch(
@@ -576,6 +630,7 @@ class TopologyRetriever:
                 by_proposition.setdefault(base_id, []).append(entry)
             for item in result:
                 item["conflicts"] = by_proposition.get(item["proposition_id"], [])
+        conflict_ms = (time.perf_counter() - conflict_started) * 1000.0
 
         result.sort(
             key=lambda item: (
@@ -583,5 +638,18 @@ class TopologyRetriever:
                 -item["relevance"]["total"],
                 item["topology"]["cost"],
             )
+        )
+        total_ms = (time.perf_counter() - started) * 1000.0
+        log = logger.info if total_ms >= 250.0 else logger.debug
+        log(
+            "HUD topology retrieval mode=%s rows=%d semantic_seed_ms=%.1f "
+            "topology_sql_ms=%.1f anchor_ms=%.1f conflict_ms=%.1f total_ms=%.1f",
+            mode,
+            len(result),
+            semantic_ms,
+            topology_ms,
+            anchor_ms,
+            conflict_ms,
+            total_ms,
         )
         return result
