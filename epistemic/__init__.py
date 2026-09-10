@@ -10,13 +10,22 @@ from .generated import create_generated_fact, resolve_generated_facts_once
 # legacy module entry points wired for existing callers until imports are moved
 # directly to topology_claims.
 from . import topology as _topology
-from .topology_claims import (
-    choose_observation_scope as _choose_observation_scope,
-    derive_claim_topology as _derive_claim_topology,
-)
+from . import topology_claims as _topology_claims
+from .ownership import resolve_semantic_ownership as _resolve_semantic_ownership
+from .ownership_verifier import verify_semantic_ownership as _verify_semantic_ownership
 
-_topology.choose_observation_scope = _choose_observation_scope
-_topology.derive_claim_topology = _derive_claim_topology
+
+async def _resolve_and_verify_semantic_ownership(db, row):
+    proposed = await _resolve_semantic_ownership(db, row)
+    return await _verify_semantic_ownership(db, row, proposed)
+
+
+# The claim projector resolves first and then subjects inferred ownership to the
+# adversarial matrix. Explicit ownership remains authoritative but still records
+# verifier evidence in topology metadata.
+_topology_claims.resolve_semantic_ownership = _resolve_and_verify_semantic_ownership
+_topology.choose_observation_scope = _topology_claims.choose_observation_scope
+_topology.derive_claim_topology = _topology_claims.derive_claim_topology
 
 __all__ = [
     "normalize_claim_once",
