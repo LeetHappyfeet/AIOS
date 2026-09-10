@@ -91,12 +91,6 @@ def empty_payload(_: Dict[str, object]) -> Dict[str, object]:
 
 STAGES: List[Stage] = [
 
-    # -------------------------------------------------
-    # 0) ingest_event -> character_identity
-    # -------------------------------------------------
-    # Character discovery must happen independently of claim/RDF processing so
-    # runtime activation can resolve a newly observed character as soon as the
-    # transport has durably ingested any event for that character.
     Stage(
         name="discover_characters",
         job_type="discover_characters",
@@ -106,13 +100,11 @@ STAGES: List[Stage] = [
         WHERE ie.character_id IS NOT NULL
           AND btrim(ie.character_id) <> ''
           AND NOT EXISTS (
-              SELECT 1
-              FROM aios.character_identity ci
+              SELECT 1 FROM aios.character_identity ci
               WHERE ci.character_id = ie.character_id
           )
           AND NOT EXISTS (
-              SELECT 1
-              FROM aios.pipeline_job pj
+              SELECT 1 FROM aios.pipeline_job pj
               WHERE pj.job_type = 'discover_characters'
                 AND pj.status IN ('queued', 'running')
           )
@@ -125,32 +117,18 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 0b) SQL world topology -> RDF /world projection
-    # -------------------------------------------------
     Stage(
         name="project_world_topology",
         job_type="project_world_topology",
         eligibility_sql="""
         SELECT w.world_id
         FROM aios.world w
-        LEFT JOIN aios.world_rdf_projection wrp
-          ON wrp.world_id=w.world_id
-        WHERE (
-            wrp.world_id IS NULL
-            OR wrp.projected_at IS NULL
-        )
+        LEFT JOIN aios.world_rdf_projection wrp ON wrp.world_id=w.world_id
+        WHERE (wrp.world_id IS NULL OR wrp.projected_at IS NULL)
           AND NOT EXISTS (
-              SELECT 1
-              FROM aios.pipeline_job pj
+              SELECT 1 FROM aios.pipeline_job pj
               WHERE pj.job_type='project_world_topology'
-                AND (
-                    pj.status IN ('queued','running')
-                    OR (
-                        pj.status='failed'
-                        AND pj.updated_at > now() - interval '30 seconds'
-                    )
-                )
+                AND (pj.status IN ('queued','running') OR (pj.status='failed' AND pj.updated_at > now() - interval '30 seconds'))
           )
         ORDER BY w.created_at
         LIMIT LEAST($1, 1)
@@ -161,9 +139,6 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 1) DAG → document_section
-    # -------------------------------------------------
     Stage(
         name="dag_to_document_section",
         job_type="dag_to_document_section",
@@ -173,26 +148,10 @@ STAGES: List[Stage] = [
         JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         WHERE n.message_text IS NOT NULL
           AND ie.superseded_at IS NULL
-          AND (
-              (
-                  n.kind = 'paragraph'
-                  AND n.payload ? 'document_id'
-                  AND n.payload ? 'paragraph_index'
-              )
-              OR
-              (
-                  n.kind IN ('chat_message', 'observation')
-                  AND n.event_id IS NOT NULL
-              )
-          )
+          AND (((n.kind = 'paragraph') AND n.payload ? 'document_id' AND n.payload ? 'paragraph_index') OR (n.kind IN ('chat_message', 'observation') AND n.event_id IS NOT NULL))
+          AND NOT EXISTS (SELECT 1 FROM aios.document_section ds WHERE ds.node_id = n.node_id)
           AND NOT EXISTS (
-              SELECT 1
-              FROM aios.document_section ds
-              WHERE ds.node_id = n.node_id
-          )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM aios.pipeline_job pj
+              SELECT 1 FROM aios.pipeline_job pj
               WHERE pj.job_type = 'dag_to_document_section'
                 AND pj.status IN ('queued', 'running')
                 AND (pj.payload->>'node_id') = n.node_id::text
@@ -206,23 +165,18 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 2) document_section → claim_candidate
-    # -------------------------------------------------
     Stage(
         name="extract_claims",
         job_type="extract_claims",
         eligibility_sql="""
         SELECT ds.section_id
         FROM aios.document_section ds
-        JOIN aios.dag_node n
-          ON n.node_id = ds.node_id
+        JOIN aios.dag_node n ON n.node_id = ds.node_id
         JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         WHERE ds.claims_extracted_at IS NULL
           AND ie.superseded_at IS NULL
           AND NOT EXISTS (
-              SELECT 1
-              FROM aios.pipeline_job pj
+              SELECT 1 FROM aios.pipeline_job pj
               WHERE pj.job_type = 'extract_claims'
                 AND pj.status IN ('queued', 'running')
                 AND (pj.payload->>'section_id') = ds.section_id::text
@@ -236,9 +190,6 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 2b) claim_candidate -> contextual semantic frames
-    # -------------------------------------------------
     Stage(
         name="decompose_claim_frames",
         job_type="decompose_claim_frames",
@@ -251,10 +202,8 @@ STAGES: List[Stage] = [
         JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE ie.superseded_at IS NULL
           AND NOT EXISTS (
-              SELECT 1
-              FROM aios.claim_semantic_frame_projection sfp
-              WHERE sfp.claim_id=cc.claim_id
-                AND sfp.decomposer_version='semantic-frame-v2'
+              SELECT 1 FROM aios.claim_semantic_frame_projection sfp
+              WHERE sfp.claim_id=cc.claim_id AND sfp.decomposer_version='semantic-frame-v2'
           )
           AND NOT EXISTS (
               SELECT 1 FROM aios.pipeline_job pj
@@ -271,57 +220,32 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 3) refined claim -> normalized proposition/observation
-    # -------------------------------------------------
     Stage(
         name="normalize_proposition",
         job_type="normalize_proposition",
         eligibility_sql="""
         SELECT cc.claim_id
         FROM aios.claim_candidate cc
-        JOIN aios.extracted_sentence es
-          ON es.sentence_id = cc.sentence_id
-        JOIN aios.document_section ds
-          ON ds.section_id = es.section_id
-        JOIN aios.dag_node n
-          ON n.node_id = ds.node_id
+        JOIN aios.extracted_sentence es ON es.sentence_id = cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id = es.section_id
+        JOIN aios.dag_node n ON n.node_id = ds.node_id
         JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         WHERE ie.superseded_at IS NULL
-          AND EXISTS (
-            SELECT 1
-            FROM aios.claim_context_resolution ccr
-            WHERE ccr.claim_id=cc.claim_id
-              AND ccr.resolver_version='context-resolver-v3'
-        )
-          AND EXISTS (
-            SELECT 1
-            FROM aios.claim_semantic_frame_projection sfp
-            WHERE sfp.claim_id=cc.claim_id
-              AND sfp.decomposer_version='semantic-frame-v2'
-        )
+          AND EXISTS (SELECT 1 FROM aios.claim_context_resolution ccr WHERE ccr.claim_id=cc.claim_id AND ccr.resolver_version='context-resolver-v3')
+          AND EXISTS (SELECT 1 FROM aios.claim_semantic_frame_projection sfp WHERE sfp.claim_id=cc.claim_id AND sfp.decomposer_version='semantic-frame-v2')
           AND (
-            NOT EXISTS (
-                SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id
-            )
+            NOT EXISTS (SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id)
             OR EXISTS (
                 SELECT 1
                 FROM aios.observation o
-                JOIN aios.claim_semantic_frame sf
-                  ON sf.claim_id=o.claim_id
-                 AND sf.decomposer_version='semantic-frame-v2'
-                LEFT JOIN aios.observation_proposition op
-                  ON op.observation_id=o.observation_id
-                 AND op.frame_id=sf.frame_id
-                WHERE o.claim_id=cc.claim_id
-                  AND op.frame_id IS NULL
+                JOIN aios.claim_semantic_frame sf ON sf.claim_id=o.claim_id AND sf.decomposer_version='semantic-frame-v2'
+                LEFT JOIN aios.observation_proposition op ON op.observation_id=o.observation_id AND op.frame_id=sf.frame_id
+                WHERE o.claim_id=cc.claim_id AND op.frame_id IS NULL
             )
-        )
+          )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
-            WHERE pj.job_type='normalize_proposition'
-              AND pj.status IN ('queued','running')
-              AND pj.payload->>'claim_id'=cc.claim_id::text
+            WHERE pj.job_type='normalize_proposition' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=cc.claim_id::text
           )
         ORDER BY cc.created_at
         LIMIT $1
@@ -332,9 +256,6 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 4) normalized observation -> RDF epistemic graph
-    # -------------------------------------------------
     Stage(
         name="rdf_epistemic_project",
         job_type="rdf_epistemic_project",
@@ -348,18 +269,12 @@ STAGES: List[Stage] = [
         JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE ie.superseded_at IS NULL
           AND NOT EXISTS (
-            SELECT 1
-            FROM aios.rdf_promotion_log rpl
-            WHERE rpl.claim_id=o.claim_id
-              AND rpl.rdf_dataset='world'
-              AND rpl.rdf_graph='urn:aios:world:epistemic'
-              AND rpl.rdf_predicate='world:observesProposition'
-        )
+            SELECT 1 FROM aios.rdf_promotion_log rpl
+            WHERE rpl.claim_id=o.claim_id AND rpl.rdf_dataset='world' AND rpl.rdf_graph='urn:aios:world:epistemic' AND rpl.rdf_predicate='world:observesProposition'
+          )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
-            WHERE pj.job_type='rdf_epistemic_project'
-              AND pj.status IN ('queued','running')
-              AND pj.payload->>'claim_id'=o.claim_id::text
+            WHERE pj.job_type='rdf_epistemic_project' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text
           )
         ORDER BY o.observed_at
         LIMIT $1
@@ -369,62 +284,40 @@ STAGES: List[Stage] = [
         queue_limit=64,
     ),
 
-
-    # -------------------------------------------------
-    # 4a) one-time semantic proposition-leaf topology backfill
-    # -------------------------------------------------
-    # The 20260909 migration invalidates existing projections so TOPIC nodes can
-    # be rebuilt with explicit PROPOSITION children. Admit this migration work
-    # ahead of ordinary enrichment, but only while the migration marker exists.
     Stage(
         name="backfill_semantic_proposition_leaves",
         job_type="derive_claim_topology",
         eligibility_sql="""
         SELECT DISTINCT o.claim_id
         FROM aios.observation o
-        JOIN aios.semantic_topology_projection stp
-          ON stp.claim_id=o.claim_id
-        JOIN aios.claim_context_resolution ccr
-          ON ccr.claim_id=o.claim_id
-        JOIN aios.claim_candidate cc
-          ON cc.claim_id=o.claim_id
-        JOIN aios.extracted_sentence es
-          ON es.sentence_id=cc.sentence_id
-        JOIN aios.document_section ds
-          ON ds.section_id=es.section_id
-        JOIN aios.dag_node dn
-          ON dn.node_id=ds.node_id
-        JOIN aios.ingest_event ie
-          ON ie.event_id=dn.event_id
+        JOIN aios.semantic_topology_projection stp ON stp.claim_id=o.claim_id
+        JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
+        JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE ie.superseded_at IS NULL
           AND stp.projected_at IS NULL
           AND stp.resolver_version='semantic-topology-v1'
           AND stp.meta->>'reproject_reason'='semantic_proposition_leaves_20260909'
           AND NOT EXISTS (
-              SELECT 1
-              FROM aios.semantic_topology_node n
-              WHERE n.scope_key=stp.scope_key
-                AND n.node_type='PROPOSITION'
-                AND n.proposition_id=o.proposition_id
+              SELECT 1 FROM aios.semantic_topology_node n
+              WHERE n.scope_key=stp.scope_key AND n.node_type='PROPOSITION' AND n.proposition_id=o.proposition_id
           )
           AND NOT EXISTS (
               SELECT 1 FROM aios.pipeline_job pj
-              WHERE pj.job_type='derive_claim_topology'
-                AND pj.status IN ('queued','running')
-                AND pj.payload->>'claim_id'=o.claim_id::text
+              WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text
           )
         ORDER BY o.claim_id
         LIMIT $1
         """,
         payload_builder=semantic_backfill_claim_payload,
-        priority=95,
-        queue_limit=32,
-        critical=False,
+        priority=70,
+        queue_limit=96,
+        critical=True,
     ),
 
-    # -------------------------------------------------
-    # 4b) normalized observation -> derived semantic topology
-    # -------------------------------------------------
     Stage(
         name="derive_claim_topology",
         job_type="derive_claim_topology",
@@ -439,18 +332,13 @@ STAGES: List[Stage] = [
         JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE ie.superseded_at IS NULL
           AND NOT EXISTS (
-            SELECT 1
-            FROM aios.semantic_topology_projection stp
-            WHERE stp.claim_id=o.claim_id
-              AND stp.projected_at IS NOT NULL
-              AND stp.resolver_version='semantic-topology-v1'
-        )
+            SELECT 1 FROM aios.semantic_topology_projection stp
+            WHERE stp.claim_id=o.claim_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1'
+          )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
-            WHERE pj.job_type='derive_claim_topology'
-              AND pj.status IN ('queued','running')
-              AND pj.payload->>'claim_id'=o.claim_id::text
-        )
+            WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text
+          )
         ORDER BY o.observed_at
         LIMIT $1
         """,
@@ -459,8 +347,6 @@ STAGES: List[Stage] = [
         queue_limit=64,
     ),
 
-    # Explicit world assertions are the only observation-derived path that may
-    # populate asserted /world topology. Source target hints never satisfy this.
     Stage(
         name="derive_world_assertion_topology",
         job_type="derive_world_assertion_topology",
@@ -469,18 +355,13 @@ STAGES: List[Stage] = [
         FROM aios.world_proposition_assertion a
         WHERE a.epistemic_status NOT IN ('rejected','superseded')
           AND NOT EXISTS (
-            SELECT 1
-            FROM aios.semantic_topology_projection stp
-            WHERE stp.assertion_id=a.assertion_id
-              AND stp.projected_at IS NOT NULL
-              AND stp.resolver_version='semantic-topology-v1'
-        )
+            SELECT 1 FROM aios.semantic_topology_projection stp
+            WHERE stp.assertion_id=a.assertion_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1'
+          )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
-            WHERE pj.job_type='derive_world_assertion_topology'
-              AND pj.status IN ('queued','running')
-              AND pj.payload->>'assertion_id'=a.assertion_id::text
-        )
+            WHERE pj.job_type='derive_world_assertion_topology' AND pj.status IN ('queued','running') AND pj.payload->>'assertion_id'=a.assertion_id::text
+          )
         ORDER BY a.created_at
         LIMIT $1
         """,
@@ -490,26 +371,18 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 4) observations -> source narrative clusters
-    # -------------------------------------------------
     Stage(
         name="assign_narratives",
         job_type="assign_narratives",
         eligibility_sql="""
         SELECT 1
         WHERE EXISTS (
-            SELECT 1
-            FROM aios.observation o
-            WHERE NOT EXISTS (
-                SELECT 1 FROM aios.narrative_membership nm
-                WHERE nm.observation_id=o.observation_id
-            )
+            SELECT 1 FROM aios.observation o
+            WHERE NOT EXISTS (SELECT 1 FROM aios.narrative_membership nm WHERE nm.observation_id=o.observation_id)
         )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
-            WHERE pj.job_type='assign_narratives'
-              AND pj.status IN ('queued','running')
+            WHERE pj.job_type='assign_narratives' AND pj.status IN ('queued','running')
           )
         LIMIT $1
         """,
@@ -518,9 +391,6 @@ STAGES: List[Stage] = [
         queue_limit=1,
     ),
 
-    # -------------------------------------------------
-    # 5) explicit acquisition events -> character knowledge
-    # -------------------------------------------------
     Stage(
         name="project_character_knowledge",
         job_type="project_character_knowledge",
@@ -534,13 +404,11 @@ STAGES: List[Stage] = [
             LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
             LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
             LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-            WHERE kae.processed_at IS NULL
-              AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+            WHERE kae.processed_at IS NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
         )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
-            WHERE pj.job_type='project_character_knowledge'
-              AND pj.status IN ('queued','running')
+            WHERE pj.job_type='project_character_knowledge' AND pj.status IN ('queued','running')
           )
         LIMIT $1
         """,
@@ -549,7 +417,6 @@ STAGES: List[Stage] = [
         queue_limit=4,
         critical=True,
     ),
-
 
     Stage(
         name="derive_character_acquisition_topology",
@@ -565,18 +432,13 @@ STAGES: List[Stage] = [
         WHERE kae.proposition_id IS NOT NULL
           AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
           AND NOT EXISTS (
-            SELECT 1
-            FROM aios.semantic_topology_projection stp
-            WHERE stp.acquisition_id=kae.acquisition_id
-              AND stp.projected_at IS NOT NULL
-              AND stp.resolver_version='semantic-topology-v1'
-        )
+            SELECT 1 FROM aios.semantic_topology_projection stp
+            WHERE stp.acquisition_id=kae.acquisition_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1'
+          )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
-            WHERE pj.job_type='derive_character_acquisition_topology'
-              AND pj.status IN ('queued','running')
-              AND pj.payload->>'acquisition_id'=kae.acquisition_id::text
-        )
+            WHERE pj.job_type='derive_character_acquisition_topology' AND pj.status IN ('queued','running') AND pj.payload->>'acquisition_id'=kae.acquisition_id::text
+          )
         ORDER BY kae.created_at
         LIMIT $1
         """,
@@ -586,9 +448,6 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 6) provisional generated world facts -> reconciliation
-    # -------------------------------------------------
     Stage(
         name="resolve_generated_facts",
         job_type="resolve_generated_facts",
@@ -603,30 +462,21 @@ STAGES: List[Stage] = [
               AND (
                   a.last_checked_at IS NULL
                   OR EXISTS (
-                      SELECT 1
-                      FROM aios.observation o
+                      SELECT 1 FROM aios.observation o
                       JOIN aios.timeline t ON t.timeline_id=o.timeline_id
                       JOIN aios.proposition op ON op.proposition_id=o.proposition_id
-                      WHERE t.world_id=a.world_id
-                        AND op.topic_key=p.topic_key
-                        AND o.observed_at > a.last_checked_at
+                      WHERE t.world_id=a.world_id AND op.topic_key=p.topic_key AND o.observed_at > a.last_checked_at
                   )
                   OR EXISTS (
-                      SELECT 1
-                      FROM aios.world_proposition_assertion wa
+                      SELECT 1 FROM aios.world_proposition_assertion wa
                       JOIN aios.proposition wp ON wp.proposition_id=wa.proposition_id
-                      WHERE wa.world_id=a.world_id
-                        AND wa.source_kind='observed'
-                        AND wa.epistemic_status NOT IN ('rejected','superseded')
-                        AND wp.topic_key=p.topic_key
-                        AND wa.updated_at > a.last_checked_at
+                      WHERE wa.world_id=a.world_id AND wa.source_kind='observed' AND wa.epistemic_status NOT IN ('rejected','superseded') AND wp.topic_key=p.topic_key AND wa.updated_at > a.last_checked_at
                   )
               )
         )
           AND NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
-            WHERE pj.job_type='resolve_generated_facts'
-              AND pj.status IN ('queued','running')
+            WHERE pj.job_type='resolve_generated_facts' AND pj.status IN ('queued','running')
           )
         LIMIT $1
         """,
@@ -635,36 +485,22 @@ STAGES: List[Stage] = [
         queue_limit=2,
     ),
 
-    # -------------------------------------------------
-    # 3) section claim set → RDF /world/liminal
-    # -------------------------------------------------
-    # One job owns one section. This preserves the lineage boundary:
-    # ingest_event → dag_node → document_section → claims → RDF receipts.
     Stage(
         name="rdf_liminal_promote",
         job_type="rdf_liminal_promote",
         eligibility_sql="""
         SELECT ds.section_id
         FROM aios.document_section ds
-        JOIN aios.dag_node n
-          ON n.node_id = ds.node_id
-        JOIN aios.ingest_event ie
-          ON ie.event_id = n.event_id
+        JOIN aios.dag_node n ON n.node_id = ds.node_id
+        JOIN aios.ingest_event ie ON ie.event_id = n.event_id
         WHERE ds.claims_extracted_at IS NOT NULL
           AND ie.superseded_at IS NULL
           AND ie.rdf_processed_at IS NULL
           AND NOT EXISTS (
-              SELECT 1
-              FROM aios.pipeline_job pj
+              SELECT 1 FROM aios.pipeline_job pj
               WHERE pj.job_type = 'rdf_liminal_promote'
                 AND (pj.payload->>'section_id') = ds.section_id::text
-                AND (
-                    pj.status IN ('queued', 'running')
-                    OR (
-                        pj.status = 'failed'
-                        AND pj.updated_at > now() - interval '30 seconds'
-                    )
-                )
+                AND (pj.status IN ('queued', 'running') OR (pj.status = 'failed' AND pj.updated_at > now() - interval '30 seconds'))
           )
         ORDER BY n.event_id
         LIMIT $1
@@ -675,43 +511,25 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 4) classify promoted liminal RDF claims
-    # -------------------------------------------------
-    # The old gate stopped scheduling forever after ANY contentKind receipt
-    # existed. Keep scheduling while at least one base-promoted claim lacks its
-    # own classification receipt.
     Stage(
         name="rdf_liminal_classify",
         job_type="rdf_liminal_classify",
         eligibility_sql="""
         SELECT 1
         WHERE EXISTS (
-            SELECT 1
-            FROM aios.claim_candidate cc
+            SELECT 1 FROM aios.claim_candidate cc
             WHERE EXISTS (
-                SELECT 1
-                FROM aios.rdf_promotion_log base
-                WHERE base.claim_id = cc.claim_id
-                  AND base.rdf_dataset = 'world'
-                  AND base.rdf_graph = 'urn:aios:world:liminal'
-                  AND base.rdf_predicate = 'rdf:type'
-                  AND base.rdf_object = 'world:Claim'
+                SELECT 1 FROM aios.rdf_promotion_log base
+                WHERE base.claim_id = cc.claim_id AND base.rdf_dataset = 'world' AND base.rdf_graph = 'urn:aios:world:liminal' AND base.rdf_predicate = 'rdf:type' AND base.rdf_object = 'world:Claim'
             )
               AND NOT EXISTS (
-                  SELECT 1
-                  FROM aios.rdf_promotion_log cls
-                  WHERE cls.claim_id = cc.claim_id
-                    AND cls.rdf_dataset = 'world'
-                    AND cls.rdf_graph = 'urn:aios:world:liminal'
-                    AND cls.rdf_predicate = 'world:contentKind'
+                  SELECT 1 FROM aios.rdf_promotion_log cls
+                  WHERE cls.claim_id = cc.claim_id AND cls.rdf_dataset = 'world' AND cls.rdf_graph = 'urn:aios:world:liminal' AND cls.rdf_predicate = 'world:contentKind'
               )
         )
         AND NOT EXISTS (
-            SELECT 1
-            FROM aios.pipeline_job pj
-            WHERE pj.job_type = 'rdf_liminal_classify'
-              AND pj.status IN ('queued', 'running')
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type = 'rdf_liminal_classify' AND pj.status IN ('queued', 'running')
         )
         LIMIT $1
         """,
@@ -721,12 +539,6 @@ STAGES: List[Stage] = [
         critical=True,
     ),
 
-    # -------------------------------------------------
-    # 5) liminal claim -> durable context resolution
-    # -------------------------------------------------
-    # Context is derived from trusted DAG/timeline lineage first, then semantic
-    # classification annotates the claim. It never promotes the proposition to
-    # world truth and never grants it to another character.
     Stage(
         name="resolve_claim_context",
         job_type="resolve_claim_context",
@@ -735,69 +547,47 @@ STAGES: List[Stage] = [
             SELECT cc.claim_id, cc.created_at
             FROM aios.claim_candidate cc
             WHERE EXISTS (
-                SELECT 1
-                FROM aios.rdf_promotion_log base
-                WHERE base.claim_id=cc.claim_id
-                  AND base.rdf_dataset='world'
-                  AND base.rdf_graph='urn:aios:world:liminal'
-                  AND base.rdf_predicate='rdf:type'
-                  AND base.rdf_object='world:Claim'
+                SELECT 1 FROM aios.rdf_promotion_log base
+                WHERE base.claim_id=cc.claim_id AND base.rdf_dataset='world' AND base.rdf_graph='urn:aios:world:liminal' AND base.rdf_predicate='rdf:type' AND base.rdf_object='world:Claim'
             )
               AND EXISTS (
-                SELECT 1
-                FROM aios.rdf_promotion_log cls
-                WHERE cls.claim_id=cc.claim_id
-                  AND cls.rdf_dataset='world'
-                  AND cls.rdf_graph='urn:aios:world:liminal'
-                  AND cls.rdf_predicate='world:contentKind'
+                SELECT 1 FROM aios.rdf_promotion_log cls
+                WHERE cls.claim_id=cc.claim_id AND cls.rdf_dataset='world' AND cls.rdf_graph='urn:aios:world:liminal' AND cls.rdf_predicate='world:contentKind'
             )
               AND EXISTS (
-                SELECT 1
-                FROM aios.claim_semantic_frame_projection sfp
-                WHERE sfp.claim_id=cc.claim_id
-                  AND sfp.decomposer_version='semantic-frame-v2'
+                SELECT 1 FROM aios.claim_semantic_frame_projection sfp
+                WHERE sfp.claim_id=cc.claim_id AND sfp.decomposer_version='semantic-frame-v2'
             )
               AND NOT EXISTS (
-                SELECT 1
-                FROM aios.claim_context_resolution ccr
-                WHERE ccr.claim_id=cc.claim_id
-                  AND ccr.resolver_version='context-resolver-v3'
+                SELECT 1 FROM aios.claim_context_resolution ccr
+                WHERE ccr.claim_id=cc.claim_id AND ccr.resolver_version='context-resolver-v3'
             )
               AND NOT EXISTS (
-                SELECT 1
-                FROM aios.pipeline_job pj
-                WHERE pj.job_type='resolve_claim_context'
-                  AND pj.status IN ('queued','running')
-                  AND pj.payload->>'claim_id'=cc.claim_id::text
+                SELECT 1 FROM aios.pipeline_job pj
+                WHERE pj.job_type='resolve_claim_context' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=cc.claim_id::text
             )
         ),
         quotas AS (
-            SELECT
-                floor($1::numeric * 0.75)::integer AS backlog_quota,
-                $1 - floor($1::numeric * 0.75)::integer AS fresh_quota
+            SELECT floor($1::numeric * 0.75)::integer AS backlog_quota,
+                   $1 - floor($1::numeric * 0.75)::integer AS fresh_quota
         ),
         backlog AS (
             SELECT e.claim_id, e.created_at, 'backlog'::text AS admission_band
-            FROM eligible e
-            ORDER BY e.created_at ASC, e.claim_id
+            FROM eligible e ORDER BY e.created_at ASC, e.claim_id
             LIMIT (SELECT backlog_quota FROM quotas)
         ),
         fresh AS (
             SELECT e.claim_id, e.created_at, 'fresh'::text AS admission_band
             FROM eligible e
-            WHERE NOT EXISTS (
-                SELECT 1 FROM backlog b WHERE b.claim_id=e.claim_id
-            )
+            WHERE NOT EXISTS (SELECT 1 FROM backlog b WHERE b.claim_id=e.claim_id)
             ORDER BY e.created_at DESC, e.claim_id
             LIMIT (SELECT fresh_quota FROM quotas)
         )
         SELECT claim_id, admission_band
         FROM (
-            SELECT claim_id, created_at, admission_band, 0 AS band_order
-            FROM backlog
+            SELECT claim_id, created_at, admission_band, 0 AS band_order FROM backlog
             UNION ALL
-            SELECT claim_id, created_at, admission_band, 1 AS band_order
-            FROM fresh
+            SELECT claim_id, created_at, admission_band, 1 AS band_order FROM fresh
         ) selected
         ORDER BY band_order, created_at
         LIMIT $1
@@ -810,26 +600,13 @@ STAGES: List[Stage] = [
 ]
 
 
-# =================================================
-# Backpressure helpers
-# =================================================
-
 async def queued_job_count(db: Database) -> int:
-    row = await db.fetchrow(
-        "SELECT COUNT(*) AS cnt FROM aios.pipeline_job WHERE status = 'queued'"
-    )
+    row = await db.fetchrow("SELECT COUNT(*) AS cnt FROM aios.pipeline_job WHERE status = 'queued'")
     return int(row["cnt"])
 
 
 async def queued_job_counts_by_type(db: Database) -> dict[str, int]:
-    rows = await db.fetch(
-        """
-        SELECT job_type, COUNT(*) AS cnt
-        FROM aios.pipeline_job
-        WHERE status='queued'
-        GROUP BY job_type
-        """
-    )
+    rows = await db.fetch("SELECT job_type, COUNT(*) AS cnt FROM aios.pipeline_job WHERE status='queued' GROUP BY job_type")
     return {str(row["job_type"]): int(row["cnt"]) for row in rows}
 
 
@@ -848,52 +625,23 @@ def stage_admission_capacity(
         return 0
 
     hard_cap = soft_cap + critical_reserve
-    global_capacity = (
-        max(0, hard_cap - total_queued)
-        if stage.critical
-        else max(0, soft_cap - total_queued)
-    )
+    global_capacity = max(0, hard_cap - total_queued) if stage.critical else max(0, soft_cap - total_queued)
     if global_capacity <= 0:
         return 0
 
-    return min(
-        batch_size,
-        remaining_cycle,
-        stage_capacity,
-        global_capacity,
-    )
+    return min(batch_size, remaining_cycle, stage_capacity, global_capacity)
 
 
-# =================================================
-# Supervisor internals
-# =================================================
-
-async def enqueue_stage_jobs(
-    db: Database,
-    stage: Stage,
-    *,
-    batch_size: int,
-) -> int:
+async def enqueue_stage_jobs(db: Database, stage: Stage, *, batch_size: int) -> int:
     rows: Iterable[Dict[str, object]] = await db.fetch(stage.eligibility_sql, batch_size)
-
     count = 0
     for row in rows:
         payload = stage.payload_builder(dict(row))
-        job_id = await enqueue_job(
-            db,
-            job_type=stage.job_type,
-            payload=payload,
-            priority=stage.priority,
-        )
+        job_id = await enqueue_job(db, job_type=stage.job_type, payload=payload, priority=stage.priority)
         if job_id is not None:
             count += 1
-
     return count
 
-
-# =================================================
-# Supervisor loop
-# =================================================
 
 async def run_supervisor() -> None:
     poll_interval = settings.supervisor_poll_interval
@@ -903,29 +651,19 @@ async def run_supervisor() -> None:
 
     db = Database(settings.db_dsn)
     await db.connect()
-
     logger.info("AIOS supervisor started")
 
     try:
         while True:
             qcnt = await queued_job_count(db)
             queued_by_type = await queued_job_counts_by_type(db)
-            critical_reserve = getattr(
-                settings,
-                "supervisor_critical_queue_reserve",
-                128,
-            )
-
+            critical_reserve = getattr(settings, "supervisor_critical_queue_reserve", 128)
             remaining = max_jobs_per_cycle
             scheduled = 0
 
-            # Higher-priority stages get first admission, independent of source
-            # order in STAGES. This keeps prerequisite/HUD work moving while
-            # background projections drain at bounded depth.
             for stage in sorted(STAGES, key=lambda value: value.priority):
                 if remaining <= 0:
                     break
-
                 stage_queued = queued_by_type.get(stage.job_type, 0)
                 allowed = stage_admission_capacity(
                     stage=stage,
@@ -938,13 +676,8 @@ async def run_supervisor() -> None:
                 )
                 if allowed <= 0:
                     continue
-
                 try:
-                    n = await enqueue_stage_jobs(
-                        db,
-                        stage,
-                        batch_size=allowed,
-                    )
+                    n = await enqueue_stage_jobs(db, stage, batch_size=allowed)
                     scheduled += n
                     remaining -= n
                     qcnt += n
@@ -954,7 +687,6 @@ async def run_supervisor() -> None:
 
             if scheduled == 0:
                 await asyncio.sleep(poll_interval)
-
     finally:
         await db.close()
 
