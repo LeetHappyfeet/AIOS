@@ -1,5 +1,7 @@
 """Epistemic normalization, narratives, knowledge projection, and gap-fill control."""
 
+from contextvars import ContextVar
+
 from .normalizer import normalize_claim_once
 from .narratives import assign_narratives_once
 from .knowledge import project_knowledge_acquisitions_once, record_acquisition
@@ -13,6 +15,8 @@ from . import topology as _topology
 from . import topology_claims as _topology_claims
 from .ownership import resolve_semantic_ownership as _resolve_semantic_ownership
 from .ownership_verifier import verify_semantic_ownership as _verify_semantic_ownership
+
+_claim_context = ContextVar("aios_semantic_claim_context", default=None)
 
 
 def _matrix_outcome_from_ownership(result):
@@ -30,6 +34,7 @@ def _matrix_outcome_from_ownership(result):
 
 
 async def _resolve_and_verify_semantic_ownership(db, row):
+    _claim_context.set(row)
     proposed = await _resolve_semantic_ownership(db, row)
     result = await _verify_semantic_ownership(db, row, proposed)
     claim_id = row.get("claim_id")
@@ -82,11 +87,11 @@ async def _resolve_and_verify_semantic_ownership(db, row):
 
 
 async def _validated_character_mention(db, mention):
-    return await resolve_character_referent(db, mention)
+    return await resolve_character_referent(db, mention, row=_claim_context.get())
 
 
 # Claim topology remains a materialized view of semantic decisions. The
-# ownership/referent decisions are now independently revisable and can mark
+# ownership/referent decisions are independently revisable and can mark
 # topology stale when their evidence changes.
 _topology_claims.resolve_semantic_ownership = _resolve_and_verify_semantic_ownership
 _topology_claims.resolve_character_mention = _validated_character_mention
