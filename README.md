@@ -6,6 +6,8 @@ The project has retired its original monolithic RAG sidecar in favor of a semant
 
 > **Development status:** the ingestion → DAG → claim → RDF → context-resolution → character/world runtime chain is implemented. The active development frontier is the branch-aware RPG/agent HUD and the clients that consume it.
 
+> **License:** AIOS is **source-available proprietary software**, not open-source software. The current code is licensed for **personal use by natural persons only** under the [AIOS Personal Use License 1.0](LICENSE). Commercial, organizational, institutional, hosted, and service-provider use requires a separate written license.
+
 <p align="center">
   <img src="screenshot.png" alt="AIOS Screenshot" width="800">
 </p>
@@ -286,3 +288,11 @@ The original ingestion and RDF work established the system's durable memory subs
 The current milestone is to finish the HUD as the **attention and presentation layer** over that architecture. Once stable, clients should not need to understand the entire RDF graph or SQL schema. They should be able to activate a character, submit observations/actions, and request a bounded frame representing what that character can reasonably perceive, remember, know, believe, and do now.
 
 That is the intended AIOS boundary: **observations go in; an epistemically valid world-and-character context comes out.**
+
+## License
+
+AIOS is licensed under the **AIOS Personal Use License 1.0**, a proprietary source-available license. It permits personal use, study, experimentation, and private modification by natural persons. Commercial, organizational, institutional, hosted, and service-provider use is not permitted without a separate written license.
+
+AIOS was previously distributed under the Apache License 2.0. Rights validly granted for earlier versions or commits remain governed by the license applicable to those versions; the current license does not retroactively revoke earlier grants.
+
+See [`LICENSE`](LICENSE) for the complete terms.
