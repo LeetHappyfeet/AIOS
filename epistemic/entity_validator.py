@@ -27,6 +27,7 @@ async def resolve_character_referent(
     if not value:
         return None
 
+    context = row or {}
     rows = await db.fetch(
         """
         SELECT DISTINCT
@@ -52,12 +53,11 @@ async def resolve_character_referent(
         ORDER BY ci.character_id
         """,
         value,
-        (row or {}).get("world_id"),
+        context.get("world_id"),
     )
     if not rows:
         return None
 
-    context = row or {}
     expected = str(context.get("origin_character_id") or context.get("speaker_id") or "").strip().lower()
     matrix: dict[str, dict[str, int]] = {}
     candidates: dict[str, dict[str, Any]] = {}
@@ -72,10 +72,7 @@ async def resolve_character_referent(
             "world": 1 if candidate["world_present"] else 0,
         }
 
-    proposed = sorted(
-        matrix,
-        key=lambda key: (-sum(matrix[key].values()), key),
-    )[0]
+    proposed = sorted(matrix, key=lambda key: (-sum(matrix[key].values()), key))[0]
     outcome = evaluate_matrix(
         matrix,
         proposed_key=proposed,
@@ -86,22 +83,26 @@ async def resolve_character_referent(
     selected = outcome.winner_key if outcome.status == "verified" else None
 
     claim_id = context.get("claim_id")
-    if claim_id:
-        dependencies = [("character_identity", value.lower())]
-        if context.get("world_id"):
-            dependencies.append(("world", str(context["world_id"])))
-        await record_validation_decision(
-            db,
-            decision_type="entity_referent",
-            decision_key=f"{claim_id}:{value.lower()}",
-            subject_type="claim",
-            subject_key=str(claim_id),
-            outcome=outcome,
-            selected_value=selected,
-            resolver_version=ENTITY_VERIFIER_VERSION,
-            dependencies=dependencies,
-            meta={"surface_mention": value},
-        )
+    subject_key = str(claim_id) if claim_id else value.lower()
+    decision_key = f"{claim_id}:{value.lower()}" if claim_id else f"mention:{value.lower()}"
+    dependencies = [("character_identity", value.lower())]
+    if context.get("world_id"):
+        dependencies.append(("world", str(context["world_id"])))
+    if context.get("speaker_id"):
+        dependencies.append(("speaker_identity", str(context["speaker_id"]).strip().lower()))
+
+    await record_validation_decision(
+        db,
+        decision_type="entity_referent",
+        decision_key=decision_key,
+        subject_type="claim" if claim_id else "surface_mention",
+        subject_key=subject_key,
+        outcome=outcome,
+        selected_value=selected,
+        resolver_version=ENTITY_VERIFIER_VERSION,
+        dependencies=dependencies,
+        meta={"surface_mention": value},
+    )
 
     if not selected:
         return None
