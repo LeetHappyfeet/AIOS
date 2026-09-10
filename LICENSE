@@ -62,11 +62,19 @@ You may create modifications and derivative works solely for your Personal Use. 
 
 You may not use a modified or derivative version to avoid the restrictions of this License.
 
-6. ATTRIBUTION AND NOTICES
+6. CONTRIBUTIONS TO AIOS
+
+"Contribution" means any original code, documentation, design, modification, patch, pull request, issue-attached patch, or other copyrightable material that you intentionally submit to the Licensor for inclusion in AIOS.
+
+Unless you conspicuously state in writing before or at the time of submission that the material is "Not a Contribution," by intentionally submitting a Contribution for inclusion in AIOS you represent that you have the right to grant the following rights and you grant the Licensor a perpetual, worldwide, non-exclusive, irrevocable, royalty-free license, with the right to sublicense and relicense, to use, reproduce, modify, prepare derivative works of, publicly display, publicly perform, distribute, make available, sell, offer for sale, commercialize, and otherwise exploit that Contribution in connection with AIOS or related works, under this License or under any other license terms chosen by the Licensor.
+
+This contribution grant does not transfer copyright ownership in your Contribution to the Licensor. A separate contributor agreement may supersede or supplement this section.
+
+7. ATTRIBUTION AND NOTICES
 
 You must preserve copyright notices, license notices, attribution notices, and proprietary notices contained in the Software or accompanying materials. You may not represent yourself or another person or entity as the creator, owner, or official distributor of AIOS.
 
-7. INTELLECTUAL PROPERTY RESERVED
+8. INTELLECTUAL PROPERTY RESERVED
 
 The Software is licensed, not sold. Except for the limited rights expressly granted above, the Licensor retains all right, title, and interest in and to the Software and associated intellectual property.
 
@@ -76,53 +84,53 @@ No right is granted to use AIOS names, logos, trademarks, service marks, brandin
 
 No patent rights are granted except to the minimum extent, if any, required by applicable law for you to exercise the Personal Use permissions expressly granted in this License.
 
-8. USER DATA AND INDEPENDENT MATERIALS
+9. USER DATA AND INDEPENDENT MATERIALS
 
 This License governs the Software. It does not, merely because such material is processed by the Software, transfer ownership of your independently created prompts, documents, observations, databases, character data, or other content to the Licensor. Rights in generated material may also depend on the terms of any third-party model, service, dataset, or other component used with the Software.
 
-9. THIRD-PARTY COMPONENTS
+10. THIRD-PARTY COMPONENTS
 
 The Software may depend on or include components licensed by third parties. This License does not replace, restrict, or expand licenses applicable to third-party components. Where a third-party license conflicts with this License with respect to that third-party component, the third-party license controls for that component.
 
-10. TERMINATION
+11. TERMINATION
 
 Your rights under this License terminate automatically if you materially violate its terms. Upon termination, you must stop using the version of the Software licensed under this License and delete copies in your possession or control, except copies that applicable law requires you to retain.
 
 Termination does not limit any rights or remedies the Licensor may otherwise have.
 
-11. COMMERCIAL OR ORGANIZATIONAL LICENSING
+12. COMMERCIAL OR ORGANIZATIONAL LICENSING
 
 Commercial, organizational, institutional, hosted, OEM, service-provider, research, or other rights not granted by this License may be available under a separate written agreement with the Licensor.
 
 Contact the AIOS repository owner for licensing inquiries.
 
-12. DISCLAIMER OF WARRANTY
+13. DISCLAIMER OF WARRANTY
 
 TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, OR SECURITY.
 
 YOU ARE SOLELY RESPONSIBLE FOR DETERMINING WHETHER THE SOFTWARE IS APPROPRIATE FOR YOUR USE AND FOR ALL RISKS ARISING FROM ITS USE.
 
-13. LIMITATION OF LIABILITY
+14. LIMITATION OF LIABILITY
 
 TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR AND CONTRIBUTORS WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR FOR LOSS OF DATA, PROFITS, REVENUE, BUSINESS, GOODWILL, OR USE, ARISING OUT OF OR RELATED TO THE SOFTWARE OR THIS LICENSE, REGARDLESS OF THE THEORY OF LIABILITY AND EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
 
 Nothing in this License excludes liability that cannot lawfully be excluded.
 
-14. NO WAIVER
+15. NO WAIVER
 
 A failure by the Licensor to enforce any provision of this License is not a waiver of that provision or of the right to enforce it later.
 
-15. SEVERABILITY
+16. SEVERABILITY
 
 If any provision of this License is found unenforceable, that provision will be enforced to the maximum extent permitted by law and the remaining provisions will remain in effect.
 
-16. EARLIER VERSIONS AND PRIOR LICENSE GRANTS
+17. EARLIER VERSIONS AND PRIOR LICENSE GRANTS
 
 This License applies to AIOS versions or commits first distributed under this License on or after September 10, 2026.
 
 AIOS versions or commits that were previously distributed under another license, including the Apache License 2.0, remain subject to any license rights validly granted for those earlier versions or commits. This License does not retroactively revoke rights already granted under an earlier license.
 
-17. ACCEPTANCE
+18. ACCEPTANCE
 
 By exercising permissions granted under this License, you accept and agree to comply with its terms. If you do not agree to these terms, you are not granted permission under this License to use, modify, or otherwise exercise rights in the Software beyond rights provided by applicable law or by a separate agreement.
 
