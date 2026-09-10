@@ -22,6 +22,7 @@ async def record_new_relation_decisions(db, *, limit: int = 500) -> int:
               SELECT 1 FROM aios.semantic_validation_decision d
               WHERE d.decision_type IN ('proposition_relation','event_identity')
                 AND d.decision_key=(r.proposition_id::text || ':' || r.neighbor_proposition_id::text)
+                AND d.status <> 'stale'
           )
         ORDER BY r.created_at
         LIMIT $2
