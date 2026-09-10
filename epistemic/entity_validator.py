@@ -13,7 +13,7 @@ def _method_score(method: str) -> int:
         "character_id_exact": 3,
         "display_name_exact": 3,
         "canonical_name_exact": 3,
-        "alias_exact": 2,
+        "alias_exact": 3,
     }.get(method, 0)
 
 
