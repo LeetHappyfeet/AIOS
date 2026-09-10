@@ -61,7 +61,7 @@ logger = logging.getLogger("aios.main")
 # App setup
 # =================================================
 
-app = FastAPI(title="AIOS MemoryVault", version="0.2.0")
+app = FastAPI(title="AIOS MemoryVault", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,27 +102,92 @@ async def healthz():
 
 
 # =================================================
-# Session management
+# Session / external-conversation identity
 # =================================================
 
 @app.post("/session", response_model=SessionOut)
 async def create_session(req: SessionCreate) -> SessionOut:
-    row = await db.execute_returning_row(
-        """
-        INSERT INTO aios.session (source, source_session_id, topic, meta)
-        VALUES ($1, $2, $3, $4::jsonb)
-        RETURNING session_id, topic
-        """,
-        req.source or settings.source_name,
-        req.source_session_id,
-        req.topic,
-        json.dumps(req.meta or {}),
-    )
+    """
+    Resolve one durable AIOS session for an external conversation.
 
-    return SessionOut(
-        session_id=row["session_id"],
-        topic=row["topic"],
-    )
+    source_session_id is a logical conversation identity supplied by clients
+    such as SillyTavern. Reconnecting to the same (source, source_session_id)
+    must resume the same session so runtime world keys and source DAG anchors do
+    not fork merely because a browser tab or extension restarted.
+
+    Calls without source_session_id retain the old create-a-new-session behavior.
+    """
+    source = str(req.source or settings.source_name).strip() or settings.source_name
+    meta_json = json.dumps(req.meta or {})
+
+    if req.source_session_id:
+        # Existing databases may already contain duplicate rows from the old
+        # always-insert API. Serialize resolution by external conversation key
+        # and deterministically resume the earliest matching session without
+        # requiring a destructive migration of historical foreign keys.
+        lock_key = f"aios-session::{source.lower()}::{req.source_session_id}"
+        async with db.connection() as con:
+            async with con.transaction():
+                await con.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    lock_key,
+                )
+                row = await con.fetchrow(
+                    """
+                    SELECT session_id, topic
+                    FROM aios.session
+                    WHERE lower(source)=lower($1)
+                      AND source_session_id=$2
+                    ORDER BY created_at, session_id
+                    LIMIT 1
+                    """,
+                    source,
+                    req.source_session_id,
+                )
+                if row:
+                    await con.execute(
+                        """
+                        UPDATE aios.session
+                        SET meta = COALESCE(meta, '{}'::jsonb) || $2::jsonb,
+                            topic = CASE
+                                WHEN COALESCE(topic, '') = '' AND $3 <> '' THEN $3
+                                ELSE topic
+                            END
+                        WHERE session_id=$1
+                        """,
+                        row["session_id"],
+                        meta_json,
+                        req.topic,
+                    )
+                    row = await con.fetchrow(
+                        "SELECT session_id, topic FROM aios.session WHERE session_id=$1",
+                        row["session_id"],
+                    )
+                else:
+                    row = await con.fetchrow(
+                        """
+                        INSERT INTO aios.session (source, source_session_id, topic, meta)
+                        VALUES ($1, $2, $3, $4::jsonb)
+                        RETURNING session_id, topic
+                        """,
+                        source,
+                        req.source_session_id,
+                        req.topic,
+                        meta_json,
+                    )
+    else:
+        row = await db.execute_returning_row(
+            """
+            INSERT INTO aios.session (source, source_session_id, topic, meta)
+            VALUES ($1, NULL, $2, $3::jsonb)
+            RETURNING session_id, topic
+            """,
+            source,
+            req.topic,
+            meta_json,
+        )
+
+    return SessionOut(session_id=row["session_id"], topic=row["topic"])
 
 
 # =================================================
@@ -155,7 +220,7 @@ async def ingest(req: IngestIn) -> IngestOut:
         resolved_viewpoint_id = req.speaker_id
 
     payload: Dict[str, Any] = dict(req.payload or {})
-    client_source = str(payload.get("source") or settings.source_name)
+    client_source = str(payload.get("source") or settings.source_name).strip() or settings.source_name
     source_message_id = payload.get("message_id")
     source_event_id = (
         f"{req.speaker_type}:{source_message_id}"
@@ -179,13 +244,20 @@ async def ingest(req: IngestIn) -> IngestOut:
         }
     )
 
-    # Python's built-in hash() is process-randomized and therefore unsuitable
-    # for persistent dedupe keys. SHA-256 gives stable identity across restarts.
+    # SillyTavern source slots are part of event identity. This keeps two
+    # separate identical messages (for example repeated "Yes.") distinct while
+    # still retaining regenerated/swiped alternatives under one source slot.
     text_digest = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
-    dedupe_key = req.dedupe_key or (
-        f"{req.session_id}::{req.kind or 'other'}::{req.speaker_type}::"
-        f"{req.speaker_id or ''}::{text_digest}"
-    )
+    if source_event_id:
+        default_dedupe_key = (
+            f"{req.session_id}::{client_source.lower()}::{source_event_id}::{text_digest}"
+        )
+    else:
+        default_dedupe_key = (
+            f"{req.session_id}::{req.kind or 'other'}::{req.speaker_type}::"
+            f"{req.speaker_id or ''}::{text_digest}"
+        )
+    dedupe_key = req.dedupe_key or default_dedupe_key
 
     try:
         ev = await db.execute_returning_row(
@@ -228,7 +300,7 @@ async def ingest(req: IngestIn) -> IngestOut:
             SET dedupe_key = EXCLUDED.dedupe_key
             RETURNING event_id
             """,
-            settings.source_name,
+            client_source,
             source_kind,
             source_event_id,
             req.kind or "other",
@@ -251,7 +323,7 @@ async def ingest(req: IngestIn) -> IngestOut:
 
     event_id = int(ev["event_id"])
 
-    # Re-selecting a previously seen swipe may hit the text dedupe key and
+    # Re-selecting a previously seen swipe may hit the stable dedupe key and
     # reuse its immutable event row. Reactivate that row before superseding the
     # currently selected alternative.
     if source_event_id:
@@ -277,7 +349,7 @@ async def ingest(req: IngestIn) -> IngestOut:
             user_name=req.user_name,
             scope_key=req.scope_key or settings.default_scope,
             meta={
-                "source": settings.source_name,
+                "source": client_source,
                 "world_assignment": "default_liminal",
             },
         )
@@ -304,7 +376,7 @@ async def ingest(req: IngestIn) -> IngestOut:
                     LIMIT 1
                 ) de ON true
                 WHERE ie.session_id=$1
-                  AND ie.source=$2
+                  AND lower(ie.source)=lower($2)
                   AND ie.source_event_id=$3
                   AND ie.event_id<>$4
                   AND ie.superseded_at IS NULL
@@ -312,7 +384,7 @@ async def ingest(req: IngestIn) -> IngestOut:
                 LIMIT 1
                 """,
                 req.session_id,
-                settings.source_name,
+                client_source,
                 source_event_id,
                 event_id,
             )
@@ -356,7 +428,7 @@ async def ingest(req: IngestIn) -> IngestOut:
         # -------------------------------------------------
         # Runtime source-perception cursor advancement
         # -------------------------------------------------
-        # The liminal/source DAG remains immutable provenance.  Matching active
+        # The liminal/source DAG remains immutable provenance. Matching active
         # runtime instances merely advance their authorized perception boundary;
         # source messages are never copied into the concrete runtime DAG.
         await db.execute(
@@ -459,10 +531,10 @@ async def ingest_external_observation(req: ExternalObservationIn) -> IngestOut:
 
 
 # =================================================
-# Memory read (READ-ONLY)
+# Legacy memory read (compatibility only)
 # =================================================
 
-@app.get("/memory", response_model=MemoryOut)
+@app.get("/memory", response_model=MemoryOut, deprecated=True)
 async def memory(
     character: str,
     context: str,
@@ -470,6 +542,13 @@ async def memory(
     scope: Optional[str] = None,
     limit: int = 8,
 ) -> MemoryOut:
+    """
+    Legacy character/timeline memory view.
+
+    This endpoint is intentionally not a live-generation HUD fallback because
+    it does not carry exact runtime/source-DAG coordinates. Clients generating
+    for an active instance should use POST /instance/{id}/hud instead.
+    """
     timeline_id = await pick_latest_timeline_for_character(
         db,
         character_id=character,
@@ -528,29 +607,32 @@ async def get_instance_state(instance_id: UUID):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/instance/{instance_id}/frame")
-async def get_instance_frame(
+async def _prepare_hud_response(
     instance_id: UUID,
-    recent_limit: Optional[int] = None,
-    token_budget: Optional[int] = None,
-    wait_ms: int = 1200,
+    *,
+    through_node_id: Optional[UUID],
+    recent_limit: Optional[int],
+    token_budget: Optional[int],
+    wait_ms: int,
 ):
-    """Build the canonical branch-aware RPG HUD for this runtime instance."""
-    try:
-        return await world_runtime.build_frame(
-            instance_id,
-            recent_limit=recent_limit,
-            token_budget=token_budget,
-            wait_ms=wait_ms,
-        )
-    except RuntimeNotFound as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    frame = await world_runtime.prepare_frame(
+        instance_id,
+        through_node_id=through_node_id,
+        recent_limit=recent_limit,
+        token_budget=token_budget,
+        wait_ms=wait_ms,
+    )
+    return {
+        "instance_id": instance_id,
+        "generation_ready": bool(frame.get("hud", {}).get("generation_ready")),
+        "freshness": frame.get("hud", {}).get("freshness", {}),
+        "frame": frame,
+        "text": render_hud_text(frame),
+    }
 
 
-
-
-@app.post("/instance/{instance_id}/prepare")
-async def prepare_instance_frame(
+@app.post("/instance/{instance_id}/hud")
+async def get_instance_hud(
     instance_id: UUID,
     through_node_id: Optional[UUID] = None,
     recent_limit: Optional[int] = None,
@@ -558,29 +640,60 @@ async def prepare_instance_frame(
     wait_ms: int = 2500,
 ):
     """
-    Prepare a generation-consistent HUD through an exact source DAG node.
+    Authoritative live-generation HUD endpoint.
 
-    This advances only latency-critical retrieval work. Background RDF,
-    narrative clustering, web accumulation, and unrelated instances are not
-    part of the generation barrier.
+    When through_node_id is supplied, the response is generation-consistent for
+    that exact active source DAG coordinate or returns 409. The same response
+    carries both the structured frame and canonical rendered text so clients do
+    not need secondary /frame or /frame/text fallbacks.
     """
     try:
-        frame = await world_runtime.prepare_frame(
+        return await _prepare_hud_response(
             instance_id,
             through_node_id=through_node_id,
             recent_limit=recent_limit,
             token_budget=token_budget,
             wait_ms=wait_ms,
         )
-        return {
-            "instance_id": instance_id,
-            "generation_ready": bool(frame.get("hud", {}).get("generation_ready")),
-            "freshness": frame.get("hud", {}).get("freshness", {}),
-            "frame": frame,
-            "text": render_hud_text(frame),
-        }
     except RuntimeConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/instance/{instance_id}/prepare", deprecated=True)
+async def prepare_instance_frame(
+    instance_id: UUID,
+    through_node_id: Optional[UUID] = None,
+    recent_limit: Optional[int] = None,
+    token_budget: Optional[int] = None,
+    wait_ms: int = 2500,
+):
+    """Compatibility alias for POST /instance/{instance_id}/hud."""
+    return await get_instance_hud(
+        instance_id,
+        through_node_id=through_node_id,
+        recent_limit=recent_limit,
+        token_budget=token_budget,
+        wait_ms=wait_ms,
+    )
+
+
+@app.get("/instance/{instance_id}/frame", deprecated=True)
+async def get_instance_frame(
+    instance_id: UUID,
+    recent_limit: Optional[int] = None,
+    token_budget: Optional[int] = None,
+    wait_ms: int = 1200,
+):
+    """Compatibility view. Live-generation clients should use POST /hud."""
+    try:
+        return await world_runtime.build_frame(
+            instance_id,
+            recent_limit=recent_limit,
+            token_budget=token_budget,
+            wait_ms=wait_ms,
+        )
     except RuntimeNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -662,13 +775,14 @@ async def fork_instance(instance_id: UUID, req: CharacterForkIn) -> CharacterAct
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.get("/instance/{instance_id}/frame/text")
+@app.get("/instance/{instance_id}/frame/text", deprecated=True)
 async def get_instance_text_frame(
     instance_id: UUID,
     recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
     wait_ms: int = 1200,
 ):
+    """Compatibility text view. Live-generation clients should use POST /hud."""
     try:
         frame = await world_runtime.build_frame(
             instance_id,
