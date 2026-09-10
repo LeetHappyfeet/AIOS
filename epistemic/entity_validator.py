@@ -86,6 +86,9 @@ async def resolve_character_referent(
     subject_key = str(claim_id) if claim_id else value.lower()
     decision_key = f"{claim_id}:{value.lower()}" if claim_id else f"mention:{value.lower()}"
     dependencies = [("character_identity", value.lower())]
+    if claim_id:
+        dependencies.append(("decision", f"semantic_owner:{claim_id}"))
+        dependencies.append(("claim_context", str(claim_id)))
     if context.get("world_id"):
         dependencies.append(("world", str(context["world_id"])))
     if context.get("speaker_id"):
