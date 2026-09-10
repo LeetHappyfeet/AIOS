@@ -1,4 +1,5 @@
 from aios_app.semantic_index.neighbor_classifier import classify_neighbor_pair
+from aios_app.semantic_index.validation_adapter import _json_object
 
 
 def proposition(**overrides):
@@ -61,3 +62,12 @@ def test_event_neighbors_on_same_timeline_can_be_same_event():
     )
     assert relation == "SAME_EVENT"
     assert confidence >= 0.8
+
+
+def test_validation_adapter_accepts_asyncpg_json_text():
+    assert _json_object('{"verifier_version":"v1","nested":{"status":"verified"}}') == {
+        "verifier_version": "v1",
+        "nested": {"status": "verified"},
+    }
+    assert _json_object(None) == {}
+    assert _json_object('["not", "an", "object"]') == {}
