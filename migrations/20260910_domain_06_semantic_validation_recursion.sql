@@ -259,11 +259,8 @@ FOR EACH ROW EXECUTE FUNCTION aios.semantic_validation_character_alias_trigger()
 CREATE OR REPLACE FUNCTION aios.semantic_validation_decision_trigger()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF TG_OP='INSERT' THEN
-        PERFORM aios.mark_semantic_validation_stale(
-            'decision', NEW.decision_type || ':' || NEW.decision_key
-        );
-    ELSIF OLD.selected_value IS DISTINCT FROM NEW.selected_value
+    IF TG_OP='INSERT'
+       OR OLD.selected_value IS DISTINCT FROM NEW.selected_value
        OR (OLD.status IS DISTINCT FROM NEW.status AND NEW.status <> 'stale')
     THEN
         PERFORM aios.mark_semantic_validation_stale(
