@@ -102,9 +102,6 @@ def deterministic_semantic_ownership(row: dict[str, Any]) -> SemanticOwnershipRe
             evidence={"epistemic_scope": scope, "source_id": source_id},
         )
 
-    # Some non-RP ingestion paths already identify an observation as world
-    # semantic state without using the narrative discourse label. Keep this
-    # narrow: speaker/character/source ambiguity must not leak into /world.
     if scope in {"world", "observation"} and world_id:
         return SemanticOwnershipResolution(
             owner_kind="world",
@@ -212,7 +209,7 @@ async def _resolve_speaker_character(
 async def _neighbor_rows(db: Database, proposition_id: UUID) -> list[dict[str, Any]]:
     rows = await db.fetch(
         """
-        WITH neighbor AS (
+        WITH raw_neighbor AS (
             SELECT neighbor_proposition_id AS proposition_id, similarity
             FROM aios.semantic_neighbor_candidate
             WHERE proposition_id=$1
@@ -222,6 +219,11 @@ async def _neighbor_rows(db: Database, proposition_id: UUID) -> list[dict[str, A
             FROM aios.semantic_neighbor_candidate
             WHERE neighbor_proposition_id=$1
               AND similarity >= $2
+        ),
+        neighbor AS (
+            SELECT proposition_id, MAX(similarity) AS similarity
+            FROM raw_neighbor
+            GROUP BY proposition_id
         )
         SELECT
             n.similarity,
@@ -259,7 +261,6 @@ def _candidate_allowed(
     candidate: SemanticOwnershipResolution,
     canonical_speaker_id: Optional[str],
 ) -> bool:
-    # Source similarity is evidence provenance, not semantic ownership evidence.
     if candidate.owner_kind in {"source", "unresolved"}:
         return False
 
@@ -287,9 +288,6 @@ async def _resolve_from_neighbors(
     if not proposition_id:
         return None
 
-    # Explicit speaker semantics are identity-sensitive. Do not turn a user's
-    # mental state into world state merely because nearby narrative claims are
-    # semantically similar.
     if _norm(row.get("epistemic_scope")) == "speaker":
         return None
 
