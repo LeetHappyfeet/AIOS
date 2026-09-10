@@ -59,6 +59,31 @@ def choose_observation_scope(row: dict[str, Any]) -> TopologyDecision:
     return _decision_from_resolution(row, deterministic_semantic_ownership(row))
 
 
+async def _remove_stale_unresolved_scope(
+    db: Database,
+    *,
+    claim_id: UUID,
+    keep_scope_key: str,
+) -> None:
+    """Delete a claim-local unresolved staging tree after confident reassignment."""
+    unresolved_scope = f"unresolved:{claim_id}"
+    if keep_scope_key == unresolved_scope:
+        return
+
+    await db.execute(
+        """
+        DELETE FROM aios.semantic_topology_projection
+        WHERE claim_id=$1 AND scope_key=$2
+        """,
+        claim_id,
+        unresolved_scope,
+    )
+    await db.execute(
+        "DELETE FROM aios.semantic_topology_node WHERE scope_key=$1",
+        unresolved_scope,
+    )
+
+
 async def derive_claim_topology(
     db: Database,
     fuseki: FusekiClient,
@@ -88,6 +113,16 @@ async def derive_claim_topology(
     ownership = await resolve_semantic_ownership(db, data)
     decision = _decision_from_resolution(data, ownership)
     ownership_meta = ownership.as_meta()
+
+    # Vector/graph evidence can arrive after an unresolved claim was projected.
+    # Since unresolved scopes are claim-local, a confident reassignment can
+    # safely remove that temporary tree without touching neighboring claims.
+    await _remove_stale_unresolved_scope(
+        db,
+        claim_id=claim_id,
+        keep_scope_key=decision.scope_key,
+    )
+
     projection_key = f"claim:{claim_id}:{decision.scope_key}"
 
     root = await _upsert_node(
