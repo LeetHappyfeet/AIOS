@@ -41,4 +41,39 @@ USING aios.claim_context_resolution ccr
 WHERE stp.claim_id=ccr.claim_id
   AND ccr.epistemic_scope IN ('character','narrative','speaker');
 
+-- Vector geometry is asynchronous relative to claim topology. When a new
+-- semantic neighbor arrives, only unresolved claim projections touching either
+-- proposition are marked stale. The normal topology supervisor will re-run the
+-- hybrid resolver. Resolved character/world/source ownership is never reopened
+-- merely because a vector neighbor appeared.
+CREATE OR REPLACE FUNCTION aios.reconsider_unresolved_topology_from_neighbor()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE aios.semantic_topology_projection stp
+    SET projected_at=NULL,
+        updated_at=now(),
+        meta=stp.meta || jsonb_build_object(
+            'reproject_reason', 'semantic_neighbor_evidence',
+            'neighbor_embedding_version', NEW.embedding_version
+        )
+    FROM aios.observation o
+    WHERE stp.claim_id=o.claim_id
+      AND stp.projected_at IS NOT NULL
+      AND stp.scope_key=('unresolved:' || o.claim_id::text)
+      AND o.proposition_id IN (NEW.proposition_id, NEW.neighbor_proposition_id);
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_reconsider_unresolved_topology_from_neighbor
+    ON aios.semantic_neighbor_candidate;
+
+CREATE TRIGGER trg_reconsider_unresolved_topology_from_neighbor
+AFTER INSERT OR UPDATE OF similarity, status
+ON aios.semantic_neighbor_candidate
+FOR EACH ROW
+EXECUTE FUNCTION aios.reconsider_unresolved_topology_from_neighbor();
+
 COMMIT;
