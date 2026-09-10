@@ -4,7 +4,7 @@ from typing import Any
 
 from aios_app.epistemic.hypothesis_validation import evaluate_matrix
 
-RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v1"
+RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v2"
 
 
 def validate_neighbor_relation(
@@ -21,7 +21,16 @@ def validate_neighbor_relation(
     same_topic = bool(a.get("topic_key") and a.get("topic_key") == b.get("topic_key"))
     same_timeline = bool(a.get("timeline_id") and a.get("timeline_id") == b.get("timeline_id"))
     same_world = bool(a.get("world_id") and a.get("world_id") == b.get("world_id"))
+    worlds_known = bool(a.get("world_id") and b.get("world_id"))
     both_events = a.get("claim_kind") == "EVENT" and b.get("claim_kind") == "EVENT"
+    has_conflict = bool(conflict_type)
+
+    # semantic_neighbor_relation is a single primary relation.  An already
+    # materialized proposition conflict is therefore negative evidence for the
+    # mutually-exclusive non-conflict labels.  This does not make the conflict
+    # record infallible: it still has to survive the matrix and leave-one-axis
+    # stability test against subject/predicate/object/world evidence.
+    conflict_veto = -3 if has_conflict else 0
 
     matrix = {
         "EQUIVALENT": {
@@ -30,6 +39,7 @@ def validate_neighbor_relation(
             "object": 2 if same_object else -1,
             "polarity": 2 if same_polarity else -3,
             "vector": 2 if similarity >= 0.90 else (1 if similarity >= 0.82 else -1),
+            "conflict": conflict_veto,
         },
         "REFINES": {
             "subject": 2 if same_subject else -2,
@@ -37,31 +47,39 @@ def validate_neighbor_relation(
             "object": 1 if not same_object else 0,
             "polarity": 2 if same_polarity else -3,
             "vector": 1 if similarity >= 0.78 else -1,
+            "conflict": conflict_veto,
         },
         "SAME_EVENT": {
             "event": 3 if both_events else -3,
             "timeline": 3 if same_timeline else -3,
-            "world": 2 if same_world else (-3 if a.get("world_id") and b.get("world_id") else 0),
+            "world": 2 if same_world else (-3 if worlds_known else 0),
             "subject": 1 if same_subject else 0,
             "vector": 2 if similarity >= 0.86 else (1 if similarity >= 0.80 else -2),
+            "conflict": conflict_veto,
         },
         "SAME_TOPIC": {
             "topic": 3 if same_topic else -2,
             "world": 1 if same_world else 0,
             "vector": 2 if similarity >= 0.82 else (1 if similarity >= 0.76 else -1),
+            "conflict": conflict_veto,
         },
         "CONTRADICTS": {
-            "conflict": 3 if conflict_type else -3,
+            "conflict": 3 if has_conflict else -3,
             "subject": 1 if same_subject else 0,
             "predicate": 1 if same_predicate else 0,
+            # Exclusive-object conflicts are supported by the same canonical
+            # subject/predicate pointing at incompatible objects.  Polarity
+            # disagreement is a separate contradiction signal.
+            "object": 2 if (has_conflict and same_subject and same_predicate and not same_object) else 0,
             "polarity": 2 if not same_polarity else 0,
-            "world": 1 if same_world else -1,
+            "world": 1 if same_world else (-2 if worlds_known else 0),
         },
         "RELATED": {
             "vector": 3 if similarity >= 0.86 else (2 if similarity >= 0.76 else 0),
             "topic": 1 if same_topic else 0,
             "subject": 1 if same_subject else 0,
             "world": 1 if same_world else 0,
+            "conflict": conflict_veto,
         },
     }
 
