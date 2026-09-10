@@ -13,13 +13,13 @@ def u(n: int) -> UUID:
 
 def test_single_strong_bridge_does_not_merge_dense_cores():
     edges = [
-        Edge(u(1), u(2), 0.91),
-        Edge(u(2), u(3), 0.90),
-        Edge(u(1), u(3), 0.89),
-        Edge(u(4), u(5), 0.93),
-        Edge(u(5), u(6), 0.92),
-        Edge(u(4), u(6), 0.90),
-        Edge(u(3), u(4), 0.86),
+        Edge(u(1), u(2), 0.91, "SAME_TOPIC"),
+        Edge(u(2), u(3), 0.90, "SAME_TOPIC"),
+        Edge(u(1), u(3), 0.89, "SAME_TOPIC"),
+        Edge(u(4), u(5), 0.93, "SAME_TOPIC"),
+        Edge(u(5), u(6), 0.92, "SAME_TOPIC"),
+        Edge(u(4), u(6), 0.90, "SAME_TOPIC"),
+        Edge(u(3), u(4), 0.86, "SAME_TOPIC"),
     ]
 
     components = _build_core_components(
@@ -59,9 +59,6 @@ def test_fringe_requires_multiple_supporting_links():
 
 
 def test_related_edges_do_not_form_core_components():
-    from uuid import UUID
-    from aios_app.semantic_index.clustering import Edge, _build_core_components
-
     a = UUID("00000000-0000-0000-0000-000000000001")
     b = UUID("00000000-0000-0000-0000-000000000002")
     c = UUID("00000000-0000-0000-0000-000000000003")
