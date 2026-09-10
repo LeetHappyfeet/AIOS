@@ -15,7 +15,7 @@ async def resolve_generated_facts_validated(db: Database, *, limit: int = 100) -
         FROM aios.world_proposition_assertion a
         JOIN aios.proposition p ON p.proposition_id=a.proposition_id
         WHERE a.source_kind='generated_fill'
-          AND a.epistemic_status='provisional'
+          AND a.epistemic_status IN ('provisional','corroborated')
           AND (
               a.last_checked_at IS NULL
               OR EXISTS (
@@ -167,7 +167,8 @@ async def resolve_generated_facts_validated(db: Database, *, limit: int = 100) -
             await db.execute(
                 """
                 UPDATE aios.world_proposition_assertion
-                SET last_checked_at=now(), updated_at=now(),
+                SET epistemic_status='provisional',
+                    last_checked_at=now(), updated_at=now(),
                     meta=meta || $2::jsonb
                 WHERE assertion_id=$1
                 """,
@@ -175,12 +176,15 @@ async def resolve_generated_facts_validated(db: Database, *, limit: int = 100) -
                 json.dumps({"resolution": "remain_provisional", "verification": verification}),
             )
 
-        affected = await notify_evidence_change(
+        # Publish the materialized world-state change to all OTHER dependent
+        # decisions. Do not invalidate the promotion decision that just created
+        # this materialization; later independent evidence may invalidate it.
+        await notify_evidence_change(
             db,
             evidence_type="world_proposition",
             evidence_key=f"{generated['world_id']}:{generated['proposition_id']}",
+            exclude_decision_type="epistemic_promotion",
+            exclude_decision_key=str(generated["assertion_id"]),
         )
-        if affected:
-            changed += 0
 
     return changed
