@@ -65,8 +65,16 @@ async def record_new_relation_decisions(db, *, limit: int = 500) -> int:
             dependencies=dependencies,
             meta={"confidence": float(row["confidence"] or 0.0)},
         )
-        # A relation/event interpretation is itself evidence for later topology,
-        # world assignment, clustering and promotion decisions.
+
+        # Neighbor geometry and the accepted relation are different evidence
+        # channels. Publish both so ownership/world decisions that depend on
+        # geometry can refresh even if the relation itself remains unchanged.
+        for proposition_id in (row["proposition_id"], row["neighbor_proposition_id"]):
+            await notify_evidence_change(
+                db,
+                evidence_type="semantic_neighbors",
+                evidence_key=str(proposition_id),
+            )
         await notify_evidence_change(
             db,
             evidence_type="decision",
