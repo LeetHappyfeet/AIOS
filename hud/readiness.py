@@ -439,6 +439,14 @@ async def save_prepared_snapshot(
     if source_node_id:
         row = await db.fetchrow("SELECT event_id FROM aios.dag_node WHERE node_id=$1", source_node_id)
         event_id = row["event_id"] if row else None
+
+    # Runtime/HUD frames are assembled directly from typed database/runtime
+    # values, so identifiers and timestamps can legitimately still be UUID or
+    # datetime objects here. The persistence boundary is where they should be
+    # converted to JSON scalars; forcing string conversion throughout the HUD
+    # assembler would weaken the in-process type contract.
+    serialized_hud = json.dumps(hud_json, default=str)
+
     await db.execute(
         """
         UPDATE aios.character_hud_readiness
@@ -458,7 +466,7 @@ async def save_prepared_snapshot(
         source_node_id,
         event_id,
         state_version,
-        json.dumps(hud_json),
+        serialized_hud,
         hud_text,
     )
 
