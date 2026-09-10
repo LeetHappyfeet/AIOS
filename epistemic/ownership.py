@@ -47,7 +47,9 @@ def _norm(value: object) -> str:
 
 
 def _unresolved_key(row: dict[str, Any]) -> str:
-    anchor = row.get("timeline_id") or row.get("claim_id") or row.get("proposition_id") or "unknown"
+    # Keep unresolved ownership claim-local so a later confident reassignment can
+    # delete the staging scope without disturbing unrelated ambiguous claims.
+    anchor = row.get("claim_id") or row.get("proposition_id") or row.get("timeline_id") or "unknown"
     return f"unresolved:{anchor}"
 
 
