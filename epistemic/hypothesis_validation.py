@@ -134,24 +134,13 @@ async def record_validation_decision(
             stability=EXCLUDED.stability,
             matrix=EXCLUDED.matrix,
             meta=aios.semantic_validation_decision.meta || EXCLUDED.meta,
-            evaluated_at=now(),
-            stale_at=NULL,
+            evaluated_at=now(), stale_at=NULL,
             revision=aios.semantic_validation_decision.revision + 1
         """,
-        decision_type,
-        decision_key,
-        subject_type,
-        subject_key,
-        outcome.proposed_key,
-        selected_value,
-        outcome.status,
-        resolver_version,
-        outcome.winner_score,
-        outcome.runner_up_score,
-        outcome.margin,
-        outcome.stability,
-        json.dumps(outcome.matrix),
-        json.dumps(meta or {}),
+        decision_type, decision_key, subject_type, subject_key,
+        outcome.proposed_key, selected_value, outcome.status, resolver_version,
+        outcome.winner_score, outcome.runner_up_score, outcome.margin,
+        outcome.stability, json.dumps(outcome.matrix), json.dumps(meta or {}),
     )
 
     await db.execute(
@@ -167,10 +156,7 @@ async def record_validation_decision(
             ) VALUES ($1,$2,$3,$4)
             ON CONFLICT DO NOTHING
             """,
-            decision_type,
-            decision_key,
-            evidence_type,
-            evidence_key,
+            decision_type, decision_key, evidence_type, evidence_key,
         )
 
 
@@ -179,19 +165,19 @@ async def invalidate_for_evidence(
     *,
     evidence_type: str,
     evidence_key: str,
+    exclude_decision_type: Optional[str] = None,
+    exclude_decision_key: Optional[str] = None,
 ) -> list[dict[str, str]]:
-    """Mark only decisions transitively dependent on changed evidence as stale.
-
-    Decisions can depend on other decisions through evidence_type='decision' and
-    evidence_key='<decision_type>:<decision_key>'. This gives AIOS bounded semantic
-    recursion without rescanning unrelated claims/worlds.
-    """
     rows = await db.fetch(
         """
         WITH RECURSIVE affected(decision_type, decision_key) AS (
             SELECT d.decision_type, d.decision_key
             FROM aios.semantic_validation_dependency d
             WHERE d.evidence_type=$1 AND d.evidence_key=$2
+              AND NOT (
+                  d.decision_type=COALESCE($3,'')
+                  AND d.decision_key=COALESCE($4,'')
+              )
             UNION
             SELECT child.decision_type, child.decision_key
             FROM affected a
@@ -209,6 +195,8 @@ async def invalidate_for_evidence(
         """,
         evidence_type,
         evidence_key,
+        exclude_decision_type,
+        exclude_decision_key,
     )
     return [dict(row) for row in rows]
 
@@ -217,7 +205,6 @@ async def apply_local_revalidation_invalidations(
     db: Database,
     affected: Iterable[dict[str, str]],
 ) -> None:
-    """Translate stale decisions into existing pipeline/materialization latches."""
     for item in affected:
         dtype = item["decision_type"]
         skey = item["subject_key"]
@@ -241,14 +228,19 @@ async def apply_local_revalidation_invalidations(
                     WHERE (proposition_id::text=$1 AND neighbor_proposition_id::text=$2)
                        OR (proposition_id::text=$2 AND neighbor_proposition_id::text=$1)
                     """,
-                    parts[0],
-                    parts[1],
+                    parts[0], parts[1],
                 )
         elif dtype == "epistemic_promotion":
             await db.execute(
                 """
                 UPDATE aios.world_proposition_assertion
-                SET last_checked_at=NULL, updated_at=now()
+                SET last_checked_at=NULL,
+                    epistemic_status=CASE
+                        WHEN source_kind='generated_fill' AND epistemic_status='corroborated'
+                        THEN 'provisional'
+                        ELSE epistemic_status
+                    END,
+                    updated_at=now()
                 WHERE assertion_id::text=$1
                 """,
                 skey,
@@ -260,11 +252,15 @@ async def notify_evidence_change(
     *,
     evidence_type: str,
     evidence_key: str,
+    exclude_decision_type: Optional[str] = None,
+    exclude_decision_key: Optional[str] = None,
 ) -> list[dict[str, str]]:
     affected = await invalidate_for_evidence(
         db,
         evidence_type=evidence_type,
         evidence_key=evidence_key,
+        exclude_decision_type=exclude_decision_type,
+        exclude_decision_key=exclude_decision_key,
     )
     if affected:
         await apply_local_revalidation_invalidations(db, affected)
