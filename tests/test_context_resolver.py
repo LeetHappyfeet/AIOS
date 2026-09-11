@@ -1,3 +1,5 @@
+import inspect
+
 from aios_app.models import ExternalObservationIn
 from aios_app.epistemic.normalizer import normalize_components
 from aios_app.epistemic.context_resolver import (
@@ -5,6 +7,7 @@ from aios_app.epistemic.context_resolver import (
     classify_entity_kind,
     classify_predicate_family,
     is_semantic_pivot,
+    resolve_claim_context,
     resolve_ingest_viewpoint,
 )
 
@@ -113,3 +116,10 @@ def test_external_observation_contract_defaults_to_source_liminal_event():
     assert req.speaker_type == "source"
     assert req.target_character_id is None
     assert req.target_world_id is None
+
+
+def test_runtime_binding_repair_keeps_instance_parameter_uuid_typed():
+    source = inspect.getsource(resolve_claim_context)
+    assert "character_instance_id=$2::uuid" in source
+    assert "'character_instance_id', ($2::uuid)::text" in source
+    assert "'character_instance_id', $2::text" not in source
