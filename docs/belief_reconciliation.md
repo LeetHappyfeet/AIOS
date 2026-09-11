@@ -25,7 +25,7 @@ Positive and negative propositions therefore compete over the same atom. Proposi
 - `unresolved`: preserved evidence is too ambiguous to use yet.
 - `suppressed`: preserved evidence is not semantically usable as a proposition.
 
-The first policy deliberately quarantines bare quoted discourse that is still classified as `narrated_observation`. Until a local quote speaker/addressee is resolved, transport-level chat identities must not be treated as local quoted participants.
+The first policy deliberately quarantines first/second-person participant references inside bare quoted discourse that is still classified as `narrated_observation`. Until a local quote speaker/addressee is resolved, transport-level chat identities must not be treated as local quoted `I`/`you` participants. Quoted facts without that participant ambiguity remain eligible for normal admission.
 
 ## Belief reconciliation
 
@@ -36,8 +36,9 @@ For each `(instance_id, atom_id)`, the resolver:
 3. ignores superseded ingest evidence;
 4. consumes only `active` admissions;
 5. collapses correlated evidence from the same source/event coordinate;
-6. aggregates positive and negative support with bounded independent-evidence accumulation;
-7. materializes `positive`, `negative`, or `unresolved` stance.
+6. preserves separate acquisitions so genuinely independent corroboration can accumulate;
+7. aggregates positive and negative support with bounded independent-evidence accumulation;
+8. materializes `positive`, `negative`, or `unresolved` stance.
 
 Default policy:
 
@@ -54,6 +55,8 @@ A stance is accepted only when its support reaches the threshold and exceeds the
 
 `character_active_proposition_knowledge` is the compatibility projection for ordinary HUD retrieval. It exposes the representative proposition selected by `character_belief_state`, with belief confidence and stance, while retaining the instance that supplied the underlying evidence.
 
+HUD lineage de-duplication is performed by `atom_id`, not the older broad `topic_key`, so distinct facts that share a subject and predicate are not silently collapsed.
+
 Raw evidence remains available for diagnostics and historical/explanation tooling.
 
 ## Automatic refresh
@@ -66,6 +69,8 @@ Database triggers refresh admission and belief state when:
 - an ingest event is superseded or restored.
 
 Descendant character instances are refreshed when ancestor evidence changes, preserving branch inheritance without sibling leakage.
+
+PostgreSQL is authoritative for belief state; Fuseki is a derived projection. If no pending acquisition topology job is already going to rewrite the character scope, a belief-state change marks one completed acquisition projection stale. The existing supervisor then reuses the normal acquisition reprojection path to refresh the full `/char` RDF graph.
 
 ## Manual inspection
 
