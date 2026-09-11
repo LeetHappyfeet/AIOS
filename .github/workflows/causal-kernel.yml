@@ -1,0 +1,40 @@
+name: causal-kernel
+
+on:
+  push:
+    branches: [AIOS-development]
+  pull_request:
+    branches: [AIOS-development]
+
+jobs:
+  causal-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install narrow test dependencies
+        run: python -m pip install --disable-pip-version-check pytest asyncpg
+      - name: Compile changed architecture modules
+        run: |
+          python -m py_compile \
+            causal/__init__.py \
+            causal/types.py \
+            causal/domain.py \
+            causal/registry.py \
+            causal/rules.py \
+            causal/kernel.py \
+            causal/ingress.py \
+            causal/projection.py \
+            causal/semantic_bridge.py \
+            causal/domains/location.py \
+            causal/domains/scalar.py \
+            world/runtime.py \
+            hud/context.py
+      - name: Run causal and separation tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/aios-pythonpath"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" \
+            python -m pytest -q tests/test_causal_domains.py tests/test_causal_separation.py
