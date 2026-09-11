@@ -20,8 +20,6 @@ def test_zero_claim_message_is_ready_after_extraction():
             "contextualized": 0,
             "normalized": 0,
             "knowledge_ready": 0,
-            "topology_ready": 0,
-            "acquisition_topology_ready": 0,
         },
     ])
     ready = asyncio.run(
@@ -34,7 +32,7 @@ def test_zero_claim_message_is_ready_after_extraction():
     assert ready is True
 
 
-def test_claim_message_waits_for_all_retrieval_stages():
+def test_claim_message_waits_for_character_knowledge():
     db = FakeDB([
         {"section_id": uuid4(), "claims_extracted_at": object()},
         {
@@ -42,8 +40,6 @@ def test_claim_message_waits_for_all_retrieval_stages():
             "contextualized": 2,
             "normalized": 2,
             "knowledge_ready": 1,
-            "topology_ready": 2,
-            "acquisition_topology_ready": 1,
         },
     ])
     ready = asyncio.run(
@@ -56,7 +52,7 @@ def test_claim_message_waits_for_all_retrieval_stages():
     assert ready is False
 
 
-def test_claim_message_ready_when_context_knowledge_and_topology_match():
+def test_claim_message_ready_without_waiting_for_topology():
     db = FakeDB([
         {"section_id": uuid4(), "claims_extracted_at": object()},
         {
@@ -64,8 +60,6 @@ def test_claim_message_ready_when_context_knowledge_and_topology_match():
             "contextualized": 2,
             "normalized": 2,
             "knowledge_ready": 2,
-            "topology_ready": 2,
-            "acquisition_topology_ready": 2,
         },
     ])
     ready = asyncio.run(

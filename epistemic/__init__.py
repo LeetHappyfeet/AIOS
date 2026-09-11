@@ -13,6 +13,7 @@ from .hypothesis_validation import MatrixOutcome, record_validation_decision
 
 from . import topology as _topology
 from . import topology_claims as _topology_claims
+from .topology_projection import install_deferred_projection
 from .ownership import resolve_semantic_ownership as _resolve_semantic_ownership
 from .ownership_verifier import verify_semantic_ownership as _verify_semantic_ownership
 
@@ -97,6 +98,10 @@ _topology_claims.resolve_semantic_ownership = _resolve_and_verify_semantic_owner
 _topology_claims.resolve_character_mention = _validated_character_mention
 _topology.choose_observation_scope = _topology_claims.choose_observation_scope
 _topology.derive_claim_topology = _topology_claims.derive_claim_topology
+
+# Keep PostgreSQL topology mutation authoritative while coalescing the expensive
+# whole-scope Fuseki rewrite behind a dirty/version projection boundary.
+install_deferred_projection(_topology, _topology_claims)
 
 # Preserve the existing runner import path while replacing the fragile
 # generated-fact promotion rule with the adversarial promotion matrix.

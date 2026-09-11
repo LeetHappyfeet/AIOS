@@ -45,7 +45,7 @@ SERVICES = [
     },
     {
         "name": "Pipeline Runner",
-        "cmd": [PYTHON, "-m", "aios_app.runner"],
+        "cmd": [PYTHON, "-m", "aios_app.runner_v2"],
         "required": True,
         "startup_timeout": CORE_STARTUP_TIMEOUT,
         "readiness": {"type": "log", "marker": "Pipeline runner started"},

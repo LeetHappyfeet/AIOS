@@ -148,6 +148,13 @@ async def source_node_retrieval_ready(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> bool:
+    """Return the generation-critical readiness barrier for one source node.
+
+    Topology/RDF/vector enrichment is intentionally not part of this barrier.
+    A live HUD needs extracted claims, resolved context, normalized observations,
+    and processed /char knowledge. Durable topology may finish asynchronously.
+    """
+
     if node_id is None:
         return True
 
@@ -171,9 +178,45 @@ async def source_node_retrieval_ready(
             count(DISTINCT ccr.claim_id) AS contextualized,
             count(DISTINCT o.claim_id) AS normalized,
             count(DISTINCT CASE WHEN kae.processed_at IS NOT NULL THEN cc.claim_id END)
-                AS knowledge_ready,
+                AS knowledge_ready
+        FROM aios.document_section ds
+        LEFT JOIN aios.extracted_sentence es ON es.section_id=ds.section_id
+        LEFT JOIN aios.claim_candidate cc ON cc.sentence_id=es.sentence_id
+        LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
+        LEFT JOIN aios.observation o ON o.claim_id=cc.claim_id
+        LEFT JOIN aios.knowledge_acquisition_event kae
+          ON kae.claim_id=cc.claim_id AND kae.instance_id=$2
+        WHERE ds.node_id=$1
+        """,
+        node_id,
+        instance_id,
+    )
+    total = int(claim_counts["total"] or 0)
+    if total == 0:
+        return True
+    return (
+        int(claim_counts["contextualized"] or 0) == total
+        and int(claim_counts["normalized"] or 0) == total
+        and int(claim_counts["knowledge_ready"] or 0) == total
+    )
+
+
+async def source_node_topology_ready(
+    db: Database,
+    *,
+    instance_id: UUID,
+    node_id: Optional[UUID],
+) -> bool:
+    """Report durable DB-topology freshness without gating live generation."""
+
+    if node_id is None:
+        return True
+    row = await db.fetchrow(
+        """
+        SELECT
+            count(DISTINCT cc.claim_id) AS total,
             count(DISTINCT CASE WHEN stp.projected_at IS NOT NULL THEN cc.claim_id END)
-                AS topology_ready,
+                AS claim_topology_ready,
             count(DISTINCT CASE
                 WHEN kae.processed_at IS NOT NULL
                  AND astp.projected_at IS NOT NULL
@@ -182,8 +225,6 @@ async def source_node_retrieval_ready(
         FROM aios.document_section ds
         LEFT JOIN aios.extracted_sentence es ON es.section_id=ds.section_id
         LEFT JOIN aios.claim_candidate cc ON cc.sentence_id=es.sentence_id
-        LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
-        LEFT JOIN aios.observation o ON o.claim_id=cc.claim_id
         LEFT JOIN aios.knowledge_acquisition_event kae
           ON kae.claim_id=cc.claim_id AND kae.instance_id=$2
         LEFT JOIN aios.semantic_topology_projection stp
@@ -197,15 +238,12 @@ async def source_node_retrieval_ready(
         node_id,
         instance_id,
     )
-    total = int(claim_counts["total"] or 0)
+    total = int(row["total"] or 0)
     if total == 0:
         return True
     return (
-        int(claim_counts["contextualized"] or 0) == total
-        and int(claim_counts["normalized"] or 0) == total
-        and int(claim_counts["knowledge_ready"] or 0) == total
-        and int(claim_counts["topology_ready"] or 0) == total
-        and int(claim_counts["acquisition_topology_ready"] or 0) == total
+        int(row["claim_topology_ready"] or 0) == total
+        and int(row["acquisition_topology_ready"] or 0) == total
     )
 
 
@@ -218,7 +256,13 @@ async def _enqueue_live_job(
     discriminator = next(
         (
             (key, str(payload[key]))
-            for key in ("node_id", "section_id", "claim_id", "acquisition_id")
+            for key in (
+                "node_id",
+                "section_id",
+                "claim_id",
+                "acquisition_id",
+                "live_instance_id",
+            )
             if payload.get(key) is not None
         ),
         None,
@@ -283,6 +327,8 @@ async def enqueue_live_turn_work(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> int:
+    """Promote only generation-critical work for the current live turn."""
+
     if node_id is None:
         return 0
 
@@ -355,49 +401,16 @@ async def enqueue_live_turn_work(
             instance_id,
             claim_id,
         )
-        if acquisition and acquisition["processed_at"] is None:
+        if not acquisition or acquisition["processed_at"] is None:
             queued += int(await _enqueue_live_job(
                 db,
                 job_type="project_character_knowledge",
                 payload={"live_instance_id": str(instance_id)},
             ))
-        elif acquisition:
-            acquisition_topology = await db.fetchrow(
-                """
-                SELECT 1
-                FROM aios.semantic_topology_projection
-                WHERE acquisition_id=$1
-                  AND resolver_version='semantic-topology-v1'
-                  AND projected_at IS NOT NULL
-                """,
-                acquisition["acquisition_id"],
-            )
-            if not acquisition_topology:
-                queued += int(await _enqueue_live_job(
-                    db,
-                    job_type="derive_character_acquisition_topology",
-                    payload={
-                        "acquisition_id": str(acquisition["acquisition_id"]),
-                        "live_instance_id": str(instance_id),
-                    },
-                ))
+            continue
 
-        topology = await db.fetchrow(
-            """
-            SELECT 1
-            FROM aios.semantic_topology_projection
-            WHERE claim_id=$1
-              AND resolver_version='semantic-topology-v1'
-              AND projected_at IS NOT NULL
-            """,
-            claim_id,
-        )
-        if not topology:
-            queued += int(await _enqueue_live_job(
-                db,
-                job_type="derive_claim_topology",
-                payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
-            ))
+        # Topology and RDF projection are durable enrichment, not a live HUD
+        # dependency. The supervisor/topology pipeline handles them separately.
 
     return queued
 
@@ -440,11 +453,6 @@ async def save_prepared_snapshot(
         row = await db.fetchrow("SELECT event_id FROM aios.dag_node WHERE node_id=$1", source_node_id)
         event_id = row["event_id"] if row else None
 
-    # Runtime/HUD frames are assembled directly from typed database/runtime
-    # values, so identifiers and timestamps can legitimately still be UUID or
-    # datetime objects here. The persistence boundary is where they should be
-    # converted to JSON scalars; forcing string conversion throughout the HUD
-    # assembler would weaken the in-process type contract.
     serialized_hud = json.dumps(hud_json, default=str)
 
     await db.execute(
