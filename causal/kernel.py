@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -20,7 +20,7 @@ from .types import (
 
 
 class CausalConflict(RuntimeError):
-    """Raised when an optimistic causal state version is stale."""
+    """Raised when an optimistic causal state version or branch coordinate is stale."""
 
 
 class CausalRejected(ValueError):
@@ -55,8 +55,8 @@ def _decode_json(value: Any) -> Any:
 class CausalIntegrityKernel:
     """Authoritative branch-consistency boundary for objective AIOS state.
 
-    The kernel owns no epistemic policy.  It never reads or writes character
-    knowledge.  It serializes deterministic transitions per
+    The kernel owns no epistemic policy. It never reads or writes character
+    knowledge. It serializes deterministic transitions per
     (world,timeline,domain,entity,state_key), records the decision, and only then
     projects committed reality into objective /world structures.
     """
@@ -72,6 +72,7 @@ class CausalIntegrityKernel:
 
     async def evaluate(self, candidate: CausalCandidate) -> CausalEvaluation:
         async with self.db.connection() as con:
+            await self._validate_coordinate(con, candidate)
             state = await self._load_state(con, candidate, for_update=False)
             rules = await self._load_domain_rules(con, candidate.world_id, candidate.domain_id)
             return self.registry.get(candidate.domain_id).evaluate(
@@ -98,8 +99,13 @@ class CausalIntegrityKernel:
                     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                     lock_key,
                 )
+                await self._validate_coordinate(con, candidate)
 
                 candidate_id = await self._persist_candidate(con, candidate)
+                existing = await self._existing_result(con, candidate_id)
+                if existing is not None:
+                    return existing
+
                 candidate = replace(candidate, candidate_id=candidate_id)
                 state = await self._load_state(con, candidate, for_update=True)
 
@@ -176,6 +182,7 @@ class CausalIntegrityKernel:
                     "after": evaluation.after,
                     "delta": evaluation.delta,
                     "latent_events": list(evaluation.latent_events),
+                    "replayed": False,
                 }
 
     async def require_commit(
@@ -249,6 +256,7 @@ class CausalIntegrityKernel:
             value=None,
         )
         async with self.db.connection() as con:
+            await self._validate_coordinate(con, candidate)
             return await self._load_state(con, candidate, for_update=False)
 
     async def fork_state(
@@ -260,14 +268,27 @@ class CausalIntegrityKernel:
         target_timeline_id: UUID,
         through_node_id: Optional[UUID] = None,
     ) -> int:
-        """Copy materialized deterministic state into a new branch.
+        """Copy shared-entity materialized deterministic state into a new branch.
 
-        The copied rows are a branch snapshot, not character knowledge.  Each
-        target row starts a new local version sequence while retaining source
-        coordinates in metadata for audit.
+        Entity-specific fork mapping is handled by the caller because character
+        instances receive new entity IDs. The copied rows are branch snapshots,
+        never character knowledge.
         """
         async with self.db.connection() as con:
             async with con.transaction():
+                source_ok = await con.fetchrow(
+                    "SELECT 1 FROM aios.timeline WHERE timeline_id=$1 AND world_id=$2",
+                    source_timeline_id,
+                    source_world_id,
+                )
+                target_ok = await con.fetchrow(
+                    "SELECT 1 FROM aios.timeline WHERE timeline_id=$1 AND world_id=$2",
+                    target_timeline_id,
+                    target_world_id,
+                )
+                if not source_ok or not target_ok:
+                    raise CausalConflict("fork timeline does not belong to the supplied world")
+
                 rows = await con.fetch(
                     """
                     SELECT domain_id, entity_id, state_key, value_json,
@@ -286,9 +307,6 @@ class CausalIntegrityKernel:
                         row["entity_id"],
                     )
                     if not entity_exists:
-                        # Character/runtime forks usually allocate new entity IDs;
-                        # callers should seed those entity-specific states after
-                        # mapping.  Shared world entities can be copied directly.
                         continue
                     await con.execute(
                         """
@@ -319,6 +337,52 @@ class CausalIntegrityKernel:
                     )
                     copied += 1
                 return copied
+
+    async def _validate_coordinate(self, con: Any, candidate: CausalCandidate) -> None:
+        row = await con.fetchrow(
+            """
+            SELECT 1
+            FROM aios.timeline t
+            JOIN aios.world w ON w.world_id=t.world_id
+            JOIN aios.world_entity e ON e.world_id=w.world_id
+            WHERE w.world_id=$1
+              AND t.timeline_id=$2
+              AND e.entity_id=$3
+            """,
+            candidate.world_id,
+            candidate.timeline_id,
+            candidate.entity_id,
+        )
+        if not row:
+            raise CausalConflict(
+                "causal world, timeline, and subject entity are not on the same branch"
+            )
+
+        if candidate.target_entity_id is not None:
+            target = await con.fetchrow(
+                """
+                SELECT 1
+                FROM aios.world_entity
+                WHERE world_id=$1 AND entity_id=$2
+                """,
+                candidate.world_id,
+                candidate.target_entity_id,
+            )
+            if not target:
+                raise CausalConflict("causal target entity belongs to a different world")
+
+        if candidate.dag_node_id is not None:
+            node = await con.fetchrow(
+                """
+                SELECT 1
+                FROM aios.dag_node
+                WHERE node_id=$1 AND timeline_id=$2
+                """,
+                candidate.dag_node_id,
+                candidate.timeline_id,
+            )
+            if not node:
+                raise CausalConflict("causal DAG node belongs to a different timeline")
 
     async def _load_state(self, con: Any, candidate: CausalCandidate, *, for_update: bool) -> CausalState | None:
         suffix = " FOR UPDATE" if for_update else ""
@@ -402,6 +466,42 @@ class CausalIntegrityKernel:
             candidate.proposition_id,
         )
         return row["candidate_id"]
+
+    async def _existing_result(self, con: Any, candidate_id: UUID) -> Optional[dict[str, Any]]:
+        row = await con.fetchrow(
+            """
+            SELECT
+                a.admission_id, a.decision, a.reason_code, a.reason_json,
+                a.state_version_before, a.state_version_after,
+                we.world_event_id
+            FROM aios.causal_admission a
+            LEFT JOIN aios.world_event we ON we.candidate_id=a.candidate_id
+            WHERE a.candidate_id=$1
+            ORDER BY a.created_at DESC
+            LIMIT 1
+            """,
+            candidate_id,
+        )
+        if not row:
+            return None
+        details = _decode_json(row["reason_json"]) or {}
+        decision = AdmissionDecision(row["decision"])
+        return {
+            "candidate_id": candidate_id,
+            "admission_id": row["admission_id"],
+            "decision": decision.value,
+            "reason_code": row["reason_code"],
+            "reason": details.get("reason", "previous causal decision"),
+            "state_version_before": int(row["state_version_before"]),
+            "state_version_after": int(row["state_version_after"]),
+            "world_event_id": row["world_event_id"],
+            "committed": decision.committable,
+            "before": details.get("before"),
+            "after": details.get("after"),
+            "delta": details.get("delta"),
+            "latent_events": details.get("latent_events") or [],
+            "replayed": True,
+        }
 
     async def _append_world_event(
         self,
