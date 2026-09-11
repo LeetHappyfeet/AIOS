@@ -87,9 +87,16 @@ jobs:
                       .read_text(encoding='utf-8')
                   )
                   row = await conn.fetchrow(
-                      "SELECT to_regclass('aios.semantic_scope_projection_state') AS rel"
+                      """
+                      SELECT EXISTS (
+                          SELECT 1
+                          FROM information_schema.tables
+                          WHERE table_schema='aios'
+                            AND table_name='semantic_scope_projection_state'
+                      ) AS present
+                      """
                   )
-                  assert row['rel'] == 'aios.semantic_scope_projection_state'
+                  assert bool(row['present'])
                   await conn.execute(
                       """
                       INSERT INTO aios.pipeline_job(job_type,payload,status)
