@@ -100,32 +100,46 @@ async def latest_source_anchor(
     *,
     character_id: str,
     session_id: Optional[UUID],
+    user_name: Optional[str] = None,
+    scope_key: Optional[str] = None,
 ) -> tuple[Optional[UUID], Optional[UUID]]:
-    """Return the latest source timeline/node for a character session."""
+    """Return an unambiguous liminal source timeline/node for a character session.
+
+    A runtime timeline is never a source fallback.  If more than one liminal
+    timeline matches the supplied identity, leave the runtime unbound rather
+    than guessing; the first exact ingress can then bind it safely.
+    """
     if not session_id:
         return None, None
 
     row = await db.fetchrow(
         """
-        SELECT t.timeline_id, n.node_id
-        FROM aios.timeline t
-        JOIN aios.world w ON w.world_id=t.world_id
-        LEFT JOIN LATERAL (
-            SELECT dn.node_id
-            FROM aios.dag_node dn
-            WHERE dn.timeline_id=t.timeline_id
-            ORDER BY dn.event_id DESC
-            LIMIT 1
-        ) n ON true
-        WHERE t.session_id=$1
-          AND t.character_id=$2
-        ORDER BY
-            CASE WHEN w.world_key='liminal' THEN 0 ELSE 1 END,
-            t.created_at DESC
+        WITH candidates AS (
+            SELECT t.timeline_id, n.node_id, t.created_at
+            FROM aios.timeline t
+            JOIN aios.world w ON w.world_id=t.world_id
+            LEFT JOIN LATERAL (
+                SELECT dn.node_id
+                FROM aios.dag_node dn
+                WHERE dn.timeline_id=t.timeline_id
+                ORDER BY dn.event_id DESC
+                LIMIT 1
+            ) n ON true
+            WHERE t.session_id=$1
+              AND t.character_id=$2
+              AND w.world_key='liminal'
+              AND ($3::text IS NULL OR t.user_name IS NOT DISTINCT FROM $3)
+              AND ($4::text IS NULL OR t.scope_key=$4)
+        )
+        SELECT timeline_id, node_id
+        FROM candidates
+        WHERE (SELECT count(*) FROM candidates)=1
         LIMIT 1
         """,
         session_id,
         character_id,
+        user_name,
+        scope_key,
     )
     if not row:
         return None, None
