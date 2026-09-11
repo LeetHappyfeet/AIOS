@@ -176,9 +176,9 @@ def validate_neighbor_relation(
         "CONTRADICTS": {
             "subject": 2 if same_subject else -3,
             "predicate": 2 if same_predicate else -3,
-            "target": 3 if semantic_conflict else -3,
-            # Scope changes the epistemic meaning of a contradiction; it does
-            # not manufacture the contradiction itself.
+            # Semantic incompatibility must stand on its own. Scope only
+            # changes what the incompatibility means epistemically.
+            "target": 4 if semantic_conflict else -3,
             "scope": 1 if scope_relation in {"WORLD_SAME_WORLD", "CHAR_SAME_VIEWPOINT"} else 0,
             # Existing conflict rows are intentionally neutral evidence.
             "legacy_conflict": 0,
