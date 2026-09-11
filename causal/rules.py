@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable, Optional
 
 
 class CausalRuleViolation(ValueError):
     pass
+
+
+def _rule_data(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        decoded = json.loads(value)
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    return dict(value)
 
 
 def validate_action_rules(
@@ -22,7 +34,7 @@ def validate_action_rules(
     """
 
     for rule in rules:
-        data = dict(rule.get("rule_data") or {})
+        data = _rule_data(rule.get("rule_data"))
         rule_type = str(rule.get("rule_type") or "constraint")
         rule_key = str(rule.get("rule_key") or "unnamed")
 
