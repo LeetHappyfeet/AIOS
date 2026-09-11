@@ -203,9 +203,18 @@ BEGIN
             v_reason := 'missing_semantic_predicate';
             v_confidence := 0.0;
         ELSE
+            -- Bare direct quotes are not automatically unsafe. Quarantine only
+            -- the participant-dependent form that can wrongly reuse the outer
+            -- transport speaker/recipient as the local quoted I/you referent.
             v_ambiguous_quoted_participant :=
                 COALESCE(v_discourse_mode, 'narrated_observation')='narrated_observation'
-                AND btrim(COALESCE(v_raw_text, '')) ~ '^["“].*["”][.!?]?$';
+                AND btrim(COALESCE(v_raw_text, '')) ~ '^["“].*["”][.!?]?$'
+                AND (
+                    lower(COALESCE(v_subject_text, '')) ~
+                        '(^|[[:space:]])(i|me|my|mine|we|us|our|ours|you|your|yours)([[:space:]]|$)'
+                    OR lower(COALESCE(v_object_text, '')) ~
+                        '(^|[[:space:]])(i|me|my|mine|we|us|our|ours|you|your|yours)([[:space:]]|$)'
+                );
 
             IF v_ambiguous_quoted_participant THEN
                 v_status := 'unresolved';
