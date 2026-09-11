@@ -103,21 +103,42 @@ async def latest_source_anchor(
     user_name: Optional[str] = None,
     scope_key: Optional[str] = None,
 ) -> tuple[Optional[UUID], Optional[UUID]]:
-    """Return an unambiguous liminal source timeline/node for a character session.
+    """Return one exact liminal source coordinate for a runtime identity.
 
-    A runtime timeline is never a source fallback.  If more than one liminal
-    timeline matches the supplied identity, leave the runtime unbound rather
-    than guessing; the first exact ingress can then bind it safely.
+    Source identity is session + character + user + scope. Runtime-world topology
+    is intentionally not used as a perception pointer. For compatibility with
+    older callers that do not yet pass user/scope explicitly, the newest runtime
+    timeline for this character/session supplies the missing identity fields.
+
+    If the resulting source identity is ambiguous, return no binding instead of
+    guessing. A runtime timeline can never qualify as a source fallback.
     """
     if not session_id:
         return None, None
 
     row = await db.fetchrow(
         """
-        WITH candidates AS (
+        WITH runtime_identity AS (
+            SELECT rt.user_name, rt.scope_key
+            FROM aios.timeline rt
+            JOIN aios.world rw ON rw.world_id=rt.world_id
+            WHERE rt.session_id=$1
+              AND rt.character_id=$2
+              AND rw.world_key <> 'liminal'
+              AND COALESCE(rt.meta->>'world_runtime','false')='true'
+            ORDER BY rt.created_at DESC, rt.timeline_id DESC
+            LIMIT 1
+        ),
+        wanted AS (
+            SELECT
+                COALESCE($3::text, (SELECT user_name FROM runtime_identity)) AS user_name,
+                COALESCE($4::text, (SELECT scope_key FROM runtime_identity)) AS scope_key
+        ),
+        candidates AS (
             SELECT t.timeline_id, n.node_id, t.created_at
             FROM aios.timeline t
             JOIN aios.world w ON w.world_id=t.world_id
+            CROSS JOIN wanted i
             LEFT JOIN LATERAL (
                 SELECT dn.node_id
                 FROM aios.dag_node dn
@@ -128,8 +149,8 @@ async def latest_source_anchor(
             WHERE t.session_id=$1
               AND t.character_id=$2
               AND w.world_key='liminal'
-              AND ($3::text IS NULL OR t.user_name IS NOT DISTINCT FROM $3)
-              AND ($4::text IS NULL OR t.scope_key=$4)
+              AND t.user_name IS NOT DISTINCT FROM i.user_name
+              AND t.scope_key IS NOT DISTINCT FROM i.scope_key
         )
         SELECT timeline_id, node_id
         FROM candidates
@@ -153,10 +174,14 @@ async def ensure_runtime_branch_world(
     session_id: Optional[UUID],
     root_world_id: UUID,
 ) -> dict:
-    """
-    Ensure a concrete runtime branch exists beneath a character root.
+    """Ensure a concrete runtime world beneath the character root.
 
-    A session branch stores the source DAG location at which it was instantiated.
+    Runtime worlds are objective/session topology shared by runtime instances.
+    They therefore do not own a per-user source/perception cursor. Source
+    timeline/head authority lives only in character_runtime_state.
+
+    The returned anchor fields are deliberately null so activation cannot treat
+    historical world anchors as an authorized /char source binding.
     """
     suffix = str(session_id) if session_id else "default"
     world_key = f"char:{character_id}:session:{suffix}"
@@ -171,40 +196,10 @@ async def ensure_runtime_branch_world(
         world_key,
     )
     if existing:
-        if existing["anchor_timeline_id"] is None or existing["anchor_node_id"] is None:
-            anchor_timeline_id, anchor_node_id = await latest_source_anchor(
-                db,
-                character_id=character_id,
-                session_id=session_id,
-            )
-            if anchor_timeline_id is not None or anchor_node_id is not None:
-                await db.execute(
-                    """
-                    UPDATE aios.world
-                    SET anchor_timeline_id=COALESCE(anchor_timeline_id,$2),
-                        anchor_node_id=COALESCE(anchor_node_id,$3)
-                    WHERE world_id=$1
-                    """,
-                    existing["world_id"],
-                    anchor_timeline_id,
-                    anchor_node_id,
-                )
-                existing = await db.fetchrow(
-                    """
-                    SELECT world_id, world_key, world_type, parent_world_id, root_world_id,
-                           anchor_timeline_id, anchor_node_id, origin_character_id
-                    FROM aios.world
-                    WHERE world_id=$1
-                    """,
-                    existing["world_id"],
-                )
-        return dict(existing)
-
-    anchor_timeline_id, anchor_node_id = await latest_source_anchor(
-        db,
-        character_id=character_id,
-        session_id=session_id,
-    )
+        result = dict(existing)
+        result["anchor_timeline_id"] = None
+        result["anchor_node_id"] = None
+        return result
 
     created = await db.execute_returning_row(
         """
@@ -223,13 +218,13 @@ async def ensure_runtime_branch_world(
             'runtime',
             $2,
             $2,
+            NULL,
+            NULL,
             $3,
-            $4,
-            $5,
             jsonb_build_object(
                 'source','runtime_activation',
                 'topology_role','session_branch',
-                'source_session_id',$6::text
+                'source_session_id',$4::text
             )
         )
         ON CONFLICT (world_key) DO NOTHING
@@ -238,13 +233,14 @@ async def ensure_runtime_branch_world(
         """,
         world_key,
         root_world_id,
-        anchor_timeline_id,
-        anchor_node_id,
         character_id,
         str(session_id) if session_id else None,
     )
     if created:
-        return dict(created)
+        result = dict(created)
+        result["anchor_timeline_id"] = None
+        result["anchor_node_id"] = None
+        return result
 
     row = await db.fetchrow(
         """
@@ -257,7 +253,10 @@ async def ensure_runtime_branch_world(
     )
     if not row:
         raise RuntimeError(f"Could not resolve runtime branch {world_key}")
-    return dict(row)
+    result = dict(row)
+    result["anchor_timeline_id"] = None
+    result["anchor_node_id"] = None
+    return result
 
 
 def _iri(kind: str, value: object) -> str:
