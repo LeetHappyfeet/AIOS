@@ -108,12 +108,7 @@ async def mark_matching_runtime_dirty(
     source_head_node_id: UUID,
     source_head_event_id: int,
 ) -> None:
-    """Adopt the exact source coordinate, then dirty every runtime that did so.
-
-    Source-cursor adoption is centralized here so ingest paths cannot report a
-    durable source node while leaving a matching live runtime stranded at NULL
-    or at the legacy self-bound runtime timeline.
-    """
+    """Adopt the exact source coordinate, then dirty every runtime that did so."""
     instance_ids = await advance_matching_runtime_source_cursor(
         db,
         character_id=character_id,
@@ -147,9 +142,10 @@ async def source_node_retrieval_ready(
 ) -> bool:
     """Return the generation-critical readiness barrier for one source node.
 
-    Topology/RDF/vector enrichment is intentionally not part of this barrier.
-    A live HUD needs extracted claims, resolved context, normalized observations,
-    and processed /char knowledge. Durable topology may finish asynchronously.
+    Every source claim must be contextualized and normalized.  Only claims that
+    resolve into this character's subjective scope require /char acquisition and
+    projection.  Narrative/world/source evidence is terminal once normalized;
+    it must not be forced into character belief merely to make the HUD ready.
     """
 
     if node_id is None:
@@ -170,13 +166,29 @@ async def source_node_retrieval_ready(
 
     claim_counts = await db.fetchrow(
         """
+        WITH runtime_identity AS (
+            SELECT ci.character_id
+            FROM aios.character_instance ci
+            WHERE ci.instance_id=$2
+        )
         SELECT
             count(DISTINCT cc.claim_id) AS total,
             count(DISTINCT ccr.claim_id) AS contextualized,
             count(DISTINCT o.claim_id) AS normalized,
-            count(DISTINCT CASE WHEN kae.processed_at IS NOT NULL THEN cc.claim_id END)
-                AS knowledge_ready
+            count(DISTINCT CASE
+                WHEN ccr.epistemic_scope='character'
+                 AND ccr.origin_character_id=ri.character_id
+                THEN cc.claim_id
+            END) AS character_required,
+            count(DISTINCT CASE
+                WHEN ccr.epistemic_scope='character'
+                 AND ccr.origin_character_id=ri.character_id
+                 AND ccr.character_instance_id=$2
+                 AND kae.processed_at IS NOT NULL
+                THEN cc.claim_id
+            END) AS character_ready
         FROM aios.document_section ds
+        CROSS JOIN runtime_identity ri
         LEFT JOIN aios.extracted_sentence es ON es.section_id=ds.section_id
         LEFT JOIN aios.claim_candidate cc ON cc.sentence_id=es.sentence_id
         LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
@@ -188,13 +200,17 @@ async def source_node_retrieval_ready(
         node_id,
         instance_id,
     )
+    if not claim_counts:
+        return False
+
     total = int(claim_counts["total"] or 0)
     if total == 0:
         return True
     return (
         int(claim_counts["contextualized"] or 0) == total
         and int(claim_counts["normalized"] or 0) == total
-        and int(claim_counts["knowledge_ready"] or 0) == total
+        and int(claim_counts["character_ready"] or 0)
+        == int(claim_counts["character_required"] or 0)
     )
 
 
@@ -329,6 +345,14 @@ async def enqueue_live_turn_work(
     if node_id is None:
         return 0
 
+    runtime_identity = await db.fetchrow(
+        "SELECT character_id FROM aios.character_instance WHERE instance_id=$1",
+        instance_id,
+    )
+    if not runtime_identity:
+        return 0
+    runtime_character_id = runtime_identity["character_id"]
+
     queued = 0
     section = await db.fetchrow(
         "SELECT section_id, claims_extracted_at FROM aios.document_section WHERE node_id=$1 LIMIT 1",
@@ -364,10 +388,28 @@ async def enqueue_live_turn_work(
     for claim in claims:
         claim_id = claim["claim_id"]
         context = await db.fetchrow(
-            "SELECT 1 FROM aios.claim_context_resolution WHERE claim_id=$1",
+            """
+            SELECT epistemic_scope, origin_character_id, character_instance_id
+            FROM aios.claim_context_resolution
+            WHERE claim_id=$1
+            """,
             claim_id,
         )
         if not context:
+            queued += int(await _enqueue_live_job(
+                db,
+                job_type="resolve_claim_context",
+                payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
+            ))
+            continue
+
+        character_relevant = (
+            context["epistemic_scope"] == "character"
+            and context["origin_character_id"] == runtime_character_id
+        )
+        if character_relevant and context["character_instance_id"] != instance_id:
+            # Cached context may have been resolved before activation.  Re-run
+            # context resolution so it can bind the exact current runtime.
             queued += int(await _enqueue_live_job(
                 db,
                 job_type="resolve_claim_context",
@@ -387,6 +429,11 @@ async def enqueue_live_turn_work(
             ))
             continue
 
+        if not character_relevant:
+            # Evidence has reached its terminal live-HUD state. Narrative/world
+            # claims do not require character belief acquisition.
+            continue
+
         acquisition = await db.fetchrow(
             """
             SELECT acquisition_id, processed_at
@@ -398,16 +445,23 @@ async def enqueue_live_turn_work(
             instance_id,
             claim_id,
         )
-        if not acquisition or acquisition["processed_at"] is None:
+        if not acquisition:
+            # Normalization is idempotent and is the layer that materializes a
+            # character acquisition after context gains an instance binding.
+            queued += int(await _enqueue_live_job(
+                db,
+                job_type="normalize_proposition",
+                payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
+            ))
+            continue
+
+        if acquisition["processed_at"] is None:
             queued += int(await _enqueue_live_job(
                 db,
                 job_type="project_character_knowledge",
                 payload={"live_instance_id": str(instance_id)},
             ))
             continue
-
-        # Topology and RDF projection are durable enrichment, not a live HUD
-        # dependency. The supervisor/topology pipeline handles them separately.
 
     return queued
 
