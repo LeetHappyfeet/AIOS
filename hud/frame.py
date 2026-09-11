@@ -77,13 +77,78 @@ def _trim_to_budget(
     return selected
 
 
+def _hud_candidate_rejection_reason(
+    item: Mapping[str, Any],
+    *,
+    visible_source_node_ids: frozenset[str] = frozenset(),
+) -> Optional[str]:
+    """Return why an internal semantic hypothesis must not cross into the HUD.
+
+    This is deliberately a presentation/admission boundary, not a semantic
+    deletion rule. Rejected propositions remain available to reconciliation,
+    topology, diagnostics, and future re-processing.
+    """
+
+    source_node_id = item.get("source_node_id")
+    if source_node_id is not None and str(source_node_id) in visible_source_node_ids:
+        return "current_source_duplicate"
+
+    text = str(item.get("text") or "").strip()
+    if not text:
+        return "empty_text"
+    if "frame:" in text.lower():
+        return "unresolved_frame"
+
+    subject = str(item.get("subject_norm") or "").strip().lower()
+    predicate = str(item.get("predicate_norm") or "").strip().lower()
+    if subject in {"", "_", "*"}:
+        return "missing_subject"
+    if predicate in {"", "_", "*"}:
+        return "missing_predicate"
+
+    kind = str(item.get("claim_kind") or "BELIEF").upper()
+    object_value = str(item.get("object_norm") or "").strip().lower()
+    if kind in {"BELIEF", "TRAIT", "STATE", "CONCEPT", "GOAL", "RULE", "RELATIONSHIP"}:
+        if object_value in {"", "_", "*"}:
+            return "missing_object"
+
+    confidence = item.get("effective_confidence")
+    if not isinstance(confidence, (float, int)):
+        confidence = item.get("confidence")
+    if isinstance(confidence, (float, int)) and float(confidence) <= 0.0:
+        return "nonpositive_confidence"
+
+    return None
+
+
+def _apply_cognitive_firewall(
+    items: Iterable[dict[str, Any]],
+    *,
+    visible_source_node_ids: frozenset[str],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    admitted: list[dict[str, Any]] = []
+    suppressed: dict[str, int] = {}
+    for item in items:
+        reason = _hud_candidate_rejection_reason(
+            item,
+            visible_source_node_ids=visible_source_node_ids,
+        )
+        if reason is None:
+            admitted.append(item)
+            continue
+        suppressed[reason] = suppressed.get(reason, 0) + 1
+    return admitted, suppressed
+
+
 class HUDAssembler:
     """
     Build the canonical prompt-ready RPG HUD.
 
-    The assembler has two hard boundaries:
+    The assembler has three hard boundaries:
       * HUDContextResolver decides branch/world eligibility.
       * Context Resolver classifications decide semantic routing.
+      * The cognitive firewall decides whether an internal semantic hypothesis
+        is mature enough to become agent-facing cognition.
 
     Relevance only ranks candidates that have already crossed those boundaries.
     """
@@ -187,6 +252,11 @@ class HUDAssembler:
             reverse=True,
         )
         recent_newest = recent_newest[:bounded_limit]
+        visible_source_node_ids = frozenset(
+            str(row["node_id"])
+            for row in recent_newest
+            if row.get("node_id") is not None and row.get("message_text")
+        )
 
         focus_text = next(
             (row.get("message_text") for row in recent_newest if row.get("message_text")),
@@ -347,6 +417,11 @@ class HUDAssembler:
             seen.add(proposition_id)
             knowledge.append(item)
 
+        knowledge, firewall_suppressed = _apply_cognitive_firewall(
+            knowledge,
+            visible_source_node_ids=visible_source_node_ids,
+        )
+
         anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
         visible_world_context_count = sum(
             len(item.get("world_context") or [])
@@ -428,8 +503,9 @@ class HUDAssembler:
             for item in semantic_rules
         ]
 
-        # Old event claims can be useful causal context, but current DAG events
-        # stay first because they describe what actually just happened here.
+        # Current DAG/source messages are immediate experience. Semantic EVENT
+        # knowledge is admitted only when the cognitive firewall has established
+        # that it does not duplicate one of those visible source nodes.
         event_items = list(reversed(recent_events)) + semantic_events
 
         memories = _trim_to_budget(
@@ -524,7 +600,7 @@ class HUDAssembler:
                 "version": "hud-v1",
                 "profile_id": hud_profile.profile_id,
                 "profile_name": hud_profile.profile_name,
-                "selection": "branch-aware/topology-guided/entity-centered/deterministic",
+                "selection": "branch-aware/topology-guided/entity-centered/deterministic/cognitive-firewall",
                 "token_budget": resolved_total,
                 "section_token_budgets": section_caps,
                 "world_lineage": list(context.lineage_world_ids),
@@ -539,6 +615,11 @@ class HUDAssembler:
                 "source_cursor_bounded": bool(
                     context.source_timeline_id and context.source_head_node_id
                 ),
+                "cognitive_firewall": {
+                    "admitted": len(knowledge),
+                    "suppressed": sum(firewall_suppressed.values()),
+                    "suppressed_by_reason": firewall_suppressed,
+                },
                 "focus_text": focus_text,
                 "plugin_focus_text": plugin_focus_text,
                 "plugin_status": plugin_snapshot.get("status") or {},
