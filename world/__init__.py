@@ -13,6 +13,7 @@ import time
 from typing import Optional
 from uuid import UUID
 
+from aios_app.hud import readiness as _readiness
 from aios_app.hud.readiness import (
     enqueue_live_turn_work,
     readiness_state,
@@ -84,6 +85,45 @@ async def _coalesce_live_generation(
         return int(str(result).split()[-1])
     except (TypeError, ValueError, IndexError):
         return 0
+
+
+# Ingest must advance the exact source cursor and dirty the runtime, but it must
+# not promote every transient reconciliation head into LIVE semantic work.  The
+# explicit HUD request (or activation prewarm) below promotes only the final,
+# current source-head generation.
+if not getattr(_readiness, "_head_only_dirty_v1", False):
+    async def _mark_matching_runtime_dirty_head_only(
+        db,
+        *,
+        character_id: str,
+        session_id: Optional[UUID],
+        user_name: Optional[str],
+        scope_key: str,
+        source_timeline_id: UUID,
+        source_head_node_id: UUID,
+        source_head_event_id: int,
+    ) -> None:
+        instance_ids = await _readiness.advance_matching_runtime_source_cursor(
+            db,
+            character_id=character_id,
+            session_id=session_id,
+            user_name=user_name,
+            scope_key=scope_key,
+            source_timeline_id=source_timeline_id,
+            source_head_node_id=source_head_node_id,
+            source_head_event_id=source_head_event_id,
+        )
+        for instance_id in instance_ids:
+            await _readiness.mark_source_dirty(
+                db,
+                instance_id=instance_id,
+                source_timeline_id=source_timeline_id,
+                source_head_node_id=source_head_node_id,
+                source_head_event_id=source_head_event_id,
+            )
+
+    _readiness.mark_matching_runtime_dirty = _mark_matching_runtime_dirty_head_only
+    _readiness._head_only_dirty_v1 = True
 
 
 # runtime.py uses its own imported enqueue symbol during character activation.
