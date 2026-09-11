@@ -90,9 +90,9 @@ class TopologyRetriever:
       * only the active character instance and its ancestors are visible.
       * sibling experiential branches never enter the candidate set.
 
-    Topology is navigation, not truth. Character knowledge remains authoritative
-    for what the active character actually owns; topology only decides where to
-    look and how costly that path is.
+    Topology is navigation, not truth. Reconciled character belief state is
+    authoritative for ordinary /char cognition; acquisition evidence remains
+    available underneath it for provenance and diagnostics.
     """
 
     def __init__(self, db: Database):
@@ -380,6 +380,7 @@ class TopologyRetriever:
                         WHEN 'object_pivot' THEN 0.65
                         WHEN 'acquires' THEN 0.25
                         WHEN 'acquired_from' THEN 1.1
+                        WHEN 'holds_belief_state' THEN 0.1
                         WHEN 'contains_assertion' THEN 0.3
                         WHEN 'asserts_topic' THEN 0.4
                         ELSE 0.8
@@ -444,7 +445,7 @@ class TopologyRetriever:
                     ck.salience_weight,
                     ck.effective_confidence,
                     array_position($2::uuid[], ck.instance_id) AS instance_depth
-                FROM aios.character_proposition_knowledge ck
+                FROM aios.character_active_proposition_knowledge ck
                 WHERE ck.instance_id = ANY($2::uuid[])
                   AND EXISTS (
                       SELECT 1
@@ -454,7 +455,7 @@ class TopologyRetriever:
                       LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
                       LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
                       LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-                      WHERE kae.instance_id=ck.instance_id
+                      WHERE kae.instance_id=ck.evidence_instance_id
                         AND kae.proposition_id=ck.proposition_id
                         AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
                   )
