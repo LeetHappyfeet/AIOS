@@ -121,6 +121,70 @@ CREATE INDEX IF NOT EXISTS idx_world_event_causal_coordinate
     ON aios.world_event (world_id, timeline_id, domain_id, actor_entity_id, occurred_at DESC)
     WHERE domain_id IS NOT NULL;
 
+-- One-time compatibility bootstrap. Existing runtime rows may predate the
+-- causal kernel. Preserve their last known objective location as a branch
+-- snapshot, project it into /world, then clear the legacy mutable field so two
+-- independent authorities cannot continue drifting after upgrade.
+INSERT INTO aios.causal_state (
+    world_id, timeline_id, domain_id, entity_id, state_key, value_json,
+    state_version, last_node_id, occurred_at, meta
+)
+SELECT
+    rs.world_id,
+    rs.timeline_id,
+    'world.location',
+    we.entity_id,
+    'location_entity_id',
+    to_jsonb(rs.location_entity_id::text),
+    1,
+    rs.head_node_id,
+    rs.updated_at,
+    jsonb_build_object('bootstrap','legacy_character_runtime_state')
+FROM aios.character_runtime_state rs
+JOIN aios.world_entity we
+  ON we.character_instance_id=rs.instance_id
+JOIN aios.world_entity location
+  ON location.entity_id=rs.location_entity_id
+ AND location.world_id=rs.world_id
+WHERE rs.location_entity_id IS NOT NULL
+ON CONFLICT (world_id,timeline_id,domain_id,entity_id,state_key) DO NOTHING;
+
+INSERT INTO aios.world_entity_relation (
+    world_id, subject_entity_id, relation_type, object_entity_id,
+    valid_from_node_id, meta
+)
+SELECT
+    rs.world_id,
+    we.entity_id,
+    'located_in',
+    rs.location_entity_id,
+    rs.head_node_id,
+    jsonb_build_object(
+        'source','causal_bootstrap',
+        'timeline_id',rs.timeline_id::text
+    )
+FROM aios.character_runtime_state rs
+JOIN aios.world_entity we
+  ON we.character_instance_id=rs.instance_id
+JOIN aios.world_entity location
+  ON location.entity_id=rs.location_entity_id
+ AND location.world_id=rs.world_id
+WHERE rs.location_entity_id IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM aios.world_entity_relation existing
+      WHERE existing.world_id=rs.world_id
+        AND existing.subject_entity_id=we.entity_id
+        AND existing.relation_type='located_in'
+        AND existing.object_entity_id=rs.location_entity_id
+        AND existing.valid_to_node_id IS NULL
+  );
+
+UPDATE aios.character_runtime_state
+SET location_entity_id=NULL,
+    updated_at=now()
+WHERE location_entity_id IS NOT NULL;
+
 COMMENT ON TABLE aios.causal_state IS
     'Hidden materialized deterministic state. Never project directly into /char or the HUD.';
 COMMENT ON TABLE aios.causal_candidate IS
