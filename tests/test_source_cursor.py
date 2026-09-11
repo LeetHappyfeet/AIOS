@@ -48,7 +48,6 @@ class CursorDB:
 async def test_unbound_runtime_adopts_first_exact_liminal_source():
     instance_id = uuid4()
     runtime_timeline_id = uuid4()
-    runtime_world_id = uuid4()
     source_timeline_id = uuid4()
     source_node_id = uuid4()
     session_id = uuid4()
@@ -72,10 +71,6 @@ async def test_unbound_runtime_adopts_first_exact_liminal_source():
                 "source_head_node_id": None,
                 "current_source_event_id": None,
                 "current_source_world_key": None,
-                "runtime_world_id": runtime_world_id,
-                "anchor_timeline_id": None,
-                "anchor_node_id": None,
-                "anchor_world_key": None,
             }
         ],
     )
@@ -92,25 +87,18 @@ async def test_unbound_runtime_adopts_first_exact_liminal_source():
     )
 
     assert advanced == [instance_id]
-    assert any(
-        "UPDATE aios.character_runtime_state" in sql
-        and args[1] == source_timeline_id
-        and args[2] == source_node_id
-        for sql, args in con.executed
-    )
-    assert any(
-        "UPDATE aios.world" in sql
-        and args[1] == source_timeline_id
-        and args[2] == source_node_id
-        for sql, args in con.executed
-    )
+    assert len(con.executed) == 1
+    sql, args = con.executed[0]
+    assert "UPDATE aios.character_runtime_state" in sql
+    assert args[1] == source_timeline_id
+    assert args[2] == source_node_id
+    assert all("UPDATE aios.world" not in statement for statement, _ in con.executed)
 
 
 @pytest.mark.asyncio
 async def test_runtime_never_silently_rebinds_between_liminal_sources():
     instance_id = uuid4()
     runtime_timeline_id = uuid4()
-    runtime_world_id = uuid4()
     existing_source_timeline_id = uuid4()
     incoming_source_timeline_id = uuid4()
     source_node_id = uuid4()
@@ -135,10 +123,6 @@ async def test_runtime_never_silently_rebinds_between_liminal_sources():
                 "source_head_node_id": uuid4(),
                 "current_source_event_id": 1399,
                 "current_source_world_key": "liminal",
-                "runtime_world_id": runtime_world_id,
-                "anchor_timeline_id": existing_source_timeline_id,
-                "anchor_node_id": uuid4(),
-                "anchor_world_key": "liminal",
             }
         ],
     )
@@ -162,7 +146,6 @@ async def test_runtime_never_silently_rebinds_between_liminal_sources():
 async def test_legacy_runtime_self_binding_is_repaired_on_ingress():
     instance_id = uuid4()
     runtime_timeline_id = uuid4()
-    runtime_world_id = uuid4()
     source_timeline_id = uuid4()
     source_node_id = uuid4()
     session_id = uuid4()
@@ -186,10 +169,6 @@ async def test_legacy_runtime_self_binding_is_repaired_on_ingress():
                 "source_head_node_id": None,
                 "current_source_event_id": None,
                 "current_source_world_key": "char:Kernel_Test_Bob:session:test",
-                "runtime_world_id": runtime_world_id,
-                "anchor_timeline_id": runtime_timeline_id,
-                "anchor_node_id": None,
-                "anchor_world_key": "char:Kernel_Test_Bob:session:test",
             }
         ],
     )
@@ -206,7 +185,7 @@ async def test_legacy_runtime_self_binding_is_repaired_on_ingress():
     )
 
     assert advanced == [instance_id]
-    assert len(con.executed) == 2
+    assert len(con.executed) == 1
 
 
 class AnchorDB:
@@ -222,7 +201,7 @@ class AnchorDB:
 
 
 @pytest.mark.asyncio
-async def test_latest_source_anchor_requires_unambiguous_liminal_timeline():
+async def test_latest_source_anchor_requires_exact_liminal_runtime_identity():
     db = AnchorDB()
     session_id = uuid4()
 
@@ -233,6 +212,34 @@ async def test_latest_source_anchor_requires_unambiguous_liminal_timeline():
     )
 
     assert result == (None, None)
+    assert "rw.world_key <> 'liminal'" in db.sql
+    assert "COALESCE(rt.meta->>'world_runtime','false')='true'" in db.sql
     assert "w.world_key='liminal'" in db.sql
+    assert "t.user_name IS NOT DISTINCT FROM i.user_name" in db.sql
+    assert "t.scope_key IS NOT DISTINCT FROM i.scope_key" in db.sql
     assert "count(*) FROM candidates)=1" in db.sql
     assert db.args[:2] == (session_id, "Kernel_Test_Bob")
+
+
+@pytest.mark.asyncio
+async def test_latest_source_anchor_accepts_explicit_user_and_scope_identity():
+    source_timeline_id = uuid4()
+    source_node_id = uuid4()
+    session_id = uuid4()
+    db = AnchorDB({"timeline_id": source_timeline_id, "node_id": source_node_id})
+
+    result = await latest_source_anchor(
+        db,
+        character_id="Kernel_Test_Bob",
+        session_id=session_id,
+        user_name="Ren-119",
+        scope_key="conversation",
+    )
+
+    assert result == (source_timeline_id, source_node_id)
+    assert db.args == (
+        session_id,
+        "Kernel_Test_Bob",
+        "Ren-119",
+        "conversation",
+    )
