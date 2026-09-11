@@ -25,41 +25,59 @@ async def project_committed_world_state(
         return
 
     location_id = UUID(str(value))
-    exists = await con.fetchrow(
+    endpoints = await con.fetch(
         """
-        SELECT 1
+        SELECT entity_id
         FROM aios.world_entity
-        WHERE world_id=$1 AND entity_id=$2
+        WHERE world_id=$1 AND entity_id = ANY($2::uuid[])
         """,
         world_id,
-        location_id,
+        [entity_id, location_id],
     )
-    if not exists:
-        raise ValueError("location target is not an entity in the causal world")
+    if len(endpoints) != 2:
+        raise ValueError("location subject and target must both belong to the causal world")
 
     # The active located_in relation is a semantic /world projection.  Causal
     # state remains authoritative; RDF/HUD may consume this projection without
-    # receiving direct access to causal_state.
-    await con.execute(
-        """
-        UPDATE aios.world_entity_relation
-        SET valid_to_node_id=COALESCE($4, valid_to_node_id),
-            meta=COALESCE(meta, '{}'::jsonb) || jsonb_build_object(
-                'closed_by','causal_projection',
-                'timeline_id',$3::text
-            )
-        WHERE world_id=$1
-          AND subject_entity_id=$2
-          AND relation_type='located_in'
-          AND valid_to_node_id IS NULL
-          AND object_entity_id<>$5
-        """,
-        world_id,
-        entity_id,
-        timeline_id,
-        dag_node_id,
-        location_id,
-    )
+    # receiving direct access to causal_state.  When a structured sensor event
+    # has no DAG node, deleting the stale projection is safe because immutable
+    # history lives in world_event, not in this materialized relation.
+    if dag_node_id is None:
+        await con.execute(
+            """
+            DELETE FROM aios.world_entity_relation
+            WHERE world_id=$1
+              AND subject_entity_id=$2
+              AND relation_type='located_in'
+              AND valid_to_node_id IS NULL
+              AND object_entity_id<>$3
+              AND COALESCE(meta->>'source','') IN ('causal_projection','causal_bootstrap')
+            """,
+            world_id,
+            entity_id,
+            location_id,
+        )
+    else:
+        await con.execute(
+            """
+            UPDATE aios.world_entity_relation
+            SET valid_to_node_id=$4,
+                meta=COALESCE(meta, '{}'::jsonb) || jsonb_build_object(
+                    'closed_by','causal_projection',
+                    'timeline_id',$3::text
+                )
+            WHERE world_id=$1
+              AND subject_entity_id=$2
+              AND relation_type='located_in'
+              AND valid_to_node_id IS NULL
+              AND object_entity_id<>$5
+            """,
+            world_id,
+            entity_id,
+            timeline_id,
+            dag_node_id,
+            location_id,
+        )
 
     await con.execute(
         """
