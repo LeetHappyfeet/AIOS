@@ -430,6 +430,7 @@ class TopologyRetriever:
                 SELECT DISTINCT ON (ck.proposition_id)
                     ck.instance_id,
                     ck.proposition_id,
+                    ck.atom_id,
                     ck.epistemic_status,
                     ck.confidence,
                     ck.acquisition_mode,
@@ -503,7 +504,7 @@ class TopologyRetriever:
             topic_ranked AS (
                 SELECT c.*,
                        row_number() OVER (
-                           PARTITION BY c.topic_key
+                           PARTITION BY c.atom_id
                            ORDER BY
                                c.instance_depth,
                                c.updated_at DESC,
