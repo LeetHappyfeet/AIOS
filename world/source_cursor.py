@@ -24,16 +24,16 @@ async def advance_matching_runtime_source_cursor(
 
     Invariants enforced here:
       * the incoming source coordinate must be a node on a liminal timeline;
-      * runtime identity must match character/session/user/scope;
+      * source and runtime identity must match character/session/user/scope;
       * an unbound runtime may bind to its first exact source timeline;
       * an already bound runtime may only advance on that same source timeline;
       * a legacy self-bound runtime may be repaired, but one liminal stream is
         never silently rebound to another liminal stream;
       * ordinary source progression is monotonic by ingest event id.
 
-    The runtime world's anchor is a branch-origin coordinate, not a live head.
-    It is populated only when absent or when legacy data points it at the
-    runtime's own non-source timeline.
+    Source perception belongs to character_runtime_state. The shared runtime
+    world is objective/session topology and is never mutated to carry a
+    per-user source cursor.
     """
 
     async with db.connection() as con:
@@ -86,33 +86,23 @@ async def advance_matching_runtime_source_cursor(
                     rs.source_timeline_id,
                     rs.source_head_node_id,
                     current_head.event_id AS current_source_event_id,
-                    current_source_world.world_key AS current_source_world_key,
-                    rw.world_id AS runtime_world_id,
-                    rw.anchor_timeline_id,
-                    rw.anchor_node_id,
-                    anchor_world.world_key AS anchor_world_key
+                    current_source_world.world_key AS current_source_world_key
                 FROM aios.character_runtime_state rs
                 JOIN aios.character_instance ci
                   ON ci.instance_id=rs.instance_id
                 JOIN aios.timeline rt
                   ON rt.timeline_id=rs.timeline_id
-                JOIN aios.world rw
-                  ON rw.world_id=rs.world_id
                 LEFT JOIN aios.timeline current_source
                   ON current_source.timeline_id=rs.source_timeline_id
                 LEFT JOIN aios.world current_source_world
                   ON current_source_world.world_id=current_source.world_id
                 LEFT JOIN aios.dag_node current_head
                   ON current_head.node_id=rs.source_head_node_id
-                LEFT JOIN aios.timeline anchor_timeline
-                  ON anchor_timeline.timeline_id=rw.anchor_timeline_id
-                LEFT JOIN aios.world anchor_world
-                  ON anchor_world.world_id=anchor_timeline.world_id
                 WHERE ci.character_id=$1
                   AND rt.session_id IS NOT DISTINCT FROM $2
                   AND rt.user_name IS NOT DISTINCT FROM $3
                   AND rt.scope_key=$4
-                FOR UPDATE OF rs, rw
+                FOR UPDATE OF rs
                 """,
                 character_id,
                 session_id,
@@ -170,27 +160,6 @@ async def advance_matching_runtime_source_cursor(
                     source_timeline_id,
                     source_head_node_id,
                 )
-
-                anchor_is_invalid = (
-                    row["anchor_timeline_id"] is None
-                    or (
-                        row["anchor_timeline_id"] == row["runtime_timeline_id"]
-                        and row["anchor_world_key"] != "liminal"
-                    )
-                )
-                if anchor_is_invalid:
-                    await con.execute(
-                        """
-                        UPDATE aios.world
-                        SET anchor_timeline_id=$2,
-                            anchor_node_id=$3
-                        WHERE world_id=$1
-                        """,
-                        row["runtime_world_id"],
-                        source_timeline_id,
-                        source_head_node_id,
-                    )
-
                 advanced.append(row["instance_id"])
 
             return advanced
