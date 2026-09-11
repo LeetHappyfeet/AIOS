@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Dict, Optional
 from uuid import UUID
 
+from aios_app.causal import CausalIntegrityKernel, CausalRejected
+from aios_app.causal.types import CausalCandidate
 from aios_app.db import Database
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.hud.frame import HUDAssembler
@@ -21,6 +23,12 @@ from aios_app.hud.readiness import (
     set_retrieval_ready,
     source_node_retrieval_ready,
 )
+from aios_app.world.topology import (
+    ensure_character_root_world,
+    ensure_runtime_branch_world,
+    latest_source_anchor,
+)
+
 logger = logging.getLogger("aios.world.runtime")
 
 
@@ -37,11 +45,55 @@ def _json_object(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-from aios_app.world.topology import (
-    ensure_character_root_world,
-    ensure_runtime_branch_world,
-    latest_source_anchor,
-)
+def _subjective_runtime_state(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only runtime coordination and /char-owned state.
+
+    Deterministic values such as location/health/energy are intentionally not
+    copied into the HUD surface.  Objective location is projected through
+    /world located_in relations; future hard-state domains follow the same path.
+    """
+    keep = {
+        "instance_id",
+        "world_id",
+        "timeline_id",
+        "head_node_id",
+        "source_timeline_id",
+        "source_head_node_id",
+        "lifecycle_state",
+        "emotional_state",
+        "social_state",
+        "goals",
+        "active_tasks",
+        "runtime_flags",
+        "state_version",
+        "updated_at",
+        "character_id",
+        "entity_id",
+        "entity_type",
+        "display_name",
+        "world_key",
+    }
+    return {key: value for key, value in row.items() if key in keep}
+
+
+def _sanitize_hud_frame(frame: Dict[str, Any]) -> Dict[str, Any]:
+    """Final firewall preventing raw deterministic compatibility state in HUD."""
+    state = frame.get("state")
+    if isinstance(state, dict):
+        for key in ("health", "stamina", "energy", "physical"):
+            state.pop(key, None)
+
+    # world_rule is deterministic policy.  Only rules explicitly acquired as
+    # character knowledge belong in /char/HUD.
+    rules = frame.get("rules")
+    if isinstance(rules, list):
+        frame["rules"] = [
+            rule
+            for rule in rules
+            if isinstance(rule, dict)
+            and rule.get("source") == "character_knowledge"
+        ]
+    return frame
 
 
 class RuntimeConflict(RuntimeError):
@@ -65,10 +117,16 @@ class ActivationResult:
 
 
 class WorldRuntimeService:
-    """SQL-backed authoritative runtime state for one shared AIOS world."""
+    """Runtime coordinator above the objective causal kernel and /char HUD.
+
+    This service no longer owns deterministic mutation policy.  It records
+    controller intent/DAG history, asks CausalIntegrityKernel to validate and
+    commit objective transitions, and keeps HUD generation coordinates current.
+    """
 
     def __init__(self, db: Database):
         self.db = db
+        self.causal = CausalIntegrityKernel(db)
         self.hud = HUDAssembler(db)
         self._hud_builds: AsyncSingleFlight[
             tuple[UUID, Optional[UUID], int, Optional[int], Optional[int]],
@@ -77,7 +135,6 @@ class WorldRuntimeService:
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
     def _spawn_background(self, awaitable: Awaitable[Any], *, label: str) -> None:
-        """Run non-critical enrichment without extending live request latency."""
         task = asyncio.create_task(awaitable)
         self._background_tasks.add(task)
 
@@ -296,18 +353,33 @@ class WorldRuntimeService:
             """
             SELECT
                 rs.*, ci.character_id, we.entity_id, we.entity_type,
-                we.display_name, w.world_key
+                we.display_name, w.world_key,
+                loc.object_entity_id AS objective_location_entity_id
             FROM aios.character_runtime_state rs
             JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
             JOIN aios.world w ON w.world_id=rs.world_id
             LEFT JOIN aios.world_entity we ON we.character_instance_id=rs.instance_id
+            LEFT JOIN LATERAL (
+                SELECT r.object_entity_id
+                FROM aios.world_entity_relation r
+                WHERE r.world_id=rs.world_id
+                  AND r.subject_entity_id=we.entity_id
+                  AND r.relation_type='located_in'
+                  AND r.valid_to_node_id IS NULL
+                ORDER BY r.created_at DESC
+                LIMIT 1
+            ) loc ON true
             WHERE rs.instance_id=$1
             """,
             instance_id,
         )
         if not row:
             raise RuntimeNotFound(f"Unknown runtime instance {instance_id}")
-        return dict(row)
+        state = dict(row)
+        # Compatibility key now comes from /world projection, never from the
+        # legacy mutable column.
+        state["location_entity_id"] = state.pop("objective_location_entity_id", None)
+        return state
 
     async def prepare_frame(
         self,
@@ -318,14 +390,6 @@ class WorldRuntimeService:
         token_budget: Optional[int] = None,
         wait_ms: int = 1200,
     ) -> Dict[str, Any]:
-        """
-        Prepare one generation-consistent HUD snapshot.
-
-        Live generation is gated by exact source/runtime coordinates, not by
-        completion of every semantic enrichment stage. ``wait_ms`` remains in
-        the public contract for compatibility but no longer delays HUD assembly;
-        incomplete enrichment is queued and reported through topology_current.
-        """
         request_started = time.perf_counter()
         await ensure_readiness_row(self.db, instance_id=instance_id, live=True)
         state = await self.get_state(instance_id)
@@ -340,7 +404,7 @@ class WorldRuntimeService:
             and ready.get("hud_json") is not None
         )
         if replay_cached:
-            frame = _json_object(ready["hud_json"])
+            frame = _sanitize_hud_frame(_json_object(ready["hud_json"]))
             frame.setdefault("hud", {})["cache"] = "replayed"
             freshness = frame["hud"].setdefault("freshness", {})
             freshness["replayed_snapshot"] = True
@@ -381,7 +445,7 @@ class WorldRuntimeService:
             and ready.get("hud_json") is not None
         )
         if exact_cached:
-            frame = _json_object(ready["hud_json"])
+            frame = _sanitize_hud_frame(_json_object(ready["hud_json"]))
             frame.setdefault("hud", {})["cache"] = "prepared"
             return frame
 
@@ -473,6 +537,7 @@ class WorldRuntimeService:
                 recent_limit=recent_limit,
                 token_budget=token_budget,
             )
+            frame = _sanitize_hud_frame(frame)
         except LookupError as exc:
             raise RuntimeNotFound(str(exc)) from exc
         except Exception:
@@ -567,7 +632,6 @@ class WorldRuntimeService:
         token_budget: Optional[int] = None,
         wait_ms: int = 1200,
     ) -> Dict[str, Any]:
-        """Return a prepared HUD when possible, rebuilding only dirty coordinates."""
         return await self.prepare_frame(
             instance_id,
             recent_limit=recent_limit,
@@ -583,7 +647,6 @@ class WorldRuntimeService:
         token_budget: Optional[int] = None,
         wait_ms: int = 1200,
     ) -> str:
-        """Render exactly the same canonical HUD returned by build_frame()."""
         frame = await self.build_frame(
             instance_id,
             recent_limit=recent_limit,
@@ -632,13 +695,16 @@ class WorldRuntimeService:
             if not target:
                 raise RuntimeNotFound("target entity is not present in this world")
 
-        await self._validate_action_rules(
+        await self.causal.validate_runtime_action(
             world_id=state["world_id"],
             action_type=action_type,
             actor_entity_type=state["entity_type"],
             target_entity_type=target["entity_type"] if target else None,
             has_target=target is not None,
         )
+
+        if action_type == "move" and target_entity_id is None:
+            raise ValueError("move requires a location target")
 
         reserved = await self.db.execute_returning_row(
             """
@@ -655,130 +721,153 @@ class WorldRuntimeService:
         if not reserved:
             raise RuntimeConflict("instance state changed before the action could be reserved")
 
-        controller = await self.db.fetchrow(
-            """
-            SELECT controller_type, controller_ref
-            FROM aios.entity_controller
-            WHERE entity_id=$1 AND active=true
-            ORDER BY CASE authority WHEN 'primary' THEN 0 ELSE 1 END, created_at
-            LIMIT 1
-            """,
-            state["entity_id"],
-        )
-        controller_type = controller["controller_type"] if controller else "agent"
-        controller_ref = controller["controller_ref"] if controller else None
-        speaker_role = "user" if controller_type == "human" else "agent"
-        viewpoint_id = (
-            controller_ref
-            if controller_type == "human" and controller_ref
-            else state["character_id"]
-        )
-
-        event_payload = {
-            **payload,
-            "controller_type": controller_type,
-            "controller_ref": controller_ref,
-            "viewpoint_id": viewpoint_id,
-            "runtime_instance_id": str(instance_id),
-            "actor_entity_id": str(state["entity_id"]) if state["entity_id"] else None,
-            "target_entity_id": str(target_entity_id) if target_entity_id else None,
-            "action_type": action_type,
-        }
-        message_text = text or f"[action:{action_type}]"
-        event_kind = "chat_message" if action_type == "speak" and text else "other"
-        ev = await self.db.execute_returning_row(
-            """
-            INSERT INTO aios.ingest_event (
-                event_time, source, kind, session_id, speaker_id, speaker_role,
-                recipient_id, viewpoint_id, character_id, user_name,
-                message_text, payload, dedupe_key
+        try:
+            controller = await self.db.fetchrow(
+                """
+                SELECT controller_type, controller_ref
+                FROM aios.entity_controller
+                WHERE entity_id=$1 AND active=true
+                ORDER BY CASE authority WHEN 'primary' THEN 0 ELSE 1 END, created_at
+                LIMIT 1
+                """,
+                state["entity_id"],
             )
-            SELECT now(), 'world_runtime', $9::aios.event_kind, t.session_id,
-                   $1, $8::aios.actor_type, $2, $7, ci.character_id, t.user_name,
-                   $3, $4::jsonb, $5
-            FROM aios.character_runtime_state rs
-            JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
-            JOIN aios.timeline t ON t.timeline_id=rs.timeline_id
-            WHERE rs.instance_id=$6
-            RETURNING event_id
-            """,
-            str(state["entity_id"]),
-            str(target_entity_id) if target_entity_id else None,
-            message_text,
-            json.dumps(event_payload),
-            f"runtime::{instance_id}::{expected_state_version}::{action_type}",
-            instance_id,
-            viewpoint_id,
-            speaker_role,
-            event_kind,
-        )
-        event_id = int(ev["event_id"])
+            controller_type = controller["controller_type"] if controller else "agent"
+            controller_ref = controller["controller_ref"] if controller else None
+            speaker_role = "user" if controller_type == "human" else "agent"
+            viewpoint_id = (
+                controller_ref
+                if controller_type == "human" and controller_ref
+                else state["character_id"]
+            )
 
-        node_id, _ = await add_node_and_edge(
-            self.db,
-            timeline_id=state["timeline_id"],
-            event_id=event_id,
-            character_id=state["character_id"],
-            kind=event_kind,
-            speaker_id=str(state["entity_id"]),
-            speaker_role=speaker_role,
-            recipient_id=str(target_entity_id) if target_entity_id else None,
-            message_text=message_text,
-            payload=event_payload,
-            viewpoint_id=viewpoint_id,
-            edge_type="next",
-        )
-
-        if action_type == "move" and target_entity_id:
-            await self.db.execute(
-                "UPDATE aios.character_runtime_state SET location_entity_id=$2 WHERE instance_id=$1",
+            event_payload = {
+                **payload,
+                "controller_type": controller_type,
+                "controller_ref": controller_ref,
+                "viewpoint_id": viewpoint_id,
+                "runtime_instance_id": str(instance_id),
+                "actor_entity_id": str(state["entity_id"]) if state["entity_id"] else None,
+                "target_entity_id": str(target_entity_id) if target_entity_id else None,
+                "action_type": action_type,
+                "causal_intent": True,
+            }
+            message_text = text or f"[action:{action_type}]"
+            event_kind = "chat_message" if action_type == "speak" and text else "other"
+            ev = await self.db.execute_returning_row(
+                """
+                INSERT INTO aios.ingest_event (
+                    event_time, source, kind, session_id, speaker_id, speaker_role,
+                    recipient_id, viewpoint_id, character_id, user_name,
+                    message_text, payload, dedupe_key
+                )
+                SELECT now(), 'world_runtime', $9::aios.event_kind, t.session_id,
+                       $1, $8::aios.actor_type, $2, $7, ci.character_id, t.user_name,
+                       $3, $4::jsonb, $5
+                FROM aios.character_runtime_state rs
+                JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
+                JOIN aios.timeline t ON t.timeline_id=rs.timeline_id
+                WHERE rs.instance_id=$6
+                RETURNING event_id
+                """,
+                str(state["entity_id"]),
+                str(target_entity_id) if target_entity_id else None,
+                message_text,
+                json.dumps(event_payload),
+                f"runtime::{instance_id}::{expected_state_version}::{action_type}",
                 instance_id,
-                target_entity_id,
+                viewpoint_id,
+                speaker_role,
+                event_kind,
+            )
+            event_id = int(ev["event_id"])
+
+            node_id, _ = await add_node_and_edge(
+                self.db,
+                timeline_id=state["timeline_id"],
+                event_id=event_id,
+                character_id=state["character_id"],
+                kind=event_kind,
+                speaker_id=str(state["entity_id"]),
+                speaker_role=speaker_role,
+                recipient_id=str(target_entity_id) if target_entity_id else None,
+                message_text=message_text,
+                payload=event_payload,
+                viewpoint_id=viewpoint_id,
+                edge_type="next",
             )
 
-        world_event = await self.db.execute_returning_row(
-            """
-            INSERT INTO aios.world_event (
-                world_id, timeline_id, instance_id, actor_entity_id,
-                target_entity_id, action_type, payload, dag_node_id
+            causal_result = None
+            if action_type == "move":
+                causal_result = await self.causal.require_commit(
+                    CausalCandidate(
+                        world_id=state["world_id"],
+                        timeline_id=state["timeline_id"],
+                        dag_node_id=node_id,
+                        domain_id="world.location",
+                        event_type="move",
+                        entity_id=state["entity_id"],
+                        target_entity_id=target_entity_id,
+                        state_key="location_entity_id",
+                        value=str(target_entity_id),
+                        source_kind="runtime",
+                        source_ref=str(instance_id),
+                        authority_kind="runtime_command",
+                        parameters={
+                            **payload,
+                            "runtime_instance_id": str(instance_id),
+                            "controller_type": controller_type,
+                        },
+                    )
+                )
+
+            updated = await self.db.execute_returning_row(
+                """
+                UPDATE aios.character_runtime_state
+                SET head_node_id=$2,
+                    lifecycle_state='ready',
+                    state_version=state_version+1,
+                    updated_at=now()
+                WHERE instance_id=$1 AND state_version=$3
+                RETURNING state_version
+                """,
+                instance_id,
+                node_id,
+                expected_state_version,
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
-            RETURNING world_event_id
-            """,
-            state["world_id"],
-            state["timeline_id"],
-            instance_id,
-            state["entity_id"],
-            target_entity_id,
-            action_type,
-            json.dumps(event_payload),
-            node_id,
-        )
+            if not updated:
+                raise RuntimeConflict("state changed while action was being committed")
 
-        updated = await self.db.execute_returning_row(
-            """
-            UPDATE aios.character_runtime_state
-            SET head_node_id=$2,
-                lifecycle_state='ready',
-                state_version=state_version+1,
-                updated_at=now()
-            WHERE instance_id=$1 AND state_version=$3
-            RETURNING state_version
-            """,
-            instance_id,
-            node_id,
-            expected_state_version,
-        )
-        if not updated:
-            raise RuntimeConflict("state changed while action was being committed")
-
-        return {
-            "ok": True,
-            "world_event_id": world_event["world_event_id"],
-            "event_id": event_id,
-            "node_id": node_id,
-            "state_version": updated["state_version"],
-        }
+            return {
+                "ok": True,
+                "world_event_id": (
+                    causal_result.get("world_event_id") if causal_result else None
+                ),
+                "causal": causal_result,
+                "event_id": event_id,
+                "node_id": node_id,
+                "state_version": updated["state_version"],
+            }
+        except CausalRejected as exc:
+            await self.db.execute(
+                """
+                UPDATE aios.character_runtime_state
+                SET lifecycle_state='ready', updated_at=now()
+                WHERE instance_id=$1
+                """,
+                instance_id,
+            )
+            raise ValueError(str(exc)) from exc
+        except Exception:
+            await self.db.execute(
+                """
+                UPDATE aios.character_runtime_state
+                SET lifecycle_state='ready', updated_at=now()
+                WHERE instance_id=$1 AND lifecycle_state='acting'
+                """,
+                instance_id,
+            )
+            raise
 
     async def fork_instance(
         self,
@@ -787,7 +876,6 @@ class WorldRuntimeService:
         target_world_id: Optional[UUID] = None,
         target_world_key: Optional[str] = None,
     ) -> ActivationResult:
-        """Fork one experiential continuation into another concrete world."""
         source = await self.get_state(source_instance_id)
         target = await self._resolve_world(
             world_id=target_world_id,
@@ -877,20 +965,21 @@ class WorldRuntimeService:
             source["entity_id"],
         )
 
+        # Only /char-owned runtime state is copied here.  Objective physical
+        # state is not copied through character_runtime_state; causal branch
+        # state must be explicitly mapped into the target world.
         await self.db.execute(
             """
             INSERT INTO aios.character_runtime_state (
                 instance_id, world_id, timeline_id, head_node_id,
                 source_timeline_id, source_head_node_id,
-                lifecycle_state, health, stamina, energy,
-                physical_state, emotional_state, social_state,
+                lifecycle_state, emotional_state, social_state,
                 goals, active_tasks, runtime_flags, state_version
             )
             SELECT
                 $1,$2,$3,NULL,
                 source_timeline_id, source_head_node_id,
-                'ready',health,stamina,energy,
-                physical_state,emotional_state,social_state,
+                'ready',emotional_state,social_state,
                 goals,active_tasks,
                 runtime_flags || jsonb_build_object(
                     'forked_from_instance_id',$4::text,
@@ -907,6 +996,8 @@ class WorldRuntimeService:
             source["head_node_id"],
         )
 
+        # Subjective knowledge remains a /char fork operation and intentionally
+        # stays separate from deterministic branch state.
         await self.db.execute(
             """
             INSERT INTO aios.character_proposition_knowledge (
@@ -949,7 +1040,72 @@ class WorldRuntimeService:
             source_instance_id,
         )
 
+        await self._seed_fork_location(
+            source=source,
+            target_world_id=target["world_id"],
+            target_timeline_id=timeline_id,
+            target_entity_id=entity["entity_id"],
+        )
+
         return await self._activation_result(instance_id)
+
+    async def _seed_fork_location(
+        self,
+        *,
+        source: Dict[str, Any],
+        target_world_id: UUID,
+        target_timeline_id: UUID,
+        target_entity_id: UUID,
+    ) -> None:
+        source_location = await self.causal.state(
+            world_id=source["world_id"],
+            timeline_id=source["timeline_id"],
+            domain_id="world.location",
+            entity_id=source["entity_id"],
+            state_key="location_entity_id",
+        )
+        if not source_location or source_location.value is None:
+            return
+
+        source_location_entity = await self.db.fetchrow(
+            """
+            SELECT entity_key
+            FROM aios.world_entity
+            WHERE world_id=$1 AND entity_id=$2
+            """,
+            source["world_id"],
+            UUID(str(source_location.value)),
+        )
+        if not source_location_entity or not source_location_entity["entity_key"]:
+            return
+        target_location = await self.db.fetchrow(
+            """
+            SELECT entity_id
+            FROM aios.world_entity
+            WHERE world_id=$1 AND entity_key=$2
+            """,
+            target_world_id,
+            source_location_entity["entity_key"],
+        )
+        if not target_location:
+            return
+
+        await self.causal.require_commit(
+            CausalCandidate(
+                world_id=target_world_id,
+                timeline_id=target_timeline_id,
+                domain_id="world.location",
+                event_type="set_location",
+                entity_id=target_entity_id,
+                target_entity_id=target_location["entity_id"],
+                state_key="location_entity_id",
+                value=str(target_location["entity_id"]),
+                source_kind="branch_fork",
+                source_ref=str(source["instance_id"]),
+                authority_kind="branch_snapshot",
+                parameters={"forked_from_timeline_id": str(source["timeline_id"])},
+            )
+        )
 
     async def create_entity(
         self,
@@ -1002,6 +1158,10 @@ class WorldRuntimeService:
         )
         if len(rows) != 2:
             raise RuntimeNotFound("both relation endpoints must exist in the same world")
+        if relation_type == "located_in":
+            raise ValueError(
+                "located_in is causal state; use a move/deterministic location event instead"
+            )
         row = await self.db.execute_returning_row(
             """
             INSERT INTO aios.world_entity_relation (
@@ -1080,68 +1240,6 @@ class WorldRuntimeService:
             authority,
         )
         return dict(row)
-
-    async def _validate_action_rules(
-        self,
-        *,
-        world_id: UUID,
-        action_type: str,
-        actor_entity_type: Optional[str],
-        target_entity_type: Optional[str],
-        has_target: bool,
-    ) -> None:
-        """Apply deterministic world-level action constraints before mutation."""
-        rules = await self.db.fetch(
-            """
-            SELECT rule_key, rule_type, rule_data
-            FROM aios.world_rule
-            WHERE world_id=$1 AND enabled=true
-            ORDER BY priority, rule_key
-            """,
-            world_id,
-        )
-
-        for rule in rules:
-            data = dict(rule["rule_data"] or {})
-            rule_type = rule["rule_type"]
-
-            if rule_type == "action_allowlist":
-                actions = set(data.get("actions") or [])
-                if actions and action_type not in actions:
-                    raise ValueError(
-                        f"world rule '{rule['rule_key']}' does not allow action '{action_type}'"
-                    )
-
-            elif rule_type == "require_target":
-                applies = data.get("action_type", "*")
-                if applies in ("*", action_type) and not has_target:
-                    raise ValueError(
-                        f"world rule '{rule['rule_key']}' requires a target for '{action_type}'"
-                    )
-
-            elif rule_type == "require_target_type":
-                applies = data.get("action_type", "*")
-                allowed_types = set(data.get("target_entity_types") or [])
-                if applies in ("*", action_type) and allowed_types:
-                    if target_entity_type not in allowed_types:
-                        raise ValueError(
-                            f"world rule '{rule['rule_key']}' rejects target type "
-                            f"'{target_entity_type}' for '{action_type}'"
-                        )
-
-            elif rule_type == "deny_action":
-                applies = data.get("action_type", "*")
-                if applies not in ("*", action_type):
-                    continue
-                actor_filter = data.get("actor_entity_type")
-                target_filter = data.get("target_entity_type")
-                if actor_filter and actor_filter != actor_entity_type:
-                    continue
-                if target_filter and target_filter != target_entity_type:
-                    continue
-                raise ValueError(
-                    f"world rule '{rule['rule_key']}' denies action '{action_type}'"
-                )
 
     async def _resolve_world(
         self,
