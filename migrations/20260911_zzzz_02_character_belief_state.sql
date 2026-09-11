@@ -104,7 +104,11 @@ BEGIN
           ON parent.instance_id=lineage.parent_instance_id
     ),
     raw_evidence AS (
-        SELECT DISTINCT ON (cpk.instance_id, cpk.proposition_id)
+        -- Keep each acquisition here. The next CTE deliberately collapses only
+        -- acquisitions that share the same source/event coordinate, so truly
+        -- independent corroboration can strengthen belief without counting
+        -- duplicate extraction artifacts as separate witnesses.
+        SELECT
             cpk.instance_id AS evidence_instance_id,
             cpk.proposition_id,
             p.polarity,
@@ -146,11 +150,6 @@ BEGIN
           ON ie.event_id=dn.event_id
         WHERE p.atom_id=p_atom_id
           AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
-        ORDER BY
-            cpk.instance_id,
-            cpk.proposition_id,
-            kae.created_at DESC,
-            kae.acquisition_id DESC
     ),
     correlated AS (
         SELECT
