@@ -379,9 +379,9 @@ async def resolve_claim_context(
                 await db.execute(
                     """
                     UPDATE aios.claim_context_resolution
-                    SET character_instance_id=$2,
+                    SET character_instance_id=$2::uuid,
                         meta=COALESCE(meta,'{}'::jsonb) || jsonb_build_object(
-                            'character_instance_id', $2::text,
+                            'character_instance_id', ($2::uuid)::text,
                             'runtime_binding_repaired', true
                         ),
                         resolved_at=now()
