@@ -6,6 +6,7 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.pipeline.jobs import enqueue_job
+from aios_app.world.source_cursor import advance_matching_runtime_source_cursor
 
 LIVE_PRIORITY = 15
 READY_STATUS = {"ready"}
@@ -107,37 +108,33 @@ async def mark_matching_runtime_dirty(
     source_head_node_id: UUID,
     source_head_event_id: int,
 ) -> None:
-    rows = await db.fetch(
-        """
-        SELECT rs.instance_id
-        FROM aios.character_runtime_state rs
-        JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
-        JOIN aios.timeline rt ON rt.timeline_id=rs.timeline_id
-        WHERE ci.character_id=$1
-          AND rt.session_id IS NOT DISTINCT FROM $2
-          AND rt.user_name IS NOT DISTINCT FROM $3
-          AND rt.scope_key=$4
-          AND rs.source_timeline_id=$5
-          AND rs.source_head_node_id=$6
-        """,
-        character_id,
-        session_id,
-        user_name,
-        scope_key,
-        source_timeline_id,
-        source_head_node_id,
+    """Adopt the exact source coordinate, then dirty every runtime that did so.
+
+    Source-cursor adoption is centralized here so ingest paths cannot report a
+    durable source node while leaving a matching live runtime stranded at NULL
+    or at the legacy self-bound runtime timeline.
+    """
+    instance_ids = await advance_matching_runtime_source_cursor(
+        db,
+        character_id=character_id,
+        session_id=session_id,
+        user_name=user_name,
+        scope_key=scope_key,
+        source_timeline_id=source_timeline_id,
+        source_head_node_id=source_head_node_id,
+        source_head_event_id=source_head_event_id,
     )
-    for row in rows:
+    for instance_id in instance_ids:
         await mark_source_dirty(
             db,
-            instance_id=row["instance_id"],
+            instance_id=instance_id,
             source_timeline_id=source_timeline_id,
             source_head_node_id=source_head_node_id,
             source_head_event_id=source_head_event_id,
         )
         await enqueue_live_turn_work(
             db,
-            instance_id=row["instance_id"],
+            instance_id=instance_id,
             node_id=source_head_node_id,
         )
 
