@@ -9,7 +9,7 @@ from aios_app.db import Database
 
 @dataclass(frozen=True)
 class HUDContext:
-    """Branch-safe runtime coordinates used by the HUD resolver."""
+    """Branch-safe /char coordinates used by the HUD resolver."""
 
     instance_id: UUID
     character_id: str
@@ -40,13 +40,11 @@ class HUDContext:
 
 
 class HUDContextResolver:
-    """
-    Resolve runtime/world/DAG coordinates before any HUD content is selected.
+    """Resolve the subjective frame without reading hidden causal_state.
 
-    SQL remains authoritative for topology.  The HUD never merges sibling worlds:
-    the current world plus its parent chain is the maximum implicit world scope.
-    Character-owned knowledge can still contain explicitly acquired cross-branch
-    information because acquisition is attached to the current instance.
+    SQL /world semantic projection remains the maximum objective input boundary
+    for HUD assembly.  The resolver never queries causal_state or causal events
+    directly, and sibling worlds remain excluded.
     """
 
     def __init__(self, db: Database):
@@ -64,14 +62,24 @@ class HUDContextResolver:
                 rs.source_head_node_id,
                 rs.state_version,
                 rs.lifecycle_state,
-                rs.location_entity_id,
                 ci.character_id,
                 we.entity_id,
-                w.world_key
+                w.world_key,
+                loc.object_entity_id AS location_entity_id
             FROM aios.character_runtime_state rs
             JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
             JOIN aios.world w ON w.world_id=rs.world_id
             LEFT JOIN aios.world_entity we ON we.character_instance_id=rs.instance_id
+            LEFT JOIN LATERAL (
+                SELECT r.object_entity_id
+                FROM aios.world_entity_relation r
+                WHERE r.world_id=rs.world_id
+                  AND r.subject_entity_id=we.entity_id
+                  AND r.relation_type='located_in'
+                  AND r.valid_to_node_id IS NULL
+                ORDER BY r.created_at DESC
+                LIMIT 1
+            ) loc ON true
             WHERE rs.instance_id=$1
             """,
             instance_id,
@@ -123,15 +131,22 @@ class HUDContextResolver:
         )
         lineage_instance_ids = tuple(row["instance_id"] for row in instance_lineage) or (instance_id,)
 
-        inventory = await self.db.fetch(
-            "SELECT entity_id FROM aios.character_inventory WHERE instance_id=$1",
-            instance_id,
-        )
-
         scene_ids = {state["entity_id"]}
         if state["location_entity_id"]:
             scene_ids.add(state["location_entity_id"])
-        scene_ids.update(row["entity_id"] for row in inventory if row["entity_id"])
+            colocated = await self.db.fetch(
+                """
+                SELECT subject_entity_id AS entity_id
+                FROM aios.world_entity_relation
+                WHERE world_id=$1
+                  AND relation_type='located_in'
+                  AND object_entity_id=$2
+                  AND valid_to_node_id IS NULL
+                """,
+                state["world_id"],
+                state["location_entity_id"],
+            )
+            scene_ids.update(row["entity_id"] for row in colocated if row["entity_id"])
 
         return HUDContext(
             instance_id=instance_id,
