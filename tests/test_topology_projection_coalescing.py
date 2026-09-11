@@ -8,6 +8,17 @@ def test_per_item_topology_projection_is_deferred_for_both_paths():
     assert topology_claims._project_scope_rdf is deferred_project_scope_rdf
 
 
+def test_topology_mutations_do_not_consume_rdf_slot():
+    for job_type in (
+        "derive_claim_topology",
+        "derive_character_acquisition_topology",
+        "derive_world_assertion_topology",
+    ):
+        spec = job_spec(job_type)
+        assert spec.resource_class is ResourceClass.SEMANTIC
+        assert spec.requires_rdf_slot is False
+
+
 def test_scope_projection_has_one_rdf_job_type():
     spec = job_spec("project_semantic_scope")
     assert spec.resource_class is ResourceClass.RDF
