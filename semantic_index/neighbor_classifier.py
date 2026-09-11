@@ -3,24 +3,14 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
-from uuid import UUID
 
 from aios_app.db import Database
 from .config import SemanticIndexConfig
+from .relation_validator import validate_neighbor_relation
 
 logger = logging.getLogger("aios.semantic_neighbor_classifier")
 
-NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v1"
-
-
-def _contains_refinement(a: str | None, b: str | None) -> bool:
-    if not a or not b:
-        return False
-    left = a.strip().lower()
-    right = b.strip().lower()
-    if left == right:
-        return False
-    return left in right or right in left
+NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v3-scope"
 
 
 def classify_neighbor_pair(
@@ -30,65 +20,18 @@ def classify_neighbor_pair(
     b: dict[str, Any],
     conflict_type: str | None,
 ) -> tuple[str, float, dict[str, Any]]:
-    same_subject = bool(a.get("subject_norm") and a.get("subject_norm") == b.get("subject_norm"))
-    same_predicate = bool(a.get("predicate_norm") and a.get("predicate_norm") == b.get("predicate_norm"))
-    same_object = bool(a.get("object_norm") and a.get("object_norm") == b.get("object_norm"))
-    same_polarity = int(a.get("polarity") or 1) == int(b.get("polarity") or 1)
-    same_topic = bool(a.get("topic_key") and a.get("topic_key") == b.get("topic_key"))
-    same_timeline = bool(a.get("timeline_id") and a.get("timeline_id") == b.get("timeline_id"))
-    same_world = bool(a.get("world_id") and a.get("world_id") == b.get("world_id"))
-    same_kind = bool(a.get("claim_kind") and a.get("claim_kind") == b.get("claim_kind"))
-    same_family = bool(
-        a.get("predicate_family")
-        and a.get("predicate_family") == b.get("predicate_family")
+    """Classify one candidate pair through the independent relation verifier.
+
+    Candidate generation may use vector similarity, topic geometry and legacy
+    conflict records.  None of those candidate hints are allowed to prove the
+    final semantic relation by themselves.
+    """
+    return validate_neighbor_relation(
+        similarity=similarity,
+        a=a,
+        b=b,
+        conflict_type=conflict_type,
     )
-
-    features = {
-        "similarity": round(float(similarity), 6),
-        "same_subject": same_subject,
-        "same_predicate": same_predicate,
-        "same_object": same_object,
-        "same_polarity": same_polarity,
-        "same_topic": same_topic,
-        "same_timeline": same_timeline,
-        "same_world": same_world,
-        "same_kind": same_kind,
-        "same_family": same_family,
-        "conflict_type": conflict_type,
-    }
-
-    if conflict_type:
-        return "CONTRADICTS", 0.96, features
-
-    if same_subject and same_predicate and same_object and same_polarity:
-        return "EQUIVALENT", 0.98, features
-
-    if (
-        same_subject
-        and same_predicate
-        and same_polarity
-        and _contains_refinement(a.get("object_norm"), b.get("object_norm"))
-    ):
-        return "REFINES", min(0.94, 0.72 + 0.22 * similarity), features
-
-    if (
-        a.get("claim_kind") == "EVENT"
-        and b.get("claim_kind") == "EVENT"
-        and same_timeline
-        and similarity >= 0.80
-    ):
-        return "SAME_EVENT", min(0.92, 0.68 + 0.24 * similarity), features
-
-    if same_topic:
-        return "SAME_TOPIC", min(0.92, 0.64 + 0.28 * similarity), features
-
-    if similarity >= 0.86 and (same_subject or same_family or same_kind):
-        return "RELATED", min(0.90, 0.60 + 0.30 * similarity), features
-
-    if similarity >= 0.76:
-        return "RELATED", min(0.82, 0.52 + 0.30 * similarity), features
-
-    return "UNRESOLVED", max(0.0, min(0.65, similarity)), features
 
 
 async def classify_neighbor_relations_once(
@@ -110,6 +53,10 @@ async def classify_neighbor_relations_once(
             ca.predicate_family AS a_predicate_family,
             ca.world_id AS a_world_id,
             ca.timeline_id AS a_timeline_id,
+            ca.epistemic_scope AS a_epistemic_scope,
+            ca.character_id AS a_character_id,
+            ca.character_instance_id AS a_character_instance_id,
+            ca.viewpoint_id AS a_viewpoint_id,
             pb.topic_key AS b_topic_key,
             pb.subject_norm AS b_subject_norm,
             pb.predicate_norm AS b_predicate_norm,
@@ -119,12 +66,24 @@ async def classify_neighbor_relations_once(
             cb.predicate_family AS b_predicate_family,
             cb.world_id AS b_world_id,
             cb.timeline_id AS b_timeline_id,
+            cb.epistemic_scope AS b_epistemic_scope,
+            cb.character_id AS b_character_id,
+            cb.character_instance_id AS b_character_instance_id,
+            cb.viewpoint_id AS b_viewpoint_id,
             pc.conflict_type
         FROM aios.semantic_neighbor_candidate snc
         JOIN aios.proposition pa ON pa.proposition_id=snc.proposition_id
         JOIN aios.proposition pb ON pb.proposition_id=snc.neighbor_proposition_id
         LEFT JOIN LATERAL (
-            SELECT ccr.claim_kind, ccr.predicate_family, ccr.world_id, ccr.timeline_id
+            SELECT
+                ccr.claim_kind,
+                ccr.predicate_family,
+                ccr.world_id,
+                ccr.timeline_id,
+                ccr.epistemic_scope,
+                ccr.origin_character_id AS character_id,
+                ccr.character_instance_id,
+                ccr.viewpoint_id
             FROM aios.observation o
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
             WHERE o.proposition_id=pa.proposition_id
@@ -132,7 +91,15 @@ async def classify_neighbor_relations_once(
             LIMIT 1
         ) ca ON true
         LEFT JOIN LATERAL (
-            SELECT ccr.claim_kind, ccr.predicate_family, ccr.world_id, ccr.timeline_id
+            SELECT
+                ccr.claim_kind,
+                ccr.predicate_family,
+                ccr.world_id,
+                ccr.timeline_id,
+                ccr.epistemic_scope,
+                ccr.origin_character_id AS character_id,
+                ccr.character_instance_id,
+                ccr.viewpoint_id
             FROM aios.observation o
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
             WHERE o.proposition_id=pb.proposition_id
@@ -183,6 +150,14 @@ async def classify_neighbor_relations_once(
             "predicate_family": row["a_predicate_family"],
             "world_id": str(row["a_world_id"]) if row["a_world_id"] else None,
             "timeline_id": str(row["a_timeline_id"]) if row["a_timeline_id"] else None,
+            "epistemic_scope": row["a_epistemic_scope"],
+            "character_id": row["a_character_id"],
+            "character_instance_id": (
+                str(row["a_character_instance_id"])
+                if row["a_character_instance_id"]
+                else None
+            ),
+            "viewpoint_id": row["a_viewpoint_id"],
         }
         b = {
             "topic_key": row["b_topic_key"],
@@ -194,6 +169,14 @@ async def classify_neighbor_relations_once(
             "predicate_family": row["b_predicate_family"],
             "world_id": str(row["b_world_id"]) if row["b_world_id"] else None,
             "timeline_id": str(row["b_timeline_id"]) if row["b_timeline_id"] else None,
+            "epistemic_scope": row["b_epistemic_scope"],
+            "character_id": row["b_character_id"],
+            "character_instance_id": (
+                str(row["b_character_instance_id"])
+                if row["b_character_instance_id"]
+                else None
+            ),
+            "viewpoint_id": row["b_viewpoint_id"],
         }
 
         relation, confidence, features = classify_neighbor_pair(
