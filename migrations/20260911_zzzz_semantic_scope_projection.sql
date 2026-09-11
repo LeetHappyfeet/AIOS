@@ -1,4 +1,0 @@
--- Compatibility alias intentionally left empty.
--- The active migration is 20260911_zzz_semantic_scope_projection.sql.
--- This file prevents older deployment manifests that referenced a zzzz suffix
--- from failing after the semantic projection migration was renamed.
