@@ -250,8 +250,6 @@ def classify_entity_kind(
     if clean in {"true", "false", "alive", "dead", "open", "closed", "missing", "unknown"}:
         return "STATE"
 
-    # Unknown named subjects/objects remain UNKNOWN instead of being guessed
-    # into PERSON/OBJECT. Later ontology/entity-linking passes can refine them.
     return "UNKNOWN"
 
 
@@ -284,9 +282,6 @@ def resolve_ingest_viewpoint(
 
 
 def infer_acquisition_mode(*, source_kind: Optional[str], speaker_role: Optional[str], node_kind: Optional[str]) -> str:
-    # DAG node kind is authoritative for the ingestion form. A chat source may
-    # have a vendor name such as "SillyTavern", which must not be mistaken for
-    # a document merely because the source string is not literally "chat".
     if node_kind == "chat_message":
         if speaker_role == "character":
             return "character_utterance"
@@ -318,6 +313,48 @@ async def _known_character(db: Database, value: Optional[str]) -> bool:
     return bool(row)
 
 
+async def _resolve_exact_runtime_instance(
+    db: Database,
+    *,
+    character_id: Optional[str],
+    source_timeline_id: Optional[UUID],
+) -> Optional[UUID]:
+    """Resolve one runtime instance for an exact source identity, or none.
+
+    Character belief ownership is instance state, not world state.  Bind only
+    when the runtime has already adopted this exact liminal source timeline and
+    its runtime timeline matches the source session/user/scope identity.  More
+    than one candidate is treated as ambiguous rather than guessed.
+    """
+    if not character_id or source_timeline_id is None:
+        return None
+
+    rows = await db.fetch(
+        """
+        SELECT ci.instance_id
+        FROM aios.character_instance ci
+        JOIN aios.character_runtime_state rs
+          ON rs.instance_id=ci.instance_id
+        JOIN aios.timeline rt
+          ON rt.timeline_id=rs.timeline_id
+        JOIN aios.timeline st
+          ON st.timeline_id=$2
+        WHERE ci.character_id=$1
+          AND rs.source_timeline_id=$2
+          AND rt.session_id IS NOT DISTINCT FROM st.session_id
+          AND rt.user_name IS NOT DISTINCT FROM st.user_name
+          AND rt.scope_key=st.scope_key
+        ORDER BY rs.updated_at DESC, ci.created_at DESC
+        LIMIT 2
+        """,
+        character_id,
+        source_timeline_id,
+    )
+    if len(rows) != 1:
+        return None
+    return rows[0]["instance_id"]
+
+
 async def resolve_claim_context(
     db: Database,
     fuseki: FusekiClient,
@@ -329,6 +366,31 @@ async def resolve_claim_context(
         claim_id,
     )
     if existing and existing["resolver_version"] == RESOLVER_VERSION:
+        rebound_instance_id = existing["character_instance_id"]
+        rebound = False
+        if existing["epistemic_scope"] == "character" and rebound_instance_id is None:
+            rebound_instance_id = await _resolve_exact_runtime_instance(
+                db,
+                character_id=existing["origin_character_id"],
+                source_timeline_id=existing["timeline_id"],
+            )
+            if rebound_instance_id is not None:
+                rebound = True
+                await db.execute(
+                    """
+                    UPDATE aios.claim_context_resolution
+                    SET character_instance_id=$2,
+                        meta=COALESCE(meta,'{}'::jsonb) || jsonb_build_object(
+                            'character_instance_id', $2::text,
+                            'runtime_binding_repaired', true
+                        ),
+                        resolved_at=now()
+                    WHERE claim_id=$1
+                    """,
+                    claim_id,
+                    rebound_instance_id,
+                )
+
         context = ClaimContext(
             claim_id=claim_id,
             claim_kind=existing["claim_kind"],
@@ -336,7 +398,7 @@ async def resolve_claim_context(
             object_kind=existing["object_kind"],
             predicate_family=existing["predicate_family"],
             origin_character_id=existing["origin_character_id"],
-            character_instance_id=existing["character_instance_id"],
+            character_instance_id=rebound_instance_id,
             speaker_id=existing["speaker_id"],
             speaker_type=existing["speaker_type"],
             viewpoint_id=existing["viewpoint_id"],
@@ -367,7 +429,7 @@ async def resolve_claim_context(
             LIMINAL_GRAPH,
             RDF_RECEIPT_PREDICATE,
         )
-        if not receipt:
+        if rebound or not receipt:
             await _write_liminal_context(fuseki, context)
             await _log_rdf_context(db, context)
         return context
@@ -407,34 +469,7 @@ async def resolve_claim_context(
             ie.source_id,
             ie.source_kind AS explicit_source_kind,
             ie.target_character_id,
-            ie.target_world_id,
-            COALESCE(
-                (
-                    SELECT ci.instance_id
-                    FROM aios.character_instance ci
-                    JOIN aios.character_runtime_state rs
-                      ON rs.instance_id=ci.instance_id
-                    JOIN aios.timeline rt
-                      ON rt.timeline_id=rs.timeline_id
-                    WHERE ci.character_id=n.character_id
-                      AND rs.source_timeline_id=n.timeline_id
-                      AND rt.session_id IS NOT DISTINCT FROM t.session_id
-                      AND rt.user_name IS NOT DISTINCT FROM t.user_name
-                      AND rt.scope_key=t.scope_key
-                    ORDER BY rs.updated_at DESC, ci.created_at DESC
-                    LIMIT 1
-                ),
-                (
-                    SELECT ci.instance_id
-                    FROM aios.character_instance ci
-                    WHERE ci.character_id=n.character_id
-                      AND ci.world_id=t.world_id
-                    ORDER BY
-                        CASE WHEN ci.current_world_id=t.world_id THEN 0 ELSE 1 END,
-                        ci.created_at
-                    LIMIT 1
-                )
-            ) AS character_instance_id
+            ie.target_world_id
         FROM aios.claim_candidate cc
         JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
         JOIN aios.document_section ds ON ds.section_id=es.section_id
@@ -496,6 +531,14 @@ async def resolve_claim_context(
     else:
         epistemic_scope = "speaker" if viewpoint_id else "source"
 
+    character_instance_id = None
+    if epistemic_scope == "character":
+        character_instance_id = await _resolve_exact_runtime_instance(
+            db,
+            character_id=origin_character_id,
+            source_timeline_id=row["timeline_id"],
+        )
+
     source_kind = row["explicit_source_kind"] or row["source_type"] or row["ingest_source"]
     acquisition_mode = infer_acquisition_mode(
         source_kind=source_kind,
@@ -527,7 +570,7 @@ async def resolve_claim_context(
         object_kind=object_kind,
         predicate_family=family,
         origin_character_id=origin_character_id,
-        character_instance_id=row["character_instance_id"],
+        character_instance_id=character_instance_id,
         speaker_id=speaker_id,
         speaker_type=speaker_type,
         viewpoint_id=viewpoint_id,
