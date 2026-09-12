@@ -14,14 +14,16 @@ observations → persistent memory/world state → agent HUD → LLM or human
 
 ## Run AIOS
 
-AIOS currently runs as a development environment. It requires:
+AIOS runs its Python application natively and uses Docker Compose for its three storage/network services:
 
-- Python 3.10+
-- PostgreSQL 14+
+- PostgreSQL
 - Apache Jena Fuseki
 - Qdrant
 
-PostgreSQL, Fuseki, and Qdrant must already be running and reachable. AIOS does not currently install or launch those external services for you. See [docs/installation.md](docs/installation.md) for service setup and troubleshooting.
+Requirements:
+
+- Python 3.10+
+- Docker with Docker Compose
 
 ### 1. Clone the development branch
 
@@ -39,16 +41,41 @@ You should now have:
 ```text
 ~/AIOS-workspace/
 └── aios_app/
+    ├── compose.yaml
     ├── __init__.py
     ├── launch.py
     └── ...
 ```
 
-### 2. Create the Python environment
+### 2. Start the infrastructure
 
-Still from `~/AIOS-workspace`:
+From the repository directory:
 
 ```bash
+cd ~/AIOS-workspace/aios_app
+docker compose up -d --build
+```
+
+This starts PostgreSQL, Qdrant, and Fuseki on localhost, creates persistent named Docker volumes, configures the Fuseki `/world` and `/char` datasets, and loads the canonical AIOS ontology graphs.
+
+The default endpoints match the AIOS application defaults:
+
+```text
+PostgreSQL: 127.0.0.1:5432
+Fuseki:    http://127.0.0.1:3030
+Qdrant:    http://127.0.0.1:6333
+```
+
+The database ports are bound to loopback by default rather than exposed to the LAN.
+
+Optional infrastructure settings are documented in `.env.example`. Copy it to `.env` only if you need to change ports, PostgreSQL credentials, Fuseki memory, or infrastructure versions.
+
+### 3. Create the Python environment
+
+Return to the workspace directory:
+
+```bash
+cd ~/AIOS-workspace
 python3 -m venv .venv
 source .venv/bin/activate
 
@@ -56,18 +83,6 @@ python -m pip install --upgrade pip
 pip install -r aios_app/requirements.txt
 python -m spacy download en_core_web_sm
 ```
-
-### 3. Point AIOS at its services
-
-Replace the PostgreSQL values with your own database credentials:
-
-```bash
-export AIOS_DB_DSN='postgresql://USER:PASSWORD@127.0.0.1:5432/DATABASE'
-export AIOS_FUSEKI_BASE_URL='http://127.0.0.1:3030'
-export AIOS_QDRANT_URL='http://127.0.0.1:6333'
-```
-
-Fuseki must contain the AIOS `/world` and `/char` datasets and the required ontology graphs. See [docs/installation.md](docs/installation.md) and [rdf/ontology/readme.md](rdf/ontology/readme.md) for those steps.
 
 ### 4. Launch AIOS
 
@@ -77,7 +92,7 @@ From `~/AIOS-workspace`, with the virtual environment active:
 python -m aios_app.launch
 ```
 
-The launcher automatically applies the current PostgreSQL migrations, checks database readiness, and starts the AIOS services.
+The launcher automatically applies the current PostgreSQL migrations, checks database readiness, and starts the native AIOS services. PostgreSQL schema ownership remains with AIOS rather than Docker initialization scripts.
 
 A healthy startup ends with output similar to:
 
@@ -107,7 +122,16 @@ API:    http://127.0.0.1:8000
 Web UI: http://127.0.0.1:7860
 ```
 
-Press `Ctrl+C` in the AIOS terminal to stop the services.
+Press `Ctrl+C` in the AIOS terminal to stop the native AIOS processes.
+
+To stop the database services without deleting their data:
+
+```bash
+cd ~/AIOS-workspace/aios_app
+docker compose down
+```
+
+Do not add `-v` unless you intentionally want to delete the AIOS Docker volumes and their stored data.
 
 <p align="center">
   <img src="screenshot.png" alt="AIOS Screenshot" width="800">
@@ -155,7 +179,7 @@ The [MemoryVaultIngest SillyTavern extension](https://github.com/LeetHappyfeet/e
 
 ## Documentation
 
-- [Development installation](docs/installation.md) — service setup, environment variables, launch behavior, and troubleshooting.
+- [Development installation](docs/installation.md) — Compose infrastructure, environment variables, launch behavior, and troubleshooting.
 - [Architecture](docs/architecture.md) — DAG, provenance, claims, RDF, epistemics, runtime, HUD, pipeline, and storage boundaries.
 - [Semantic Index](semantic_index/README.md) — Qdrant, semantic structure, clustering, classification, and reconciliation.
 - [Plugin system](plugins/README.md) — HUD/plugin provider architecture.
