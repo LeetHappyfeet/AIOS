@@ -27,18 +27,21 @@ class EvidencePoint:
 DEFAULT_POLICY = ReconciliationPolicy("generic", "accumulate")
 
 FAMILY_POLICIES = {
-    # Durable facts can accumulate independent corroboration.
+    # Durable facts accumulate independent corroboration. These deliberately
+    # share the generic threshold because the legacy SQL accumulator remains
+    # authoritative for accumulated support; the policy engine changes how
+    # families reconcile, not the meaning of its already-materialized support.
     "IDENTITY": ReconciliationPolicy("identity", "accumulate", 0.60, 0.15),
     "SOCIAL": ReconciliationPolicy("relationship", "accumulate", 0.60, 0.15),
     "MEMBERSHIP": ReconciliationPolicy("membership", "accumulate", 0.60, 0.15),
     "POSSESSION": ReconciliationPolicy("possession", "accumulate", 0.60, 0.15),
-    "EPISTEMIC": ReconciliationPolicy("epistemic", "accumulate", 0.55, 0.12),
-    "MEMORY": ReconciliationPolicy("memory", "accumulate", 0.55, 0.12),
-    "CAUSAL": ReconciliationPolicy("causal", "accumulate", 0.65, 0.15),
+    "EPISTEMIC": ReconciliationPolicy("epistemic", "accumulate", 0.60, 0.15),
+    "MEMORY": ReconciliationPolicy("memory", "accumulate", 0.60, 0.15),
+    "CAUSAL": ReconciliationPolicy("causal", "accumulate", 0.60, 0.15),
     "COMMUNICATION": ReconciliationPolicy("communication", "accumulate", 0.60, 0.15),
     "ACTION": ReconciliationPolicy("event", "accumulate", 0.60, 0.15),
     "TEMPORAL": ReconciliationPolicy("temporal", "accumulate", 0.60, 0.15),
-    # Volatile state should follow the newest admitted state rather than grow
+    # Volatile state follows the newest admitted state rather than growing
     # increasingly certain merely because old observations remain in history.
     "DESCRIPTIVE": ReconciliationPolicy("descriptive_state", "latest", 0.50, 0.05),
     "EMOTIONAL": ReconciliationPolicy("emotional_state", "latest", 0.50, 0.05),
