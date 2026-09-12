@@ -182,22 +182,22 @@ SET acquisition_mode=aios.acquisition_mode_for_perceiver(
         'semantic_confidence_separate', true,
         'legacy_acquisition_repaired', true
     )
-FROM aios.observation o
-JOIN aios.dag_node dn
-  ON dn.node_id=o.dag_node_id
-JOIN aios.claim_context_resolution ccr
-  ON ccr.claim_id=o.claim_id
-JOIN aios.character_runtime_state rs
-  ON rs.instance_id=kae.instance_id
- AND rs.source_timeline_id=o.timeline_id
-JOIN aios.character_instance ci
-  ON ci.instance_id=kae.instance_id
-JOIN aios.timeline rt
-  ON rt.timeline_id=rs.timeline_id
-JOIN aios.timeline st
-  ON st.timeline_id=o.timeline_id
+FROM aios.observation o,
+     aios.dag_node dn,
+     aios.claim_context_resolution ccr,
+     aios.character_runtime_state rs,
+     aios.character_instance ci,
+     aios.timeline rt,
+     aios.timeline st
 WHERE kae.claim_id=o.claim_id
   AND kae.proposition_id=o.proposition_id
+  AND dn.node_id=o.dag_node_id
+  AND ccr.claim_id=o.claim_id
+  AND rs.instance_id=kae.instance_id
+  AND rs.source_timeline_id=o.timeline_id
+  AND ci.instance_id=kae.instance_id
+  AND rt.timeline_id=rs.timeline_id
+  AND st.timeline_id=o.timeline_id
   AND dn.kind::text IN ('chat_message','observation')
   AND rt.session_id IS NOT DISTINCT FROM st.session_id
   AND rt.user_name IS NOT DISTINCT FROM st.user_name
