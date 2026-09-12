@@ -38,14 +38,20 @@ class SemanticIndexConfig:
         os.getenv("AIOS_EMBEDDING_DEVICE", ""),
     ) or None
 
+    # Low-latency query RPC. The Semantic Index process owns the warm embedding
+    # model; API/HUD callers connect over loopback and never load it locally.
+    query_host: str = os.getenv("AIOS_SEMANTIC_QUERY_HOST", "127.0.0.1")
+    query_port: int = int(os.getenv("AIOS_SEMANTIC_QUERY_PORT", "8765"))
+    query_timeout_seconds: float = float(
+        os.getenv("AIOS_SEMANTIC_QUERY_TIMEOUT_SECONDS", "0.20")
+    )
+
     batch_size: int = int(os.getenv("AIOS_SEMANTIC_INDEX_BATCH_SIZE", "64"))
     default_top_k: int = int(os.getenv("AIOS_SEMANTIC_TOP_K", "80"))
     hud_candidate_k: int = int(os.getenv("AIOS_SEMANTIC_HUD_CANDIDATE_K", "200"))
     neighbor_k: int = int(os.getenv("AIOS_SEMANTIC_NEIGHBOR_K", "24"))
     neighbor_min_score: float = float(os.getenv("AIOS_SEMANTIC_NEIGHBOR_MIN_SCORE", "0.72"))
 
-    # Semantic clustering. Core edges create dense components; weaker edges may
-    # attach fringe members but cannot merge two established cores.
     cluster_core_threshold: float = float(
         os.getenv("AIOS_SEMANTIC_CLUSTER_CORE_THRESHOLD", "0.82")
     )
@@ -68,7 +74,6 @@ class SemanticIndexConfig:
         os.getenv("AIOS_SEMANTIC_CLUSTER_MIN_COHESION", "0.78")
     )
 
-    # Advisory semantic classifier. Low-margin decisions remain UNRESOLVED.
     classifier_min_confidence: float = float(
         os.getenv("AIOS_SEMANTIC_CLASSIFIER_MIN_CONFIDENCE", "0.48")
     )
@@ -76,8 +81,6 @@ class SemanticIndexConfig:
         os.getenv("AIOS_SEMANTIC_CLASSIFIER_MIN_MARGIN", "0.04")
     )
 
-    # Reconciliation thresholds. These govern promotion into derived topology/RDF,
-    # not truth or epistemic ownership.
     reconcile_relation_min_confidence: float = float(
         os.getenv("AIOS_SEMANTIC_RECONCILE_RELATION_MIN_CONFIDENCE", "0.80")
     )
