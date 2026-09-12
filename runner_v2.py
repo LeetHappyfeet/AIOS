@@ -55,8 +55,41 @@ def _short(value: Any, width: int = 8) -> str:
     return text[:width] if text else ""
 
 
+def _decode_payload(value: Any) -> dict[str, Any]:
+    """Normalize pipeline_job.payload for telemetry-only inspection.
+
+    Depending on the asyncpg/PostgreSQL JSON codec configuration, payload can
+    arrive as a mapping, a JSON string, bytes, or NULL. Telemetry should never
+    fail the runner because of representation differences.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "items"):
+        try:
+            return dict(value.items())
+        except Exception:
+            return {}
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except Exception:
+            return {}
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            decoded = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
 async def _work_subject(db: Database, row: Any) -> dict[str, Any]:
-    payload = dict(row["payload"] or {})
+    payload = _decode_payload(row["payload"])
     partition_key = str(row["partition_key"] or "")
 
     scope_key = str(payload.get("scope_key") or "")
