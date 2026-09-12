@@ -81,7 +81,6 @@ async def _partition_key_for_enqueue(
     return None
 
 
-
 async def enqueue_job(
     db: Database,
     *,
@@ -158,8 +157,9 @@ async def fetch_next_job(
     """Atomically lease the next runnable job for one execution class.
 
     Lane filtering protects live epistemic work from maintenance starvation.
-    Jobs whose partition is already running are ranked after uncontended jobs
-    so workers spread across independent semantic trees before convoying.
+    RDF workers additionally prefer every foreground lane over BACKGROUND so
+    topology publication cannot starve ordinary RDF work. Jobs whose partition
+    is already running are ranked after uncontended jobs within that class.
     """
 
     row = await db.execute_returning_row(
@@ -175,6 +175,11 @@ async def fetch_next_job(
                     OR q.scheduling_lane = ANY($4::text[])
               )
             ORDER BY
+                CASE
+                    WHEN $1::text = 'RDF'
+                     AND q.scheduling_lane = 'BACKGROUND'
+                    THEN 1 ELSE 0
+                END ASC,
                 CASE
                     WHEN $5::boolean
                      AND q.partition_key IS NOT NULL
@@ -311,8 +316,6 @@ async def mark_failed(
     )
 
 
-
-
 async def rebalance_queued_priorities(db: Database) -> int:
     """
     Apply the current pipeline priority policy to jobs already in the queue.
@@ -346,6 +349,7 @@ async def rebalance_queued_priorities(db: Database) -> int:
                             ELSE 80
                         END
                     WHEN 'assign_narratives' THEN 90
+                    WHEN 'project_semantic_scope' THEN 200
                     ELSE priority
                 END AS desired_priority
             FROM aios.pipeline_job
