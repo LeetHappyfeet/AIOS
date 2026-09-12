@@ -16,6 +16,24 @@ from .job_registry import SchedulingLane, job_spec, scheduling_lane
 # ---------------------------------------------------------------------
 
 
+async def _claim_timeline_partition(db: Database, claim_id: str) -> Optional[str]:
+    """Return the causal timeline partition containing one claim."""
+    row = await db.fetchrow(
+        """
+        SELECT dn.timeline_id
+        FROM aios.claim_candidate cc
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        WHERE cc.claim_id=$1::uuid
+        """,
+        claim_id,
+    )
+    if not row or row["timeline_id"] is None:
+        return None
+    return f"timeline:{row['timeline_id']}"
+
+
 async def _partition_key_for_enqueue(
     db: Database,
     *,
@@ -24,6 +42,9 @@ async def _partition_key_for_enqueue(
 ) -> Optional[str]:
     if payload.get("claim_id"):
         claim_id = str(payload["claim_id"])
+        if job_type == "decompose_claim_frames":
+            timeline_partition = await _claim_timeline_partition(db, claim_id)
+            return timeline_partition or f"claim:{claim_id}"
         if job_type in {"resolve_claim_context", "normalize_proposition"}:
             return f"claim:{claim_id}"
         if job_type in {"derive_claim_topology", "rdf_epistemic_project"}:
@@ -145,6 +166,31 @@ async def enqueue_job(
 # Atomic fetch + claim
 # ---------------------------------------------------------------------
 
+async def _backfill_decompose_timeline_partitions(db: Database) -> None:
+    """Upgrade legacy queued/running frame jobs to causal timeline partitions.
+
+    Older jobs were enqueued before decomposition became timeline-aware. Doing
+    this lazily keeps an in-flight backlog safe across a normal code restart
+    without requiring a schema migration or manual queue cleanup.
+    """
+    await db.execute(
+        """
+        UPDATE aios.pipeline_job pj
+        SET partition_key='timeline:' || dn.timeline_id::text,
+            updated_at=now()
+        FROM aios.claim_candidate cc
+        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        JOIN aios.document_section ds ON ds.section_id=es.section_id
+        JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        WHERE pj.job_type='decompose_claim_frames'
+          AND pj.status IN ('queued','running')
+          AND pj.payload->>'claim_id'=cc.claim_id::text
+          AND dn.timeline_id IS NOT NULL
+          AND pj.partition_key IS DISTINCT FROM 'timeline:' || dn.timeline_id::text
+        """
+    )
+
+
 async def fetch_next_job(
     db: Database,
     *,
@@ -158,9 +204,14 @@ async def fetch_next_job(
 
     Lane filtering protects live epistemic work from maintenance starvation.
     RDF workers additionally prefer every foreground lane over BACKGROUND so
-    topology publication cannot starve ordinary RDF work. Jobs whose partition
-    is already running are ranked after uncontended jobs within that class.
+    topology publication cannot starve ordinary RDF work. Frame decomposition
+    is stricter: a timeline may have at most one running decomposition job, so
+    local antecedent resolution remains causally ordered while other timelines
+    can execute concurrently.
     """
+
+    if resource_class == "NLP":
+        await _backfill_decompose_timeline_partitions(db)
 
     row = await db.execute_returning_row(
         """
@@ -173,6 +224,17 @@ async def fetch_next_job(
               AND (
                     $4::text[] IS NULL
                     OR q.scheduling_lane = ANY($4::text[])
+              )
+              AND (
+                    q.job_type <> 'decompose_claim_frames'
+                    OR q.partition_key IS NULL
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM aios.pipeline_job active
+                        WHERE active.status='running'
+                          AND active.job_type='decompose_claim_frames'
+                          AND active.partition_key=q.partition_key
+                    )
               )
             ORDER BY
                 CASE
@@ -335,6 +397,7 @@ async def rebalance_queued_priorities(db: Database) -> int:
                     WHEN 'extract_claims' THEN 25
                     WHEN 'rdf_liminal_promote' THEN 25
                     WHEN 'rdf_liminal_classify' THEN 28
+                    WHEN 'decompose_claim_frames' THEN 27
                     WHEN 'resolve_claim_context' THEN 30
                     WHEN 'project_character_knowledge' THEN 30
                     WHEN 'normalize_proposition' THEN 35
@@ -433,7 +496,7 @@ async def retry_failed_job(
             claimed_at=NULL,
             heartbeat_at=NULL,
             lease_expires_at=NULL,
-            updated_at = now()
+            updated_at=now()
         WHERE job_id = $1
         """,
         job_id,

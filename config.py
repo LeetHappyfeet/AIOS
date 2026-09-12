@@ -83,8 +83,6 @@ class Settings(BaseModel):
         os.getenv("AIOS_RUNNER_POLL_INTERVAL", "1.0")
     )
 
-
-
     pipeline_lease_seconds: int = int(
         os.getenv("AIOS_PIPELINE_LEASE_SECONDS", "120")
     )
@@ -94,7 +92,10 @@ class Settings(BaseModel):
     )
 
     runner_fast_sql_workers: int = int(os.getenv("AIOS_RUNNER_FAST_SQL_WORKERS", "4"))
-    runner_nlp_workers: int = int(os.getenv("AIOS_RUNNER_NLP_WORKERS", "1"))
+    # Frame decomposition is serialized per source timeline by the queue
+    # admission policy, so independent timelines can safely use separate NLP
+    # workers without allowing a later claim to outrun its local antecedents.
+    runner_nlp_workers: int = int(os.getenv("AIOS_RUNNER_NLP_WORKERS", "4"))
     runner_semantic_workers: int = int(os.getenv("AIOS_RUNNER_SEMANTIC_WORKERS", "4"))
     runner_vector_workers: int = int(os.getenv("AIOS_RUNNER_VECTOR_WORKERS", "1"))
     runner_rdf_workers: int = int(os.getenv("AIOS_RUNNER_RDF_WORKERS", "1"))
