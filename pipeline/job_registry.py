@@ -61,13 +61,6 @@ def job_spec(job_type: str) -> JobSpec:
 
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
-    if job_type in {
-        "decompose_claim_frames",
-        "resolve_claim_context",
-        "normalize_proposition",
-        "project_character_knowledge",
-    }:
-        return SchedulingLane.LIVE
     if (
         job_type == "derive_claim_topology"
         and payload.get("semantic_backfill") == "proposition_leaves_20260909"
