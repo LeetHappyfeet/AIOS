@@ -14,7 +14,10 @@ from aios_app.epistemic.pivots import resolve_subject_pivot
 
 logger = logging.getLogger("aios.epistemic.semantic_frames")
 
-DECOMPOSER_VERSION = "semantic-frame-v3"
+# Keep the frame-schema version stable because normalizer/supervisor/vector
+# stages intentionally key on semantic-frame-v2. Perspective is a resolver
+# upgrade, not a new frame storage contract.
+DECOMPOSER_VERSION = "semantic-frame-v2"
 REFERENT_RESOLVER_VERSION = "local-dag-referent-v3"
 PERSPECTIVE_VERSION = "frame-perspective-v1"
 
@@ -104,10 +107,7 @@ def _span_text(tokens: Iterable) -> Optional[str]:
 def _phrase(token) -> Optional[str]:
     if token is None:
         return None
-    tokens = [
-        t for t in token.subtree
-        if t.dep_ not in CLAUSE_DEPS or t.i == token.i
-    ]
+    tokens = [t for t in token.subtree if t.dep_ not in CLAUSE_DEPS or t.i == token.i]
     return _span_text(tokens)
 
 
@@ -115,7 +115,6 @@ def _find_subject(root):
     subjects = [c for c in root.children if c.dep_ in SUBJECT_DEPS]
     if subjects:
         return subjects[0]
-
     if root.dep_ in {"conj", "xcomp", "ccomp", "advcl"}:
         head = root.head
         seen: set[int] = set()
@@ -156,9 +155,8 @@ def _negated(root) -> bool:
     if any(c.dep_ == "neg" for c in root.children):
         return True
     for child in root.children:
-        if child.dep_ in OBJECT_DEPS:
-            if any(t.lower_ in {"no", "none", "nothing"} for t in child.subtree):
-                return True
+        if child.dep_ in OBJECT_DEPS and any(t.lower_ in {"no", "none", "nothing"} for t in child.subtree):
+            return True
     return False
 
 
@@ -270,7 +268,6 @@ def _annotate_perspective(drafts: list[FrameDraft]) -> None:
             "perspective_depth": len(chain),
             "perspective_chain": chain,
         })
-
         if kind == "mental_content":
             draft.discourse_mode = "attributed_mental_content"
         elif kind in {"quoted_speech", "attributed_speech_content"}:
@@ -294,8 +291,8 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
 
     roots = sorted(dict.fromkeys(tok for tok in doc if is_frame_root(tok)), key=lambda t: t.i)
     root_to_index = {tok.i: idx for idx, tok in enumerate(roots)}
-
     drafts: list[FrameDraft] = []
+
     for idx, root in enumerate(roots):
         subject_token = _find_subject(root)
         object_token = _find_object(root)
@@ -309,14 +306,10 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
                 None,
             )
         object_frame_index = root_to_index.get(child_clause.i) if child_clause is not None else None
-
-        parent_index = None
-        if root.head.i != root.i and root.head.i in root_to_index:
-            parent_index = root_to_index[root.head.i]
+        parent_index = root_to_index.get(root.head.i) if root.head.i != root.i else None
 
         predicate, predicate_confidence, construction = _canonical_predicate(root, object_token)
         polarity = -1 if _negated(root) else 1
-
         local_relative_antecedent = None
         if root.dep_ == "relcl" and subject_token is not None and subject_token.lower_ in RELATIVE_PRONOUNS:
             local_relative_antecedent = _phrase(root.head)
@@ -346,37 +339,35 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
         if polarity < 0:
             canonical = "NOT " + canonical
 
-        drafts.append(
-            FrameDraft(
-                index=idx,
-                root_i=root.i,
-                parent_index=parent_index,
-                object_frame_index=object_frame_index,
-                subject=subject,
-                predicate_surface=root.lemma_.lower() or root.text.lower(),
-                predicate_canonical=predicate,
-                object_text=object_text,
-                polarity=polarity,
-                modality=_modality(root),
-                tense=str(root.morph.get("Tense")[0]) if root.morph.get("Tense") else None,
-                aspect=str(root.morph.get("Aspect")[0]) if root.morph.get("Aspect") else None,
-                frame_role="main" if root.dep_ == "ROOT" else root.dep_.lower(),
-                discourse_mode="reported_claim" if passive_reporting else _discourse_mode(root, predicate),
-                extraction_confidence=0.92 if subject and predicate else 0.72 if predicate else 0.45,
-                predicate_confidence=predicate_confidence,
-                canonical_text=canonical,
-                meta={
-                    "root_text": root.text,
-                    "root_dep": root.dep_,
-                    "construction": construction,
-                    "local_relative_antecedent": local_relative_antecedent,
-                    "passive_reporting": passive_reporting,
-                    "named_entities": named_entities,
-                    "inside_direct_quote": _inside_quote(root, quote_spans),
-                    "addressee_text": _find_addressee(root) if predicate in REPORTING_PREDICATES else None,
-                },
-            )
-        )
+        drafts.append(FrameDraft(
+            index=idx,
+            root_i=root.i,
+            parent_index=parent_index,
+            object_frame_index=object_frame_index,
+            subject=subject,
+            predicate_surface=root.lemma_.lower() or root.text.lower(),
+            predicate_canonical=predicate,
+            object_text=object_text,
+            polarity=polarity,
+            modality=_modality(root),
+            tense=str(root.morph.get("Tense")[0]) if root.morph.get("Tense") else None,
+            aspect=str(root.morph.get("Aspect")[0]) if root.morph.get("Aspect") else None,
+            frame_role="main" if root.dep_ == "ROOT" else root.dep_.lower(),
+            discourse_mode="reported_claim" if passive_reporting else _discourse_mode(root, predicate),
+            extraction_confidence=0.92 if subject and predicate else 0.72 if predicate else 0.45,
+            predicate_confidence=predicate_confidence,
+            canonical_text=canonical,
+            meta={
+                "root_text": root.text,
+                "root_dep": root.dep_,
+                "construction": construction,
+                "local_relative_antecedent": local_relative_antecedent,
+                "passive_reporting": passive_reporting,
+                "named_entities": named_entities,
+                "inside_direct_quote": _inside_quote(root, quote_spans),
+                "addressee_text": _find_addressee(root) if predicate in REPORTING_PREDICATES else None,
+            },
+        ))
 
     _annotate_perspective(drafts)
     return drafts
@@ -386,13 +377,7 @@ def _norm(value: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().lower())
 
 
-def _guess_kind(
-    value: Optional[str],
-    named_entities: list[dict],
-    *,
-    predicate: Optional[str] = None,
-    object_text: Optional[str] = None,
-) -> Optional[str]:
+def _guess_kind(value: Optional[str], named_entities: list[dict], *, predicate: Optional[str] = None, object_text: Optional[str] = None) -> Optional[str]:
     clean = _norm(value)
     if not clean:
         return None
@@ -457,9 +442,7 @@ async def _recent_antecedents(db: Database, claim_id: UUID, limit: int = 5) -> l
             f.frame_index DESC
         LIMIT $3
         """,
-        claim_id,
-        DECOMPOSER_VERSION,
-        limit * 3,
+        claim_id, DECOMPOSER_VERSION, limit * 3,
     )
     return [dict(row) for row in rows]
 
@@ -484,16 +467,7 @@ def _choose_antecedent(value: Optional[str], candidates: list[dict]) -> tuple[Op
     return value, None, 0.20
 
 
-def _resolve_participant_phrase(
-    value: Optional[str],
-    *,
-    character_id: Optional[str],
-    speaker_id: Optional[str],
-    speaker_role: Optional[str],
-    recipient_id: Optional[str],
-    viewpoint_id: Optional[str],
-    ruleset_id: str,
-) -> tuple[Optional[str], bool]:
+def _resolve_participant_phrase(value: Optional[str], *, character_id: Optional[str], speaker_id: Optional[str], speaker_role: Optional[str], recipient_id: Optional[str], viewpoint_id: Optional[str], ruleset_id: str) -> tuple[Optional[str], bool]:
     clean = (value or "").strip()
     if not clean:
         return value, False
@@ -535,15 +509,10 @@ async def _transport_identity_names(db: Database, character_id: Optional[str], s
         return names
     rows = await db.fetch(
         """
-        SELECT ci.character_id AS value
-        FROM aios.character_identity ci
-        WHERE ci.character_id=$1
-        UNION ALL
-        SELECT ci.canonical_name FROM aios.character_identity ci WHERE ci.character_id=$1
-        UNION ALL
-        SELECT ci.display_name FROM aios.character_identity ci WHERE ci.character_id=$1
-        UNION ALL
-        SELECT ca.alias FROM aios.character_alias ca WHERE ca.character_id=$1
+        SELECT ci.character_id AS value FROM aios.character_identity ci WHERE ci.character_id=$1
+        UNION ALL SELECT ci.canonical_name FROM aios.character_identity ci WHERE ci.character_id=$1
+        UNION ALL SELECT ci.display_name FROM aios.character_identity ci WHERE ci.character_id=$1
+        UNION ALL SELECT ca.alias FROM aios.character_alias ca WHERE ca.character_id=$1
         """,
         character_id,
     )
@@ -557,10 +526,14 @@ def _matches_transport(value: Optional[str], names: set[str]) -> bool:
 
 async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
     projection = await db.fetchrow(
-        "SELECT decomposer_version FROM aios.claim_semantic_frame_projection WHERE claim_id=$1",
+        "SELECT decomposer_version, resolver_version FROM aios.claim_semantic_frame_projection WHERE claim_id=$1",
         claim_id,
     )
-    if projection and projection["decomposer_version"] == DECOMPOSER_VERSION:
+    if (
+        projection
+        and projection["decomposer_version"] == DECOMPOSER_VERSION
+        and projection["resolver_version"] == REFERENT_RESOLVER_VERSION
+    ):
         return 0
 
     row = await db.fetchrow(
@@ -586,34 +559,26 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
 
     drafts = decompose_sentence(row["raw_text"])
     if not drafts:
-        drafts = [
-            FrameDraft(
-                index=0, root_i=0, parent_index=None, object_frame_index=None,
-                subject=None, predicate_surface=None, predicate_canonical=None,
-                object_text=row["raw_text"], polarity=1, modality="asserted",
-                tense=None, aspect=None, frame_role="fallback",
-                discourse_mode="narrated_observation",
-                extraction_confidence=0.25, predicate_confidence=0.0,
-                canonical_text=row["raw_text"].strip(),
-                meta={"fallback": True, "perspective_version": PERSPECTIVE_VERSION},
-            )
-        ]
+        drafts = [FrameDraft(
+            index=0, root_i=0, parent_index=None, object_frame_index=None,
+            subject=None, predicate_surface=None, predicate_canonical=None,
+            object_text=row["raw_text"], polarity=1, modality="asserted",
+            tense=None, aspect=None, frame_role="fallback",
+            discourse_mode="narrated_observation",
+            extraction_confidence=0.25, predicate_confidence=0.0,
+            canonical_text=row["raw_text"].strip(),
+            meta={"fallback": True, "perspective_version": PERSPECTIVE_VERSION},
+        )]
 
     await db.execute(
         "DELETE FROM aios.claim_semantic_frame WHERE claim_id=$1 AND decomposer_version=$2",
-        claim_id,
-        DECOMPOSER_VERSION,
+        claim_id, DECOMPOSER_VERSION,
     )
 
     inserted: dict[int, UUID] = {}
     for draft in drafts:
         named_entities = draft.meta.get("named_entities", [])
-        subject_kind = _guess_kind(
-            draft.subject,
-            named_entities,
-            predicate=draft.predicate_canonical,
-            object_text=draft.object_text,
-        )
+        subject_kind = _guess_kind(draft.subject, named_entities, predicate=draft.predicate_canonical, object_text=draft.object_text)
         object_kind = _guess_kind(draft.object_text, named_entities)
         result = await db.execute_returning_row(
             """
@@ -645,11 +610,7 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
 
     for draft in drafts:
         await db.execute(
-            """
-            UPDATE aios.claim_semantic_frame
-            SET parent_frame_id=$2, object_frame_id=$3
-            WHERE frame_id=$1
-            """,
+            "UPDATE aios.claim_semantic_frame SET parent_frame_id=$2, object_frame_id=$3 WHERE frame_id=$1",
             inserted[draft.index],
             inserted.get(draft.parent_index) if draft.parent_index is not None else None,
             inserted.get(draft.object_frame_index) if draft.object_frame_index is not None else None,
@@ -663,13 +624,8 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
         frame_id = inserted[draft.index]
         subject_resolved, subject_key, subject_ref_conf = _choose_antecedent(draft.subject, antecedents)
         object_resolved, object_key, object_ref_conf = _choose_antecedent(draft.object_text, antecedents)
-
-        perspective_holder, _, perspective_holder_conf = _choose_antecedent(
-            draft.meta.get("perspective_holder_text"), antecedents
-        )
-        perspective_addressee, _, perspective_addressee_conf = _choose_antecedent(
-            draft.meta.get("perspective_addressee_text"), antecedents
-        )
+        perspective_holder, _, perspective_holder_conf = _choose_antecedent(draft.meta.get("perspective_holder_text"), antecedents)
+        perspective_addressee, _, perspective_addressee_conf = _choose_antecedent(draft.meta.get("perspective_addressee_text"), antecedents)
         perspective_kind = draft.meta.get("perspective_kind")
 
         pivot_context = {
@@ -699,17 +655,9 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
 
         final_discourse_mode = draft.discourse_mode
         if perspective_kind == "mental_content":
-            final_discourse_mode = (
-                "character_mental_state"
-                if _matches_transport(perspective_holder, transport_names)
-                else "attributed_mental_content"
-            )
+            final_discourse_mode = "character_mental_state" if _matches_transport(perspective_holder, transport_names) else "attributed_mental_content"
         elif perspective_kind in {"quoted_speech", "attributed_speech_content"}:
-            final_discourse_mode = (
-                "character_speech"
-                if _matches_transport(perspective_holder, transport_names)
-                else "attributed_speech_content"
-            )
+            final_discourse_mode = "character_speech" if _matches_transport(perspective_holder, transport_names) else "attributed_speech_content"
 
         frame_row = await db.fetchrow(
             "SELECT subject_kind_guess, object_kind_guess, object_frame_id FROM aios.claim_semantic_frame WHERE frame_id=$1",
@@ -722,26 +670,22 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
 
         relevant_refs = [c for c, v in ((subject_ref_conf, draft.subject), (object_ref_conf, draft.object_text)) if v]
         referent_confidence = min(relevant_refs) if relevant_refs else 0.75
-        perspective_confidence = min(
+        perspective_values = [
             c for c, v in (
                 (perspective_holder_conf, draft.meta.get("perspective_holder_text")),
                 (perspective_addressee_conf, draft.meta.get("perspective_addressee_text")),
             ) if v
-        ) if any((draft.meta.get("perspective_holder_text"), draft.meta.get("perspective_addressee_text"))) else 1.0
+        ]
+        perspective_confidence = min(perspective_values) if perspective_values else 1.0
 
         has_required = bool(draft.predicate_canonical and (subject_resolved or draft.frame_role == "fallback"))
         unresolved_pronoun = any(
             _norm(v) in PRONOUN_PERSON | PRONOUN_NEUTRAL | FIRST_PERSON | SECOND_PERSON and key is None
-            for v, key in ((draft.subject, subject_key), (draft.object_text, object_key))
-            if v
+            for v, key in ((draft.subject, subject_key), (draft.object_text, object_key)) if v
         )
         unresolved_local_participant = (
             perspective_kind == "quoted_speech"
-            and any(
-                _norm(v).split()[0] in FIRST_PERSON | SECOND_PERSON
-                for v in (draft.subject, draft.object_text)
-                if _norm(v)
-            )
+            and any(_norm(v).split()[0] in FIRST_PERSON | SECOND_PERSON for v in (draft.subject, draft.object_text) if _norm(v))
             and not (subject_pivoted or object_pivoted)
         )
         status = "partial" if unresolved_pronoun or unresolved_local_participant else "resolved" if has_required else "partial"
@@ -788,14 +732,10 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
         SELECT frame_id
         FROM aios.claim_semantic_frame
         WHERE claim_id=$1 AND decomposer_version=$2
-        ORDER BY
-            CASE WHEN frame_role='main' THEN 0 ELSE 1 END,
-            frame_confidence DESC,
-            frame_index
+        ORDER BY CASE WHEN frame_role='main' THEN 0 ELSE 1 END, frame_confidence DESC, frame_index
         LIMIT 1
         """,
-        claim_id,
-        DECOMPOSER_VERSION,
+        claim_id, DECOMPOSER_VERSION,
     )
     await db.execute(
         """
