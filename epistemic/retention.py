@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -63,7 +64,7 @@ async def set_retention_state(
         quality_score,
         redundancy_score,
         recoverability,
-        meta or {},
+        json.dumps(meta or {}),
     )
     return bool(row and row["changed"])
 
@@ -112,7 +113,6 @@ async def get_retention_decision(
         )
     meta = row["meta"]
     if isinstance(meta, str):
-        import json
         meta = json.loads(meta)
     return RetentionDecision(
         artifact_type=artifact_type,
