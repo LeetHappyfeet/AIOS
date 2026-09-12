@@ -3,12 +3,13 @@ from __future__ import annotations
 """Semantic-first context resolver.
 
 The legacy resolver remains responsible for lineage, ownership, viewpoint,
-acquisition mode, runtime binding and RDF plumbing.  This wrapper adds a
-language-neutral semantic interpretation step and then corrects ontology
-classification before normalization consumes the result.
+acquisition mode, runtime binding and initial RDF plumbing. This wrapper adds
+a language-neutral semantic interpretation step and rewrites semantic context
+consistently in SQL and RDF before normalization consumes it.
 """
 
 import json
+from urllib.parse import quote
 from uuid import UUID
 
 from aios_app.db import Database
@@ -20,6 +21,12 @@ from aios_app.epistemic.semantic_interpreter import (
 )
 
 RESOLVER_VERSION = "context-resolver-v4-semantic"
+
+
+def _sparql_lit(value: str | None) -> str:
+    if value is None:
+        return '""'
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 async def _primary_frame(db: Database, claim_id: UUID):
@@ -42,6 +49,68 @@ async def _primary_frame(db: Database, claim_id: UUID):
         """,
         claim_id,
     )
+
+
+async def _write_semantic_rdf(fuseki: FusekiClient, context) -> None:
+    claim_iri = f"urn:aios:world:claim:{context.claim_id}"
+    triples = [
+        f"<{claim_iri}> world:claimKind world:{context.claim_kind.title()} .",
+        f"<{claim_iri}> world:predicateFamily world:{context.predicate_family.title()} .",
+        f"<{claim_iri}> world:epistemicScope {_sparql_lit(context.epistemic_scope)} .",
+        f"<{claim_iri}> world:contextResolverVersion {_sparql_lit(RESOLVER_VERSION)} .",
+        f"<{claim_iri}> world:subjectIsPivot {_sparql_lit(str(context.subject_is_pivot).lower())} .",
+        f"<{claim_iri}> world:objectIsPivot {_sparql_lit(str(context.object_is_pivot).lower())} .",
+    ]
+    if context.subject_kind:
+        triples.append(f"<{claim_iri}> world:subjectKind world:{context.subject_kind.title()} .")
+    if context.object_kind:
+        triples.append(f"<{claim_iri}> world:objectKind world:{context.object_kind.title()} .")
+    if context.origin_character_id:
+        segment = quote(context.origin_character_id, safe="")
+        triples.append(f"<{claim_iri}> world:originCharacter <urn:aios:character:{segment}> .")
+    if context.source_id:
+        triples.append(f"<{claim_iri}> world:sourceId {_sparql_lit(context.source_id)} .")
+    if context.source_kind:
+        triples.append(f"<{claim_iri}> world:sourceKind {_sparql_lit(context.source_kind)} .")
+    if context.target_character_id:
+        triples.append(f"<{claim_iri}> world:targetCharacterHint {_sparql_lit(context.target_character_id)} .")
+    if context.target_world_id:
+        triples.append(f"<{claim_iri}> world:targetWorldHint <urn:aios:world:{context.target_world_id}> .")
+    if context.viewpoint_id:
+        triples.append(f"<{claim_iri}> world:viewpointId {_sparql_lit(context.viewpoint_id)} .")
+    if context.character_instance_id:
+        triples.append(f"<{claim_iri}> world:originCharacterInstance <urn:aios:character-instance:{context.character_instance_id}> .")
+    if context.world_id:
+        triples.append(f"<{claim_iri}> world:originWorld <urn:aios:world:{context.world_id}> .")
+    if context.timeline_id:
+        triples.append(f"<{claim_iri}> world:originTimeline <urn:aios:timeline:{context.timeline_id}> .")
+    if context.acquisition_mode:
+        triples.append(f"<{claim_iri}> world:acquisitionMode {_sparql_lit(context.acquisition_mode)} .")
+
+    clear = f"""
+PREFIX world: <urn:aios:world#>
+DELETE {{ GRAPH <{legacy.LIMINAL_GRAPH}> {{ <{claim_iri}> ?p ?o . }} }}
+WHERE {{
+  GRAPH <{legacy.LIMINAL_GRAPH}> {{
+    <{claim_iri}> ?p ?o .
+    FILTER (?p IN (
+      world:claimKind, world:predicateFamily, world:epistemicScope,
+      world:contextResolverVersion, world:subjectIsPivot, world:objectIsPivot,
+      world:subjectKind, world:objectKind, world:acquisitionMode
+    ))
+  }}
+}}
+""".strip()
+    fuseki.update(legacy.DATASET, clear)
+    insert = f"""
+PREFIX world: <urn:aios:world#>
+INSERT DATA {{
+  GRAPH <{legacy.LIMINAL_GRAPH}> {{
+    {chr(10).join(triples)}
+  }}
+}}
+""".strip()
+    fuseki.update(legacy.DATASET, insert)
 
 
 async def resolve_claim_context(
@@ -135,7 +204,7 @@ async def resolve_claim_context(
         confidence=max(context.confidence, float(interpretation.confidence)),
     )
 
-    await legacy._write_liminal_context(fuseki, corrected)
+    await _write_semantic_rdf(fuseki, corrected)
     await legacy._log_rdf_context(db, corrected)
     await db.execute(
         """
