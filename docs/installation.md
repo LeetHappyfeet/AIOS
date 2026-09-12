@@ -1,133 +1,179 @@
 # Running AIOS Development
 
-This guide describes the current development layout. AIOS is under active development, so installation is still closer to a developer environment than a packaged end-user application.
+AIOS keeps its Python application native while Docker Compose manages the external storage/network services. This gives a repeatable local installation without forcing the Python runtime, NLP models, or AIOS worker processes into containers.
 
 ## Requirements
 
-AIOS currently expects:
+You need:
 
 - Python 3.10+;
-- PostgreSQL 14+;
-- Apache Jena Fuseki;
-- Qdrant;
+- Docker with Docker Compose;
 - the Python dependencies in `requirements.txt`;
 - the spaCy `en_core_web_sm` language model.
 
-PostgreSQL, Fuseki, and Qdrant are external services and must be reachable before AIOS starts.
+Docker Compose supplies:
+
+- PostgreSQL;
+- Apache Jena Fuseki;
+- Qdrant.
 
 ## Repository/package layout
 
 The repository root is the Python package itself. Imports use the package name `aios_app`, so the simplest development checkout is to clone the repository into a directory named `aios_app` and run Python from its parent directory.
 
-For example:
-
 ```text
 workspace/
 ├── .venv/
 └── aios_app/
+    ├── compose.yaml
+    ├── docker/
     ├── __init__.py
     ├── launch.py
-    ├── main.py
     └── ...
 ```
 
-From `workspace/`, `python -m aios_app.launch` can import the package normally.
-
 ## Clone the development branch
 
-From the directory that will contain the checkout:
-
 ```bash
+mkdir -p ~/AIOS-workspace
+cd ~/AIOS-workspace
 git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git aios_app
 ```
 
 If the repository is already cloned:
 
 ```bash
-cd aios_app
+cd ~/AIOS-workspace/aios_app
 git switch AIOS-development
 git pull
-cd ..
 ```
+
+## Start PostgreSQL, Fuseki, and Qdrant
+
+From the repository directory:
+
+```bash
+cd ~/AIOS-workspace/aios_app
+docker compose up -d --build
+```
+
+This single Compose operation:
+
+1. starts PostgreSQL;
+2. starts Qdrant;
+3. builds and starts Apache Jena Fuseki;
+4. configures persistent TDB2-backed `/world` and `/char` datasets;
+5. waits for Fuseki readiness;
+6. runs a one-shot `fuseki-init` service that replaces the three canonical AIOS ontology graphs with the versions in the checked-out repository.
+
+The canonical graphs loaded into `/world` are:
+
+```text
+urn:aios:ontology:world
+urn:aios:ontology:contentkind
+urn:aios:ontology:world-asserted
+```
+
+The bootstrap is idempotent. Running `docker compose up -d --build` again refreshes those canonical ontology graphs but does not delete other world graphs, character graphs, PostgreSQL data, or Qdrant collections.
+
+### Persistent storage
+
+Compose creates named volumes:
+
+```text
+aios_postgres
+aios_qdrant
+aios_fuseki
+```
+
+`docker compose down` removes the containers and network but keeps those volumes.
+
+Do not run the following unless you intentionally want to erase the container-managed AIOS databases:
+
+```bash
+docker compose down -v
+```
+
+### Default ports
+
+The storage services bind to loopback by default:
+
+```text
+PostgreSQL: 127.0.0.1:5432
+Fuseki:    127.0.0.1:3030
+Qdrant:    127.0.0.1:6333 (HTTP)
+Qdrant:    127.0.0.1:6334 (gRPC)
+```
+
+They are not exposed to other machines on the LAN by the default Compose configuration.
+
+## Infrastructure configuration
+
+The defaults are intentionally aligned with the current native AIOS application defaults, so a fresh local installation does not require environment variables.
+
+Optional overrides are documented in `.env.example`.
+
+To customize them:
+
+```bash
+cd ~/AIOS-workspace/aios_app
+cp .env.example .env
+```
+
+Important values include:
+
+```text
+AIOS_DB_DSN
+AIOS_FUSEKI_BASE_URL
+AIOS_QDRANT_URL
+AIOS_POSTGRES_DB
+AIOS_POSTGRES_USER
+AIOS_POSTGRES_PASSWORD
+AIOS_POSTGRES_PORT
+AIOS_FUSEKI_PORT
+AIOS_QDRANT_HTTP_PORT
+AIOS_QDRANT_GRPC_PORT
+AIOS_JENA_VERSION
+AIOS_FUSEKI_JAVA_OPTIONS
+```
+
+If you change the PostgreSQL database name, user, password, or host port, update `AIOS_DB_DSN` to match.
 
 ## Create the Python environment
 
 From the parent directory of `aios_app`:
 
 ```bash
+cd ~/AIOS-workspace
 python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r aios_app/requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
 The spaCy model is a separate download. Installing the `spacy` Python package alone does not install `en_core_web_sm`.
 
-## Configure services
+## Launch AIOS
 
-AIOS reads configuration from environment variables and `.env` through `python-dotenv`.
-
-The most important service settings are:
+With the Compose infrastructure running, launch AIOS natively from the parent directory:
 
 ```bash
-export AIOS_DB_DSN='postgresql://USER:PASSWORD@127.0.0.1:5432/DATABASE'
-export AIOS_FUSEKI_BASE_URL='http://127.0.0.1:3030'
-export AIOS_QDRANT_URL='http://127.0.0.1:6333'
+cd ~/AIOS-workspace
+source .venv/bin/activate
+python -m aios_app.launch
 ```
 
-The API defaults to:
-
-```bash
-export AIOS_API_HOST='0.0.0.0'
-export AIOS_API_PORT='8000'
-```
-
-Additional pipeline, worker, timeout, embedding, and semantic-engine settings can be overridden through environment variables, but the defaults are normally appropriate for an initial development run.
-
-## PostgreSQL
-
-`AIOS_DB_DSN` must point to a PostgreSQL database that AIOS is allowed to migrate.
-
-The launcher automatically runs:
+The launcher still owns PostgreSQL schema lifecycle. Before it starts the AIOS processes it runs:
 
 ```bash
 python -m aios_app.migrate
 python -m aios_app.db_check
 ```
 
-before starting service processes. You normally do not need to run those commands separately unless diagnosing database setup.
+The Docker PostgreSQL image creates the server and persistent database volume; it does not replace AIOS migrations.
 
-Current migrations live in `migrations/`. Older superseded migrations are retained under `migrations/legacy/` for historical reference and upgrade compatibility logic.
-
-## Fuseki
-
-Fuseki must be reachable at `AIOS_FUSEKI_BASE_URL` and provide the AIOS RDF datasets used by the runtime, including `/world` and `/char`.
-
-The canonical ontology graphs and loader examples are documented in [../rdf/ontology/readme.md](../rdf/ontology/readme.md).
-
-AIOS treats RDF as part of the semantic/epistemic architecture, not as the sole operational database. PostgreSQL remains the durable operational and provenance store.
-
-## Qdrant
-
-Qdrant is used by the Semantic Index. The default endpoint is:
-
-```text
-http://127.0.0.1:6333
-```
-
-The Semantic Index service can be optional during startup, so a failure there may produce an `AIOS READY — DEGRADED` state while required core services remain available.
-
-See [../semantic_index/README.md](../semantic_index/README.md) for its architecture and collection roles.
-
-## Launch AIOS
-
-From the parent directory of `aios_app`, with the virtual environment active:
-
-```bash
-python -m aios_app.launch
-```
-
-The launcher performs database preflight checks and then starts services in readiness-gated stages. Required core services include the accumulator, supervisor, pipeline runner, and API. The UI and Semantic Index are currently treated as optional services by the launcher.
+The launcher then starts the native AIOS services in readiness-gated stages. Required core services include the accumulator, supervisor, pipeline runner, and API. The UI and Semantic Index are currently treated as optional services by the launcher.
 
 A healthy startup ends with output similar to:
 
@@ -144,9 +190,45 @@ If an optional service fails its readiness check, startup can instead report:
 ✅ AIOS READY — DEGRADED
 ```
 
-## Verify the API
+## Verify the infrastructure
 
-From the same machine:
+From the repository directory:
+
+```bash
+docker compose ps
+```
+
+PostgreSQL and Fuseki should report healthy. Qdrant should be running, and `fuseki-init` should have exited successfully after loading the ontology.
+
+Useful checks:
+
+```bash
+# PostgreSQL container readiness
+docker compose exec postgres pg_isready -U postgres -d postgres
+
+# Qdrant
+curl http://127.0.0.1:6333
+
+# Fuseki world dataset
+curl -G \
+  --data-urlencode 'query=ASK {}' \
+  http://127.0.0.1:3030/world/sparql
+
+# Fuseki character dataset
+curl -G \
+  --data-urlencode 'query=ASK {}' \
+  http://127.0.0.1:3030/char/sparql
+```
+
+To inspect the bootstrap output:
+
+```bash
+docker compose logs fuseki-init
+```
+
+## Verify the AIOS API
+
+With `python -m aios_app.launch` running:
 
 ```bash
 curl http://127.0.0.1:8000/healthz
@@ -158,20 +240,104 @@ Expected response:
 {"ok":true}
 ```
 
-Default local endpoints are:
+Default native endpoints are:
 
 ```text
 API:    http://127.0.0.1:8000
 Web UI: http://127.0.0.1:7860
 ```
 
-When accessing AIOS from another device on the LAN, replace `127.0.0.1` with the AIOS host's LAN address and ensure the relevant firewall rules allow the port.
+When accessing AIOS from another device on the LAN, replace `127.0.0.1` for the AIOS API/UI with the host's LAN address and ensure the relevant firewall rules allow those application ports. The database ports remain localhost-only unless the Compose file is deliberately changed.
+
+## Day-to-day commands
+
+Start or reconcile the infrastructure:
+
+```bash
+cd ~/AIOS-workspace/aios_app
+docker compose up -d --build
+```
+
+View status:
+
+```bash
+docker compose ps
+```
+
+Follow infrastructure logs:
+
+```bash
+docker compose logs -f
+```
+
+Stop the infrastructure while preserving data:
+
+```bash
+docker compose down
+```
+
+Restart one service:
+
+```bash
+docker compose restart qdrant
+```
+
+Re-run only the Fuseki ontology bootstrap:
+
+```bash
+docker compose run --rm fuseki-init
+```
+
+## Existing installations
+
+The Compose stack uses new Docker named volumes by default. It does not automatically import an existing PostgreSQL cluster, Qdrant directory, or Fuseki database from a previous manual installation.
+
+For an existing AIOS installation with valuable data, back up each store before switching storage ownership. Do not delete the old services or directories until the Compose-backed installation has been verified. Migration of existing large stores should be treated as a separate data-migration operation rather than hidden inside installation startup.
 
 ## Common startup problems
 
-### `No module named aios_app`
+### Docker port already in use
 
-Run `python -m aios_app.launch` from the parent directory of the checkout/package, not from inside the package directory, and make sure the checkout directory is named `aios_app` or otherwise available on `PYTHONPATH` as that package.
+If an older PostgreSQL, Fuseki, or Qdrant service is still running on the host, Compose may fail to bind the default port.
+
+Check:
+
+```bash
+ss -ltnp | grep -E ':5432|:3030|:6333|:6334'
+```
+
+Either stop the old service or change the corresponding port in `.env`.
+
+### `fuseki-init` exits non-zero
+
+Inspect:
+
+```bash
+docker compose logs fuseki
+docker compose logs fuseki-init
+```
+
+The initializer requires the `/world` dataset to be healthy and the ontology files under `rdf/ontology/` to be present.
+
+### PostgreSQL readiness fails in AIOS
+
+Check both layers:
+
+```bash
+docker compose ps postgres
+docker compose logs postgres
+```
+
+Then confirm `AIOS_DB_DSN` matches the Compose PostgreSQL settings.
+
+You can run the AIOS checks directly:
+
+```bash
+cd ~/AIOS-workspace
+source .venv/bin/activate
+python -m aios_app.migrate
+python -m aios_app.db_check
+```
 
 ### spaCy cannot find `en_core_web_sm`
 
@@ -181,23 +347,30 @@ Install the model inside the active virtual environment:
 python -m spacy download en_core_web_sm
 ```
 
-### PostgreSQL readiness fails
+### `No module named aios_app`
 
-Check `AIOS_DB_DSN`, verify the server is reachable, and confirm the configured user can create/update the AIOS schema through the migration runner.
+Run `python -m aios_app.launch` from the parent directory of the checkout/package, not from inside the package directory, and make sure the checkout directory is named `aios_app` or otherwise available on `PYTHONPATH`.
 
-You can run the checks directly while troubleshooting:
+## Architecture boundary
 
-```bash
-python -m aios_app.migrate
-python -m aios_app.db_check
+The intended ownership is:
+
+```text
+Docker Compose
+├── PostgreSQL process + persistent files
+├── Qdrant process + persistent files
+├── Fuseki process + persistent TDB2 files
+└── Fuseki ontology bootstrap
+
+Native AIOS
+├── PostgreSQL migrations
+├── pipeline/runtime services
+├── Semantic Index collection logic
+├── API
+├── UI
+└── Python/NLP/model environment
 ```
 
-### Fuseki or Qdrant is unavailable
-
-Verify the configured endpoints first. Fuseki also requires the expected datasets and ontology graphs; a listening HTTP port alone is not enough for semantic processing to operate correctly.
-
-## Development notes
-
-The current branch is not yet distributed as a conventional Python package or single-container application. The commands above describe the repository's actual development layout rather than hiding that constraint behind an incomplete one-line install command.
+This boundary intentionally keeps Docker out of the active AIOS Python development loop while making its network dependencies reproducible.
 
 For the system design after startup, see [architecture.md](architecture.md).
