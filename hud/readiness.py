@@ -6,7 +6,6 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.pipeline.jobs import enqueue_job
-from aios_app.world.source_cursor import advance_matching_runtime_source_cursor
 
 LIVE_PRIORITY = 15
 READY_STATUS = {"ready"}
@@ -109,6 +108,12 @@ async def mark_matching_runtime_dirty(
     source_head_event_id: int,
 ) -> None:
     """Adopt the exact source coordinate, then dirty every runtime that did so."""
+    # Import lazily so hud.readiness remains importable while aios_app.world is
+    # still initializing. world.__init__ re-exports readiness helpers, so a
+    # module-level source_cursor import creates a circular import during tests
+    # and cold startup.
+    from aios_app.world.source_cursor import advance_matching_runtime_source_cursor
+
     instance_ids = await advance_matching_runtime_source_cursor(
         db,
         character_id=character_id,
