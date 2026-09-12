@@ -49,7 +49,7 @@ def _subjective_runtime_state(row: Dict[str, Any]) -> Dict[str, Any]:
     """Return only runtime coordination and /char-owned state.
 
     Deterministic values such as location/health/energy are intentionally not
-    copied into the HUD surface.  Objective location is projected through
+    copied into the HUD surface. Objective location is projected through
     /world located_in relations; future hard-state domains follow the same path.
     """
     keep = {
@@ -83,7 +83,7 @@ def _sanitize_hud_frame(frame: Dict[str, Any]) -> Dict[str, Any]:
         for key in ("health", "stamina", "energy", "physical"):
             state.pop(key, None)
 
-    # world_rule is deterministic policy.  Only rules explicitly acquired as
+    # world_rule is deterministic policy. Only rules explicitly acquired as
     # character knowledge belong in /char/HUD.
     rules = frame.get("rules")
     if isinstance(rules, list):
@@ -119,7 +119,7 @@ class ActivationResult:
 class WorldRuntimeService:
     """Runtime coordinator above the objective causal kernel and /char HUD.
 
-    This service no longer owns deterministic mutation policy.  It records
+    This service no longer owns deterministic mutation policy. It records
     controller intent/DAG history, asks CausalIntegrityKernel to validate and
     commit objective transitions, and keeps HUD generation coordinates current.
     """
@@ -449,11 +449,100 @@ class WorldRuntimeService:
             frame.setdefault("hud", {})["cache"] = "prepared"
             return frame
 
-        if wait_ms:
-            logger.debug(
-                "HUD wait_ms=%s ignored for live semantic completion; enrichment is asynchronous",
-                wait_ms,
+        wait_budget_ms = max(0, min(int(wait_ms), 10000))
+        deadline = time.monotonic() + (wait_budget_ms / 1000.0)
+        semantic_current = await source_node_retrieval_ready(
+            self.db,
+            instance_id=instance_id,
+            node_id=target_node_id,
+        )
+        if not semantic_current:
+            await enqueue_live_turn_work(
+                self.db,
+                instance_id=instance_id,
+                node_id=target_node_id,
             )
+
+        while not semantic_current and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.05, remaining))
+            semantic_current = await source_node_retrieval_ready(
+                self.db,
+                instance_id=instance_id,
+                node_id=target_node_id,
+            )
+            if not semantic_current:
+                await enqueue_live_turn_work(
+                    self.db,
+                    instance_id=instance_id,
+                    node_id=target_node_id,
+                )
+
+        if not semantic_current:
+            after = await self.get_state(instance_id)
+            coordinates_stable = (
+                after.get("state_version") == state.get("state_version")
+                and after.get("source_head_node_id") == state.get("source_head_node_id")
+            )
+            await self.db.execute(
+                """
+                UPDATE aios.character_hud_readiness
+                SET status='dirty',
+                    last_error='retrieval substrate not ready before HUD wait budget expired',
+                    updated_at=now()
+                WHERE instance_id=$1
+                """,
+                instance_id,
+            )
+            frame = _sanitize_hud_frame({
+                "identity": {
+                    "character_id": after.get("character_id"),
+                    "display_name": after.get("display_name") or after.get("character_id"),
+                },
+                "presence": {
+                    "instance_id": after.get("instance_id"),
+                    "world_id": after.get("world_id"),
+                    "world_key": after.get("world_key"),
+                    "timeline_id": after.get("timeline_id"),
+                    "state_version": after.get("state_version"),
+                    "location_entity_id": after.get("location_entity_id"),
+                },
+                "state": _subjective_runtime_state(after),
+                "hud": {
+                    "generation_ready": False,
+                    "cache": "not_ready",
+                    "wait_exhausted": True,
+                    "wait_budget_ms": wait_budget_ms,
+                    "freshness": {
+                        "runtime_state_version": after.get("state_version"),
+                        "source_head_node_id": str(after["source_head_node_id"])
+                            if after.get("source_head_node_id") else None,
+                        "requested_source_node_id": str(target_node_id)
+                            if target_node_id else None,
+                        "retrieval_ready_node_id": None,
+                        "source_current": after.get("source_head_node_id") == target_node_id,
+                        "runtime_current": coordinates_stable,
+                        "topology_current": False,
+                    },
+                },
+            })
+            logger.info(
+                "HUD wait expired instance=%s node=%s wait_ms=%d total_request_ms=%.1f; "
+                "returning generation_ready=false without topology traversal",
+                instance_id,
+                target_node_id,
+                wait_budget_ms,
+                (time.perf_counter() - request_started) * 1000.0,
+            )
+            return frame
+
+        await set_retrieval_ready(
+            self.db,
+            instance_id=instance_id,
+            node_id=target_node_id,
+        )
 
         build_key = (
             instance_id,
@@ -473,9 +562,10 @@ class WorldRuntimeService:
             ),
         )
         logger.debug(
-            "HUD request instance=%s node=%s total_request_ms=%.1f active_builds=%d",
+            "HUD request instance=%s node=%s wait_ms=%d total_request_ms=%.1f active_builds=%d",
             instance_id,
             target_node_id,
+            wait_budget_ms,
             (time.perf_counter() - request_started) * 1000.0,
             self._hud_builds.active(),
         )
@@ -558,7 +648,8 @@ class WorldRuntimeService:
             and after.get("source_head_node_id") == state.get("source_head_node_id")
         )
         generation_ready = bool(
-            coordinates_stable
+            semantic_current
+            and coordinates_stable
             and after.get("source_head_node_id") == target_node_id
         )
         frame.setdefault("hud", {})
@@ -594,6 +685,7 @@ class WorldRuntimeService:
                 SET status='dirty',
                     last_error=CASE
                         WHEN $2 THEN 'runtime/source coordinates changed during HUD assembly'
+                        WHEN NOT $3 THEN 'retrieval substrate became stale during HUD assembly'
                         ELSE 'HUD snapshot was not generation-consistent'
                     END,
                     updated_at=now()
@@ -601,6 +693,7 @@ class WorldRuntimeService:
                 """,
                 instance_id,
                 not coordinates_stable,
+                semantic_current,
             )
         timings["snapshot"] = (time.perf_counter() - snapshot_started) * 1000.0
         total_ms = (time.perf_counter() - started) * 1000.0
@@ -965,7 +1058,7 @@ class WorldRuntimeService:
             source["entity_id"],
         )
 
-        # Only /char-owned runtime state is copied here.  Objective physical
+        # Only /char-owned runtime state is copied here. Objective physical
         # state is not copied through character_runtime_state; causal branch
         # state must be explicitly mapped into the target world.
         await self.db.execute(
