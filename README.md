@@ -12,107 +12,52 @@ observations → persistent memory/world state → agent HUD → LLM or human
 >
 > **License:** AIOS is source-available proprietary software for personal use by natural persons. See the [AIOS Personal Use License 1.0](LICENSE).
 
-## Run AIOS
+## Install AIOS
 
-AIOS runs its Python application natively and uses Docker Compose for its three storage/network services:
-
-- PostgreSQL
-- Apache Jena Fuseki
-- Qdrant
+AIOS runs its Python application natively and uses Docker Compose for PostgreSQL, Apache Jena Fuseki, and Qdrant.
 
 Requirements:
 
 - Python 3.10+
 - Docker with Docker Compose
 
-### 1. Clone the development branch
-
-The repository root is the `aios_app` Python package. Clone it into a directory named `aios_app` and run Python from its parent directory.
+Clone AIOS into a directory named `aios_app`, then run the setup script:
 
 ```bash
 mkdir -p ~/AIOS-workspace
 cd ~/AIOS-workspace
 
 git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git aios_app
+cd aios_app
+./setup.sh
 ```
 
-You should now have:
+`setup.sh` checks Python and Docker, starts the Compose infrastructure, waits for PostgreSQL, Qdrant, and Fuseki, loads the canonical AIOS ontology, creates the native Python virtual environment in `~/AIOS-workspace/.venv`, installs the Python requirements and spaCy model, then runs the current AIOS database migrations and database check.
+
+The default PostgreSQL connection remains:
 
 ```text
-~/AIOS-workspace/
-└── aios_app/
-    ├── compose.yaml
-    ├── __init__.py
-    ├── launch.py
-    └── ...
+postgresql://postgres:postgres@127.0.0.1:5432/postgres
 ```
 
-### 2. Start the infrastructure
+The database/network services are bound to localhost by default.
 
-From the repository directory:
+## Run AIOS
+
+After first-time setup:
 
 ```bash
 cd ~/AIOS-workspace/aios_app
-docker compose up -d --build
+./run.sh
 ```
 
-This starts PostgreSQL, Qdrant, and Fuseki on localhost, creates persistent named Docker volumes, configures the Fuseki `/world` and `/char` datasets, and loads the canonical AIOS ontology graphs.
-
-The default endpoints match the AIOS application defaults:
-
-```text
-PostgreSQL: 127.0.0.1:5432
-Fuseki:    http://127.0.0.1:3030
-Qdrant:    http://127.0.0.1:6333
-```
-
-The database ports are bound to loopback by default rather than exposed to the LAN.
-
-Optional infrastructure settings are documented in `.env.example`. Copy it to `.env` only if you need to change ports, PostgreSQL credentials, Fuseki memory, or infrastructure versions.
-
-### 3. Create the Python environment
-
-Return to the workspace directory:
-
-```bash
-cd ~/AIOS-workspace
-python3 -m venv .venv
-source .venv/bin/activate
-
-python -m pip install --upgrade pip
-pip install -r aios_app/requirements.txt
-python -m spacy download en_core_web_sm
-```
-
-### 4. Launch AIOS
-
-From `~/AIOS-workspace`, with the virtual environment active:
-
-```bash
-python -m aios_app.launch
-```
-
-The launcher automatically applies the current PostgreSQL migrations, checks database readiness, and starts the native AIOS services. PostgreSQL schema ownership remains with AIOS rather than Docker initialization scripts.
+`run.sh` makes sure the Compose infrastructure is running and then starts the native AIOS launcher with the existing virtual environment.
 
 A healthy startup ends with output similar to:
 
 ```text
 ✅ AIOS READY
    Required services: 4/4 ready
-```
-
-### 5. Verify it is running
-
-In another terminal:
-
-```bash
-curl http://127.0.0.1:8000/healthz
-```
-
-Expected response:
-
-```json
-{"ok":true}
 ```
 
 Default local endpoints:
@@ -124,14 +69,15 @@ Web UI: http://127.0.0.1:7860
 
 Press `Ctrl+C` in the AIOS terminal to stop the native AIOS processes.
 
-To stop the database services without deleting their data:
+To stop PostgreSQL, Qdrant, and Fuseki without deleting their stored data:
 
 ```bash
-cd ~/AIOS-workspace/aios_app
-docker compose down
+./stop.sh
 ```
 
-Do not add `-v` unless you intentionally want to delete the AIOS Docker volumes and their stored data.
+The Compose data lives in persistent named Docker volumes. Do not use `docker compose down -v` unless you intentionally want to delete the stored AIOS data.
+
+Optional infrastructure settings are documented in `.env.example`.
 
 <p align="center">
   <img src="screenshot.png" alt="AIOS Screenshot" width="800">
