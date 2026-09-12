@@ -17,6 +17,7 @@ from .service import (
     index_epistemic_objects_once,
     initialize_backend,
 )
+from .query_server import start_query_server
 from .structure import analyze_neighbors_once
 from .neighbor_classifier import classify_neighbor_relations_once
 from .clustering import cluster_neighbors_once
@@ -77,10 +78,15 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
     cfg = SemanticIndexConfig()
     db = Database(settings.db_dsn)
     fuseki = FusekiClient(settings.fuseki_base_url)
+    query_server = None
     await db.connect()
     try:
         logger.info("Semantic Index startup: initializing embedding backend and Qdrant collections")
         initialize_backend(cfg, warmup=True)
+        # Query service starts only after warmup succeeds. From this point the
+        # embedding model stays resident in Semantic Index for the lifetime of
+        # the process; API/HUD requests never instantiate a local model.
+        query_server = start_query_server(cfg)
         logger.info("AIOS_READY service=semantic_index")
 
         window_started = time.monotonic()
@@ -199,6 +205,9 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
             ):
                 await asyncio.sleep(poll_seconds)
     finally:
+        if query_server is not None:
+            query_server.shutdown()
+            query_server.server_close()
         await db.close()
 
 
