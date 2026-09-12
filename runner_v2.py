@@ -88,6 +88,90 @@ def _decode_payload(value: Any) -> dict[str, Any]:
     return {}
 
 
+async def _work_timeline(db: Database, row: Any) -> dict[str, Any]:
+    """Resolve the causal DAG timeline for telemetry without inferring one.
+
+    A character identity is not enough to assign a timeline: claim/node/section
+    work must be linked through the DAG.  That distinction makes orphaned work
+    visible as NO TIMELINE instead of making it look like normal character work.
+    """
+    payload = _decode_payload(row["payload"])
+
+    explicit_timeline = payload.get("timeline_id")
+    if explicit_timeline:
+        return {"timeline_status": "LINKED", "timeline_id": str(explicit_timeline)}
+
+    node_id = payload.get("node_id")
+    if node_id:
+        resolved = await db.fetchrow(
+            "SELECT timeline_id FROM aios.dag_node WHERE node_id=$1::uuid",
+            node_id,
+        )
+        timeline_id = resolved["timeline_id"] if resolved else None
+        return {
+            "timeline_status": "LINKED" if timeline_id else "MISSING",
+            "timeline_id": str(timeline_id) if timeline_id else None,
+        }
+
+    section_id = payload.get("section_id")
+    if section_id:
+        resolved = await db.fetchrow(
+            """
+            SELECT n.timeline_id
+            FROM aios.document_section ds
+            LEFT JOIN aios.dag_node n ON n.node_id=ds.node_id
+            WHERE ds.section_id=$1::uuid
+            """,
+            section_id,
+        )
+        timeline_id = resolved["timeline_id"] if resolved else None
+        return {
+            "timeline_status": "LINKED" if timeline_id else "MISSING",
+            "timeline_id": str(timeline_id) if timeline_id else None,
+        }
+
+    claim_id = payload.get("claim_id")
+    if claim_id:
+        resolved = await db.fetchrow(
+            """
+            SELECT n.timeline_id
+            FROM aios.claim_candidate cc
+            LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+            LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+            LEFT JOIN aios.dag_node n ON n.node_id=ds.node_id
+            WHERE cc.claim_id=$1::uuid
+            """,
+            claim_id,
+        )
+        timeline_id = resolved["timeline_id"] if resolved else None
+        return {
+            "timeline_status": "LINKED" if timeline_id else "MISSING",
+            "timeline_id": str(timeline_id) if timeline_id else None,
+        }
+
+    acquisition_id = payload.get("acquisition_id")
+    if acquisition_id:
+        resolved = await db.fetchrow(
+            """
+            SELECT n.timeline_id
+            FROM aios.knowledge_acquisition_event kae
+            LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+            LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+            LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+            LEFT JOIN aios.dag_node n ON n.node_id=ds.node_id
+            WHERE kae.acquisition_id=$1::uuid
+            """,
+            acquisition_id,
+        )
+        timeline_id = resolved["timeline_id"] if resolved else None
+        return {
+            "timeline_status": "LINKED" if timeline_id else "MISSING",
+            "timeline_id": str(timeline_id) if timeline_id else None,
+        }
+
+    return {"timeline_status": "NOT_APPLICABLE", "timeline_id": None}
+
+
 async def _work_subject(db: Database, row: Any) -> dict[str, Any]:
     payload = _decode_payload(row["payload"])
     partition_key = str(row["partition_key"] or "")
@@ -180,6 +264,7 @@ async def _describe_work_rows(db: Database, rows: list[Any]) -> list[dict[str, A
     described: list[dict[str, Any]] = []
     for row in rows:
         subject = await _work_subject(db, row)
+        timeline = await _work_timeline(db, row)
         described.append(
             {
                 "job_id": str(row["job_id"]),
@@ -190,6 +275,7 @@ async def _describe_work_rows(db: Database, rows: list[Any]) -> list[dict[str, A
                 if hasattr(row, "get")
                 else round(float(row["running_seconds"] or 0.0), 2),
                 **subject,
+                **timeline,
             }
         )
     return described
