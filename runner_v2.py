@@ -34,11 +34,8 @@ async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
-        # Reuse the exact semantic-scope advisory lock used by topology mutation.
         return str(payload["scope_key"])
     if job_type == "project_character_knowledge" and payload.get("live_instance_id"):
-        # A live character projection should not convoy behind unrelated global
-        # knowledge projection work.
         return f"instance:{payload['live_instance_id']}"
     return await _original_resolve_partition_key(db, job)
 
@@ -53,12 +50,171 @@ def _emit_telemetry(payload: dict[str, Any]) -> None:
     )
 
 
-async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
-    """Publish compact queue/freshness telemetry for the launcher.
+def _short(value: Any, width: int = 8) -> str:
+    text = str(value or "")
+    return text[:width] if text else ""
 
-    This is deliberately read-only. Scheduling remains entirely owned by the
-    pipeline runner; launch.py only consumes these snapshots for display.
-    """
+
+async def _work_subject(db: Database, row: Any) -> dict[str, Any]:
+    payload = dict(row["payload"] or {})
+    partition_key = str(row["partition_key"] or "")
+
+    scope_key = str(payload.get("scope_key") or "")
+    for value in (scope_key, partition_key):
+        if value.startswith("char:"):
+            return {"subject_type": "character", "subject_id": value.split(":", 1)[1]}
+        if value.startswith("world:"):
+            return {"subject_type": "world", "subject_id": value}
+        if value.startswith("source:"):
+            return {"subject_type": "source", "subject_id": value.split(":", 1)[1]}
+
+    if payload.get("character_id"):
+        return {"subject_type": "character", "subject_id": str(payload["character_id"])}
+
+    live_instance_id = payload.get("live_instance_id") or payload.get("instance_id")
+    if live_instance_id:
+        resolved = await db.fetchrow(
+            """
+            SELECT character_id
+            FROM aios.character_instance
+            WHERE instance_id=$1::uuid
+            """,
+            live_instance_id,
+        )
+        if resolved and resolved["character_id"]:
+            return {
+                "subject_type": "character",
+                "subject_id": str(resolved["character_id"]),
+                "instance_id": str(live_instance_id),
+            }
+
+    acquisition_id = payload.get("acquisition_id")
+    if acquisition_id:
+        resolved = await db.fetchrow(
+            """
+            SELECT ci.character_id
+            FROM aios.knowledge_acquisition_event kae
+            JOIN aios.character_instance ci ON ci.instance_id=kae.instance_id
+            WHERE kae.acquisition_id=$1::uuid
+            """,
+            acquisition_id,
+        )
+        if resolved and resolved["character_id"]:
+            return {"subject_type": "character", "subject_id": str(resolved["character_id"])}
+
+    claim_id = payload.get("claim_id")
+    if claim_id:
+        resolved = await db.fetchrow(
+            """
+            SELECT origin_character_id, world_id, source_id
+            FROM aios.claim_context_resolution
+            WHERE claim_id=$1::uuid
+            """,
+            claim_id,
+        )
+        if resolved:
+            if resolved["origin_character_id"]:
+                return {
+                    "subject_type": "character",
+                    "subject_id": str(resolved["origin_character_id"]),
+                }
+            if resolved["world_id"]:
+                return {
+                    "subject_type": "world",
+                    "subject_id": f"world:{resolved['world_id']}",
+                }
+            if resolved["source_id"]:
+                return {"subject_type": "source", "subject_id": str(resolved["source_id"])}
+
+    for key, subject_type in (
+        ("world_id", "world"),
+        ("node_id", "node"),
+        ("section_id", "section"),
+        ("claim_id", "claim"),
+        ("assertion_id", "assertion"),
+        ("acquisition_id", "acquisition"),
+    ):
+        if payload.get(key):
+            value = str(payload[key])
+            return {"subject_type": subject_type, "subject_id": value, "short_id": _short(value)}
+
+    if partition_key:
+        return {"subject_type": "partition", "subject_id": partition_key}
+    return {"subject_type": "global", "subject_id": "global"}
+
+
+async def _describe_work_rows(db: Database, rows: list[Any]) -> list[dict[str, Any]]:
+    described: list[dict[str, Any]] = []
+    for row in rows:
+        subject = await _work_subject(db, row)
+        described.append(
+            {
+                "job_id": str(row["job_id"]),
+                "job_type": str(row["job_type"]),
+                "resource": str(row["resource_class"]),
+                "lane": str(row["scheduling_lane"]),
+                "running_s": round(float(row.get("running_seconds", 0.0) or 0.0), 2)
+                if hasattr(row, "get")
+                else round(float(row["running_seconds"] or 0.0), 2),
+                **subject,
+            }
+        )
+    return described
+
+
+def _candidate_state(
+    *,
+    queued: int,
+    oldest_s: float,
+    arrivals_per_s: float,
+    done_per_s: float,
+    queue_velocity: float,
+    failures: int = 0,
+    live: bool = False,
+) -> str:
+    if failures:
+        return "DEGRADED"
+    if queued == 0 or (live and oldest_s <= 2.0):
+        return "READY" if live else "CAUGHT_UP"
+
+    scale = max(arrivals_per_s, done_per_s, 0.25)
+    net_ratio = (done_per_s - arrivals_per_s) / scale
+    if net_ratio >= 0.10 and queue_velocity <= 0.10:
+        return "DRAINING"
+    if net_ratio <= -0.10 and queue_velocity >= -0.10:
+        return "LAGGING" if live else "FALLING_BEHIND"
+    return "BUSY"
+
+
+def _stabilize_state(
+    key: str,
+    candidate: str,
+    stable: dict[str, str],
+    pending: dict[str, tuple[str, int]],
+) -> str:
+    current = stable.get(key)
+    if current is None:
+        stable[key] = candidate
+        return candidate
+    if candidate == current:
+        pending.pop(key, None)
+        return current
+    if candidate in {"DEGRADED", "CAUGHT_UP", "READY"}:
+        stable[key] = candidate
+        pending.pop(key, None)
+        return candidate
+
+    previous_candidate, count = pending.get(key, ("", 0))
+    count = count + 1 if previous_candidate == candidate else 1
+    pending[key] = (candidate, count)
+    if count >= 3:
+        stable[key] = candidate
+        pending.pop(key, None)
+    return stable[key]
+
+
+async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
+    """Publish compact queue, stage, and active-subject telemetry."""
     db = Database(
         settings.db_dsn,
         min_size=1,
@@ -66,7 +222,10 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
     )
     await db.connect()
     previous_queued: int | None = None
+    previous_live_queued: int | None = None
     previous_at: float | None = None
+    stable_states: dict[str, str] = {}
+    pending_states: dict[str, tuple[str, int]] = {}
     loop = asyncio.get_running_loop()
     try:
         while True:
@@ -92,33 +251,83 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
                     ORDER BY resource_class, scheduling_lane
                     """
                 )
+                stage_rows = await db.fetch(
+                    """
+                    SELECT
+                        job_type,
+                        resource_class,
+                        scheduling_lane,
+                        COUNT(*) FILTER (WHERE status='queued' AND run_after <= now())::integer AS queued,
+                        COUNT(*) FILTER (WHERE status='running')::integer AS running,
+                        COALESCE(
+                            EXTRACT(EPOCH FROM (
+                                now() - MIN(created_at) FILTER (
+                                    WHERE status='queued' AND run_after <= now()
+                                )
+                            )),
+                            0
+                        )::double precision AS oldest_seconds
+                    FROM aios.pipeline_job
+                    WHERE status IN ('queued','running')
+                    GROUP BY job_type, resource_class, scheduling_lane
+                    HAVING COUNT(*) FILTER (WHERE status='queued' AND run_after <= now()) > 0
+                        OR COUNT(*) FILTER (WHERE status='running') > 0
+                    ORDER BY oldest_seconds DESC, queued DESC
+                    """
+                )
                 rates = await db.fetchrow(
                     """
                     SELECT
+                        COUNT(*) FILTER (WHERE created_at >= now() - interval '30 seconds')::integer AS arrivals_30s,
                         COUNT(*) FILTER (
-                            WHERE created_at >= now() - interval '30 seconds'
-                        )::integer AS arrivals_30s,
-                        COUNT(*) FILTER (
-                            WHERE status='done'
-                              AND updated_at >= now() - interval '30 seconds'
+                            WHERE status='done' AND updated_at >= now() - interval '30 seconds'
                         )::integer AS done_30s,
                         COUNT(*) FILTER (
-                            WHERE status='failed'
-                              AND updated_at >= now() - interval '60 seconds'
+                            WHERE scheduling_lane='LIVE'
+                              AND created_at >= now() - interval '30 seconds'
+                        )::integer AS live_arrivals_30s,
+                        COUNT(*) FILTER (
+                            WHERE scheduling_lane='LIVE'
+                              AND status='done'
+                              AND updated_at >= now() - interval '30 seconds'
+                        )::integer AS live_done_30s,
+                        COUNT(*) FILTER (
+                            WHERE status='failed' AND updated_at >= now() - interval '60 seconds'
                         )::integer AS failed_60s
                     FROM aios.pipeline_job
                     WHERE created_at >= now() - interval '60 seconds'
                        OR updated_at >= now() - interval '60 seconds'
                     """
                 )
+                running_rows = await db.fetch(
+                    """
+                    SELECT
+                        job_id, job_type, resource_class, scheduling_lane,
+                        partition_key, payload,
+                        COALESCE(EXTRACT(EPOCH FROM (now() - claimed_at)), 0)::double precision AS running_seconds
+                    FROM aios.pipeline_job
+                    WHERE status='running'
+                    ORDER BY claimed_at ASC NULLS LAST
+                    LIMIT 12
+                    """
+                )
+                recent_rows = await db.fetch(
+                    """
+                    SELECT
+                        job_id, job_type, resource_class, scheduling_lane,
+                        partition_key, payload,
+                        COALESCE(EXTRACT(EPOCH FROM (now() - updated_at)), 0)::double precision AS running_seconds
+                    FROM aios.pipeline_job
+                    WHERE status='done'
+                      AND updated_at >= now() - interval '20 seconds'
+                    ORDER BY updated_at DESC
+                    LIMIT 8
+                    """
+                )
 
                 lanes: list[dict[str, Any]] = []
-                total_queued = 0
-                total_running = 0
-                oldest = 0.0
-                live_queued = 0
-                live_running = 0
-                live_oldest = 0.0
+                total_queued = total_running = live_queued = live_running = 0
+                oldest = live_oldest = 0.0
                 for row in rows:
                     queued = int(row["queued"] or 0)
                     running = int(row["running"] or 0)
@@ -142,37 +351,63 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
                     )
 
                 now = loop.time()
-                queue_velocity = 0.0
-                if previous_queued is not None and previous_at is not None:
+                queue_velocity = live_queue_velocity = 0.0
+                if previous_at is not None:
                     elapsed = max(0.001, now - previous_at)
-                    queue_velocity = (total_queued - previous_queued) / elapsed
+                    if previous_queued is not None:
+                        queue_velocity = (total_queued - previous_queued) / elapsed
+                    if previous_live_queued is not None:
+                        live_queue_velocity = (live_queued - previous_live_queued) / elapsed
                 previous_queued = total_queued
+                previous_live_queued = live_queued
                 previous_at = now
 
                 arrivals_per_s = float((rates["arrivals_30s"] if rates else 0) or 0) / 30.0
                 done_per_s = float((rates["done_30s"] if rates else 0) or 0) / 30.0
+                live_arrivals_per_s = float((rates["live_arrivals_30s"] if rates else 0) or 0) / 30.0
+                live_done_per_s = float((rates["live_done_30s"] if rates else 0) or 0) / 30.0
                 failed_60s = int((rates["failed_60s"] if rates else 0) or 0)
 
-                if failed_60s:
-                    state = "DEGRADED"
-                elif total_queued == 0:
-                    state = "CAUGHT_UP"
-                elif done_per_s > arrivals_per_s + 0.05 or queue_velocity < -0.05:
-                    state = "DRAINING"
-                elif arrivals_per_s > done_per_s + 0.05 and queue_velocity > 0.05:
-                    state = "FALLING_BEHIND"
-                else:
-                    state = "BUSY"
-
-                live_state = (
-                    "READY"
-                    if live_queued == 0 or live_oldest <= 2.0
-                    else ("DRAINING" if done_per_s >= arrivals_per_s else "LAGGING")
+                state = _stabilize_state(
+                    "global",
+                    _candidate_state(
+                        queued=total_queued,
+                        oldest_s=oldest,
+                        arrivals_per_s=arrivals_per_s,
+                        done_per_s=done_per_s,
+                        queue_velocity=queue_velocity,
+                        failures=failed_60s,
+                    ),
+                    stable_states,
+                    pending_states,
                 )
-                drain_seconds = None
-                net_drain = done_per_s - arrivals_per_s
-                if total_queued and net_drain > 0.05:
-                    drain_seconds = round(total_queued / net_drain, 1)
+                live_state = _stabilize_state(
+                    "live",
+                    _candidate_state(
+                        queued=live_queued,
+                        oldest_s=live_oldest,
+                        arrivals_per_s=live_arrivals_per_s,
+                        done_per_s=live_done_per_s,
+                        queue_velocity=live_queue_velocity,
+                        live=True,
+                    ),
+                    stable_states,
+                    pending_states,
+                )
+
+                stage_backlog = [
+                    {
+                        "job_type": str(row["job_type"]),
+                        "resource": str(row["resource_class"]),
+                        "lane": str(row["scheduling_lane"]),
+                        "queued": int(row["queued"] or 0),
+                        "running": int(row["running"] or 0),
+                        "oldest_s": round(float(row["oldest_seconds"] or 0.0), 2),
+                    }
+                    for row in stage_rows
+                ]
+                active_work = await _describe_work_rows(db, list(running_rows))
+                recent_work = await _describe_work_rows(db, list(recent_rows))
 
                 _emit_telemetry(
                     {
@@ -187,10 +422,15 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
                         "live_oldest_s": round(live_oldest, 2),
                         "arrivals_per_s": round(arrivals_per_s, 2),
                         "done_per_s": round(done_per_s, 2),
+                        "live_arrivals_per_s": round(live_arrivals_per_s, 2),
+                        "live_done_per_s": round(live_done_per_s, 2),
                         "queue_velocity_per_s": round(queue_velocity, 2),
+                        "live_queue_velocity_per_s": round(live_queue_velocity, 2),
                         "failed_60s": failed_60s,
-                        "drain_seconds": drain_seconds,
                         "lanes": lanes,
+                        "stage_backlog": stage_backlog,
+                        "active_work": active_work,
+                        "recent_work": recent_work,
                     }
                 )
             except Exception:
