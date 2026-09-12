@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote
 
@@ -14,6 +15,8 @@ _TOPOLOGY_MODULE: Any = None
 
 RDF_UPDATE_TARGET_BYTES = 2 * 1024 * 1024
 RDF_DB_PAGE_SIZE = 2000
+RDF_PROJECTION_QUIET_SECONDS = 3.0
+RDF_PROJECTION_PRIORITY = 200
 
 
 def install_deferred_projection(topology_module: Any, topology_claims_module: Any) -> None:
@@ -30,9 +33,6 @@ def install_deferred_projection(topology_module: Any, topology_claims_module: An
         _TOPOLOGY_MODULE = topology_module
 
     topology_module._project_scope_rdf = deferred_project_scope_rdf
-    # topology_claims imported the private projector by value, so patch that
-    # local binding too. This is the existing compatibility pattern used by
-    # epistemic.__init__ for claim-topology ownership resolution.
     topology_claims_module._project_scope_rdf = deferred_project_scope_rdf
 
 
@@ -67,11 +67,31 @@ async def mark_scope_dirty(db: Database, *, decision: Any) -> int:
 
     from aios_app.pipeline.jobs import enqueue_job
 
+    run_after = datetime.now(timezone.utc) + timedelta(seconds=RDF_PROJECTION_QUIET_SECONDS)
     await enqueue_job(
         db,
         job_type="project_semantic_scope",
         payload={"scope_key": decision.scope_key},
-        priority=70,
+        priority=RDF_PROJECTION_PRIORITY,
+        run_after=run_after,
+    )
+
+    # If a projection is already queued, every new mutation extends the quiet
+    # period. Running projections are left alone; once they finish, the dirty
+    # scope recovery scan will enqueue the latest version after it goes quiet.
+    await db.execute(
+        """
+        UPDATE aios.pipeline_job
+        SET run_after=GREATEST(run_after,$2),
+            priority=GREATEST(priority,$3),
+            updated_at=now()
+        WHERE job_type='project_semantic_scope'
+          AND status='queued'
+          AND payload->>'scope_key'=$1
+        """,
+        decision.scope_key,
+        run_after,
+        RDF_PROJECTION_PRIORITY,
     )
     return int(row["dirty_version"])
 
@@ -236,7 +256,6 @@ async def _project_scope_rdf_batched(
     staging_graph = f"{graph}:staging:{target_version}"
     scope_iri = f"urn:aios:topology-scope:{quote(decision.scope_key, safe='')}"
 
-    # A failed prior attempt at this version may have left staging data.
     fuseki.update(dataset, f"CLEAR SILENT GRAPH <{staging_graph}>")
 
     writer = _RdfBatchWriter(
@@ -328,8 +347,6 @@ async def _project_scope_rdf_batched(
 
         writer.flush()
 
-        # COPY replaces the destination graph. The old live graph is untouched
-        # until every staging batch has succeeded.
         fuseki.update(
             dataset,
             (
@@ -371,18 +388,23 @@ async def project_semantic_scope(
     *,
     scope_key: str,
 ) -> dict[str, Any]:
-    """Project the latest authoritative PostgreSQL topology for one scope once."""
+    """Project the latest authoritative PostgreSQL topology for one quiet scope."""
 
     if _REAL_PROJECT_SCOPE_RDF is None or _TOPOLOGY_MODULE is None:
         raise RuntimeError("semantic topology projection boundary is not installed")
 
     state = await db.fetchrow(
         """
-        SELECT scope_key, scope_kind, dirty_version, projected_version
+        SELECT scope_key, scope_kind, dirty_version, projected_version, dirty_at,
+               (
+                    dirty_at IS NULL
+                    OR dirty_at <= now() - make_interval(secs => $2)
+               ) AS quiet_ready
         FROM aios.semantic_scope_projection_state
         WHERE scope_key=$1
         """,
         scope_key,
+        RDF_PROJECTION_QUIET_SECONDS,
     )
     if not state:
         return {"scope_key": scope_key, "projected": False, "reason": "not_dirty"}
@@ -390,6 +412,14 @@ async def project_semantic_scope(
     target_version = int(state["dirty_version"] or 0)
     if target_version <= int(state["projected_version"] or 0):
         return {"scope_key": scope_key, "projected": False, "reason": "already_current"}
+    if not bool(state["quiet_ready"]):
+        logger.debug(
+            "Deferred hot RDF scope=%s version=%s dirty_at=%s",
+            scope_key,
+            target_version,
+            state["dirty_at"],
+        )
+        return {"scope_key": scope_key, "projected": False, "reason": "debouncing"}
 
     scope = await db.fetchrow(
         """
@@ -490,13 +520,17 @@ async def project_semantic_scope(
 
 
 async def enqueue_dirty_scope_jobs(db: Database, *, limit: int = 64) -> int:
-    """Ensure dirty scopes eventually receive a projection after an active job exits."""
+    """Enqueue only dirty scopes that have remained quiet long enough to publish."""
 
     rows = await db.fetch(
         """
         SELECT s.scope_key
         FROM aios.semantic_scope_projection_state s
         WHERE s.dirty_version > s.projected_version
+          AND (
+                s.dirty_at IS NULL
+                OR s.dirty_at <= now() - make_interval(secs => $2)
+          )
           AND NOT EXISTS (
               SELECT 1
               FROM aios.pipeline_job pj
@@ -508,6 +542,7 @@ async def enqueue_dirty_scope_jobs(db: Database, *, limit: int = 64) -> int:
         LIMIT $1
         """,
         limit,
+        RDF_PROJECTION_QUIET_SECONDS,
     )
     if not rows:
         return 0
@@ -520,7 +555,7 @@ async def enqueue_dirty_scope_jobs(db: Database, *, limit: int = 64) -> int:
             db,
             job_type="project_semantic_scope",
             payload={"scope_key": str(row["scope_key"])},
-            priority=70,
+            priority=RDF_PROJECTION_PRIORITY,
         )
         created += int(job_id is not None)
     return created
