@@ -63,9 +63,8 @@ def _node(index: int, label_size: int = 64):
 
 
 @pytest.mark.asyncio
-async def test_large_projection_is_batched_and_promoted(monkeypatch) -> None:
-    monkeypatch.setattr(projection, "RDF_UPDATE_TARGET_BYTES", 1024)
-    nodes = [_node(i, label_size=300) for i in range(12)]
+async def test_large_projection_is_batched_and_promoted() -> None:
+    nodes = [_node(i, label_size=300_000) for i in range(12)]
     db = FakeDb(nodes)
     fuseki = FakeFuseki()
     decision = SimpleNamespace(scope_key="world:test:observed", scope_kind="world")
@@ -81,13 +80,16 @@ async def test_large_projection_is_batched_and_promoted(monkeypatch) -> None:
     assert graph == "urn:test:live"
     inserts = [sparql for _, sparql in fuseki.calls if sparql.startswith("INSERT DATA")]
     assert len(inserts) > 1
-    assert any("COPY SILENT GRAPH <urn:test:live:staging:7> TO GRAPH <urn:test:live>" in sparql for _, sparql in fuseki.calls)
+    assert max(len(sparql.encode("utf-8")) for sparql in inserts) < 3 * 1024 * 1024
+    assert any(
+        "COPY SILENT GRAPH <urn:test:live:staging:7> TO GRAPH <urn:test:live>" in sparql
+        for _, sparql in fuseki.calls
+    )
 
 
 @pytest.mark.asyncio
-async def test_failed_batch_never_replaces_live_graph(monkeypatch) -> None:
-    monkeypatch.setattr(projection, "RDF_UPDATE_TARGET_BYTES", 1024)
-    nodes = [_node(i, label_size=300) for i in range(12)]
+async def test_failed_batch_never_replaces_live_graph() -> None:
+    nodes = [_node(i, label_size=300_000) for i in range(12)]
     db = FakeDb(nodes)
     fuseki = FakeFuseki(fail_insert_number=2)
     decision = SimpleNamespace(scope_key="world:test:observed", scope_kind="world")
