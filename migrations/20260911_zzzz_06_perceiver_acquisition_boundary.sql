@@ -49,7 +49,8 @@ DECLARE
 BEGIN
     -- Only event forms that an attached live runtime can directly perceive are
     -- projected automatically. Documents/source material still require an
-    -- explicit read/learn acquisition path.
+    -- explicit read/learn acquisition path. The source-head constraint prevents
+    -- future/sibling evidence on the source timeline from leaking into /char.
     FOR rec IN
         SELECT
             ci.instance_id AS perceiver_instance_id,
@@ -72,9 +73,13 @@ BEGIN
           ON st.timeline_id=NEW.timeline_id
         JOIN aios.dag_node dn
           ON dn.node_id=NEW.dag_node_id
+        JOIN aios.dag_node source_head
+          ON source_head.node_id=rs.source_head_node_id
+         AND source_head.timeline_id=NEW.timeline_id
         LEFT JOIN aios.claim_context_resolution ccr
           ON ccr.claim_id=NEW.claim_id
         WHERE rs.source_timeline_id=NEW.timeline_id
+          AND dn.event_id <= source_head.event_id
           AND rt.session_id IS NOT DISTINCT FROM st.session_id
           AND rt.user_name IS NOT DISTINCT FROM st.user_name
           AND rt.scope_key=st.scope_key
@@ -142,7 +147,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION aios.project_observation_to_runtime_perceivers() IS
-'Projects live chat/observation evidence to exact runtime perceivers bound to the source timeline without changing evidence origin ownership.';
+'Projects live chat/observation evidence to exact runtime perceivers bound to the source timeline and not beyond the runtime source head, without changing evidence origin ownership.';
 
 DROP TRIGGER IF EXISTS trg_project_observation_to_runtime_perceivers
 ON aios.observation;
@@ -184,6 +189,7 @@ SET acquisition_mode=aios.acquisition_mode_for_perceiver(
     )
 FROM aios.observation o,
      aios.dag_node dn,
+     aios.dag_node source_head,
      aios.claim_context_resolution ccr,
      aios.character_runtime_state rs,
      aios.character_instance ci,
@@ -195,6 +201,9 @@ WHERE kae.claim_id=o.claim_id
   AND ccr.claim_id=o.claim_id
   AND rs.instance_id=kae.instance_id
   AND rs.source_timeline_id=o.timeline_id
+  AND source_head.node_id=rs.source_head_node_id
+  AND source_head.timeline_id=o.timeline_id
+  AND dn.event_id <= source_head.event_id
   AND ci.instance_id=kae.instance_id
   AND rt.timeline_id=rs.timeline_id
   AND st.timeline_id=o.timeline_id
@@ -258,6 +267,9 @@ LEFT JOIN aios.claim_context_resolution ccr
   ON ccr.claim_id=o.claim_id
 JOIN aios.character_runtime_state rs
   ON rs.source_timeline_id=o.timeline_id
+JOIN aios.dag_node source_head
+  ON source_head.node_id=rs.source_head_node_id
+ AND source_head.timeline_id=o.timeline_id
 JOIN aios.character_instance ci
   ON ci.instance_id=rs.instance_id
 JOIN aios.timeline rt
@@ -265,6 +277,7 @@ JOIN aios.timeline rt
 JOIN aios.timeline st
   ON st.timeline_id=o.timeline_id
 WHERE dn.kind::text IN ('chat_message','observation')
+  AND dn.event_id <= source_head.event_id
   AND rt.session_id IS NOT DISTINCT FROM st.session_id
   AND rt.user_name IS NOT DISTINCT FROM st.user_name
   AND rt.scope_key=st.scope_key
