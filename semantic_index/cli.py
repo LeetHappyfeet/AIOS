@@ -10,7 +10,13 @@ from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
 from .config import SemanticIndexConfig
-from .service import index_once, initialize_backend
+from .service import (
+    index_source_sections_once,
+    index_semantic_frames_once,
+    index_propositions_once,
+    index_epistemic_objects_once,
+    initialize_backend,
+)
 from .structure import analyze_neighbors_once
 from .neighbor_classifier import classify_neighbor_relations_once
 from .clustering import cluster_neighbors_once
@@ -27,70 +33,6 @@ def _emit_telemetry(payload: dict[str, Any]) -> None:
     )
 
 
-async def _capped_vector_backlog(
-    db: Database,
-    cfg: SemanticIndexConfig,
-    *,
-    cap: int = 10000,
-) -> dict[str, int | bool]:
-    """Return bounded backlog counts without forcing unbounded COUNT scans."""
-    frames = await db.fetchrow(
-        """
-        SELECT COUNT(*)::integer AS n
-        FROM (
-            SELECT 1
-            FROM aios.claim_semantic_frame f
-            WHERE f.decomposer_version='semantic-frame-v2'
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM aios.semantic_vector_index_state s
-                  WHERE s.object_type='semantic_frame'
-                    AND s.object_key=f.frame_id::text
-                    AND s.qdrant_collection=$1
-                    AND s.embedding_model=$2
-                    AND s.embedding_version=$3
-              )
-            LIMIT $4
-        ) pending
-        """,
-        cfg.frame_collection,
-        cfg.embedding_model,
-        cfg.embedding_version,
-        cap + 1,
-    )
-    propositions = await db.fetchrow(
-        """
-        SELECT COUNT(*)::integer AS n
-        FROM (
-            SELECT 1
-            FROM aios.proposition p
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM aios.semantic_vector_index_state s
-                WHERE s.object_type='proposition'
-                  AND s.object_key=p.proposition_id::text
-                  AND s.qdrant_collection=$1
-                  AND s.embedding_model=$2
-                  AND s.embedding_version=$3
-            )
-            LIMIT $4
-        ) pending
-        """,
-        cfg.proposition_collection,
-        cfg.embedding_model,
-        cfg.embedding_version,
-        cap + 1,
-    )
-    frame_n = int((frames["n"] if frames else 0) or 0)
-    proposition_n = int((propositions["n"] if propositions else 0) or 0)
-    return {
-        "frames": min(frame_n, cap),
-        "frames_capped": frame_n > cap,
-        "propositions": min(proposition_n, cap),
-        "propositions_capped": proposition_n > cap,
-    }
-
-
 async def run_forever(poll_seconds: float = 1.0) -> None:
     cfg = SemanticIndexConfig()
     db = Database(settings.db_dsn)
@@ -104,16 +46,46 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         last_report = 0.0
         window_started = time.monotonic()
         totals = {
-            "indexed": 0,
+            "source_indexed": 0,
+            "frames_indexed": 0,
+            "propositions_indexed": 0,
+            "epistemic_indexed": 0,
             "structured": 0,
             "neighbor_classified": 0,
             "clustered": 0,
             "classified": 0,
             "reconciled": 0,
         }
+        last_batches = {
+            "source": 0,
+            "frames": 0,
+            "propositions": 0,
+            "epistemic": 0,
+        }
 
         while True:
-            indexed = await index_once(db, cfg)
+            source_indexed = await index_source_sections_once(db, cfg)
+            frames_indexed = await index_semantic_frames_once(db, cfg)
+            propositions_indexed = await index_propositions_once(db, cfg)
+            epistemic_indexed = await index_epistemic_objects_once(db, cfg)
+            indexed = (
+                source_indexed
+                + frames_indexed
+                + propositions_indexed
+                + epistemic_indexed
+            )
+
+            last_batches = {
+                "source": int(source_indexed),
+                "frames": int(frames_indexed),
+                "propositions": int(propositions_indexed),
+                "epistemic": int(epistemic_indexed),
+            }
+            totals["source_indexed"] += int(source_indexed)
+            totals["frames_indexed"] += int(frames_indexed)
+            totals["propositions_indexed"] += int(propositions_indexed)
+            totals["epistemic_indexed"] += int(epistemic_indexed)
+
             structured = await analyze_neighbors_once(db, cfg)
             neighbor_classified = await classify_neighbor_relations_once(db, cfg)
 
@@ -131,7 +103,6 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 cfg,
             )
 
-            totals["indexed"] += int(indexed)
             totals["structured"] += int(structured)
             totals["neighbor_classified"] += int(neighbor_classified)
             totals["clustered"] += int(clustered)
@@ -141,34 +112,45 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
             now = time.monotonic()
             if now - last_report >= 5.0:
                 elapsed = max(0.001, now - window_started)
-                try:
-                    backlog = await _capped_vector_backlog(db, cfg)
-                    pending_vectors = int(backlog["frames"]) + int(backlog["propositions"])
-                    capped = bool(backlog["frames_capped"] or backlog["propositions_capped"])
-                    active = any(value > 0 for value in totals.values())
-                    state = "CAUGHT_UP" if pending_vectors == 0 and not active else "DRAINING"
-                    _emit_telemetry(
-                        {
-                            "service": "semantic_index",
-                            "state": state,
-                            "pending_vectors": pending_vectors,
-                            "pending_vectors_capped": capped,
-                            "pending_frames": backlog["frames"],
-                            "pending_propositions": backlog["propositions"],
-                            "indexed_per_s": round(totals["indexed"] / elapsed, 2),
-                            "neighbors_per_s": round(totals["structured"] / elapsed, 2),
-                            "neighbor_classified_per_s": round(
-                                totals["neighbor_classified"] / elapsed, 2
-                            ),
-                            "clusters_per_s": round(totals["clustered"] / elapsed, 2),
-                            "cluster_classified_per_s": round(
-                                totals["classified"] / elapsed, 2
-                            ),
-                            "reconciled_per_s": round(totals["reconciled"] / elapsed, 2),
-                        }
-                    )
-                except Exception:
-                    logger.exception("Failed to collect semantic index telemetry")
+                saturated = [
+                    name
+                    for name, count in last_batches.items()
+                    if count >= cfg.batch_size
+                ]
+                active = any(value > 0 for value in totals.values())
+                state = "CAUGHT_UP" if not active else "DRAINING"
+                total_indexed = (
+                    totals["source_indexed"]
+                    + totals["frames_indexed"]
+                    + totals["propositions_indexed"]
+                    + totals["epistemic_indexed"]
+                )
+                _emit_telemetry(
+                    {
+                        "service": "semantic_index",
+                        "state": state,
+                        "batch_size": cfg.batch_size,
+                        "last_batches": last_batches,
+                        "saturated_streams": saturated,
+                        "indexed_per_s": round(total_indexed / elapsed, 2),
+                        "frames_per_s": round(totals["frames_indexed"] / elapsed, 2),
+                        "propositions_per_s": round(
+                            totals["propositions_indexed"] / elapsed, 2
+                        ),
+                        "epistemic_per_s": round(
+                            totals["epistemic_indexed"] / elapsed, 2
+                        ),
+                        "neighbors_per_s": round(totals["structured"] / elapsed, 2),
+                        "neighbor_classified_per_s": round(
+                            totals["neighbor_classified"] / elapsed, 2
+                        ),
+                        "clusters_per_s": round(totals["clustered"] / elapsed, 2),
+                        "cluster_classified_per_s": round(
+                            totals["classified"] / elapsed, 2
+                        ),
+                        "reconciled_per_s": round(totals["reconciled"] / elapsed, 2),
+                    }
+                )
                 totals = {key: 0 for key in totals}
                 window_started = now
                 last_report = now
