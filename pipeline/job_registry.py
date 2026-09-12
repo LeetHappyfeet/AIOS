@@ -38,6 +38,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "decompose_claim_frames": JobSpec(ResourceClass.NLP, "claim_id", True, isolate_blocking=True),
     "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_id", True, isolate_blocking=True, requires_rdf_slot=True),
     "normalize_proposition": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
+    "reconcile_semantic_memory": JobSpec(ResourceClass.RECONCILIATION, "claim_scope", True),
     "project_character_knowledge": JobSpec(ResourceClass.SEMANTIC, "global", True),
     "derive_claim_topology": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True),
     "derive_character_acquisition_topology": JobSpec(ResourceClass.SEMANTIC, "acquisition_scope", True, isolate_blocking=True),
@@ -65,6 +66,7 @@ def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) 
         "decompose_claim_frames",
         "resolve_claim_context",
         "normalize_proposition",
+        "reconcile_semantic_memory",
         "project_character_knowledge",
     }:
         return SchedulingLane.LIVE
