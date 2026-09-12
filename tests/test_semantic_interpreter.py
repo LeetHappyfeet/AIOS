@@ -54,7 +54,7 @@ def test_dependent_clause_is_semantic_content_not_atomic_fact():
     assert result.standalone_semantic is False
 
 
-def test_internal_frame_reference_never_becomes_standalone():
+def test_parent_with_nested_content_remains_valid_semantic_unit():
     result = interpret_frame(
         predicate="want",
         predicate_surface="want",
@@ -65,5 +65,5 @@ def test_internal_frame_reference_never_becomes_standalone():
         object_frame_id="synthetic-child-id",
     )
     assert result.semantic_type == "DESIRE"
-    assert result.standalone_semantic is False
+    assert result.standalone_semantic is True
     assert "nested_content" in result.cues

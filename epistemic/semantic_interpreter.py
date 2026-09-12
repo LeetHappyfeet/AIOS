@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
-SEMANTIC_INTERPRETER_VERSION = "semantic-interpreter-v1"
+SEMANTIC_INTERPRETER_VERSION = "semantic-interpreter-v2"
 
 SEMANTIC_TYPE_TO_PREDICATE_FAMILY = {
     "ACTION": "ACTION",
@@ -43,6 +43,9 @@ SEMANTIC_TYPE_TO_CLAIM_KIND = {
     "UNKNOWN": "UNKNOWN",
 }
 
+# English lexical knowledge belongs to the source-language adapter boundary.
+# It maps surface lemmas into stable semantic types; downstream epistemic code
+# consumes those semantic types rather than the English words themselves.
 _ENGLISH_LEMMA_HINTS = {
     "remember": "MEMORY", "recall": "MEMORY", "forget": "MEMORY",
     "know": "MENTAL_STATE", "believe": "MENTAL_STATE", "think": "MENTAL_STATE",
@@ -66,6 +69,8 @@ _IDENTITY_NOUNS = {
     "admin", "partner", "assistant", "member", "agent",
 }
 _LOCATION_PREPOSITIONS = {"in", "at", "inside", "within", "on", "near"}
+_DEPENDENT_ROLES = {"xcomp", "ccomp", "advcl", "acl", "relcl", "fallback"}
+
 
 @dataclass(frozen=True)
 class SemanticInterpretation:
@@ -99,13 +104,20 @@ def _norm(value: Optional[str]) -> str:
     return " ".join((value or "").strip().lower().split())
 
 
-def _standalone(*, frame_role: Optional[str], subject: Optional[str], predicate: Optional[str], resolution_status: Optional[str], object_is_internal_frame: bool) -> bool:
+def _standalone(*, frame_role: Optional[str], subject: Optional[str], predicate: Optional[str], resolution_status: Optional[str]) -> bool:
+    """Whether this semantic unit may stand independently in cognition.
+
+    A root operator may be standalone even when its content is another frame:
+    WANT(Ren, BUILD(...)) is a valid desire.  The BUILD xcomp is the dependent
+    unit and remains non-atomic.  This keeps nested content structural without
+    throwing away the parent belief/goal/communication act.
+    """
     role = _norm(frame_role)
     if resolution_status and _norm(resolution_status) != "resolved":
         return False
-    if not predicate or not subject or object_is_internal_frame:
+    if not predicate or not subject:
         return False
-    if role in {"xcomp", "ccomp", "advcl", "acl", "relcl", "fallback"}:
+    if role in _DEPENDENT_ROLES:
         return False
     return role in {"", "main", "root", "conj"}
 
@@ -115,7 +127,12 @@ def interpret_frame(*, predicate: Optional[str], predicate_surface: Optional[str
     canonical = _norm(predicate).replace(" ", "_")
     object_text = _norm(object_value)
     object_is_internal_frame = object_frame_id is not None or object_text.startswith("frame:")
-    standalone = _standalone(frame_role=frame_role, subject=subject, predicate=pred or canonical, resolution_status=resolution_status, object_is_internal_frame=object_is_internal_frame)
+    standalone = _standalone(
+        frame_role=frame_role,
+        subject=subject,
+        predicate=pred or canonical,
+        resolution_status=resolution_status,
+    )
 
     cues: list[str] = []
     semantic_type = "UNKNOWN"
@@ -160,12 +177,18 @@ def interpret_frame(*, predicate: Optional[str], predicate_surface: Optional[str
     if object_is_internal_frame:
         cues.append("nested_content")
     role = _norm(frame_role)
-    if role in {"xcomp", "ccomp", "advcl", "acl", "relcl"}:
+    if role in _DEPENDENT_ROLES:
         cues.append(f"dependent_clause:{role}")
     if meta and meta.get("passive_reporting"):
         cues.append("passive_reporting")
 
-    return SemanticInterpretation(semantic_type=semantic_type, confidence=confidence, standalone_semantic=standalone, source_language=source_language, cues=tuple(cues))
+    return SemanticInterpretation(
+        semantic_type=semantic_type,
+        confidence=confidence,
+        standalone_semantic=standalone,
+        source_language=source_language,
+        cues=tuple(cues),
+    )
 
 
 def family_from_semantic_type(semantic_type: Optional[str]) -> Optional[str]:
