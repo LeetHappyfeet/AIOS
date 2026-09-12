@@ -180,6 +180,23 @@ async def source_node_topology_ready(
     """
     if node_id is None:
         return True
+
+    # Aggregate counts alone cannot distinguish a genuinely zero-claim message
+    # from a source node that has not reached extraction yet. Require the
+    # extraction boundary before zero claims can mean "enrichment complete".
+    section = await db.fetchrow(
+        """
+        SELECT claims_extracted_at
+        FROM aios.document_section
+        WHERE node_id=$1
+        ORDER BY section_order
+        LIMIT 1
+        """,
+        node_id,
+    )
+    if not section or section["claims_extracted_at"] is None:
+        return False
+
     row = await db.fetchrow(
         """
         WITH runtime_identity AS (
