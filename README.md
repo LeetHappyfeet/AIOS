@@ -29,7 +29,7 @@ cd ~/AIOS-workspace
 
 git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git aios_app
 cd aios_app
-./setup.sh
+bash setup.sh
 ```
 
 `setup.sh` checks Python and Docker, starts the Compose infrastructure, waits for PostgreSQL, Qdrant, and Fuseki, loads the canonical AIOS ontology, creates the native Python virtual environment in `~/AIOS-workspace/.venv`, installs the Python requirements and spaCy model, then runs the current AIOS database migrations and database check.
@@ -48,7 +48,7 @@ After first-time setup:
 
 ```bash
 cd ~/AIOS-workspace/aios_app
-./run.sh
+bash run.sh
 ```
 
 `run.sh` makes sure the Compose infrastructure is running and then starts the native AIOS launcher with the existing virtual environment.
@@ -72,7 +72,7 @@ Press `Ctrl+C` in the AIOS terminal to stop the native AIOS processes.
 To stop PostgreSQL, Qdrant, and Fuseki without deleting their stored data:
 
 ```bash
-./stop.sh
+bash stop.sh
 ```
 
 The Compose data lives in persistent named Docker volumes. Do not use `docker compose down -v` unless you intentionally want to delete the stored AIOS data.
