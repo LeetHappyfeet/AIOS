@@ -25,11 +25,11 @@ if [ "$(basename "$REPO_DIR")" != "aios_app" ]; then
     fail "AIOS must currently be cloned into a directory named 'aios_app'.\nExpected layout: <workspace>/aios_app"
 fi
 
-require_command python3 "Python 3 is required. Install Python 3.10 or newer and run ./setup.sh again."
-require_command docker "Docker is required. Install Docker with the Compose plugin and run ./setup.sh again."
+require_command python3 "Python 3 is required. Install Python 3.10 or newer and run 'bash setup.sh' again."
+require_command docker "Docker is required. Install Docker with the Compose plugin and run 'bash setup.sh' again."
 
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required ('docker compose')."
-docker info >/dev/null 2>&1 || fail "Docker is installed, but the Docker daemon is not reachable. Start Docker and run ./setup.sh again."
+docker info >/dev/null 2>&1 || fail "Docker is installed, but the Docker daemon is not reachable. Start Docker and run 'bash setup.sh' again."
 
 PYTHON_VERSION="$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
 python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
@@ -45,7 +45,7 @@ docker compose up -d --build
 
 POSTGRES_ID="$(docker compose ps -q postgres)"
 FUSEKI_ID="$(docker compose ps -q fuseki)"
-INIT_ID="$(docker compose ps -q fuseki-init)"
+INIT_ID="$(docker compose ps -a -q fuseki-init)"
 
 [ -n "$POSTGRES_ID" ] || fail "PostgreSQL container was not created."
 [ -n "$FUSEKI_ID" ] || fail "Fuseki container was not created."
@@ -152,6 +152,6 @@ printf '        AIOS SETUP COMPLETE\n'
 printf '========================================\n\n'
 printf 'Start AIOS with:\n\n'
 printf '    cd %s\n' "$REPO_DIR"
-printf '    ./run.sh\n\n'
+printf '    bash run.sh\n\n'
 printf 'API:    http://127.0.0.1:8000\n'
 printf 'Web UI: http://127.0.0.1:7860\n\n'
