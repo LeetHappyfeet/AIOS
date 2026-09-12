@@ -140,12 +140,13 @@ async def source_node_retrieval_ready(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> bool:
-    """Return the generation-critical readiness barrier for one source node.
+    """Return the generation-critical retrieval barrier for one source node.
 
-    Every source claim must be contextualized and normalized.  Only claims that
-    resolve into this character's subjective scope require /char acquisition and
-    projection.  Narrative/world/source evidence is terminal once normalized;
-    it must not be forced into character belief merely to make the HUD ready.
+    A live HUD is retrieval-ready only after claims are contextualized and
+    normalized, relevant /char acquisitions are projected, and the SQL semantic
+    topology that live retrieval walks has been materialized for the same source
+    coordinate. This prevents the request path from racing partially projected
+    topology and doing expensive graph work against a moving substrate.
     """
 
     if node_id is None:
@@ -206,11 +207,19 @@ async def source_node_retrieval_ready(
     total = int(claim_counts["total"] or 0)
     if total == 0:
         return True
-    return (
+    cognition_ready = (
         int(claim_counts["contextualized"] or 0) == total
         and int(claim_counts["normalized"] or 0) == total
         and int(claim_counts["character_ready"] or 0)
         == int(claim_counts["character_required"] or 0)
+    )
+    if not cognition_ready:
+        return False
+
+    return await source_node_topology_ready(
+        db,
+        instance_id=instance_id,
+        node_id=node_id,
     )
 
 
@@ -220,24 +229,39 @@ async def source_node_topology_ready(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> bool:
-    """Report durable DB-topology freshness without gating live generation."""
+    """Return whether the topology consumed by live HUD retrieval is current."""
 
     if node_id is None:
         return True
     row = await db.fetchrow(
         """
+        WITH runtime_identity AS (
+            SELECT ci.character_id
+            FROM aios.character_instance ci
+            WHERE ci.instance_id=$2
+        )
         SELECT
             count(DISTINCT cc.claim_id) AS total,
             count(DISTINCT CASE WHEN stp.projected_at IS NOT NULL THEN cc.claim_id END)
                 AS claim_topology_ready,
             count(DISTINCT CASE
-                WHEN kae.processed_at IS NOT NULL
+                WHEN ccr.epistemic_scope='character'
+                 AND ccr.origin_character_id=ri.character_id
+                THEN cc.claim_id
+            END) AS acquisition_required,
+            count(DISTINCT CASE
+                WHEN ccr.epistemic_scope='character'
+                 AND ccr.origin_character_id=ri.character_id
+                 AND ccr.character_instance_id=$2
+                 AND kae.processed_at IS NOT NULL
                  AND astp.projected_at IS NOT NULL
                 THEN cc.claim_id
             END) AS acquisition_topology_ready
         FROM aios.document_section ds
+        CROSS JOIN runtime_identity ri
         LEFT JOIN aios.extracted_sentence es ON es.section_id=ds.section_id
         LEFT JOIN aios.claim_candidate cc ON cc.sentence_id=es.sentence_id
+        LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
         LEFT JOIN aios.knowledge_acquisition_event kae
           ON kae.claim_id=cc.claim_id AND kae.instance_id=$2
         LEFT JOIN aios.semantic_topology_projection stp
@@ -251,12 +275,15 @@ async def source_node_topology_ready(
         node_id,
         instance_id,
     )
+    if not row:
+        return False
     total = int(row["total"] or 0)
     if total == 0:
         return True
     return (
         int(row["claim_topology_ready"] or 0) == total
-        and int(row["acquisition_topology_ready"] or 0) == total
+        and int(row["acquisition_topology_ready"] or 0)
+        == int(row["acquisition_required"] or 0)
     )
 
 
@@ -340,7 +367,7 @@ async def enqueue_live_turn_work(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> int:
-    """Promote only generation-critical work for the current live turn."""
+    """Promote all work required by the live HUD retrieval barrier."""
 
     if node_id is None:
         return 0
@@ -408,7 +435,7 @@ async def enqueue_live_turn_work(
             and context["origin_character_id"] == runtime_character_id
         )
         if character_relevant and context["character_instance_id"] != instance_id:
-            # Cached context may have been resolved before activation.  Re-run
+            # Cached context may have been resolved before activation. Re-run
             # context resolution so it can bind the exact current runtime.
             queued += int(await _enqueue_live_job(
                 db,
@@ -429,9 +456,28 @@ async def enqueue_live_turn_work(
             ))
             continue
 
+        claim_topology = await db.fetchrow(
+            """
+            SELECT 1
+            FROM aios.semantic_topology_projection
+            WHERE claim_id=$1
+              AND resolver_version='semantic-topology-v1'
+              AND projected_at IS NOT NULL
+            LIMIT 1
+            """,
+            claim_id,
+        )
+        if not claim_topology:
+            queued += int(await _enqueue_live_job(
+                db,
+                job_type="derive_claim_topology",
+                payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
+            ))
+
         if not character_relevant:
-            # Evidence has reached its terminal live-HUD state. Narrative/world
-            # claims do not require character belief acquisition.
+            # Narrative/world/source claims still need claim topology because it
+            # is part of the retrieval substrate, but they do not require a
+            # character acquisition projection.
             continue
 
         acquisition = await db.fetchrow(
@@ -446,8 +492,8 @@ async def enqueue_live_turn_work(
             claim_id,
         )
         if not acquisition:
-            # Normalization is idempotent and is the layer that materializes a
-            # character acquisition after context gains an instance binding.
+            # Normalization is idempotent and materializes a character
+            # acquisition after context gains an instance binding.
             queued += int(await _enqueue_live_job(
                 db,
                 job_type="normalize_proposition",
@@ -462,6 +508,27 @@ async def enqueue_live_turn_work(
                 payload={"live_instance_id": str(instance_id)},
             ))
             continue
+
+        acquisition_topology = await db.fetchrow(
+            """
+            SELECT 1
+            FROM aios.semantic_topology_projection
+            WHERE acquisition_id=$1
+              AND resolver_version='semantic-topology-v1'
+              AND projected_at IS NOT NULL
+            LIMIT 1
+            """,
+            acquisition["acquisition_id"],
+        )
+        if not acquisition_topology:
+            queued += int(await _enqueue_live_job(
+                db,
+                job_type="derive_character_acquisition_topology",
+                payload={
+                    "acquisition_id": str(acquisition["acquisition_id"]),
+                    "live_instance_id": str(instance_id),
+                },
+            ))
 
     return queued
 
