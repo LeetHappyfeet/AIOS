@@ -21,6 +21,7 @@ jobs:
           python -m py_compile \
             epistemic/topology_projection.py \
             epistemic/belief_reconciliation.py \
+            epistemic/reconciliation_stage.py \
             epistemic/context_resolver.py \
             epistemic/__init__.py \
             hud/readiness.py \
@@ -29,9 +30,10 @@ jobs:
             pipeline/job_registry.py \
             runner_v2.py \
             launch.py \
+            tests/test_memory_reconciliation_stage.py \
             tests/ci_belief_migration_smoke.py \
             tests/ci_context_resolver_uuid_binding_smoke.py
-      - name: Run readiness, projection, belief, and context tests
+      - name: Run readiness, projection, belief, reconciliation, and context tests
         run: |
           mkdir -p "$RUNNER_TEMP/aios-pythonpath"
           ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
@@ -40,6 +42,7 @@ jobs:
               tests/test_hud_readiness.py \
               tests/test_topology_projection_coalescing.py \
               tests/test_belief_reconciliation.py \
+              tests/test_memory_reconciliation_stage.py \
               tests/test_topology_retrieval.py \
               tests/test_context_resolver.py
 
