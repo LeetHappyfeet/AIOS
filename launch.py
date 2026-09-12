@@ -326,6 +326,16 @@ def _subject_text(work: dict[str, Any]) -> str:
     return value or "unknown"
 
 
+def _timeline_text(work: dict[str, Any]) -> str:
+    timeline_id = str(work.get("timeline_id") or "")
+    status = str(work.get("timeline_status") or "")
+    if timeline_id:
+        return f" [tl:{timeline_id[:8]}]"
+    if status == "MISSING":
+        return " [NO TIMELINE]"
+    return ""
+
+
 def _stage_text(job_type: Any) -> str:
     return str(job_type or "work").replace("_", " ")
 
@@ -403,7 +413,8 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
         for work in active[:8]:
             print(
                 "         → "
-                f"{_subject_text(work)} | {_stage_text(work.get('job_type'))} | "
+                f"{_subject_text(work)}{_timeline_text(work)} | "
+                f"{_stage_text(work.get('job_type'))} | "
                 f"{work.get('resource')}/{work.get('lane')} | "
                 f"{_format_age(work.get('running_s'))}",
                 flush=True,
@@ -422,7 +433,8 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
         for work in fresh_recent[:5]:
             print(
                 "         ✓ "
-                f"{_subject_text(work)} | {_stage_text(work.get('job_type'))}",
+                f"{_subject_text(work)}{_timeline_text(work)} | "
+                f"{_stage_text(work.get('job_type'))}",
                 flush=True,
             )
 
