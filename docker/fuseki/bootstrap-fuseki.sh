@@ -49,16 +49,13 @@ verify_graph() {
         --data-urlencode "query=ASK { GRAPH <${graph}> { ?s ?p ?o } }" \
         "$WORLD_QUERY_URL")"
 
-    case "$result" in
-        *'"boolean" : true'*|*'"boolean":true'*|*'"boolean" :true'*|*'"boolean": true'*)
-            return 0
-            ;;
-        *)
-            echo "Fuseki bootstrap: verification failed for $graph" >&2
-            echo "$result" >&2
-            return 1
-            ;;
-    esac
+    if printf '%s' "$result" | grep -Eq '"boolean"[[:space:]]*:[[:space:]]*true'; then
+        return 0
+    fi
+
+    echo "Fuseki bootstrap: verification failed for $graph" >&2
+    echo "$result" >&2
+    return 1
 }
 
 wait_for_world
