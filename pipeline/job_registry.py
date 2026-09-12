@@ -39,9 +39,12 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_id", True, isolate_blocking=True),
     "normalize_proposition": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
     "project_character_knowledge": JobSpec(ResourceClass.SEMANTIC, "global", True),
-    "derive_claim_topology": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True),
-    "derive_character_acquisition_topology": JobSpec(ResourceClass.SEMANTIC, "acquisition_scope", True, isolate_blocking=True),
-    "derive_world_assertion_topology": JobSpec(ResourceClass.SEMANTIC, "assertion_scope", True, isolate_blocking=True),
+    # Topology derivation rewrites a whole Fuseki scope graph after its SQL
+    # topology mutations. Keep that blocking/network work off the semantic
+    # worker pool so archaeology cannot consume cognition capacity.
+    "derive_claim_topology": JobSpec(ResourceClass.RDF, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
+    "derive_character_acquisition_topology": JobSpec(ResourceClass.RDF, "acquisition_scope", True, isolate_blocking=True, requires_rdf_slot=True),
+    "derive_world_assertion_topology": JobSpec(ResourceClass.RDF, "assertion_scope", True, isolate_blocking=True, requires_rdf_slot=True),
     "project_semantic_scope": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
     "resolve_generated_facts": JobSpec(ResourceClass.RECONCILIATION, "global", True),
     "rdf_epistemic_project": JobSpec(ResourceClass.RDF, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
