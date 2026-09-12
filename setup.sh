@@ -52,8 +52,7 @@ INIT_ID="$(docker compose ps -q fuseki-init)"
 [ -n "$INIT_ID" ] || fail "Fuseki bootstrap container was not created."
 
 wait_for_health() {
-    name="$1"
-    container_id="$2"
+    container_id="$1"
     attempts=60
 
     while [ "$attempts" -gt 0 ]; do
@@ -72,13 +71,13 @@ wait_for_health() {
     return 1
 }
 
-wait_for_health postgres "$POSTGRES_ID" || {
+wait_for_health "$POSTGRES_ID" || {
     docker compose logs --tail=80 postgres >&2 || true
     fail "PostgreSQL did not become healthy."
 }
 ok "PostgreSQL ready"
 
-wait_for_health fuseki "$FUSEKI_ID" || {
+wait_for_health "$FUSEKI_ID" || {
     docker compose logs --tail=80 fuseki >&2 || true
     fail "Fuseki did not become healthy."
 }
@@ -101,17 +100,24 @@ while [ "$attempts" -gt 0 ]; do
 done
 [ "$attempts" -gt 0 ] || fail "Timed out waiting for the Fuseki ontology bootstrap."
 
-if python3 - <<'PY'
+attempts=60
+while [ "$attempts" -gt 0 ]; do
+    if python3 - <<'PY'
 import urllib.request
 try:
-    with urllib.request.urlopen("http://127.0.0.1:6333/", timeout=3) as response:
+    with urllib.request.urlopen("http://127.0.0.1:6333/", timeout=2) as response:
         raise SystemExit(0 if 200 <= response.status < 500 else 1)
 except Exception:
     raise SystemExit(1)
 PY
-then
-    ok "Qdrant ready"
-else
+    then
+        ok "Qdrant ready"
+        break
+    fi
+    attempts=$((attempts - 1))
+    sleep 2
+done
+if [ "$attempts" -eq 0 ]; then
     docker compose logs --tail=80 qdrant >&2 || true
     fail "Qdrant is not responding on http://127.0.0.1:6333."
 fi
