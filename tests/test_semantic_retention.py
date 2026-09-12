@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from uuid import uuid4
 
 from aios_app.epistemic.retention import (
@@ -66,7 +67,7 @@ def test_retention_state_round_trips_quarantine():
     db = FakeDatabase(
         retention_row={
             "state": "QUARANTINED",
-            "reason_code": "extraction_debris:missing_semantic_predicate",
+            "reason_code": "extraction_debris:internal_frame_reference",
             "protected": False,
             "meta": '{"recoverable": true}',
         }
@@ -80,3 +81,21 @@ def test_retention_state_round_trips_quarantine():
     )
     assert result.state is RetentionState.QUARANTINED
     assert result.detail["recoverable"] is True
+
+
+def test_missing_predicate_is_repairable_not_automatic_trash():
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "20260912_semantic_retention_repairable_incomplete.sql"
+    ).read_text(encoding="utf-8")
+
+    structural_block = migration.split(
+        "IF v_reason IN (", 1
+    )[1].split(") THEN", 1)[0]
+
+    assert "'internal_frame_reference'" in structural_block
+    assert "'serialized_semantic_component'" in structural_block
+    assert "'missing_semantic_predicate'" not in structural_block
+    assert "repairable_incomplete_semantic_extraction" in migration
+    assert "recompute_semantic_evidence_admission" not in structural_block
