@@ -23,6 +23,7 @@ from aios_app.hud.readiness import (
 )
 
 from . import runtime as _runtime
+from .source_cursor import advance_matching_runtime_source_cursor
 
 logger = logging.getLogger("aios.world")
 
@@ -103,7 +104,7 @@ if not getattr(_readiness, "_head_only_dirty_v1", False):
         source_head_node_id: UUID,
         source_head_event_id: int,
     ) -> None:
-        instance_ids = await _readiness.advance_matching_runtime_source_cursor(
+        instance_ids = await advance_matching_runtime_source_cursor(
             db,
             character_id=character_id,
             session_id=session_id,
