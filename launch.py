@@ -339,9 +339,22 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
     done_rate = _format_rate(pipeline.get("done_per_s"))
     in_rate = _format_rate(pipeline.get("arrivals_per_s"))
     semantic_state = str(semantic.get("state") or "WAITING")
-    vector_backlog = int(semantic.get("pending_vectors") or 0)
-    vector_suffix = "+" if semantic.get("pending_vectors_capped") else ""
+    semantic_batches = dict(semantic.get("last_batches") or {})
+    saturated = list(semantic.get("saturated_streams") or [])
     index_rate = _format_rate(semantic.get("indexed_per_s"))
+    if saturated:
+        semantic_detail = "busy:" + ",".join(str(item) for item in saturated)
+    elif semantic_state == "CAUGHT_UP":
+        semantic_detail = "caught-up"
+    elif semantic_batches:
+        active_batches = [
+            f"{name}={int(count)}"
+            for name, count in semantic_batches.items()
+            if int(count or 0) > 0
+        ]
+        semantic_detail = ",".join(active_batches) if active_batches else "working"
+    else:
+        semantic_detail = "waiting"
     api_text = f"{api_ms:.0f}ms" if api_ok and api_ms is not None else "DOWN"
 
     print(
@@ -349,8 +362,7 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
         f"LIVE {live_state} | "
         f"pipeline {pipeline_state} {queued}q/{running}r lag {lag} "
         f"in {in_rate} out {done_rate} | "
-        f"semantic {semantic_state} vectors {vector_backlog}{vector_suffix} "
-        f"index {index_rate} | "
+        f"semantic {semantic_state} {semantic_detail} index {index_rate} | "
         f"API {api_text}",
         flush=True,
     )
