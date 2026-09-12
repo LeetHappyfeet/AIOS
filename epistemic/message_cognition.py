@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Iterable
 from uuid import UUID
 
 from aios_app.db import Database
@@ -14,21 +13,62 @@ MAX_UNITS = 16
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
-_NEGATION_RE = re.compile(r"\b(?:not|never|no|cannot|can't|isn't|aren't|wasn't|weren't|doesn't|didn't|won't)\b", re.I)
+_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|cannot|can't|isn't|aren't|wasn't|weren't|doesn't|didn't|won't)\b",
+    re.I,
+)
 
 _KIND_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("MEMORY", re.compile(r"\b(?:remember|recall|memory|memories|forgot|forget|recognize)\b", re.I)),
-    ("GOAL", re.compile(r"\b(?:want|wants|wanted|intend|plan|plans|goal|seek|escape|need|needs|trying to|try to)\b", re.I)),
-    ("BELIEF", re.compile(r"\b(?:believe|believes|think|thinks|know|knows|suspect|assume|wonder|uncertain|maybe|perhaps)\b", re.I)),
-    ("RULE", re.compile(r"\b(?:must|mustn't|should|shouldn't|allowed|forbidden|required|cannot|can't|may not)\b", re.I)),
-    ("RELATIONSHIP", re.compile(r"\b(?:friend|enemy|ally|partner|assistant|sidekick|battle buddy|trust|distrust|help you|help me)\b", re.I)),
-    ("STATE", re.compile(r"\b(?:is|am|are|was|were|has|have|alive|dead|digital|data|inside|within|located|form|body)\b", re.I)),
+    (
+        "MEMORY",
+        re.compile(
+            r"\b(?:remember(?:s|ed|ing)?|recall(?:s|ed|ing)?|memory|memories|forgot|forget(?:s|ting)?|recognize(?:s|d|ing)?)\b",
+            re.I,
+        ),
+    ),
+    (
+        "GOAL",
+        re.compile(
+            r"\b(?:want(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|goal|seek(?:s|ing)?|escape(?:s|d|ing)?|need(?:s|ed|ing)?|trying to|try to)\b",
+            re.I,
+        ),
+    ),
+    (
+        "BELIEF",
+        re.compile(
+            r"\b(?:believe(?:s|d|ing)?|think(?:s|ing)?|thought|know(?:s|ing)?|knew|suspect(?:s|ed|ing)?|assume(?:s|d|ing)?|wonder(?:s|ed|ing)?|uncertain|maybe|perhaps)\b",
+            re.I,
+        ),
+    ),
+    (
+        "RULE",
+        re.compile(
+            r"\b(?:must|mustn't|should|shouldn't|allowed|forbidden|required|cannot|can't|may not)\b",
+            re.I,
+        ),
+    ),
+    (
+        "RELATIONSHIP",
+        re.compile(
+            r"\b(?:friend|enemy|ally|partner|assistant|sidekick|battle buddy|trust(?:s|ed|ing)?|distrust(?:s|ed|ing)?|help(?:s|ed|ing)? you|help(?:s|ed|ing)? me)\b",
+            re.I,
+        ),
+    ),
+    (
+        "STATE",
+        re.compile(
+            r"\b(?:is|am|are|was|were|has|have|had|alive|dead|digital|data|inside|within|located|form|body|exist(?:s|ed|ing)?)\b",
+            re.I,
+        ),
+    ),
 )
 
 _SALIENCE_RE = re.compile(
-    r"\b(?:remember|know|believe|think|want|need|plan|intend|goal|must|cannot|can't|alive|dead|"
-    r"digital|data|computer|world|body|form|escape|help|partner|assistant|friend|enemy|trust|"
-    r"uncertain|maybe|real|exist|existed|location|inside|outside|moved|arrived|left|gave|took)\b",
+    r"\b(?:remember(?:s|ed|ing)?|recall(?:s|ed|ing)?|know(?:s|ing)?|knew|believe(?:s|d|ing)?|"
+    r"think(?:s|ing)?|thought|want(?:s|ed|ing)?|need(?:s|ed|ing)?|plan(?:s|ned|ning)?|"
+    r"intend(?:s|ed|ing)?|goal|must|cannot|can't|alive|dead|digital|data|computer|world|body|"
+    r"form|escape(?:s|d|ing)?|help(?:s|ed|ing)?|partner|assistant|friend|enemy|trust(?:s|ed|ing)?|"
+    r"uncertain|maybe|real|exist(?:s|ed|ing)?|location|inside|outside|moved|arrived|left|gave|took)\b",
     re.I,
 )
 
@@ -64,11 +104,12 @@ def _kind(text: str) -> str:
 
 def _topic_key(text: str, *, character_id: str, speaker_id: str | None) -> str:
     tokens = [
-        token for token in _WORD_RE.findall(text.lower())
-        if len(token) >= 3 and token not in _STOPWORDS and token not in {"not", "never", "cannot", "can't"}
+        token
+        for token in _WORD_RE.findall(text.lower())
+        if len(token) >= 3
+        and token not in _STOPWORDS
+        and token not in {"not", "never", "cannot", "can't"}
     ]
-    # Message cognition needs stable coarse topics, not exhaustive lexical identity.
-    # Prefer named participants and then the first few content words.
     preferred: list[str] = []
     for value in (character_id, speaker_id):
         clean = re.sub(r"[^a-z0-9_'-]+", " ", (value or "").lower()).strip()
@@ -82,7 +123,14 @@ def _topic_key(text: str, *, character_id: str, speaker_id: str | None) -> str:
     return ":".join(preferred[:5]) or "message"
 
 
-def _score(text: str, *, index: int, total: int, character_id: str, speaker_id: str | None) -> float:
+def _score(
+    text: str,
+    *,
+    index: int,
+    total: int,
+    character_id: str,
+    speaker_id: str | None,
+) -> float:
     score = 0.15
     hits = len(_SALIENCE_RE.findall(text))
     score += min(0.50, hits * 0.12)
@@ -126,7 +174,6 @@ def interpret_message(
             character_id=character_id,
             speaker_id=speaker_id,
         )
-        # Keep only genuinely useful live cognition unless the message is tiny.
         if len(sentences) > 4 and salience < 0.27:
             continue
         kind = _kind(sentence)
@@ -134,7 +181,11 @@ def interpret_message(
         unit = CognitiveUnit(
             text=sentence,
             claim_kind=kind,
-            topic_key=_topic_key(sentence, character_id=character_id, speaker_id=speaker_id),
+            topic_key=_topic_key(
+                sentence,
+                character_id=character_id,
+                speaker_id=speaker_id,
+            ),
             polarity=polarity,
             salience=salience,
             confidence=max(0.45, min(0.90, 0.48 + salience * 0.42)),
@@ -209,12 +260,7 @@ async def commit_message_cognition(
     instance_id: UUID,
     node_id: UUID,
 ) -> bool:
-    """Commit a bounded, message-level cognitive interpretation for live use.
-
-    This deliberately does not create exhaustive claim candidates, semantic
-    frames, RDF, vector work, or topology. Those remain archaeology/enrichment.
-    The operation is idempotent for an (instance, node) source coordinate.
-    """
+    """Commit bounded SQL-only cognition for one source message."""
     row = await db.fetchrow(
         """
         SELECT
@@ -243,8 +289,17 @@ async def commit_message_cognition(
         instance_id,
         node_id,
     )
-    if existing and existing["source_text_hash"] == digest and existing["interpreter_version"] == INTERPRETER_VERSION:
-        await _advance_cognitive_cursor(db, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
+    if (
+        existing
+        and existing["source_text_hash"] == digest
+        and existing["interpreter_version"] == INTERPRETER_VERSION
+    ):
+        await _advance_cognitive_cursor(
+            db,
+            instance_id=instance_id,
+            node_id=node_id,
+            event_id=row["event_id"],
+        )
         return True
 
     units = interpret_message(
@@ -257,7 +312,9 @@ async def commit_message_cognition(
     summary = {
         "unit_count": len(units),
         "kinds": sorted({unit.claim_kind for unit in units}),
-        "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
+        "participants": [
+            value for value in (row["speaker_id"], row["character_id"]) if value
+        ],
         "bounded": True,
         "max_units": MAX_UNITS,
     }
@@ -297,7 +354,10 @@ async def commit_message_cognition(
         json.dumps(summary),
     )
     commit_id = commit_row["commit_id"]
-    await db.execute("DELETE FROM aios.message_cognitive_unit WHERE commit_id=$1", commit_id)
+    await db.execute(
+        "DELETE FROM aios.message_cognitive_unit WHERE commit_id=$1",
+        commit_id,
+    )
 
     for ordinal, unit in enumerate(units):
         unit_row = await db.execute_returning_row(
@@ -391,7 +451,10 @@ async def mark_enrichment_ready(
     instance_id: UUID,
     node_id: UUID,
 ) -> None:
-    row = await db.fetchrow("SELECT event_id FROM aios.dag_node WHERE node_id=$1", node_id)
+    row = await db.fetchrow(
+        "SELECT event_id FROM aios.dag_node WHERE node_id=$1",
+        node_id,
+    )
     event_id = row["event_id"] if row else None
     await db.execute(
         """
