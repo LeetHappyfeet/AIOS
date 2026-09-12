@@ -7,6 +7,7 @@ from typing import Any, Iterable, Mapping, Protocol
 from aios_app.db import Database
 from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
+from aios_app.epistemic.message_cognition import current_message_cognition
 
 
 class RelevanceScorer(Protocol):
@@ -15,8 +16,6 @@ class RelevanceScorer(Protocol):
 
 @dataclass(frozen=True)
 class CognitiveAttentionInputs:
-    """Historically and epistemically eligible inputs prepared before HUD assembly."""
-
     recent_newest: list[dict[str, Any]]
     visible_source_node_ids: frozenset[str]
     focus_text: str
@@ -27,8 +26,6 @@ class CognitiveAttentionInputs:
 
 @dataclass(frozen=True)
 class CognitiveKnowledgeSnapshot:
-    """Admitted character cognition ready for attention ranking/presentation."""
-
     knowledge: list[dict[str, Any]]
     topology_retrieval: bool
     topology_partial_fallback: bool
@@ -56,11 +53,15 @@ def cognitive_rejection_reason(
     *,
     visible_source_node_ids: frozenset[str] = frozenset(),
 ) -> str | None:
-    """Reject immature semantic hypotheses before they reach the HUD layer.
+    """Reject immature archaeology hypotheses before HUD presentation.
 
-    Rejection here is admission control only. The underlying proposition remains
-    available to reconciliation, topology, diagnostics, and later re-processing.
+    Message-level cognitive commits are already bounded/admitted by the fast
+    interpreter and intentionally bypass the current-source duplicate guard.
+    They represent cognition derived from the source event, not a second copy of
+    the raw event.
     """
+    if item.get("cognitive_commit"):
+        return None
 
     source_node_id = item.get("source_node_id")
     if source_node_id is not None and str(source_node_id) in visible_source_node_ids:
@@ -114,14 +115,7 @@ def admit_cognitive_candidates(
 
 
 class CognitiveContextService:
-    """Resolve source visibility and character cognition before HUD presentation.
-
-    This service owns the boundary between historical/epistemic state and the
-    presentation layer. It deliberately does not perform token budgeting or
-    text rendering. The HUD may rank and compress the admitted result, but it
-    should not discover new evidence or decide whether a proposition is mature
-    enough to become agent-facing cognition.
-    """
+    """Resolve source visibility and character cognition before HUD presentation."""
 
     def __init__(self, db: Database):
         self.db = db
@@ -149,10 +143,7 @@ class CognitiveContextService:
             context.timeline_id,
             bounded_limit,
         )
-        runtime_newest = [
-            {**dict(row), "event_stream": "runtime"}
-            for row in runtime_rows
-        ]
+        runtime_newest = [{**dict(row), "event_stream": "runtime"} for row in runtime_rows]
 
         source_newest: list[dict[str, Any]] = []
         if context.source_timeline_id and context.source_head_node_id:
@@ -175,10 +166,7 @@ class CognitiveContextService:
                 context.source_head_node_id,
                 bounded_limit,
             )
-            source_newest = [
-                {**dict(row), "event_stream": "source"}
-                for row in source_rows
-            ]
+            source_newest = [{**dict(row), "event_stream": "source"} for row in source_rows]
 
         recent_newest = source_newest + runtime_newest
         recent_newest.sort(
@@ -232,64 +220,73 @@ class CognitiveContextService:
         focus_text = attention.retrieval_focus_text
         goals = attention.goals
 
+        # Fast cognition is generation-critical and deliberately independent of
+        # topology/vector/RDF completion. It is merged first so token budgeting
+        # favors the current message's committed semantics.
+        fast_rows = await current_message_cognition(
+            self.db,
+            instance_id=context.instance_id,
+            node_id=context.source_head_node_id,
+        )
+        fast_knowledge: list[dict[str, Any]] = []
+        for rank, row in enumerate(fast_rows):
+            kind = str(row.get("claim_kind") or "BELIEF").upper()
+            text = str(row.get("text") or "").strip()
+            if not text:
+                continue
+            confidence = float(row.get("confidence") or 0.5)
+            fast_knowledge.append({
+                "proposition_id": f"cognitive:{row['unit_id']}",
+                "topic_key": row.get("topic_key"),
+                "text": text,
+                "subject_norm": context.character_id,
+                "predicate_norm": "message_cognition",
+                "object_norm": text,
+                "polarity": row.get("polarity") or 1,
+                "modality": "asserted",
+                "claim_kind": kind,
+                "predicate_family": "COGNITIVE_COMMIT",
+                "epistemic_status": "observed",
+                "confidence": confidence,
+                "effective_confidence": confidence,
+                "salience_weight": float(row.get("salience") or 0.5),
+                "source_node_id": row.get("node_id"),
+                "acquisition_mode": "message_cognitive_commit",
+                "updated_at": None,
+                "conflicts": [],
+                "cognitive_commit": True,
+                "tier": 0 if kind in {"GOAL", "RULE"} else 1,
+                "relevance": {"total": 10.0 - rank * 0.01, "source": "message_cognitive_commit"},
+            })
+
         topology_memories = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="memory",
-            focus_text=focus_text,
-            goals=goals,
-            max_hops=max(
-                3 if hud_profile.deep_memory_limit > 0 else 2,
-                int(hud_profile.entity_hops),
-            ),
-            limit=min(
-                250,
-                hud_profile.semantic_retrieval_limit + max(0, hud_profile.deep_memory_limit),
-            ),
+            context, scorer, mode="memory", focus_text=focus_text, goals=goals,
+            max_hops=max(3 if hud_profile.deep_memory_limit > 0 else 2, int(hud_profile.entity_hops)),
+            limit=min(250, hud_profile.semantic_retrieval_limit + max(0, hud_profile.deep_memory_limit)),
         )
         topology_beliefs = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="belief",
-            focus_text=focus_text,
-            goals=goals,
+            context, scorer, mode="belief", focus_text=focus_text, goals=goals,
             max_hops=max(2, int(hud_profile.entity_hops)),
             limit=hud_profile.semantic_retrieval_limit,
         )
         topology_goals = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="goal",
-            focus_text=focus_text,
-            goals=goals,
+            context, scorer, mode="goal", focus_text=focus_text, goals=goals,
             max_hops=max(1, int(hud_profile.entity_hops)),
             limit=min(hud_profile.semantic_retrieval_limit, 30),
         )
         topology_events = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="event",
-            focus_text=focus_text,
-            goals=goals,
+            context, scorer, mode="event", focus_text=focus_text, goals=goals,
             max_hops=max(2, int(hud_profile.entity_hops)),
             limit=min(hud_profile.semantic_retrieval_limit, 40),
         )
         topology_rules = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="rule",
-            focus_text=focus_text,
-            goals=goals,
+            context, scorer, mode="rule", focus_text=focus_text, goals=goals,
             max_hops=max(1, int(hud_profile.entity_hops)),
             limit=min(hud_profile.semantic_retrieval_limit, 30),
         )
 
         topology_knowledge = (
-            topology_memories
-            + topology_beliefs
-            + topology_goals
-            + topology_events
-            + topology_rules
+            topology_memories + topology_beliefs + topology_goals + topology_events + topology_rules
         )
         missing_modes = {
             "memory": not topology_memories,
@@ -304,7 +301,7 @@ class CognitiveContextService:
             else []
         )
 
-        merged = list(topology_knowledge)
+        merged = list(fast_knowledge) + list(topology_knowledge)
         for item in legacy_knowledge:
             kind = str(item.get("claim_kind") or "BELIEF").upper()
             if (
@@ -339,8 +336,7 @@ class CognitiveContextService:
             if item.get("anchor", {}).get("world_visible")
         )
         invisible_anchor_count = sum(
-            1
-            for item in knowledge
+            1 for item in knowledge
             if item.get("anchor") and not item["anchor"].get("world_visible", False)
         )
         return CognitiveKnowledgeSnapshot(
@@ -389,17 +385,11 @@ class CognitiveContextService:
             FROM aios.character_proposition_knowledge ck
             JOIN aios.proposition p ON p.proposition_id=ck.proposition_id
             LEFT JOIN LATERAL (
-                SELECT
-                    ccr.claim_kind,
-                    ccr.predicate_family,
-                    ccr.world_id,
-                    ccr.dag_node_id
+                SELECT ccr.claim_kind, ccr.predicate_family, ccr.world_id, ccr.dag_node_id
                 FROM aios.observation o
                 JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
                 WHERE o.proposition_id=p.proposition_id
-                ORDER BY
-                    (ccr.character_instance_id=$1) DESC,
-                    ccr.resolved_at DESC
+                ORDER BY (ccr.character_instance_id=$1) DESC, ccr.resolved_at DESC
                 LIMIT 1
             ) ctx ON true
             LEFT JOIN LATERAL (
@@ -420,8 +410,7 @@ class CognitiveContextService:
                 JOIN aios.character_proposition_knowledge other_ck
                   ON other_ck.instance_id=$1
                  AND other_ck.proposition_id=other.proposition_id
-                WHERE pc.proposition_a_id=p.proposition_id
-                   OR pc.proposition_b_id=p.proposition_id
+                WHERE pc.proposition_a_id=p.proposition_id OR pc.proposition_b_id=p.proposition_id
             ) conflicts ON true
             WHERE ck.instance_id=$1
               AND EXISTS (
