@@ -36,7 +36,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "dag_to_document_section": JobSpec(ResourceClass.FAST_SQL, "node_id", True),
     "extract_claims": JobSpec(ResourceClass.NLP, "section_id", True, isolate_blocking=True),
     "decompose_claim_frames": JobSpec(ResourceClass.NLP, "claim_id", True, isolate_blocking=True),
-    "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_id", True, isolate_blocking=True, requires_rdf_slot=True),
+    "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_id", True, isolate_blocking=True),
     "normalize_proposition": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
     "project_character_knowledge": JobSpec(ResourceClass.SEMANTIC, "global", True),
     "derive_claim_topology": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True),
