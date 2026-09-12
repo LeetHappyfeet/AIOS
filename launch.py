@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import json
 import os
 import queue
 import signal
@@ -12,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from aios_app.config import settings
 
@@ -21,6 +22,13 @@ PYTHON = sys.executable
 DEFAULT_STARTUP_TIMEOUT = float(os.getenv("AIOS_STARTUP_TIMEOUT", "20"))
 CORE_STARTUP_TIMEOUT = float(os.getenv("AIOS_CORE_STARTUP_TIMEOUT", "60"))
 FAILURE_TAIL_LINES = int(os.getenv("AIOS_FAILURE_TAIL_LINES", "20"))
+STATUS_INTERVAL = float(os.getenv("AIOS_STATUS_INTERVAL", "10"))
+LOG_MODE = os.getenv("AIOS_LOG_MODE", "normal").strip().lower()
+if LOG_MODE not in {"normal", "verbose", "debug"}:
+    LOG_MODE = "normal"
+
+_TELEMETRY: Dict[str, dict[str, Any]] = {}
+_LAST_STATES: Dict[str, str] = {}
 
 
 SERVICES = [
@@ -158,11 +166,18 @@ def _probe_tcp(host: str, port: int) -> bool:
 
 
 def _probe_http(url: str) -> bool:
+    ok, _ = _probe_http_latency(url)
+    return ok
+
+
+def _probe_http_latency(url: str) -> tuple[bool, Optional[float]]:
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(url, timeout=0.5) as response:
-            return 200 <= response.status < 300
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            return 200 <= response.status < 300, elapsed_ms
     except (urllib.error.URLError, TimeoutError, OSError):
-        return False
+        return False, None
 
 
 def _readiness_probe(runtime: ServiceRuntime) -> bool:
@@ -186,6 +201,71 @@ def _mark_ready(runtime: ServiceRuntime) -> None:
     print(_format_state(runtime.name, "READY", f"{elapsed:.1f}s"), flush=True)
 
 
+def _parse_telemetry(line: str) -> Optional[dict[str, Any]]:
+    marker = "AIOS_TELEMETRY "
+    if not line.startswith(marker):
+        return None
+    try:
+        payload = json.loads(line[len(marker):])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_important_line(line: str) -> bool:
+    upper = line.upper()
+    return (
+        " WARNING" in upper
+        or "WARNING:" in upper
+        or " ERROR" in upper
+        or "ERROR:" in upper
+        or "CRITICAL" in upper
+        or "TRACEBACK" in upper
+        or "EXCEPTION" in upper
+        or "FAILED" in upper
+    )
+
+
+def _should_print_line(name: str, line: str) -> bool:
+    if LOG_MODE == "debug":
+        return True
+    if _is_important_line(line):
+        return True
+
+    if name == "API" and ' "GET /healthz HTTP/' in line and " 200 " in line:
+        return False
+
+    if name == "Pipeline Runner":
+        noisy = (
+            "INFO:aios.pipeline.runner:Job done " in line
+            or "INFO:aios.pipeline.runner:Scheduler queues " in line
+            or "INFO:aios.epistemic.topology_projection:Projected semantic topology " in line
+        )
+        if noisy:
+            return LOG_MODE == "verbose" and "Job done " not in line
+
+    if name == "Semantic Index":
+        if "INFO:httpx:HTTP Request:" in line or "INFO:httpcore:" in line:
+            return False
+        if "INFO:aios.semantic_index:Indexed " in line:
+            return LOG_MODE == "verbose"
+
+    return True
+
+
+def _announce_state_transition(payload: dict[str, Any]) -> None:
+    service = str(payload.get("service") or "")
+    state = str(payload.get("state") or "")
+    if not service or not state:
+        return
+    previous = _LAST_STATES.get(service)
+    _LAST_STATES[service] = state
+    if previous is None or previous == state:
+        return
+    symbol = "✓" if state in {"CAUGHT_UP", "HEALTHY"} else "⚠"
+    print(f"{symbol} {service} state {previous} → {state}", flush=True)
+
+
 def _drain_output(
     output_queue: "queue.Queue[tuple[str, str]]",
     runtimes: Dict[str, ServiceRuntime],
@@ -196,7 +276,6 @@ def _drain_output(
         except queue.Empty:
             break
 
-        print(f"[{name}] {line}", flush=True)
         runtime = runtimes[name]
         readiness = runtime.spec.get("readiness", {})
         if (
@@ -205,6 +284,95 @@ def _drain_output(
             and str(readiness.get("marker", "")) in line
         ):
             _mark_ready(runtime)
+
+        payload = _parse_telemetry(line)
+        if payload is not None:
+            service = str(payload.get("service") or name)
+            _TELEMETRY[service] = payload
+            _announce_state_transition(payload)
+            continue
+
+        if _should_print_line(name, line):
+            print(f"[{name}] {line}", flush=True)
+
+
+def _format_age(seconds: Any) -> str:
+    try:
+        value = max(0.0, float(seconds or 0.0))
+    except (TypeError, ValueError):
+        return "-"
+    if value < 1.0:
+        return f"{value * 1000:.0f}ms"
+    if value < 60.0:
+        return f"{value:.1f}s"
+    minutes, secs = divmod(int(value), 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _format_rate(value: Any) -> str:
+    try:
+        return f"{float(value):.1f}/s"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
+    pipeline = _TELEMETRY.get("pipeline", {})
+    semantic = _TELEMETRY.get("semantic_index", {})
+
+    api_runtime = runtime_by_name.get("API")
+    api_ok = False
+    api_ms: Optional[float] = None
+    if api_runtime and api_runtime.process.poll() is None:
+        readiness = api_runtime.spec.get("readiness", {})
+        if readiness.get("type") == "http":
+            api_ok, api_ms = _probe_http_latency(str(readiness["url"]))
+
+    live_state = str(pipeline.get("live_state") or "UNKNOWN")
+    pipeline_state = str(pipeline.get("state") or "WAITING")
+    queued = int(pipeline.get("queued") or 0)
+    running = int(pipeline.get("running") or 0)
+    lag = _format_age(pipeline.get("oldest_s"))
+    done_rate = _format_rate(pipeline.get("done_per_s"))
+    in_rate = _format_rate(pipeline.get("arrivals_per_s"))
+    semantic_state = str(semantic.get("state") or "WAITING")
+    vector_backlog = int(semantic.get("pending_vectors") or 0)
+    vector_suffix = "+" if semantic.get("pending_vectors_capped") else ""
+    index_rate = _format_rate(semantic.get("indexed_per_s"))
+    api_text = f"{api_ms:.0f}ms" if api_ok and api_ms is not None else "DOWN"
+
+    print(
+        "[AIOS] "
+        f"LIVE {live_state} | "
+        f"pipeline {pipeline_state} {queued}q/{running}r lag {lag} "
+        f"in {in_rate} out {done_rate} | "
+        f"semantic {semantic_state} vectors {vector_backlog}{vector_suffix} "
+        f"index {index_rate} | "
+        f"API {api_text}",
+        flush=True,
+    )
+
+    if pipeline_state in {"FALLING_BEHIND", "DEGRADED"}:
+        lanes = list(pipeline.get("lanes") or [])
+        lanes.sort(
+            key=lambda row: (int(row.get("queued") or 0), float(row.get("oldest_s") or 0.0)),
+            reverse=True,
+        )
+        for row in lanes[:4]:
+            queued_lane = int(row.get("queued") or 0)
+            running_lane = int(row.get("running") or 0)
+            if queued_lane == 0 and running_lane == 0:
+                continue
+            print(
+                "       "
+                f"{row.get('resource')}/{row.get('lane')}: "
+                f"{queued_lane}q/{running_lane}r "
+                f"oldest {_format_age(row.get('oldest_s'))}",
+                flush=True,
+            )
 
 
 def _print_failure_tail(runtime: ServiceRuntime) -> None:
@@ -336,6 +504,7 @@ def main() -> None:
     print(f"   API: http://{settings.api_host}:{settings.api_port}")
     print(f"   PostgreSQL: {settings.db_dsn}")
     print(f"   Fuseki: {settings.fuseki_base_url}")
+    print(f"   Console mode: {LOG_MODE}")
     print()
 
     try:
@@ -376,14 +545,24 @@ def main() -> None:
         print(f"   Required services: {required_ready}/{len(required)} ready")
         print(f"   Optional services: {optional_ready}/{len(optional)} ready")
         print(f"   API: http://{settings.api_host}:{settings.api_port}")
+        print(
+            "   Terminal shows summarized health; set AIOS_LOG_MODE=verbose or "
+            "debug for more detail."
+        )
         print("   Press Ctrl+C to stop.\n", flush=True)
 
         reported_optional_exits = {
             runtime.name for runtime in optional if runtime.state == "DEGRADED"
         }
+        next_status = time.monotonic()
 
         while True:
             _drain_output(output_queue, runtime_by_name)
+
+            now = time.monotonic()
+            if now >= next_status:
+                _render_status(runtime_by_name)
+                next_status = now + max(2.0, STATUS_INTERVAL)
 
             for runtime in runtimes:
                 code = runtime.process.poll()
