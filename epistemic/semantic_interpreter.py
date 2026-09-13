@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
-SEMANTIC_INTERPRETER_VERSION = "semantic-interpreter-v2"
+SEMANTIC_INTERPRETER_VERSION = "semantic-interpreter-v3"
 
 SEMANTIC_TYPE_TO_PREDICATE_FAMILY = {
     "ACTION": "ACTION",
@@ -44,15 +44,16 @@ SEMANTIC_TYPE_TO_CLAIM_KIND = {
 }
 
 # English lexical knowledge belongs to the source-language adapter boundary.
-# It maps surface lemmas into stable semantic types; downstream epistemic code
-# consumes those semantic types rather than the English words themselves.
+# Completed/ongoing attempts intentionally remain ACTION/EVENT rather than
+# durable INTENTION/GOAL. A goal requires explicit desire/planning language.
 _ENGLISH_LEMMA_HINTS = {
     "remember": "MEMORY", "recall": "MEMORY", "forget": "MEMORY",
     "know": "MENTAL_STATE", "believe": "MENTAL_STATE", "think": "MENTAL_STATE",
     "suspect": "MENTAL_STATE", "assume": "MENTAL_STATE", "infer": "MENTAL_STATE",
     "understand": "MENTAL_STATE", "want": "DESIRE", "wish": "DESIRE",
     "desire": "DESIRE", "intend": "INTENTION", "plan": "INTENTION",
-    "try": "INTENTION", "attempt": "INTENTION", "seek": "INTENTION",
+    "seek": "INTENTION",
+    "try": "ACTION", "attempt": "ACTION",
     "say": "COMMUNICATION", "tell": "COMMUNICATION", "ask": "COMMUNICATION",
     "reply": "COMMUNICATION", "report": "COMMUNICATION", "claim": "COMMUNICATION",
     "state": "COMMUNICATION", "write": "COMMUNICATION", "have": "POSSESSION",
@@ -105,13 +106,6 @@ def _norm(value: Optional[str]) -> str:
 
 
 def _standalone(*, frame_role: Optional[str], subject: Optional[str], predicate: Optional[str], resolution_status: Optional[str]) -> bool:
-    """Whether this semantic unit may stand independently in cognition.
-
-    A root operator may be standalone even when its content is another frame:
-    WANT(Ren, BUILD(...)) is a valid desire.  The BUILD xcomp is the dependent
-    unit and remains non-atomic.  This keeps nested content structural without
-    throwing away the parent belief/goal/communication act.
-    """
     role = _norm(frame_role)
     if resolution_status and _norm(resolution_status) != "resolved":
         return False
