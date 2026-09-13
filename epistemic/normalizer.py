@@ -8,6 +8,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic import normalizer_legacy as legacy
 from aios_app.epistemic.context_resolver import RESOLVER_VERSION
+from aios_app.epistemic.knowledge import reconcile_context_acquisitions_for_claim
 
 NORMALIZER_VERSION = "proposition-v3-semantic"
 
@@ -25,6 +26,11 @@ ensure_proposition = legacy.ensure_proposition
 
 async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
     proposition_id = await legacy.normalize_claim_once(db, claim_id=claim_id)
+
+    # The compatibility normalizer may have emitted a context-generated
+    # acquisition from an older/coarser interpretation. Revalidate it against
+    # the current semantic context before it can reach /char knowledge.
+    await reconcile_context_acquisitions_for_claim(db, claim_id=claim_id)
 
     # Keep observation provenance honest about the resolver that actually
     # classified the claim.  Older code stamped v3 as a literal constant.
