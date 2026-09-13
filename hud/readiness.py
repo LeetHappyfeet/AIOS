@@ -140,6 +140,56 @@ async def mark_matching_runtime_dirty(
         )
 
 
+async def _character_projection_clean(
+    db: Database,
+    *,
+    instance_id: UUID,
+) -> bool:
+    """Return false only when stale materialized /char state is known to be invalid.
+
+    Ordinary unprocessed enrichment does not block generation. The barrier only
+    catches context-generated acquisitions that were already materialized but
+    whose current resolver/frame state would now fail the /char admission rules.
+    This prevents a fast HUD from replaying known-stale beliefs while background
+    retraction is still queued.
+    """
+    row = await db.fetchrow(
+        """
+        SELECT NOT EXISTS (
+            SELECT 1
+            FROM aios.knowledge_acquisition_event kae
+            LEFT JOIN aios.claim_context_resolution ccr
+              ON ccr.claim_id=kae.claim_id
+            LEFT JOIN aios.claim_candidate cc
+              ON cc.claim_id=kae.claim_id
+            LEFT JOIN aios.claim_semantic_frame_projection sfp
+              ON sfp.claim_id=kae.claim_id
+            LEFT JOIN aios.claim_semantic_frame sf
+              ON sf.frame_id=sfp.primary_frame_id
+            WHERE kae.instance_id=$1
+              AND kae.claim_id IS NOT NULL
+              AND kae.processed_at IS NOT NULL
+              AND lower(COALESCE(kae.meta->>'source','')) LIKE 'context-resolver%'
+              AND (
+                    ccr.claim_id IS NULL
+                 OR lower(COALESCE(ccr.epistemic_scope,'')) <> 'character'
+                 OR ccr.character_instance_id IS DISTINCT FROM $1
+                 OR upper(COALESCE(ccr.claim_kind,'')) NOT IN (
+                        'BELIEF','MEMORY','GOAL','RULE','STATE','TRAIT','RELATIONSHIP'
+                    )
+                 OR lower(COALESCE(sf.discourse_mode,'')) IN (
+                        'question','hypothetical','counterfactual','conditional','quoted_question'
+                    )
+                 OR COALESCE(cc.raw_text,'') ~ '\\?\\s*["''”’\\)\\]]*\\s*$'
+              )
+            LIMIT 1
+        ) AS clean
+        """,
+        instance_id,
+    )
+    return bool(row and row["clean"])
+
+
 async def source_node_retrieval_ready(
     db: Database,
     *,
@@ -148,14 +198,14 @@ async def source_node_retrieval_ready(
 ) -> bool:
     """Return the generation-critical cognitive barrier for one source node.
 
-    The old implementation waited for every extracted claim, normalization,
-    acquisition and topology projection. That made semantic archaeology a hard
-    dependency of generation. Retrieval readiness now means that the bounded
-    message-level cognitive commit exists for this exact runtime/source node.
-    Exhaustive enrichment continues independently.
+    Generation does not wait for exhaustive claim/topology enrichment. It does,
+    however, refuse to report ready when current SQL context proves that already
+    materialized context-generated /char knowledge is stale and awaiting
+    retraction. This keeps the fast cognition path while preventing known-wrong
+    character beliefs from being replayed as generation-ready.
     """
     if node_id is None:
-        return True
+        return await _character_projection_clean(db, instance_id=instance_id)
     row = await db.fetchrow(
         """
         SELECT 1
@@ -168,7 +218,9 @@ async def source_node_retrieval_ready(
         node_id,
         INTERPRETER_VERSION,
     )
-    return bool(row)
+    if not row:
+        return False
+    return await _character_projection_clean(db, instance_id=instance_id)
 
 
 async def source_node_topology_ready(
