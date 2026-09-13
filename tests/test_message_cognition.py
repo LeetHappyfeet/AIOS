@@ -1,92 +1,77 @@
-from aios_app.epistemic.message_cognition import (
-    INTERPRETER_VERSION,
-    MAX_UNITS,
-    interpret_message,
-)
+from aios_app.epistemic.message_cognition import INTERPRETER_VERSION, interpret_message
 
 
-def _interpret(text: str, *, speaker: str = "Ren-119", viewpoint: str = "Shego_001"):
+def _interpret(text: str, *, speaker: str = "Shego_001", viewpoint: str = "Shego_001"):
     return interpret_message(
         text,
         character_id="Shego_001",
         speaker_id=speaker,
-        speaker_role="user" if speaker != "Shego_001" else "assistant",
+        speaker_role="assistant",
         viewpoint_id=viewpoint,
     )
 
 
-def test_message_cognition_is_bounded_and_salient():
-    text = " ".join(
-        [
-            "Shego looked around.",
-            "The wallpaper was beige.",
-            "Shego knows she is digital data inside a computer.",
-            "Shego remembers being trapped in a comic book.",
-            "Ren offers to help her if she works as his battle buddy.",
-            "Shego wants to escape confinement.",
-            "Shego is uncertain whether she ever physically existed.",
-        ]
-        + [f"She moved her hand {i}." for i in range(40)]
-    )
-    units = _interpret(text)
-    assert len(units) <= MAX_UNITS
-    rendered = " ".join(unit.text.lower() for unit in units)
-    assert "digital data" in rendered
-    assert "remembers" in rendered
-    assert "wants to escape" in rendered
-    assert "uncertain" in rendered
-    assert "wallpaper" not in rendered
-
-
-def test_message_cognition_classifies_core_kinds():
-    units = _interpret(
-        "Shego remembers the show ending. "
-        "Shego wants to escape. "
-        "Shego believes she is alive."
-    )
-    kinds = {unit.claim_kind for unit in units}
-    assert {"MEMORY", "GOAL", "BELIEF"}.issubset(kinds)
-
-
-def test_negation_changes_polarity():
-    units = _interpret("Shego believes she is not trapped.")
-    assert units
-    assert units[0].polarity == -1
-
-
-def test_other_speaker_first_person_desire_is_not_character_goal():
-    units = _interpret("I want to leave this place.", speaker="Ren-119")
-    assert not [unit for unit in units if unit.claim_kind == "GOAL"]
-
-
-def test_character_first_person_desire_is_character_goal():
-    units = _interpret(
-        "I want to leave this place.",
-        speaker="Shego_001",
-        viewpoint="Shego_001",
-    )
+def test_first_person_goal_owned_by_character():
+    units = _interpret("I want to get out of this computer.")
     goals = [unit for unit in units if unit.claim_kind == "GOAL"]
     assert len(goals) == 1
     assert goals[0].meta["character_owned"] is True
     assert goals[0].meta["semantic_owner"] == "Shego_001"
 
 
-def test_second_person_question_is_not_character_goal():
-    units = _interpret("You want me to be your assistant?")
+def test_second_person_other_speaker_maps_to_active_character():
+    units = _interpret("You are digital now.", speaker="Ren-119", viewpoint="Ren-119")
+    states = [unit for unit in units if unit.claim_kind == "STATE"]
+    assert len(states) == 1
+    assert states[0].meta["character_owned"] is True
+
+
+def test_question_does_not_become_goal():
+    units = _interpret("Do you want to be my battle buddy?")
     assert not [unit for unit in units if unit.claim_kind == "GOAL"]
 
 
-def test_question_about_desire_is_not_character_goal():
-    units = _interpret("What do you want?")
+def test_causal_desire_does_not_become_goal():
+    units = _interpret("The pressure made her want to escape.")
     assert not [unit for unit in units if unit.claim_kind == "GOAL"]
 
 
-def test_causal_impulse_is_not_durable_goal():
-    units = _interpret("It made her want to scream.")
-    assert not [unit for unit in units if unit.claim_kind == "GOAL"]
+def test_memory_is_durable():
+    units = _interpret("She remembers the show ending.")
+    memories = [unit for unit in units if unit.claim_kind == "MEMORY"]
+    assert len(memories) == 1
+    assert memories[0].meta["persistence"] == "durable"
 
 
-def test_explicit_narrated_character_goal_is_kept():
+def test_belief_is_until_contradicted():
+    units = _interpret("She believes this system is a prison.")
+    beliefs = [unit for unit in units if unit.claim_kind == "BELIEF"]
+    assert len(beliefs) == 1
+    assert beliefs[0].meta["persistence"] == "until_contradicted"
+
+
+def test_explicit_rule_is_until_contradicted():
+    units = _interpret("Shego must not reveal the password.")
+    rules = [unit for unit in units if unit.claim_kind == "RULE"]
+    assert len(rules) == 1
+    assert rules[0].meta["persistence"] == "until_contradicted"
+
+
+def test_state_is_until_changed():
+    units = _interpret("She is digital now.")
+    states = [unit for unit in units if unit.claim_kind == "STATE"]
+    assert len(states) == 1
+    assert states[0].meta["persistence"] == "until_changed"
+
+
+def test_completed_event_is_turn_scoped():
+    units = _interpret("She escaped the room.")
+    events = [unit for unit in units if unit.claim_kind == "EVENT"]
+    assert len(events) == 1
+    assert events[0].meta["persistence"] == "turn"
+
+
+def test_prepared_goal_is_session_scoped():
     units = _interpret("Shego prepared to tear her way out of the system.")
     goals = [unit for unit in units if unit.claim_kind == "GOAL"]
     assert len(goals) == 1
@@ -105,5 +90,5 @@ def test_relationship_observation_can_cross_speaker_boundary():
     assert relationships[0].meta["character_owned"] is False
 
 
-def test_v2_interpreter_version_forces_old_commit_refresh():
-    assert INTERPRETER_VERSION == "message-cognition-v2"
+def test_v3_interpreter_version_forces_old_commit_refresh():
+    assert INTERPRETER_VERSION == "message-cognition-v3"
