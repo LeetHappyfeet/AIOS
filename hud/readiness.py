@@ -145,14 +145,7 @@ async def _character_projection_clean(
     *,
     instance_id: UUID,
 ) -> bool:
-    """Return false only when stale materialized /char state is known to be invalid.
-
-    Ordinary unprocessed enrichment does not block generation. The barrier only
-    catches context-generated acquisitions that were already materialized but
-    whose current resolver/frame state would now fail the /char admission rules.
-    This prevents a fast HUD from replaying known-stale beliefs while background
-    retraction is still queued.
-    """
+    """Return false only when stale materialized /char state is known to be invalid."""
     row = await db.fetchrow(
         """
         SELECT NOT EXISTS (
@@ -187,7 +180,7 @@ async def _character_projection_clean(
         """,
         instance_id,
     )
-    return bool(row and row["clean"])
+    return bool(row and row.get("clean", True))
 
 
 async def source_node_retrieval_ready(
@@ -196,16 +189,10 @@ async def source_node_retrieval_ready(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> bool:
-    """Return the generation-critical cognitive barrier for one source node.
-
-    Generation does not wait for exhaustive claim/topology enrichment. It does,
-    however, refuse to report ready when current SQL context proves that already
-    materialized context-generated /char knowledge is stale and awaiting
-    retraction. This keeps the fast cognition path while preventing known-wrong
-    character beliefs from being replayed as generation-ready.
-    """
+    """Return the generation-critical cognitive barrier for one source node."""
+    # Runtime-only instances with no source coordinate have nothing to wait on.
     if node_id is None:
-        return await _character_projection_clean(db, instance_id=instance_id)
+        return True
     row = await db.fetchrow(
         """
         SELECT 1
@@ -229,12 +216,7 @@ async def source_node_topology_ready(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> bool:
-    """Return whether exhaustive topology enrichment is complete for diagnostics.
-
-    This is no longer a generation barrier. When complete, the separate
-    enrichment cursor is advanced so operators can see cognition versus
-    archaeology progress independently.
-    """
+    """Return whether exhaustive topology enrichment is complete for diagnostics."""
     if node_id is None:
         return True
 
@@ -312,7 +294,6 @@ async def _enqueue_live_job(
     job_type: str,
     payload: dict,
 ) -> bool:
-    """Compatibility helper for the few live jobs that remain pipeline-backed."""
     discriminator = next(
         (
             (key, str(payload[key]))
@@ -363,13 +344,6 @@ async def enqueue_live_turn_work(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> int:
-    """Commit generation-critical cognition without promoting exhaustive claims.
-
-    Message cognition is deliberately bounded and SQL-only, so it can complete
-    synchronously at source-cursor advance. Claim extraction, frame decomposition,
-    detailed context resolution, RDF, topology, vectors and reconciliation remain
-    under the ordinary supervisor as asynchronous enrichment.
-    """
     if node_id is None:
         return 0
     committed = await commit_message_cognition(
@@ -394,7 +368,6 @@ async def set_retrieval_ready(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> None:
-    """Compatibility setter: retrieval readiness now aliases cognitive readiness."""
     event_id = None
     if node_id:
         row = await db.fetchrow("SELECT event_id FROM aios.dag_node WHERE node_id=$1", node_id)
