@@ -56,6 +56,21 @@ def _as_uuid(value: object) -> Optional[UUID]:
         return None
 
 
+def _candidate_world_id(row: dict[str, Any]) -> Optional[UUID]:
+    """Choose the concrete-world candidate without letting a hint override runtime truth."""
+    scope = _norm(row.get("epistemic_scope"))
+    source_kind = _norm(row.get("source_kind"))
+    source_id = row.get("source_id")
+
+    if scope in {"world", "observation", "character", "speaker"}:
+        return _as_uuid(row.get("world_id"))
+
+    if scope == "narrative" and (not source_id or source_kind in _RUNTIME_SOURCE_KINDS):
+        return _as_uuid(row.get("world_id"))
+
+    return _as_uuid(row.get("target_world_id")) or _as_uuid(row.get("world_id"))
+
+
 def _source_context_key(source_id: str, topic_key: object) -> str:
     topic = str(topic_key or "").strip()
     if not topic:
@@ -75,7 +90,7 @@ def plan_reality_memberships(row: dict[str, Any]) -> tuple[RealityMembershipPlan
     scope = _norm(row.get("epistemic_scope"))
     source_kind = _norm(row.get("source_kind"))
     source_id = row.get("source_id")
-    world_id = row.get("target_world_id") or row.get("world_id")
+    world_id = _candidate_world_id(row)
 
     plans: list[RealityMembershipPlan] = []
 
@@ -158,13 +173,24 @@ def plan_reality_memberships(row: dict[str, Any]) -> tuple[RealityMembershipPlan
     return tuple(plans)
 
 
-async def _ensure_world_context(db: Database, world_id: UUID) -> dict[str, Any]:
+async def _ensure_world_context(db: Database, world_id: UUID) -> Optional[dict[str, Any]]:
+    # target_world_id is only a hint for external ingest. A stale or mistyped
+    # optional hint must not make the semantic topology job fail.
+    exists = await db.fetchrow(
+        "SELECT world_id FROM aios.world WHERE world_id=$1",
+        world_id,
+    )
+    if not exists:
+        return None
+
     row = await db.fetchrow(
         """
         SELECT aios.ensure_world_reality_context($1) AS reality_context_id
         """,
         world_id,
     )
+    if not row:
+        return None
     context_id = row["reality_context_id"]
     context = await db.fetchrow(
         """
@@ -175,7 +201,7 @@ async def _ensure_world_context(db: Database, world_id: UUID) -> dict[str, Any]:
         """,
         context_id,
     )
-    return dict(context)
+    return dict(context) if context else None
 
 
 async def _ensure_source_context(db: Database, row: dict[str, Any]) -> dict[str, Any]:
@@ -296,7 +322,7 @@ async def resolve_claim_reality(
         REALITY_RESOLVER_VERSION,
     )
 
-    world_id = _as_uuid(row.get("target_world_id") or row.get("world_id"))
+    world_id = _candidate_world_id(row)
     source_context: Optional[dict[str, Any]] = None
     world_context: Optional[dict[str, Any]] = None
     memberships: list[dict[str, Any]] = []
@@ -313,6 +339,8 @@ async def resolve_claim_reality(
                 continue
             if world_context is None:
                 world_context = await _ensure_world_context(db, world_id)
+            if world_context is None:
+                continue
             context = world_context
         else:
             continue
