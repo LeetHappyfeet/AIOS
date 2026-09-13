@@ -13,19 +13,63 @@ def test_character_owned_observation_builds_character_scope():
         "origin_character_id": "natalie",
         "character_instance_id": instance_id,
         "world_id": world_id,
-        "source_id": None,
+        "source_id": "sillytavern:chat-a",
         "subject_is_pivot": True,
         "object_is_pivot": False,
     })
     assert decision.scope_kind == "character"
+    assert decision.scope_key == "char:natalie"
     assert decision.character_id == "natalie"
     assert decision.character_instance_id == instance_id
     assert decision.world_id == world_id
+    assert decision.source_id == "sillytavern:chat-a"
     assert decision.branch_kind == "epistemic_transition"
     assert decision.significance == 0.95
 
 
-def test_external_source_never_becomes_character_or_target_world_scope():
+def test_historical_character_claim_does_not_require_runtime_instance():
+    world_id = uuid4()
+    decision = choose_observation_scope({
+        "claim_kind": "BELIEF",
+        "predicate_family": "EPISTEMIC",
+        "epistemic_scope": "character",
+        "origin_character_id": "Renamon",
+        "character_instance_id": None,
+        "world_id": world_id,
+        "source_id": "sillytavern:historical-chat",
+        "subject_is_pivot": True,
+        "object_is_pivot": False,
+    })
+    assert decision.scope_kind == "character"
+    assert decision.scope_key == "char:Renamon"
+    assert decision.character_id == "Renamon"
+    assert decision.character_instance_id is None
+    assert decision.world_id == world_id
+    assert decision.source_id == "sillytavern:historical-chat"
+
+
+def test_narrative_world_claim_outranks_source_provenance():
+    world_id = uuid4()
+    decision = choose_observation_scope({
+        "claim_kind": "EVENT",
+        "predicate_family": "ACTION",
+        "epistemic_scope": "narrative",
+        "origin_character_id": "Renamon",
+        "character_instance_id": None,
+        "world_id": world_id,
+        "source_id": "sillytavern:chat-a",
+        "subject_is_pivot": True,
+        "object_is_pivot": False,
+    })
+    assert decision.scope_kind == "world"
+    assert decision.scope_key == f"world:{world_id}:observed"
+    assert decision.character_id is None
+    assert decision.world_id == world_id
+    assert decision.source_id == "sillytavern:chat-a"
+    assert decision.branch_kind == "event"
+
+
+def test_explicit_external_source_remains_source_owned():
     target_world_id = uuid4()
     decision = choose_observation_scope({
         "claim_kind": "EVENT",
@@ -45,6 +89,24 @@ def test_external_source_never_becomes_character_or_target_world_scope():
     assert decision.character_id is None
     assert decision.world_id is None
     assert decision.branch_kind == "event"
+
+
+def test_ambiguous_speaker_is_unresolved_not_source_owned():
+    timeline_id = uuid4()
+    decision = choose_observation_scope({
+        "claim_kind": "STATE",
+        "predicate_family": "EPISTEMIC",
+        "epistemic_scope": "speaker",
+        "speaker_id": "Mia",
+        "speaker_type": "user",
+        "timeline_id": timeline_id,
+        "source_id": "sillytavern:chat-a",
+        "subject_is_pivot": False,
+        "object_is_pivot": False,
+    })
+    assert decision.scope_kind == "unresolved"
+    assert decision.scope_key == f"unresolved:{timeline_id}"
+    assert decision.source_id == "sillytavern:chat-a"
 
 
 def test_temporal_predicate_creates_temporal_transition():

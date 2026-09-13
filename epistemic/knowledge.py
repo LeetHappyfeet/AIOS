@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 from uuid import UUID
 
 from aios_app.db import Database
 from .weights import calculate_weights
+
+
+_CONTEXT_KNOWLEDGE_KINDS = {
+    "BELIEF",
+    "MEMORY",
+    "GOAL",
+    "RULE",
+    "STATE",
+    "TRAIT",
+    "RELATIONSHIP",
+}
+_NONASSERTIVE_DISCOURSE = {
+    "question",
+    "hypothetical",
+    "counterfactual",
+    "conditional",
+    "quoted_question",
+}
+_QUESTION_END_RE = re.compile(r"\?\s*[\"'”’\)\]]*\s*$")
+STALE_RETRACTION_BATCH = 64
+PROJECT_BATCH_MAX = 128
 
 
 def _json_object(value: object) -> dict:
@@ -22,9 +44,229 @@ def _json_object(value: object) -> dict:
             raise ValueError("expected JSON object metadata")
         return decoded
     try:
-        return dict(value)  # asyncpg codecs/custom mappings may already be mapping-like
+        return dict(value)
     except (TypeError, ValueError) as exc:
         raise ValueError("expected object-like metadata") from exc
+
+
+def _context_generated(meta: object) -> bool:
+    source = str(_json_object(meta).get("source") or "").strip().lower()
+    return source.startswith("context-resolver")
+
+
+def _context_acquisition_eligible_values(
+    *,
+    instance_id: UUID | str,
+    epistemic_scope: Optional[str],
+    character_instance_id: Optional[UUID | str],
+    claim_kind: Optional[str],
+    raw_text: Optional[str],
+    discourse_mode: Optional[str],
+) -> bool:
+    """Return whether resolved context is eligible for settled /char knowledge."""
+    if (epistemic_scope or "").lower() != "character":
+        return False
+    if character_instance_id is None or str(character_instance_id) != str(instance_id):
+        return False
+    if (claim_kind or "").upper() not in _CONTEXT_KNOWLEDGE_KINDS:
+        return False
+    if (discourse_mode or "").lower() in _NONASSERTIVE_DISCOURSE:
+        return False
+    if raw_text and _QUESTION_END_RE.search(raw_text.strip()):
+        return False
+    return True
+
+
+async def _context_row(db: Database, *, claim_id: UUID):
+    return await db.fetchrow(
+        """
+        SELECT
+            ccr.epistemic_scope,
+            ccr.character_instance_id,
+            ccr.claim_kind,
+            cc.raw_text,
+            sf.discourse_mode,
+            sf.modality
+        FROM aios.claim_candidate cc
+        LEFT JOIN aios.claim_context_resolution ccr
+          ON ccr.claim_id=cc.claim_id
+        LEFT JOIN aios.claim_semantic_frame_projection sfp
+          ON sfp.claim_id=cc.claim_id
+        LEFT JOIN aios.claim_semantic_frame sf
+          ON sf.frame_id=sfp.primary_frame_id
+        WHERE cc.claim_id=$1
+        """,
+        claim_id,
+    )
+
+
+async def _context_acquisition_eligible(db: Database, row) -> bool:
+    if row["claim_id"] is None or not _context_generated(row["meta"]):
+        return True
+    context = await _context_row(db, claim_id=row["claim_id"])
+    if not context:
+        return False
+    return _context_acquisition_eligible_values(
+        instance_id=row["instance_id"],
+        epistemic_scope=context["epistemic_scope"],
+        character_instance_id=context["character_instance_id"],
+        claim_kind=context["claim_kind"],
+        raw_text=context["raw_text"],
+        discourse_mode=context["discourse_mode"],
+    )
+
+
+async def _retract_acquisition_row(db: Database, row) -> None:
+    """Retract one stale context-generated acquisition without touching other evidence."""
+    acquisition_id = row["acquisition_id"]
+    instance_id = row["instance_id"]
+    claim_id = row["claim_id"]
+    proposition_id = row["proposition_id"]
+    if proposition_id is None and claim_id is not None:
+        obs = await db.fetchrow(
+            "SELECT proposition_id FROM aios.observation WHERE claim_id=$1",
+            claim_id,
+        )
+        proposition_id = obs["proposition_id"] if obs else None
+
+    other_claim_support = None
+    if claim_id is not None:
+        other_claim_support = await db.fetchrow(
+            """
+            SELECT 1
+            FROM aios.knowledge_acquisition_event kae
+            WHERE kae.instance_id=$1
+              AND kae.claim_id=$2
+              AND kae.acquisition_id<>$3
+            LIMIT 1
+            """,
+            instance_id,
+            claim_id,
+            acquisition_id,
+        )
+
+    other_prop_support = None
+    if proposition_id is not None:
+        other_prop_support = await db.fetchrow(
+            """
+            SELECT 1
+            FROM aios.knowledge_acquisition_event kae
+            LEFT JOIN aios.observation o ON o.claim_id=kae.claim_id
+            WHERE kae.instance_id=$1
+              AND kae.acquisition_id<>$2
+              AND COALESCE(kae.proposition_id, o.proposition_id)=$3
+            LIMIT 1
+            """,
+            instance_id,
+            acquisition_id,
+            proposition_id,
+        )
+
+    await db.execute(
+        "DELETE FROM aios.knowledge_acquisition_event WHERE acquisition_id=$1",
+        acquisition_id,
+    )
+
+    if claim_id is not None and not other_claim_support:
+        await db.execute(
+            """
+            DELETE FROM aios.character_knowledge
+            WHERE instance_id=$1
+              AND claim_id=$2
+              AND COALESCE((meta->>'copied_on_fork')::boolean, false)=false
+            """,
+            instance_id,
+            claim_id,
+        )
+
+    if proposition_id is not None and not other_prop_support:
+        await db.execute(
+            """
+            DELETE FROM aios.character_proposition_knowledge
+            WHERE instance_id=$1
+              AND proposition_id=$2
+              AND COALESCE((meta->>'copied_on_fork')::boolean, false)=false
+            """,
+            instance_id,
+            proposition_id,
+        )
+
+
+async def reconcile_context_acquisitions_for_claim(
+    db: Database,
+    *,
+    claim_id: UUID,
+) -> int:
+    rows = await db.fetch(
+        """
+        SELECT *
+        FROM aios.knowledge_acquisition_event
+        WHERE claim_id=$1
+          AND lower(COALESCE(meta->>'source','')) LIKE 'context-resolver%'
+        ORDER BY created_at
+        """,
+        claim_id,
+    )
+    retracted = 0
+    for row in rows:
+        if await _context_acquisition_eligible(db, row):
+            continue
+        await _retract_acquisition_row(db, row)
+        retracted += 1
+    return retracted
+
+
+async def reconcile_stale_context_acquisitions(
+    db: Database,
+    *,
+    instance_id: Optional[UUID] = None,
+    limit: int = STALE_RETRACTION_BATCH,
+) -> int:
+    """Retract only acquisitions current SQL already proves are stale.
+
+    The old repair pass selected hundreds of arbitrary context acquisitions and
+    re-resolved each one in Python. Under a large backlog that turned one LIVE
+    projector job into minutes of database round trips. This query performs the
+    eligibility test set-wise and returns only rows that require mutation.
+    """
+    rows = await db.fetch(
+        """
+        SELECT kae.*
+        FROM aios.knowledge_acquisition_event kae
+        LEFT JOIN aios.claim_context_resolution ccr
+          ON ccr.claim_id=kae.claim_id
+        LEFT JOIN aios.claim_candidate cc
+          ON cc.claim_id=kae.claim_id
+        LEFT JOIN aios.claim_semantic_frame_projection sfp
+          ON sfp.claim_id=kae.claim_id
+        LEFT JOIN aios.claim_semantic_frame sf
+          ON sf.frame_id=sfp.primary_frame_id
+        WHERE kae.claim_id IS NOT NULL
+          AND lower(COALESCE(kae.meta->>'source','')) LIKE 'context-resolver%'
+          AND ($2::uuid IS NULL OR kae.instance_id=$2)
+          AND (
+                ccr.claim_id IS NULL
+             OR lower(COALESCE(ccr.epistemic_scope,'')) <> 'character'
+             OR ccr.character_instance_id IS DISTINCT FROM kae.instance_id
+             OR upper(COALESCE(ccr.claim_kind,'')) NOT IN (
+                    'BELIEF','MEMORY','GOAL','RULE','STATE','TRAIT','RELATIONSHIP'
+                )
+             OR lower(COALESCE(sf.discourse_mode,'')) IN (
+                    'question','hypothetical','counterfactual','conditional','quoted_question'
+                )
+             OR COALESCE(cc.raw_text,'') ~ '\\?\\s*["''”’\\)\\]]*\\s*$'
+          )
+        ORDER BY kae.created_at, kae.acquisition_id
+        LIMIT $1
+        """,
+        max(1, min(int(limit), PROJECT_BATCH_MAX)),
+        instance_id,
+    )
+    retracted = 0
+    for row in rows:
+        await _retract_acquisition_row(db, row)
+        retracted += 1
+    return retracted
 
 
 async def record_acquisition(
@@ -91,6 +333,13 @@ async def project_knowledge_acquisitions_once(
     limit: int = 200,
     instance_id: Optional[UUID] = None,
 ) -> int:
+    await reconcile_stale_context_acquisitions(
+        db,
+        instance_id=instance_id,
+        limit=STALE_RETRACTION_BATCH,
+    )
+
+    projection_limit = max(1, min(int(limit), PROJECT_BATCH_MAX))
     rows = await db.fetch(
         """
         SELECT *
@@ -113,12 +362,16 @@ async def project_knowledge_acquisitions_once(
         ORDER BY created_at
         LIMIT $1
         """,
-        limit,
+        projection_limit,
         instance_id,
     )
     projected = 0
 
     for row in rows:
+        if not await _context_acquisition_eligible(db, row):
+            await _retract_acquisition_row(db, row)
+            continue
+
         proposition_id = row["proposition_id"]
         if proposition_id is None and row["claim_id"] is not None:
             obs = await db.fetchrow(
@@ -201,9 +454,6 @@ async def project_knowledge_acquisitions_once(
             weights["effective_confidence"],
         )
 
-        # Keep the legacy claim-level projection populated when a concrete
-        # source claim exists. New prompt construction should prefer the
-        # proposition-level table.
         if row["claim_id"] is not None:
             await db.execute(
                 """
@@ -227,7 +477,10 @@ async def project_knowledge_acquisitions_once(
                 row["confidence"],
                 row["source_entity_id"],
                 row["dag_node_id"],
-                json.dumps({"acquisition_mode": row["acquisition_mode"]}),
+                json.dumps({
+                    "acquisition_mode": row["acquisition_mode"],
+                    "acquisition_source": acquisition_meta.get("source"),
+                }),
             )
 
         await db.execute(
@@ -253,7 +506,6 @@ async def acquire_document(
     epistemic_status: str = "observed",
     confidence: Optional[float] = None,
 ) -> dict:
-    """Queue every normalized proposition observed in a document for one character."""
     exists = await db.fetchrow(
         "SELECT 1 FROM aios.source_document WHERE document_id=$1",
         document_id,

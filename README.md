@@ -1,288 +1,127 @@
 # AIOS
 
-AIOS is an epistemic runtime and memory architecture for language-model agents. It turns raw observations—chat, documents, web material, and other ingested text—into provenance-preserving temporal records, normalized claims, RDF knowledge, character-specific epistemic state, concrete runtime worlds, and finally a bounded HUD that can be consumed by either an LLM or a human-facing client.
+**AIOS is a persistent memory and runtime system for AI agents and characters.**
 
-The project has retired its original monolithic RAG sidecar in favor of a semantic index and semantic-structure engine. The RDF/epistemic pipeline and the first complete character/world runtime are now in place. Current development is focused on the **HUD assembly layer**: deciding what a character should perceive, remember, believe, carry, care about, and be allowed to act on at a particular moment without leaking information across characters, worlds, timelines, or branches.
+AIOS gives long-running agents continuity beyond a single prompt or chat. It maintains persistent memory, world and character state, timelines, and knowledge, then provides the active agent with a focused **HUD** containing the context it needs for the current generation.
 
-> **Development status:** the ingestion → DAG → claim → RDF → context-resolution → character/world runtime chain is implemented. The active development frontier is the branch-aware RPG/agent HUD and the clients that consume it.
+**Want to try it first?** Open the [AIOS Google Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing) for a guided demo without setting up a full local installation.
 
-<p align="center">
-  <img src="screenshot.png" alt="AIOS Screenshot" width="800">
-</p>
+> **Status:** AIOS is experimental and under active development.
+>
+> **License:** AIOS is source-available proprietary software for personal use by natural persons. See the [AIOS Personal Use License 1.0](LICENSE).
 
-## What AIOS is trying to solve
+## What AIOS Does
 
-Most LLM memory systems retrieve text and place it back into a prompt. AIOS instead treats memory as an epistemic problem.
+AIOS is intended for persistent assistants, role-playing characters, agents, and other applications where remembering similar text is not enough.
 
-A statement can be observed without being true. A source can disagree with another source. A character can know something that another character does not. A character can remember an event differently from the global state of a world. A runtime branch can diverge without rewriting its parent history. “I” must resolve to the active character, while world facts must remain attached to the correct world.
+It keeps track of what happened, when it happened, where information came from, what belongs to the shared world, and what individual characters know or believe. The HUD turns that larger persistent state into a smaller context that a client can provide to an LLM.
 
-AIOS therefore separates:
+Vector retrieval is part of AIOS, but AIOS is not designed as a conventional RAG system. Memory, chronology, character knowledge, world state, and deterministic state are maintained as parts of a larger runtime rather than being decided by similarity search alone.
 
-- **observation** — what entered the system;
-- **temporal truth** — where and when it occurred in the DAG;
-- **linguistic claims** — what the text appears to assert;
-- **semantic context** — what kind of claim/entity/relation it is and whose viewpoint produced it;
-- **world state** — what belongs to a particular world or branch;
-- **character epistemics** — what a particular character knows, believes, remembers, or has acquired;
-- **runtime state** — the concrete character instance currently acting in a world;
-- **presentation/attention** — the bounded HUD assembled for a human or LLM.
+## What's Changed
 
-The Semantic Index uses Qdrant heavily as a similarity oracle across source sections, normalized propositions, and epistemic objects. Vector geometry proposes candidates and structure; it never decides truth or epistemic visibility by itself.
+This release is a substantial update from previous versions of AIOS.
 
-## Architecture
+- **Better live performance.** AIOS can process multiple kinds of memory work concurrently and gives live conversation work priority over heavier background processing. Large semantic workloads should be less likely to stall an active conversation.
+- **Stronger character and world memory.** AIOS more clearly separates shared world information from what an individual character has actually experienced, learned, remembered, or believes.
+- **Improved long-term consistency.** New information can be reconciled with existing memory instead of simply accumulating indefinitely. This gives AIOS a better foundation for contradictions, changing beliefs, corrections, and evolving world state.
+- **Shared worlds and individual perspectives.** Characters can participate in a common world timeline while retaining their own knowledge and experience history.
+- **Deterministic state.** AIOS now has a separate foundation for information that should be exact rather than inferred through semantic memory, such as locations, counters, status effects, and game or simulation state.
+- **More reliable HUD generation.** The runtime performs stronger readiness checks before treating memory as current enough for generation, reducing the chance of returning a HUD built from partially processed state.
+- **Much easier installation.** PostgreSQL, Qdrant, and Fuseki are now managed through Docker Compose while AIOS itself remains a native Python application. First-time setup, database initialization, migrations, startup, and shutdown are handled by included scripts.
+- **More validation and testing.** The project now has broader automated coverage around memory, scheduling, character knowledge, world state, HUD readiness, and fresh installations.
 
-```text
- External sources / documents                 Chat / agent interaction
-              │                                        │
-              └────────────────┬───────────────────────┘
-                               ▼
-                         ingest_event
-                  immutable observed event
-                               │
-                               ▼
-                         Temporal DAG
-             ordering • containment • provenance
-                               │
-                               ▼
-                       document_section
-                               │
-                               ▼
-                      extracted_sentence
-                               │
-                               ▼
-                       claim_candidate
-                   untrusted S/P/O assertion
-                               │
-                               ▼
-                    /world/liminal RDF
-             semantic staging, not accepted truth
-                               │
-                               ▼
-                       Context Resolver
-          claim/entity kind • predicate family • pivots
-          character_id • world_id • viewpoint • scope
-                               │
-                  ┌────────────┴────────────┐
-                  ▼                         ▼
-          /world knowledge             /char knowledge
-       world/branch context       character epistemic context
-                  └────────────┬────────────┘
-                               ▼
-                    Character/World Runtime
-          instances • entities • relations • rules • state
-          timelines • branches • controllers • actions
-                               │
-                               ▼
-                         HUD Assembler
-       branch eligibility → semantic routing → relevance
-                               │
-                  ┌────────────┴────────────┐
-                  ▼                         ▼
-             JSON frame                 Text frame
-          application/client          LLM prompt surface
-```
+The overall direction is simple: AIOS is moving from an advanced retrieval and memory system toward a persistent runtime that can maintain what an agent knows, what the world contains, and how both change over time.
 
-Qdrant/vector retrieval can assist candidate discovery, but IDs, provenance, world boundaries, character boundaries, and DAG position remain authoritative.
+## First-Time Installation
 
-## 1. Observation and the DAG
+AIOS currently requires:
 
-All input begins as observation rather than fact.
+- Python 3.10 or newer
+- Docker with Docker Compose v2
+- Git
 
-The API and external ingestion paths persist an `ingest_event`, then anchor that event to a timeline in the DAG. Documents, paragraphs, and chat messages therefore share a common temporal model while retaining their source metadata.
-
-The DAG is deliberately non-semantic. Its job is to preserve ordering, containment, identity, and provenance. Later classifiers can be replaced or improved without rewriting what was originally observed.
-
-For chat ingestion, the source timeline remains immutable provenance. Active runtime instances advance a source-perception cursor rather than copying source messages into the concrete runtime DAG.
-
-## 2. Claims and RDF
-
-DAG-backed text is projected into stable document sections, split into canonical sentences, and converted into `claim_candidate` records. Claims are tentative linguistic assertions, not facts.
-
-Claims are promoted into the Jena `/world` dataset through the liminal graph:
-
-```text
-urn:aios:world:liminal
-```
-
-Liminal means “observed and available for semantic processing,” not “true.” Contradictory claims can coexist there while retaining provenance.
-
-The pipeline normalizes propositions, records RDF promotion receipts, classifies structural content, and performs later epistemic projections without collapsing disagreement into a single answer.
-
-## 3. Context Resolver and semantic pivots
-
-The Context Resolver is the bridge between generic RDF claims and the character/world engine.
-
-It classifies claims into first-order semantic kinds including:
-
-```text
-PERSON          LOCATION        OBJECT          EVENT
-MEMORY          RELATIONSHIP    BELIEF          GOAL
-RULE            TRAIT           STATE           CONCEPT
-ORGANIZATION    TIME            ACTION          QUANTITY
-```
-
-It also groups predicates into semantic families such as spatial, temporal, social, possession, epistemic, memory, causal, emotional, identity, descriptive, rule, goal, action, membership, and communication.
-
-Most importantly, the resolver attaches the coordinates required to prevent epistemic leakage:
-
-- originating `character_id`;
-- character instance when one can be resolved;
-- viewpoint;
-- `world_id`;
-- timeline and DAG node;
-- epistemic scope;
-- acquisition mode;
-- subject/object semantic-pivot flags.
-
-A character ID is a semantic pivot for first-person and character-relative knowledge. A world ID is the higher-level pivot for facts and state belonging to a world. The result is not one permanent RDF tree; AIOS derives context-specific trees/views from a graph according to character, world, timeline, and branch.
-
-This allows the same proposition to be globally available as an observed claim while remaining inaccessible to a character that has never perceived or acquired it.
-
-## 4. Character epistemics
-
-AIOS maintains a separate character knowledge model rather than treating `/char` as a copy of `/world`.
-
-Character epistemic state can represent knowledge, belief, memory, source acquisition, generated information, confidence/weighting, and links back to normalized propositions and concrete runtime entities. This supports cases such as:
-
-- two characters knowing different things about the same world;
-- a character remembering an event that another character never witnessed;
-- a document or conversation teaching a character something;
-- contradictory sources remaining visible rather than being averaged away;
-- generated facts being tracked separately from observed source material.
-
-The separation between `/world` and `/char` is fundamental: world claims describe a world context; character claims describe a character's epistemic relationship to information in that context.
-
-## 5. Character and world runtime
-
-The runtime turns the epistemic model into an environment an agent can inhabit.
-
-A character identity can be activated into a concrete `character_instance` associated with a runtime world, timeline, entity, controller, and mutable runtime state. Worlds can form parent/root relationships and runtime branches, allowing a session to diverge without destroying the source world or its provenance.
-
-Runtime support includes world entities, entity relations, world rules, character state, location, inventory/stateful objects, actions, controller identity, branching/forking, and source-perception boundaries.
-
-Humans, LLMs, or other controllers can therefore operate through the same runtime model instead of requiring separate memory architectures.
-
-## 6. The HUD: current development focus
-
-The HUD is the next major layer being built on top of the completed pipeline and runtime foundations.
-
-The canonical HUD assembler resolves the active runtime/world/DAG coordinates **before** selecting content. Context and branch eligibility are hard boundaries; relevance scoring only ranks information that is already legal for the active character to see.
-
-The current frame can assemble sections for:
-
-- identity and epistemic profile;
-- runtime presence and world/timeline coordinates;
-- current scene and nearby entities;
-- physical, emotional, social, health, stamina, and energy state;
-- relationships;
-- inventory;
-- active memories;
-- knowledge and beliefs;
-- goals;
-- rules;
-- recent perceived events;
-- available actions.
-
-The frame is deterministic and token-budgeted. It exposes both a structured JSON representation for applications and a deterministic text renderer intended to become the LLM-facing “text adventure/HUD” prompt surface.
-
-The design target is:
-
-```text
-all stored knowledge
-        ↓
-world + branch eligibility
-        ↓
-character epistemic eligibility
-        ↓
-scene/entity relevance
-        ↓
-attention / token budgeting
-        ↓
-small actionable HUD
-```
-
-The HUD should never become another unrestricted retrieval layer. Its purpose is to provide the active mind with the smallest useful, provenance-compatible view of the much larger AIOS graph.
-
-## API highlights
-
-The FastAPI service currently exposes the runtime and ingestion surfaces used by clients. Important routes include:
-
-```text
-POST /session
-POST /ingest
-
-POST /character/{character_id}/activate
-GET  /instance/{instance_id}/state
-GET  /instance/{instance_id}/frame
-GET  /instance/{instance_id}/frame/text
-POST /instance/{instance_id}/action
-```
-
-Additional endpoints support world entities/relations/rules, character forks/controllers, knowledge acquisition, generated and observed facts, epistemic queries, long-document ingestion, and character epistemic profiles.
-
-The text-frame endpoint is intended for integrations such as SillyTavern or other LLM clients. The JSON frame is intended for richer interfaces that want to render the same canonical state themselves.
-
-## Pipeline execution
-
-AIOS uses a supervisor/runner job pipeline. The supervisor discovers eligible work and queues jobs; the runner performs individual stages. Major work now includes character discovery, world topology projection, document/claim processing, liminal RDF promotion, proposition normalization, context resolution, and epistemic projection.
-
-This separation makes the pipeline replayable and keeps HTTP ingestion from pretending that all downstream semantic processing completed synchronously.
-
-## Storage roles
-
-**PostgreSQL** is the durable operational and provenance store. It contains ingest events, DAG structure, source/document projections, claims, pipeline jobs, character identities and instances, world topology, runtime state, epistemic records, and RDF processing receipts.
-
-**Apache Jena Fuseki** provides RDF semantic workspaces. AIOS uses separate `/world` and `/char` datasets/graphs so world semantics and character epistemics can be reasoned about without conflating them.
-
-**Qdrant / Semantic Index** maintains separate source, proposition, and epistemic vector spaces. It supports source retrieval, semantic-neighbor discovery, clustering/split candidates, topology seeding, and HUD attention. PostgreSQL/RDF remain authoritative for truth, chronology, branches, worlds, and character knowledge.
-
-## Running the development branch
-
-AIOS is currently under active development. The development branch is:
+Clone the repository and run the setup script:
 
 ```bash
-git switch AIOS-development
-git pull
+git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git
+cd AIOS
+bash setup.sh
 ```
 
-Install the Python requirements, configure the environment/database settings, and provide reachable PostgreSQL, Fuseki, and Qdrant services. Fuseki must have the `/world` and `/char` datasets and the AIOS ontology loaded.
+The repository can be cloned under a different directory name if desired.
 
-From the application environment, launch AIOS with:
+The setup script handles the rest of the first-time installation. It starts PostgreSQL, Qdrant, and Fuseki, prepares the Python virtual environment, installs Python dependencies and the required language model, initializes the database, applies current migrations, and verifies that the installation is ready to run.
+
+When setup finishes successfully, start AIOS with:
 
 ```bash
-python -m aios_app.launch
+bash run.sh
 ```
 
-The default services are:
+A healthy startup should eventually report:
 
 ```text
-FastAPI:  http://localhost:8000
-Web UI:   http://localhost:7860
+AIOS READY
+Required services: 4/4 ready
 ```
 
-Use the health endpoint to verify the API:
+## Open the Gradio Interface
+
+Once AIOS is running, point your browser to:
 
 ```text
-GET /healthz
+http://127.0.0.1:7860
 ```
 
-Database migrations in `migrations/` must be applied for the schema expected by the current development branch.
+Port **7860** is the Gradio web interface. If you are opening AIOS from another computer or phone on the same network, replace `127.0.0.1` with the IP address of the machine running AIOS, for example:
 
-## Requirements
+```text
+http://192.168.1.50:7860
+```
 
-Core infrastructure:
+The AIOS API runs separately on port **8000**:
 
-- Python and the project dependencies in the repository;
-- PostgreSQL 14+;
-- Apache Jena Fuseki with `/world` and `/char` datasets;
-- Qdrant for vector retrieval.
+```text
+http://127.0.0.1:8000
+```
 
-See the repository configuration, migrations, ontology files, and application modules for the exact development-state schema and service settings.
+Most users who simply want to inspect and use AIOS should start with the Gradio interface on port 7860. Client integrations use the API on port 8000.
 
-## Project direction
+## Running AIOS Later
 
-The original ingestion and RDF work established the system's durable memory substrate. The character engine added identity, viewpoint, epistemic separation, world topology, runtime instances, and branching. The Context Resolver connected those two halves.
+After the first installation, return to the repository and run:
 
-The current milestone is to finish the HUD as the **attention and presentation layer** over that architecture. Once stable, clients should not need to understand the entire RDF graph or SQL schema. They should be able to activate a character, submit observations/actions, and request a bounded frame representing what that character can reasonably perceive, remember, know, believe, and do now.
+```bash
+bash run.sh
+```
 
-That is the intended AIOS boundary: **observations go in; an epistemically valid world-and-character context comes out.**
+`run.sh` starts the required Docker services if necessary and launches AIOS using the environment created during setup.
+
+Press `Ctrl+C` to stop the native AIOS processes.
+
+To also stop PostgreSQL, Qdrant, and Fuseki without deleting their stored data:
+
+```bash
+bash stop.sh
+```
+
+AIOS data is stored in persistent Docker volumes. Do not use `docker compose down -v` unless you intentionally want to delete that data.
+
+Optional infrastructure settings are available in `.env.example`.
+
+## Client Integration
+
+AIOS exposes an API for creating sessions, activating characters, ingesting new information, and retrieving the current HUD for generation.
+
+The [MemoryVaultIngest SillyTavern extension](https://github.com/LeetHappyfeet/extension-MemoryVaultIngest) is one client that integrates AIOS with a live role-playing environment.
+
+Additional technical documentation is available in the `docs/` directory for developers who want to work on AIOS itself or build integrations.
+
+## License
+
+AIOS is licensed under the **AIOS Personal Use License 1.0**. Personal use, study, experimentation, and private modification by natural persons are permitted. Commercial, organizational, institutional, hosted, and service-provider use requires a separate written license.
+
+Earlier versions distributed under the Apache License 2.0 remain governed by the license applicable to those versions.
+
+See [`LICENSE`](LICENSE) for the complete terms.

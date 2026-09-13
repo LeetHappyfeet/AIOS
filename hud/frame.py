@@ -6,18 +6,18 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
-from aios_app.hud.relevance import HUDRelevanceScorer
-from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.profile import get_profile as get_hud_profile
+from aios_app.hud.relevance import HUDRelevanceScorer
 from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
 @dataclass(frozen=True)
 class HUDBudget:
-    """Approximate token caps.  These are selection budgets, not tokenizer guarantees."""
+    """Approximate token caps. These are selection budgets, not tokenizer guarantees."""
 
     total_tokens: int = 1600
     section_tokens: Mapping[str, int] = field(
@@ -48,9 +48,6 @@ def _json_value(value: Any, default: Any) -> Any:
 
 
 def _approx_tokens(value: Any) -> int:
-    # Deliberately tokenizer-independent.  Four characters/token is conservative
-    # enough for bounded prompt assembly and can later be replaced by a model
-    # tokenizer without changing the assembler contract.
     return max(1, (len(str(value)) + 3) // 4)
 
 
@@ -66,7 +63,6 @@ def _trim_to_budget(
         if selected and used + cost > token_cap:
             continue
         if not selected and cost > token_cap:
-            # Keep one highly ranked item rather than making a section vanish.
             clipped = dict(item)
             text = text_fn(item)
             clipped["text"] = text[: max(64, token_cap * 4)]
@@ -78,14 +74,12 @@ def _trim_to_budget(
 
 
 class HUDAssembler:
-    """
-    Build the canonical prompt-ready RPG HUD.
+    """Build the canonical prompt-ready HUD from already-resolved cognition.
 
-    The assembler has two hard boundaries:
-      * HUDContextResolver decides branch/world eligibility.
-      * Context Resolver classifications decide semantic routing.
-
-    Relevance only ranks candidates that have already crossed those boundaries.
+    Historical/source eligibility, semantic retrieval, flat-knowledge fallback,
+    deduplication, and semantic admission live in CognitiveContextService.
+    This layer performs attention scoring, presentation shaping, token budgeting,
+    and deterministic frame assembly only.
     """
 
     def __init__(
@@ -97,7 +91,7 @@ class HUDAssembler:
     ):
         self.db = db
         self.context_resolver = HUDContextResolver(db)
-        self.retriever = TopologyRetriever(db)
+        self.cognition = CognitiveContextService(db)
         self.budget = budget or HUDBudget()
         self.plugin_manager = plugin_manager or PluginManager()
 
@@ -122,94 +116,29 @@ class HUDAssembler:
                 raw_state=raw_state,
             )
         )
-        hud_profile = await get_hud_profile(
-            self.db,
-            character_id=context.character_id,
-        )
-
+        hud_profile = await get_hud_profile(self.db, character_id=context.character_id)
         effective_recent_limit = (
-            hud_profile.recent_event_limit
-            if recent_limit is None
-            else recent_limit
+            hud_profile.recent_event_limit if recent_limit is None else recent_limit
         )
-        bounded_limit = max(1, min(effective_recent_limit, 100))
 
-        runtime_rows = await self.db.fetch(
-            """
-            SELECT node_id, event_id, event_time, speaker_id, speaker_role,
-                   message_text, payload
-            FROM aios.dag_node
-            WHERE timeline_id=$1
-            ORDER BY event_id DESC
-            LIMIT $2
-            """,
-            context.timeline_id,
-            bounded_limit,
-        )
-        runtime_newest = [
-            {**dict(row), "event_stream": "runtime"}
-            for row in runtime_rows
-        ]
-
-        source_newest: list[dict[str, Any]] = []
-        if context.source_timeline_id and context.source_head_node_id:
-            source_rows = await self.db.fetch(
-                """
-                SELECT dn.node_id, dn.event_id, dn.event_time, dn.speaker_id,
-                       dn.speaker_role, dn.message_text, dn.payload
-                FROM aios.dag_node dn
-                JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-                JOIN aios.dag_node source_head
-                  ON source_head.node_id=$2
-                 AND source_head.timeline_id=$1
-                WHERE dn.timeline_id=$1
-                  AND ie.superseded_at IS NULL
-                  AND dn.event_id <= source_head.event_id
-                ORDER BY dn.event_id DESC
-                LIMIT $3
-                """,
-                context.source_timeline_id,
-                context.source_head_node_id,
-                bounded_limit,
-            )
-            source_newest = [
-                {**dict(row), "event_stream": "source"}
-                for row in source_rows
-            ]
-
-        recent_newest = source_newest + runtime_newest
-        recent_newest.sort(
-            key=lambda row: (
-                row.get("event_time") is not None,
-                row.get("event_time"),
-                row.get("event_id", -1),
-            ),
-            reverse=True,
-        )
-        recent_newest = recent_newest[:bounded_limit]
-
-        focus_text = next(
-            (row.get("message_text") for row in recent_newest if row.get("message_text")),
-            "",
-        )
-        goals = list(_json_value(raw_state.get("goals"), []))
-        plugin_focus_text = " ".join(
-            str(signal.get("focus_text") or "")
-            for signal in sorted(
-                plugin_snapshot.get("retrieval_signals") or [],
-                key=lambda item: float(item.get("strength") or 0.0),
-                reverse=True,
-            )
-            if signal.get("focus_text")
-        )
-        retrieval_focus_text = " ".join(
-            part for part in (focus_text, plugin_focus_text) if part
+        attention = await self.cognition.resolve_attention_inputs(
+            context,
+            raw_state,
+            plugin_snapshot,
+            recent_limit=effective_recent_limit,
         )
         scorer = HUDRelevanceScorer(
             context,
-            focus_text=retrieval_focus_text,
-            goals=goals,
+            focus_text=attention.retrieval_focus_text,
+            goals=attention.goals,
         )
+        cognitive_snapshot = await self.cognition.resolve_knowledge(
+            context,
+            scorer,
+            attention,
+            hud_profile,
+        )
+        knowledge = list(cognitive_snapshot.knowledge)
 
         section_caps = {
             "scene": hud_profile.scene_budget,
@@ -247,117 +176,6 @@ class HUDAssembler:
             if hud_profile.include_inventory
             else []
         )
-        topology_memories = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="memory",
-            focus_text=retrieval_focus_text,
-            goals=goals,
-            max_hops=max(
-                3 if hud_profile.deep_memory_limit > 0 else 2,
-                int(hud_profile.entity_hops),
-            ),
-            limit=min(
-                250,
-                hud_profile.semantic_retrieval_limit + max(0, hud_profile.deep_memory_limit),
-            ),
-        )
-        topology_beliefs = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="belief",
-            focus_text=retrieval_focus_text,
-            goals=goals,
-            max_hops=max(2, int(hud_profile.entity_hops)),
-            limit=hud_profile.semantic_retrieval_limit,
-        )
-        topology_goals = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="goal",
-            focus_text=retrieval_focus_text,
-            goals=goals,
-            max_hops=max(1, int(hud_profile.entity_hops)),
-            limit=min(hud_profile.semantic_retrieval_limit, 30),
-        )
-        topology_events = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="event",
-            focus_text=retrieval_focus_text,
-            goals=goals,
-            max_hops=max(2, int(hud_profile.entity_hops)),
-            limit=min(hud_profile.semantic_retrieval_limit, 40),
-        )
-        topology_rules = await self.retriever.retrieve_character_knowledge(
-            context,
-            scorer,
-            mode="rule",
-            focus_text=retrieval_focus_text,
-            goals=goals,
-            max_hops=max(1, int(hud_profile.entity_hops)),
-            limit=min(hud_profile.semantic_retrieval_limit, 30),
-        )
-
-        topology_knowledge = (
-            topology_memories
-            + topology_beliefs
-            + topology_goals
-            + topology_events
-            + topology_rules
-        )
-
-        # Projection is asynchronous and may be partially complete. Fill only
-        # missing semantic sections from authoritative flat character knowledge;
-        # topology-ranked sections keep priority whenever they exist.
-        missing_modes = {
-            "memory": not topology_memories,
-            "belief": not topology_beliefs,
-            "goal": not topology_goals,
-            "event": not topology_events,
-            "rule": not topology_rules,
-        }
-        legacy_knowledge = (
-            await self._knowledge(context, scorer)
-            if any(missing_modes.values())
-            else []
-        )
-
-        merged = list(topology_knowledge)
-        for item in legacy_knowledge:
-            kind = str(item.get("claim_kind") or "BELIEF").upper()
-            if (
-                (kind == "MEMORY" and missing_modes["memory"])
-                or (kind == "EVENT" and (missing_modes["memory"] or missing_modes["event"]))
-                or (kind == "GOAL" and missing_modes["goal"])
-                or (kind == "RULE" and missing_modes["rule"])
-                or (
-                    kind not in {"MEMORY", "RELATIONSHIP", "EVENT", "GOAL", "RULE"}
-                    and missing_modes["belief"]
-                )
-            ):
-                merged.append(item)
-
-        seen: set[Any] = set()
-        knowledge = []
-        for item in merged:
-            proposition_id = item.get("proposition_id")
-            if proposition_id in seen:
-                continue
-            seen.add(proposition_id)
-            knowledge.append(item)
-
-        anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
-        visible_world_context_count = sum(
-            len(item.get("world_context") or [])
-            for item in knowledge
-            if item.get("anchor", {}).get("world_visible")
-        )
-        invisible_anchor_count = sum(
-            1
-            for item in knowledge
-            if item.get("anchor") and not item["anchor"].get("world_visible", False)
-        )
 
         if not hud_profile.include_conflicts:
             for item in knowledge:
@@ -365,8 +183,12 @@ class HUDAssembler:
         if not hud_profile.include_provenance:
             for item in knowledge:
                 for key in (
-                    "source_entity_id", "source_world_id", "source_node_id",
-                    "acquisition_mode", "predicate_family", "topology",
+                    "source_entity_id",
+                    "source_world_id",
+                    "source_node_id",
+                    "acquisition_mode",
+                    "predicate_family",
+                    "topology",
                 ):
                     item.pop(key, None)
                 anchor = item.get("anchor")
@@ -389,20 +211,25 @@ class HUDAssembler:
         if not hud_profile.include_confidence:
             for item in knowledge:
                 for key in (
-                    "confidence", "base_confidence", "effective_confidence",
-                    "attention_weight", "trust_weight", "compatibility_weight",
-                    "retention_weight", "salience_weight",
+                    "confidence",
+                    "base_confidence",
+                    "effective_confidence",
+                    "attention_weight",
+                    "trust_weight",
+                    "compatibility_weight",
+                    "retention_weight",
+                    "salience_weight",
                 ):
                     item.pop(key, None)
+
         rules = await self._rules(context, scorer)
-        recent_events = self._recent_events(recent_newest, scorer)
+        recent_events = self._recent_events(attention.recent_newest, scorer)
 
         memories: list[dict[str, Any]] = []
         beliefs: list[dict[str, Any]] = []
         semantic_goals: list[dict[str, Any]] = []
         semantic_rules: list[dict[str, Any]] = []
         semantic_events: list[dict[str, Any]] = []
-
         for item in knowledge:
             kind = str(item.get("claim_kind") or "BELIEF").upper()
             if kind == "MEMORY":
@@ -418,29 +245,19 @@ class HUDAssembler:
 
         goal_items = [
             {"text": str(goal), "source": "runtime", "tier": 0}
-            for goal in goals
+            for goal in attention.goals
         ] + semantic_goals
-
-        # Runtime rules are authoritative constraints.  Claim-derived RULE items
-        # are character knowledge and remain visibly marked as epistemic.
         rule_items = rules + [
             {**item, "source": "character_knowledge"}
             for item in semantic_rules
         ]
-
-        # Old event claims can be useful causal context, but current DAG events
-        # stay first because they describe what actually just happened here.
         event_items = list(reversed(recent_events)) + semantic_events
 
         memories = _trim_to_budget(
-            memories,
-            section_caps["memories"],
-            lambda x: x.get("text", ""),
+            memories, section_caps["memories"], lambda x: x.get("text", "")
         )
         beliefs = _trim_to_budget(
-            beliefs,
-            section_caps["beliefs"],
-            lambda x: x.get("text", ""),
+            beliefs, section_caps["beliefs"], lambda x: x.get("text", "")
         )
         relationships = _trim_to_budget(
             relationships,
@@ -453,9 +270,7 @@ class HUDAssembler:
             lambda x: f"{x.get('display_name','')} {x.get('state','')}",
         )
         goal_items = _trim_to_budget(
-            goal_items,
-            section_caps["goals"],
-            lambda x: x.get("text", ""),
+            goal_items, section_caps["goals"], lambda x: x.get("text", "")
         )
         rule_items = _trim_to_budget(
             rule_items,
@@ -468,6 +283,7 @@ class HUDAssembler:
             lambda x: x.get("message_text") or x.get("text") or "",
         )
 
+        suppressed = cognitive_snapshot.firewall_suppressed
         return {
             "identity": identity,
             "presence": {
@@ -490,15 +306,18 @@ class HUDAssembler:
                 "energy": raw_state.get("energy"),
                 "physical": (
                     _json_value(raw_state.get("physical_state"), {})
-                    if hud_profile.include_physical_state else {}
+                    if hud_profile.include_physical_state
+                    else {}
                 ),
                 "emotional": (
                     _json_value(raw_state.get("emotional_state"), {})
-                    if hud_profile.include_emotional_state else {}
+                    if hud_profile.include_emotional_state
+                    else {}
                 ),
                 "social": (
                     _json_value(raw_state.get("social_state"), {})
-                    if hud_profile.include_social_state else {}
+                    if hud_profile.include_social_state
+                    else {}
                 ),
                 "active_tasks": _json_value(raw_state.get("active_tasks"), []),
                 "flags": _json_value(raw_state.get("runtime_flags"), {}),
@@ -513,7 +332,12 @@ class HUDAssembler:
             "plugins": plugin_snapshot.get("plugins") or {},
             "plugin_sections": plugin_snapshot.get("sections") or [],
             "actions": [
-                "speak", "move", "inspect", "use_item", "wait", "custom",
+                "speak",
+                "move",
+                "inspect",
+                "use_item",
+                "wait",
+                "custom",
                 *[
                     str(action.get("key"))
                     for action in (plugin_snapshot.get("actions") or [])
@@ -524,23 +348,32 @@ class HUDAssembler:
                 "version": "hud-v1",
                 "profile_id": hud_profile.profile_id,
                 "profile_name": hud_profile.profile_name,
-                "selection": "branch-aware/topology-guided/entity-centered/deterministic",
+                "selection": "pre-resolved-cognition/entity-centered/deterministic",
                 "token_budget": resolved_total,
                 "section_token_budgets": section_caps,
                 "world_lineage": list(context.lineage_world_ids),
                 "instance_lineage": list(context.lineage_instance_ids),
-                "topology_retrieval": bool(topology_knowledge),
-                "topology_partial_fallback": bool(legacy_knowledge),
-                "anchor_retrieval": anchored_knowledge_count > 0,
-                "anchor_partial_fallback": bool(knowledge) and anchored_knowledge_count < len(knowledge),
-                "anchor_count": anchored_knowledge_count,
-                "anchor_invisible_count": invisible_anchor_count,
-                "world_context_count": visible_world_context_count,
+                "topology_retrieval": cognitive_snapshot.topology_retrieval,
+                "topology_partial_fallback": cognitive_snapshot.topology_partial_fallback,
+                "anchor_retrieval": cognitive_snapshot.anchored_knowledge_count > 0,
+                "anchor_partial_fallback": (
+                    bool(knowledge)
+                    and cognitive_snapshot.anchored_knowledge_count < len(knowledge)
+                ),
+                "anchor_count": cognitive_snapshot.anchored_knowledge_count,
+                "anchor_invisible_count": cognitive_snapshot.invisible_anchor_count,
+                "world_context_count": cognitive_snapshot.visible_world_context_count,
                 "source_cursor_bounded": bool(
                     context.source_timeline_id and context.source_head_node_id
                 ),
-                "focus_text": focus_text,
-                "plugin_focus_text": plugin_focus_text,
+                "cognitive_firewall": {
+                    "admitted": len(knowledge),
+                    "suppressed": sum(suppressed.values()),
+                    "suppressed_by_reason": suppressed,
+                    "stage": "pre_hud",
+                },
+                "focus_text": attention.focus_text,
+                "plugin_focus_text": attention.plugin_focus_text,
                 "plugin_status": plugin_snapshot.get("status") or {},
                 "plugin_retrieval_signals": plugin_snapshot.get("retrieval_signals") or [],
             },
@@ -568,8 +401,7 @@ class HUDAssembler:
         )
         identity = dict(row) if row else {"character_id": context.character_id}
         identity["epistemic_profile"] = await get_profile(
-            self.db,
-            character_id=context.character_id,
+            self.db, character_id=context.character_id
         )
         return identity
 
@@ -623,9 +455,10 @@ class HUDAssembler:
         location = None
         for rank, row in enumerate(rows):
             item = dict(row)
-            item["tier"] = 0 if context.entity_is_active(item["entity_id"]) else min(
-                2,
-                int(item.get("graph_depth") or 0) + 1,
+            item["tier"] = (
+                0
+                if context.entity_is_active(item["entity_id"])
+                else min(2, int(item.get("graph_depth") or 0) + 1)
             )
             score = scorer.score(
                 item,
@@ -640,17 +473,13 @@ class HUDAssembler:
                 location = item
 
         entities.sort(
-            key=lambda item: (
-                item.get("tier", 9),
-                -item["relevance"]["total"],
-            )
+            key=lambda item: (item.get("tier", 9), -item["relevance"]["total"])
         )
         entities = _trim_to_budget(
             entities,
             token_cap,
             lambda x: f"{x.get('display_name','')} {x.get('entity_type','')} {x.get('meta','')}",
         )
-
         selected_ids = [context.entity_id] + [item["entity_id"] for item in entities]
         relations = await self.db.fetch(
             """
@@ -664,10 +493,11 @@ class HUDAssembler:
             context.world_id,
             selected_ids,
         )
-
         actors = [
-            item for item in entities
-            if str(item.get("entity_type", "")).lower() in {"character", "person", "agent", "user"}
+            item
+            for item in entities
+            if str(item.get("entity_type", "")).lower()
+            in {"character", "person", "agent", "user"}
         ]
         objects = [item for item in entities if item not in actors and item is not location]
         return {
@@ -678,9 +508,7 @@ class HUDAssembler:
         }
 
     async def _relationships(
-        self,
-        context: HUDContext,
-        scorer: HUDRelevanceScorer,
+        self, context: HUDContext, scorer: HUDRelevanceScorer
     ) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """
@@ -722,9 +550,7 @@ class HUDAssembler:
         return result
 
     async def _inventory(
-        self,
-        context: HUDContext,
-        scorer: HUDRelevanceScorer,
+        self, context: HUDContext, scorer: HUDRelevanceScorer
     ) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """
@@ -754,128 +580,8 @@ class HUDAssembler:
         result.sort(key=lambda x: (x["tier"], -x["relevance"]["total"]))
         return result
 
-    async def _knowledge(
-        self,
-        context: HUDContext,
-        scorer: HUDRelevanceScorer,
-    ) -> list[dict[str, Any]]:
-        rows = await self.db.fetch(
-            """
-            SELECT
-                ck.epistemic_status,
-                ck.confidence,
-                ck.acquisition_mode,
-                ck.source_entity_id,
-                ck.updated_at,
-                ck.base_confidence,
-                ck.attention_weight,
-                ck.trust_weight,
-                ck.compatibility_weight,
-                ck.retention_weight,
-                ck.salience_weight,
-                ck.effective_confidence,
-                p.proposition_id,
-                p.topic_key,
-                p.canonical_text,
-                p.subject_norm,
-                p.predicate_norm,
-                p.object_norm,
-                p.polarity,
-                p.modality,
-                COALESCE(ctx.claim_kind, 'BELIEF') AS claim_kind,
-                ctx.predicate_family,
-                ctx.world_id AS source_world_id,
-                ctx.dag_node_id AS source_node_id,
-                COALESCE(conflicts.items, '[]'::jsonb) AS conflicts
-            FROM aios.character_proposition_knowledge ck
-            JOIN aios.proposition p ON p.proposition_id=ck.proposition_id
-            LEFT JOIN LATERAL (
-                SELECT
-                    ccr.claim_kind,
-                    ccr.predicate_family,
-                    ccr.world_id,
-                    ccr.dag_node_id
-                FROM aios.observation o
-                JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-                WHERE o.proposition_id=p.proposition_id
-                ORDER BY
-                    (ccr.character_instance_id=$1) DESC,
-                    ccr.resolved_at DESC
-                LIMIT 1
-            ) ctx ON true
-            LEFT JOIN LATERAL (
-                SELECT jsonb_agg(
-                    jsonb_build_object(
-                        'proposition_id', other.proposition_id,
-                        'text', other.canonical_text,
-                        'conflict_type', pc.conflict_type,
-                        'strength', pc.strength
-                    )
-                ) AS items
-                FROM aios.proposition_conflict pc
-                JOIN aios.proposition other
-                  ON other.proposition_id = CASE
-                      WHEN pc.proposition_a_id=p.proposition_id THEN pc.proposition_b_id
-                      ELSE pc.proposition_a_id
-                  END
-                JOIN aios.character_proposition_knowledge other_ck
-                  ON other_ck.instance_id=$1
-                 AND other_ck.proposition_id=other.proposition_id
-                WHERE pc.proposition_a_id=p.proposition_id
-                   OR pc.proposition_b_id=p.proposition_id
-            ) conflicts ON true
-            WHERE ck.instance_id=$1
-              AND EXISTS (
-                  SELECT 1
-                  FROM aios.knowledge_acquisition_event kae
-                  LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
-                  LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
-                  LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
-                  LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
-                  LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-                  WHERE kae.instance_id=ck.instance_id
-                    AND kae.proposition_id=ck.proposition_id
-                    AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
-              )
-            ORDER BY ck.updated_at DESC
-            LIMIT 250
-            """,
-            context.instance_id,
-        )
-
-        result = []
-        for rank, row in enumerate(rows):
-            item = dict(row)
-            item["text"] = item.pop("canonical_text")
-            item["conflicts"] = _json_value(item.get("conflicts"), [])
-            # Explicit instance acquisition is the branch-crossing authorization.
-            # source_world_id therefore informs scoring/debugging but does not
-            # reject knowledge already owned by this current character instance.
-            score = scorer.score(
-                item,
-                rank=rank,
-                candidate_text=(
-                    f"{item.get('topic_key','')} {item.get('subject_norm','')} "
-                    f"{item.get('predicate_norm','')} {item.get('object_norm','')} {item.get('text','')}"
-                ),
-                candidate_world_id=context.world_id,
-                candidate_entity_id=item.get("source_entity_id"),
-                epistemic_status=item.get("epistemic_status"),
-                confidence=item.get("effective_confidence") or item.get("confidence"),
-                updated_at=item.get("updated_at"),
-            )
-            kind = str(item.get("claim_kind") or "BELIEF").upper()
-            item["tier"] = self._knowledge_tier(kind, score.total)
-            item["relevance"] = score.as_dict()
-            result.append(item)
-
-        result.sort(key=lambda x: (x["tier"], -x["relevance"]["total"]))
-        return result
-
     async def _rules(
-        self,
-        context: HUDContext,
-        scorer: HUDRelevanceScorer,
+        self, context: HUDContext, scorer: HUDRelevanceScorer
     ) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """
@@ -909,7 +615,13 @@ class HUDAssembler:
             item["tier"] = 0 if item.get("world_id") == context.world_id else 1
             item["relevance"] = score.as_dict()
             result.append(item)
-        result.sort(key=lambda x: (x["tier"], x.get("priority", 100), -x["relevance"]["total"]))
+        result.sort(
+            key=lambda x: (
+                x["tier"],
+                x.get("priority", 100),
+                -x["relevance"]["total"],
+            )
+        )
         return result
 
     def _recent_events(
@@ -932,11 +644,3 @@ class HUDAssembler:
             result.append(event)
         result.sort(key=lambda x: (x["tier"], -x["relevance"]["total"]))
         return result
-
-    @staticmethod
-    def _knowledge_tier(kind: str, score: float) -> int:
-        if kind in {"GOAL", "RULE"}:
-            return 0
-        if kind in {"MEMORY", "RELATIONSHIP", "STATE", "EVENT"} and score >= 1.0:
-            return 1
-        return 2

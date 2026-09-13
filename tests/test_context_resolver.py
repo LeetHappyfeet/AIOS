@@ -1,3 +1,5 @@
+import inspect
+
 from aios_app.models import ExternalObservationIn
 from aios_app.epistemic.normalizer import normalize_components
 from aios_app.epistemic.context_resolver import (
@@ -6,6 +8,9 @@ from aios_app.epistemic.context_resolver import (
     classify_predicate_family,
     is_semantic_pivot,
     resolve_ingest_viewpoint,
+)
+from aios_app.epistemic.context_resolver_legacy import (
+    resolve_claim_context as resolve_claim_context_legacy,
 )
 
 
@@ -65,9 +70,6 @@ def test_same_statement_normalizes_to_one_source_neutral_proposition():
         object_value="dead",
         raw_text="The king is dead.",
     )
-
-    # Character ownership is deliberately absent from proposition identity.
-    # Separate observations/knowledge rows carry Alice/Bob visibility instead.
     assert alice["proposition_hash"] == bob["proposition_hash"]
     assert alice["topic_key"] == bob["topic_key"]
 
@@ -113,3 +115,13 @@ def test_external_observation_contract_defaults_to_source_liminal_event():
     assert req.speaker_type == "source"
     assert req.target_character_id is None
     assert req.target_world_id is None
+
+
+def test_runtime_binding_repair_keeps_instance_parameter_uuid_typed():
+    # Runtime rebinding still lives in the legacy SQL compatibility helper while
+    # v4 owns semantic correction. Verify the UUID cast at the boundary where
+    # that SQL actually executes instead of requiring old internals in v4.
+    source = inspect.getsource(resolve_claim_context_legacy)
+    assert "character_instance_id=$2::uuid" in source
+    assert "'character_instance_id', ($2::uuid)::text" in source
+    assert "'character_instance_id', $2::text" not in source

@@ -36,12 +36,16 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "dag_to_document_section": JobSpec(ResourceClass.FAST_SQL, "node_id", True),
     "extract_claims": JobSpec(ResourceClass.NLP, "section_id", True, isolate_blocking=True),
     "decompose_claim_frames": JobSpec(ResourceClass.NLP, "claim_id", True, isolate_blocking=True),
-    "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_id", True, isolate_blocking=True, requires_rdf_slot=True),
+    "resolve_claim_context": JobSpec(ResourceClass.SEMANTIC, "claim_id", True, isolate_blocking=True),
     "normalize_proposition": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
     "project_character_knowledge": JobSpec(ResourceClass.SEMANTIC, "global", True),
-    "derive_claim_topology": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
-    "derive_character_acquisition_topology": JobSpec(ResourceClass.SEMANTIC, "acquisition_scope", True, isolate_blocking=True, requires_rdf_slot=True),
-    "derive_world_assertion_topology": JobSpec(ResourceClass.SEMANTIC, "assertion_scope", True, isolate_blocking=True, requires_rdf_slot=True),
+    # Derivation is PostgreSQL-authoritative. epistemic.topology_projection
+    # replaces the old per-item Fuseki rewrite with a dirty-scope enqueue, so
+    # these remain structural semantic work rather than RDF workers.
+    "derive_claim_topology": JobSpec(ResourceClass.SEMANTIC, "claim_scope", True, isolate_blocking=True),
+    "derive_character_acquisition_topology": JobSpec(ResourceClass.SEMANTIC, "acquisition_scope", True, isolate_blocking=True),
+    "derive_world_assertion_topology": JobSpec(ResourceClass.SEMANTIC, "assertion_scope", True, isolate_blocking=True),
+    "project_semantic_scope": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
     "resolve_generated_facts": JobSpec(ResourceClass.RECONCILIATION, "global", True),
     "rdf_epistemic_project": JobSpec(ResourceClass.RDF, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
     "rdf_liminal_promote": JobSpec(ResourceClass.RDF, "section_id", True, isolate_blocking=True, requires_rdf_slot=True),
@@ -60,8 +64,11 @@ def job_spec(job_type: str) -> JobSpec:
 
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
+    # LIVE here means fresh semantic enrichment, not a generation barrier. The
+    # message_cognitive_commit is the only generation-critical semantic path.
+    # Keeping fresh context/normalization on this lane reserves two semantic
+    # workers while structural and background archaeology use separate workers.
     if job_type in {
-        "decompose_claim_frames",
         "resolve_claim_context",
         "normalize_proposition",
         "project_character_knowledge",
@@ -78,4 +85,6 @@ def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) 
         "derive_world_assertion_topology",
     }:
         return SchedulingLane.STRUCTURAL
+    if job_type == "project_semantic_scope":
+        return SchedulingLane.BACKGROUND
     return SchedulingLane.DEFAULT

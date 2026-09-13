@@ -1,0 +1,159 @@
+name: semantic-topology-coalescing
+
+on:
+  push:
+    branches: [AIOS-development]
+  pull_request:
+    branches: [AIOS-development]
+
+jobs:
+  topology-readiness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install narrow dependencies
+        run: python -m pip install --disable-pip-version-check pytest asyncpg requests qdrant-client pydantic python-dotenv
+      - name: Compile coalescing/readiness modules
+        run: |
+          python -m py_compile \
+            epistemic/topology_projection.py \
+            epistemic/belief_reconciliation.py \
+            epistemic/reconciliation_stage.py \
+            epistemic/retention.py \
+            epistemic/context_resolver.py \
+            epistemic/__init__.py \
+            hud/readiness.py \
+            hud/retrieval.py \
+            world/__init__.py \
+            pipeline/job_registry.py \
+            runner_v2.py \
+            launch.py \
+            tests/test_memory_reconciliation_stage.py \
+            tests/test_semantic_retention.py \
+            tests/ci_belief_migration_smoke.py \
+            tests/ci_context_resolver_uuid_binding_smoke.py
+      - name: Run readiness, projection, belief, reconciliation, retention, and context tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/aios-pythonpath"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" \
+            python -m pytest -q \
+              tests/test_hud_readiness.py \
+              tests/test_topology_projection_coalescing.py \
+              tests/test_belief_reconciliation.py \
+              tests/test_memory_reconciliation_stage.py \
+              tests/test_semantic_retention.py \
+              tests/test_topology_retrieval.py \
+              tests/test_context_resolver.py
+
+  migration-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aios
+          POSTGRES_PASSWORD: aios
+          POSTGRES_DB: aiosdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aios -d aiosdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install asyncpg
+        run: python -m pip install --disable-pip-version-check asyncpg
+      - name: Apply semantic projection migration fixture
+        env:
+          AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+          from pathlib import Path
+          import asyncpg
+
+          BOOTSTRAP = r'''
+          CREATE SCHEMA aios;
+          CREATE TABLE aios.pipeline_job (
+              job_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+              job_type text NOT NULL,
+              payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+              status text NOT NULL DEFAULT 'queued'
+          );
+          '''
+
+          async def main():
+              conn = await asyncpg.connect(os.environ['AIOS_DB_DSN'])
+              try:
+                  await conn.execute(BOOTSTRAP)
+                  await conn.execute(
+                      Path('migrations/20260911_zzz_semantic_scope_projection.sql')
+                      .read_text(encoding='utf-8')
+                  )
+                  assert await conn.fetchval(
+                      "SELECT to_regclass('aios.semantic_scope_projection_state') IS NOT NULL"
+                  )
+                  await conn.execute(
+                      """
+                      INSERT INTO aios.pipeline_job(job_type,payload,status)
+                      VALUES ('project_semantic_scope','{"scope_key":"char:test"}'::jsonb,'queued')
+                      """
+                  )
+                  try:
+                      await conn.execute(
+                          """
+                          INSERT INTO aios.pipeline_job(job_type,payload,status)
+                          VALUES ('project_semantic_scope','{"scope_key":"char:test"}'::jsonb,'running')
+                          """
+                      )
+                  except asyncpg.UniqueViolationError:
+                      pass
+                  else:
+                      raise AssertionError('active scope projection uniqueness was not enforced')
+              finally:
+                  await conn.close()
+
+          asyncio.run(main())
+          PY
+      - name: Exercise context resolver UUID binding
+        env:
+          AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
+        run: python tests/ci_context_resolver_uuid_binding_smoke.py
+
+  belief-migration-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aios
+          POSTGRES_PASSWORD: aios
+          POSTGRES_DB: aiosdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aios -d aiosdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install asyncpg
+        run: python -m pip install --disable-pip-version-check asyncpg
+      - name: Apply and exercise belief reconciliation migrations
+        env:
+          AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
+        run: python tests/ci_belief_migration_smoke.py

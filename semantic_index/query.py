@@ -1,37 +1,49 @@
 from __future__ import annotations
 
+import json
+import socket
 from typing import Any, Iterable
-from qdrant_client.http import models as qm
 
 from .config import SemanticIndexConfig
-from .embeddings import Embedder
-from .store import QdrantStore
-
-_EMBEDDER: Embedder | None = None
-_STORES: dict[str, QdrantStore] = {}
-
-
-def _embedder(cfg: SemanticIndexConfig) -> Embedder:
-    global _EMBEDDER
-    if _EMBEDDER is None:
-        _EMBEDDER = Embedder(cfg.embedding_model, cfg.embedding_device)
-    return _EMBEDDER
-
-
-def _store(cfg: SemanticIndexConfig, collection: str) -> QdrantStore:
-    if collection not in _STORES:
-        emb = _embedder(cfg)
-        _STORES[collection] = QdrantStore(
-            cfg.qdrant_url, cfg.qdrant_api_key, collection, emb.dim
-        )
-        _STORES[collection].ensure_collection()
-    return _STORES[collection]
 
 
 class SemanticQueryService:
+    """Lightweight client for the always-warm Semantic Index query service.
+
+    The API/HUD process must never instantiate the sentence-transformer model.
+    Embedding and Qdrant vector search are owned by the Semantic Index process,
+    which loads and warms the model during service startup.
+    """
+
     def __init__(self, cfg: SemanticIndexConfig | None = None):
         self.cfg = cfg or SemanticIndexConfig()
-        self.embedder = _embedder(self.cfg)
+
+    def _request(self, payload: dict[str, Any]) -> list[tuple[str, float, dict[str, Any]]]:
+        data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+        with socket.create_connection(
+            (self.cfg.query_host, self.cfg.query_port),
+            timeout=self.cfg.query_timeout_seconds,
+        ) as sock:
+            sock.settimeout(self.cfg.query_timeout_seconds)
+            sock.sendall(data)
+            response = b""
+            while not response.endswith(b"\n"):
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                response += chunk
+                if len(response) > 8 * 1024 * 1024:
+                    raise RuntimeError("semantic query response exceeded size limit")
+
+        if not response:
+            raise RuntimeError("semantic query service returned no response")
+        result = json.loads(response.decode("utf-8"))
+        if not result.get("ok"):
+            raise RuntimeError(result.get("error") or "semantic query service failed")
+        return [
+            (str(item[0]), float(item[1]), dict(item[2]))
+            for item in result.get("hits", [])
+        ]
 
     def search(
         self,
@@ -44,25 +56,17 @@ class SemanticQueryService:
     ) -> list[tuple[str, float, dict[str, Any]]]:
         if not query_text.strip():
             return []
-        conditions: list[qm.FieldCondition] = []
-        for key, value in (must or {}).items():
-            if value is not None:
-                conditions.append(
-                    qm.FieldCondition(key=key, match=qm.MatchValue(value=str(value)))
-                )
-        for key, values in (any_values or {}).items():
-            vals = [str(v) for v in values if v is not None]
-            if vals:
-                conditions.append(
-                    qm.FieldCondition(key=key, match=qm.MatchAny(any=vals))
-                )
-        qfilter = qm.Filter(must=conditions) if conditions else None
-        vector = self.embedder.embed([query_text])[0]
-        return _store(self.cfg, collection).search(
-            vector,
-            top_k=top_k or self.cfg.default_top_k,
-            qdrant_filter=qfilter,
-        )
+        return self._request({
+            "op": "search",
+            "query_text": query_text,
+            "collection": collection,
+            "top_k": top_k,
+            "must": must or {},
+            "any_values": {
+                key: [str(value) for value in values if value is not None]
+                for key, values in (any_values or {}).items()
+            },
+        })
 
     def search_epistemic(
         self,
@@ -72,10 +76,12 @@ class SemanticQueryService:
         instance_ids: Iterable[Any],
         top_k: int | None = None,
     ) -> list[tuple[str, float, dict[str, Any]]]:
-        return self.search(
-            query_text,
-            collection=self.cfg.epistemic_collection,
-            top_k=top_k or self.cfg.hud_candidate_k,
-            must={"object_type": "character_knowledge", "character_id": character_id},
-            any_values={"instance_id": instance_ids},
-        )
+        if not query_text.strip():
+            return []
+        return self._request({
+            "op": "search_epistemic",
+            "query_text": query_text,
+            "character_id": character_id,
+            "instance_ids": [str(value) for value in instance_ids if value is not None],
+            "top_k": top_k,
+        })

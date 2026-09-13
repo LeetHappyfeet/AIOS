@@ -1,0 +1,244 @@
+name: causal-kernel
+
+on:
+  push:
+    branches: [AIOS-development]
+  pull_request:
+    branches: [AIOS-development]
+
+jobs:
+  causal-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install narrow test dependencies
+        run: python -m pip install --disable-pip-version-check pytest asyncpg
+      - name: Compile changed architecture modules
+        run: |
+          python -m py_compile \
+            causal/__init__.py \
+            causal/types.py \
+            causal/domain.py \
+            causal/registry.py \
+            causal/rules.py \
+            causal/kernel.py \
+            causal/ingress.py \
+            causal/projection.py \
+            causal/semantic_bridge.py \
+            causal/domains/location.py \
+            causal/domains/scalar.py \
+            world/runtime.py \
+            hud/context.py
+      - name: Run causal and separation tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/aios-pythonpath"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" \
+            python -m pytest -q tests/test_causal_domains.py tests/test_causal_separation.py
+
+  migration-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aios
+          POSTGRES_PASSWORD: aios
+          POSTGRES_DB: aiosdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aios -d aiosdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install migration dependency
+        run: python -m pip install --disable-pip-version-check asyncpg
+      - name: Apply causal migrations to existing-runtime fixture
+        env:
+          AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+          from pathlib import Path
+          import asyncpg
+
+          BOOTSTRAP = r'''
+          CREATE SCHEMA aios;
+          CREATE TABLE aios.world (
+              world_id uuid PRIMARY KEY,
+              world_key text,
+              world_type text NOT NULL DEFAULT 'runtime'
+          );
+          CREATE TABLE aios.timeline (
+              timeline_id uuid PRIMARY KEY,
+              world_id uuid NOT NULL REFERENCES aios.world(world_id)
+          );
+          CREATE TABLE aios.dag_node (
+              node_id uuid PRIMARY KEY,
+              timeline_id uuid NOT NULL REFERENCES aios.timeline(timeline_id),
+              event_time timestamptz
+          );
+          CREATE TABLE aios.character_instance (
+              instance_id uuid PRIMARY KEY
+          );
+          CREATE TABLE aios.world_entity (
+              entity_id uuid PRIMARY KEY,
+              world_id uuid NOT NULL REFERENCES aios.world(world_id),
+              entity_key text,
+              entity_type text NOT NULL DEFAULT 'object',
+              display_name text,
+              character_instance_id uuid REFERENCES aios.character_instance(instance_id),
+              created_at timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE TABLE aios.world_entity_relation (
+              relation_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+              world_id uuid NOT NULL REFERENCES aios.world(world_id),
+              subject_entity_id uuid NOT NULL REFERENCES aios.world_entity(entity_id),
+              relation_type text NOT NULL,
+              object_entity_id uuid NOT NULL REFERENCES aios.world_entity(entity_id),
+              valid_from_node_id uuid REFERENCES aios.dag_node(node_id),
+              valid_to_node_id uuid REFERENCES aios.dag_node(node_id),
+              created_at timestamptz NOT NULL DEFAULT now(),
+              meta jsonb NOT NULL DEFAULT '{}'::jsonb,
+              CHECK (subject_entity_id <> object_entity_id)
+          );
+          CREATE TABLE aios.claim_candidate (claim_id uuid PRIMARY KEY);
+          CREATE TABLE aios.claim_semantic_frame (frame_id uuid PRIMARY KEY);
+          CREATE TABLE aios.proposition (proposition_id uuid PRIMARY KEY);
+          CREATE TABLE aios.world_event (
+              world_event_id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+              world_id uuid NOT NULL REFERENCES aios.world(world_id),
+              timeline_id uuid REFERENCES aios.timeline(timeline_id),
+              instance_id uuid REFERENCES aios.character_instance(instance_id),
+              actor_entity_id uuid REFERENCES aios.world_entity(entity_id),
+              target_entity_id uuid REFERENCES aios.world_entity(entity_id),
+              action_type text NOT NULL,
+              status text NOT NULL DEFAULT 'accepted',
+              payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+              dag_node_id uuid REFERENCES aios.dag_node(node_id),
+              created_at timestamptz NOT NULL DEFAULT now()
+          );
+          CREATE TABLE aios.character_runtime_state (
+              instance_id uuid PRIMARY KEY REFERENCES aios.character_instance(instance_id),
+              world_id uuid NOT NULL REFERENCES aios.world(world_id),
+              timeline_id uuid NOT NULL REFERENCES aios.timeline(timeline_id),
+              head_node_id uuid REFERENCES aios.dag_node(node_id),
+              location_entity_id uuid REFERENCES aios.world_entity(entity_id),
+              health double precision,
+              stamina double precision,
+              energy double precision,
+              physical_state jsonb NOT NULL DEFAULT '{}'::jsonb,
+              updated_at timestamptz NOT NULL DEFAULT now()
+          );
+
+          INSERT INTO aios.world VALUES
+            ('00000000-0000-0000-0000-000000000001','fixture','runtime');
+          INSERT INTO aios.timeline VALUES
+            ('00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000001');
+          INSERT INTO aios.character_instance VALUES
+            ('00000000-0000-0000-0000-000000000003');
+          INSERT INTO aios.world_entity(entity_id,world_id,entity_key,entity_type,character_instance_id) VALUES
+            ('00000000-0000-0000-0000-000000000004','00000000-0000-0000-0000-000000000001','character:test','character','00000000-0000-0000-0000-000000000003'),
+            ('00000000-0000-0000-0000-000000000005','00000000-0000-0000-0000-000000000001','room:test','location',NULL);
+          INSERT INTO aios.character_runtime_state(
+              instance_id,world_id,timeline_id,location_entity_id,
+              health,stamina,energy,physical_state
+          ) VALUES (
+              '00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000001',
+              '00000000-0000-0000-0000-000000000002',
+              '00000000-0000-0000-0000-000000000005',
+              55,80,42,'{"posture":"standing"}'::jsonb
+          );
+          '''
+
+          async def main():
+              conn = await asyncpg.connect(os.environ['AIOS_DB_DSN'])
+              try:
+                  await conn.execute(BOOTSTRAP)
+                  for name in (
+                      'migrations/20260911_causal_integrity_kernel.sql',
+                      'migrations/20260911_zz_causal_runtime_legacy_state.sql',
+                  ):
+                      await conn.execute(Path(name).read_text(encoding='utf-8'))
+
+                  names = await conn.fetch(
+                      """
+                      SELECT table_name
+                      FROM information_schema.tables
+                      WHERE table_schema='aios'
+                        AND table_name IN ('causal_candidate','causal_admission','causal_state')
+                      ORDER BY table_name
+                      """
+                  )
+                  assert [row['table_name'] for row in names] == [
+                      'causal_admission', 'causal_candidate', 'causal_state'
+                  ]
+
+                  cols = await conn.fetch(
+                      """
+                      SELECT column_name
+                      FROM information_schema.columns
+                      WHERE table_schema='aios'
+                        AND table_name='world_event'
+                        AND column_name IN ('candidate_id','domain_id','result_state_version')
+                      ORDER BY column_name
+                      """
+                  )
+                  assert [row['column_name'] for row in cols] == [
+                      'candidate_id', 'domain_id', 'result_state_version'
+                  ]
+
+                  causal_rows = await conn.fetch(
+                      """
+                      SELECT domain_id, state_key, value_json
+                      FROM aios.causal_state
+                      WHERE entity_id='00000000-0000-0000-0000-000000000004'::uuid
+                      ORDER BY domain_id, state_key
+                      """
+                  )
+                  keys = {(r['domain_id'], r['state_key']) for r in causal_rows}
+                  assert ('world.location', 'location_entity_id') in keys
+                  assert ('world.scalar', 'health') in keys
+                  assert ('world.scalar', 'stamina') in keys
+                  assert ('world.scalar', 'energy') in keys
+                  assert ('world.scalar', 'physical_state') in keys
+
+                  legacy = await conn.fetchrow(
+                      """
+                      SELECT location_entity_id, health, stamina, energy, physical_state
+                      FROM aios.character_runtime_state
+                      WHERE instance_id='00000000-0000-0000-0000-000000000003'::uuid
+                      """
+                  )
+                  assert legacy['location_entity_id'] is None
+                  assert legacy['health'] is None
+                  assert legacy['stamina'] is None
+                  assert legacy['energy'] is None
+                  assert dict(legacy['physical_state']) == {} if isinstance(legacy['physical_state'], dict) else str(legacy['physical_state']) == '{}'
+
+                  relation = await conn.fetchrow(
+                      """
+                      SELECT object_entity_id
+                      FROM aios.world_entity_relation
+                      WHERE subject_entity_id='00000000-0000-0000-0000-000000000004'::uuid
+                        AND relation_type='located_in'
+                        AND valid_to_node_id IS NULL
+                      """
+                  )
+                  assert relation['object_entity_id'] == asyncpg.pgproto.pgproto.UUID('00000000-0000-0000-0000-000000000005')
+              finally:
+                  await conn.close()
+
+          asyncio.run(main())
+          PY

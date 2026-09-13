@@ -1,0 +1,81 @@
+name: aios
+
+services:
+  postgres:
+    image: postgres:16.15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AIOS_POSTGRES_DB:-postgres}
+      POSTGRES_USER: ${AIOS_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${AIOS_POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "127.0.0.1:${AIOS_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - aios_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${AIOS_QDRANT_HTTP_PORT:-6333}:6333"
+      - "127.0.0.1:${AIOS_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - aios_qdrant:/qdrant/storage
+
+  fuseki:
+    build:
+      context: ./docker/fuseki
+      args:
+        JENA_VERSION: ${AIOS_JENA_VERSION:-6.2.0}
+    restart: unless-stopped
+    environment:
+      JAVA_OPTIONS: ${AIOS_FUSEKI_JAVA_OPTIONS:--Xms512m -Xmx2g}
+    ports:
+      - "127.0.0.1:${AIOS_FUSEKI_PORT:-3030}:3030"
+    volumes:
+      - aios_fuseki:/fuseki/databases
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --silent --show-error --get
+          --data-urlencode 'query=ASK {}'
+          http://127.0.0.1:3030/world/sparql >/dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  fuseki-init:
+    build:
+      context: ./docker/fuseki
+      args:
+        JENA_VERSION: ${AIOS_JENA_VERSION:-6.2.0}
+    restart: "no"
+    depends_on:
+      fuseki:
+        condition: service_healthy
+    environment:
+      FUSEKI_BASE_URL: http://fuseki:3030
+    entrypoint:
+      - /bin/sh
+      - /bootstrap/bootstrap-fuseki.sh
+    volumes:
+      - ./docker/fuseki/bootstrap-fuseki.sh:/bootstrap/bootstrap-fuseki.sh:ro
+      - ./rdf/ontology:/ontology:ro
+
+volumes:
+  aios_postgres:
+    name: aios_postgres
+  aios_qdrant:
+    name: aios_qdrant
+  aios_fuseki:
+    name: aios_fuseki

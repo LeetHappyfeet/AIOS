@@ -5,6 +5,11 @@ from typing import Optional
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.epistemic.message_cognition import (
+    INTERPRETER_VERSION,
+    commit_message_cognition,
+    mark_enrichment_ready,
+)
 from aios_app.pipeline.jobs import enqueue_job
 
 LIVE_PRIORITY = 15
@@ -107,39 +112,75 @@ async def mark_matching_runtime_dirty(
     source_head_node_id: UUID,
     source_head_event_id: int,
 ) -> None:
-    rows = await db.fetch(
-        """
-        SELECT rs.instance_id
-        FROM aios.character_runtime_state rs
-        JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
-        JOIN aios.timeline rt ON rt.timeline_id=rs.timeline_id
-        WHERE ci.character_id=$1
-          AND rt.session_id IS NOT DISTINCT FROM $2
-          AND rt.user_name IS NOT DISTINCT FROM $3
-          AND rt.scope_key=$4
-          AND rs.source_timeline_id=$5
-          AND rs.source_head_node_id=$6
-        """,
-        character_id,
-        session_id,
-        user_name,
-        scope_key,
-        source_timeline_id,
-        source_head_node_id,
+    """Adopt the exact source coordinate, dirty matching runtimes, then commit cognition."""
+    from aios_app.world.source_cursor import advance_matching_runtime_source_cursor
+
+    instance_ids = await advance_matching_runtime_source_cursor(
+        db,
+        character_id=character_id,
+        session_id=session_id,
+        user_name=user_name,
+        scope_key=scope_key,
+        source_timeline_id=source_timeline_id,
+        source_head_node_id=source_head_node_id,
+        source_head_event_id=source_head_event_id,
     )
-    for row in rows:
+    for instance_id in instance_ids:
         await mark_source_dirty(
             db,
-            instance_id=row["instance_id"],
+            instance_id=instance_id,
             source_timeline_id=source_timeline_id,
             source_head_node_id=source_head_node_id,
             source_head_event_id=source_head_event_id,
         )
         await enqueue_live_turn_work(
             db,
-            instance_id=row["instance_id"],
+            instance_id=instance_id,
             node_id=source_head_node_id,
         )
+
+
+async def _character_projection_clean(
+    db: Database,
+    *,
+    instance_id: UUID,
+) -> bool:
+    """Return false only when stale materialized /char state is known to be invalid."""
+    row = await db.fetchrow(
+        """
+        SELECT NOT EXISTS (
+            SELECT 1
+            FROM aios.knowledge_acquisition_event kae
+            LEFT JOIN aios.claim_context_resolution ccr
+              ON ccr.claim_id=kae.claim_id
+            LEFT JOIN aios.claim_candidate cc
+              ON cc.claim_id=kae.claim_id
+            LEFT JOIN aios.claim_semantic_frame_projection sfp
+              ON sfp.claim_id=kae.claim_id
+            LEFT JOIN aios.claim_semantic_frame sf
+              ON sf.frame_id=sfp.primary_frame_id
+            WHERE kae.instance_id=$1
+              AND kae.claim_id IS NOT NULL
+              AND kae.processed_at IS NOT NULL
+              AND lower(COALESCE(kae.meta->>'source','')) LIKE 'context-resolver%'
+              AND (
+                    ccr.claim_id IS NULL
+                 OR lower(COALESCE(ccr.epistemic_scope,'')) <> 'character'
+                 OR ccr.character_instance_id IS DISTINCT FROM $1
+                 OR upper(COALESCE(ccr.claim_kind,'')) NOT IN (
+                        'BELIEF','MEMORY','GOAL','RULE','STATE','TRAIT','RELATIONSHIP'
+                    )
+                 OR lower(COALESCE(sf.discourse_mode,'')) IN (
+                        'question','hypothetical','counterfactual','conditional','quoted_question'
+                    )
+                 OR COALESCE(cc.raw_text,'') ~ '\\?\\s*["''”’\\)\\]]*\\s*$'
+              )
+            LIMIT 1
+        ) AS clean
+        """,
+        instance_id,
+    )
+    return bool(row and row.get("clean", True))
 
 
 async def source_node_retrieval_ready(
@@ -148,15 +189,43 @@ async def source_node_retrieval_ready(
     instance_id: UUID,
     node_id: Optional[UUID],
 ) -> bool:
+    """Return the generation-critical cognitive barrier for one source node."""
+    # Runtime-only instances with no source coordinate have nothing to wait on.
+    if node_id is None:
+        return True
+    row = await db.fetchrow(
+        """
+        SELECT 1
+        FROM aios.message_cognitive_commit
+        WHERE instance_id=$1
+          AND node_id=$2
+          AND interpreter_version=$3
+        """,
+        instance_id,
+        node_id,
+        INTERPRETER_VERSION,
+    )
+    if not row:
+        return False
+    return await _character_projection_clean(db, instance_id=instance_id)
+
+
+async def source_node_topology_ready(
+    db: Database,
+    *,
+    instance_id: UUID,
+    node_id: Optional[UUID],
+) -> bool:
+    """Return whether exhaustive topology enrichment is complete for diagnostics."""
     if node_id is None:
         return True
 
     section = await db.fetchrow(
         """
-        SELECT ds.section_id, ds.claims_extracted_at
-        FROM aios.document_section ds
-        WHERE ds.node_id=$1
-        ORDER BY ds.section_order
+        SELECT claims_extracted_at
+        FROM aios.document_section
+        WHERE node_id=$1
+        ORDER BY section_order
         LIMIT 1
         """,
         node_id,
@@ -164,26 +233,35 @@ async def source_node_retrieval_ready(
     if not section or section["claims_extracted_at"] is None:
         return False
 
-    claim_counts = await db.fetchrow(
+    row = await db.fetchrow(
         """
+        WITH runtime_identity AS (
+            SELECT ci.character_id
+            FROM aios.character_instance ci
+            WHERE ci.instance_id=$2
+        )
         SELECT
             count(DISTINCT cc.claim_id) AS total,
-            count(DISTINCT ccr.claim_id) AS contextualized,
-            count(DISTINCT o.claim_id) AS normalized,
-            count(DISTINCT CASE WHEN kae.processed_at IS NOT NULL THEN cc.claim_id END)
-                AS knowledge_ready,
             count(DISTINCT CASE WHEN stp.projected_at IS NOT NULL THEN cc.claim_id END)
-                AS topology_ready,
+                AS claim_topology_ready,
             count(DISTINCT CASE
-                WHEN kae.processed_at IS NOT NULL
+                WHEN ccr.epistemic_scope='character'
+                 AND ccr.origin_character_id=ri.character_id
+                THEN cc.claim_id
+            END) AS acquisition_required,
+            count(DISTINCT CASE
+                WHEN ccr.epistemic_scope='character'
+                 AND ccr.origin_character_id=ri.character_id
+                 AND ccr.character_instance_id=$2
+                 AND kae.processed_at IS NOT NULL
                  AND astp.projected_at IS NOT NULL
                 THEN cc.claim_id
             END) AS acquisition_topology_ready
         FROM aios.document_section ds
+        CROSS JOIN runtime_identity ri
         LEFT JOIN aios.extracted_sentence es ON es.section_id=ds.section_id
         LEFT JOIN aios.claim_candidate cc ON cc.sentence_id=es.sentence_id
         LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
-        LEFT JOIN aios.observation o ON o.claim_id=cc.claim_id
         LEFT JOIN aios.knowledge_acquisition_event kae
           ON kae.claim_id=cc.claim_id AND kae.instance_id=$2
         LEFT JOIN aios.semantic_topology_projection stp
@@ -197,16 +275,17 @@ async def source_node_retrieval_ready(
         node_id,
         instance_id,
     )
-    total = int(claim_counts["total"] or 0)
-    if total == 0:
-        return True
-    return (
-        int(claim_counts["contextualized"] or 0) == total
-        and int(claim_counts["normalized"] or 0) == total
-        and int(claim_counts["knowledge_ready"] or 0) == total
-        and int(claim_counts["topology_ready"] or 0) == total
-        and int(claim_counts["acquisition_topology_ready"] or 0) == total
+    if not row:
+        return False
+    total = int(row["total"] or 0)
+    ready = total == 0 or (
+        int(row["claim_topology_ready"] or 0) == total
+        and int(row["acquisition_topology_ready"] or 0)
+        == int(row["acquisition_required"] or 0)
     )
+    if ready:
+        await mark_enrichment_ready(db, instance_id=instance_id, node_id=node_id)
+    return ready
 
 
 async def _enqueue_live_job(
@@ -218,7 +297,7 @@ async def _enqueue_live_job(
     discriminator = next(
         (
             (key, str(payload[key]))
-            for key in ("node_id", "section_id", "claim_id", "acquisition_id")
+            for key in ("node_id", "section_id", "claim_id", "acquisition_id", "live_instance_id")
             if payload.get(key) is not None
         ),
         None,
@@ -227,11 +306,8 @@ async def _enqueue_live_job(
         key, value = discriminator
         exists = await db.fetchrow(
             """
-            SELECT 1
-            FROM aios.pipeline_job
-            WHERE job_type=$1
-              AND status IN ('queued','running')
-              AND payload->>$2=$3
+            SELECT 1 FROM aios.pipeline_job
+            WHERE job_type=$1 AND status IN ('queued','running') AND payload->>$2=$3
             LIMIT 1
             """,
             job_type,
@@ -240,13 +316,7 @@ async def _enqueue_live_job(
         )
     else:
         exists = await db.fetchrow(
-            """
-            SELECT 1
-            FROM aios.pipeline_job
-            WHERE job_type=$1
-              AND status IN ('queued','running')
-            LIMIT 1
-            """,
+            "SELECT 1 FROM aios.pipeline_job WHERE job_type=$1 AND status IN ('queued','running') LIMIT 1",
             job_type,
         )
     if exists:
@@ -256,10 +326,7 @@ async def _enqueue_live_job(
             SET priority=LEAST(priority,$2), updated_at=now()
             WHERE job_type=$1
               AND status IN ('queued','running')
-              AND (
-                    $3::text IS NULL
-                    OR payload->>$3=$4
-                  )
+              AND ($3::text IS NULL OR payload->>$3=$4)
             """,
             job_type,
             LIVE_PRIORITY,
@@ -267,13 +334,7 @@ async def _enqueue_live_job(
             discriminator[1] if discriminator else None,
         )
         return False
-
-    await enqueue_job(
-        db,
-        job_type=job_type,
-        payload=payload,
-        priority=LIVE_PRIORITY,
-    )
+    await enqueue_job(db, job_type=job_type, payload=payload, priority=LIVE_PRIORITY)
     return True
 
 
@@ -285,121 +346,20 @@ async def enqueue_live_turn_work(
 ) -> int:
     if node_id is None:
         return 0
-
-    queued = 0
-    section = await db.fetchrow(
-        "SELECT section_id, claims_extracted_at FROM aios.document_section WHERE node_id=$1 LIMIT 1",
-        node_id,
+    committed = await commit_message_cognition(
+        db,
+        instance_id=instance_id,
+        node_id=node_id,
     )
-    if not section:
-        created = await _enqueue_live_job(
-            db,
-            job_type="dag_to_document_section",
-            payload={"node_id": str(node_id), "live_instance_id": str(instance_id)},
-        )
-        return int(created)
+    if committed:
+        return 0
 
-    section_id = section["section_id"]
-    if section["claims_extracted_at"] is None:
-        created = await _enqueue_live_job(
-            db,
-            job_type="extract_claims",
-            payload={"section_id": str(section_id), "live_instance_id": str(instance_id)},
-        )
-        return int(created)
-
-    claims = await db.fetch(
-        """
-        SELECT DISTINCT cc.claim_id
-        FROM aios.claim_candidate cc
-        JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
-        WHERE es.section_id=$1
-        """,
-        section_id,
+    created = await _enqueue_live_job(
+        db,
+        job_type="dag_to_document_section",
+        payload={"node_id": str(node_id), "live_instance_id": str(instance_id)},
     )
-
-    for claim in claims:
-        claim_id = claim["claim_id"]
-        context = await db.fetchrow(
-            "SELECT 1 FROM aios.claim_context_resolution WHERE claim_id=$1",
-            claim_id,
-        )
-        if not context:
-            queued += int(await _enqueue_live_job(
-                db,
-                job_type="resolve_claim_context",
-                payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
-            ))
-            continue
-
-        observation = await db.fetchrow(
-            "SELECT 1 FROM aios.observation WHERE claim_id=$1",
-            claim_id,
-        )
-        if not observation:
-            queued += int(await _enqueue_live_job(
-                db,
-                job_type="normalize_proposition",
-                payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
-            ))
-            continue
-
-        acquisition = await db.fetchrow(
-            """
-            SELECT acquisition_id, processed_at
-            FROM aios.knowledge_acquisition_event
-            WHERE instance_id=$1 AND claim_id=$2
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            instance_id,
-            claim_id,
-        )
-        if acquisition and acquisition["processed_at"] is None:
-            queued += int(await _enqueue_live_job(
-                db,
-                job_type="project_character_knowledge",
-                payload={"live_instance_id": str(instance_id)},
-            ))
-        elif acquisition:
-            acquisition_topology = await db.fetchrow(
-                """
-                SELECT 1
-                FROM aios.semantic_topology_projection
-                WHERE acquisition_id=$1
-                  AND resolver_version='semantic-topology-v1'
-                  AND projected_at IS NOT NULL
-                """,
-                acquisition["acquisition_id"],
-            )
-            if not acquisition_topology:
-                queued += int(await _enqueue_live_job(
-                    db,
-                    job_type="derive_character_acquisition_topology",
-                    payload={
-                        "acquisition_id": str(acquisition["acquisition_id"]),
-                        "live_instance_id": str(instance_id),
-                    },
-                ))
-
-        topology = await db.fetchrow(
-            """
-            SELECT 1
-            FROM aios.semantic_topology_projection
-            WHERE claim_id=$1
-              AND resolver_version='semantic-topology-v1'
-              AND projected_at IS NOT NULL
-            """,
-            claim_id,
-        )
-        if not topology:
-            queued += int(await _enqueue_live_job(
-                db,
-                job_type="derive_claim_topology",
-                payload={"claim_id": str(claim_id), "live_instance_id": str(instance_id)},
-            ))
-
-    return queued
+    return int(created)
 
 
 async def set_retrieval_ready(
@@ -415,7 +375,9 @@ async def set_retrieval_ready(
     await db.execute(
         """
         UPDATE aios.character_hud_readiness
-        SET retrieval_ready_node_id=$2,
+        SET cognitive_ready_node_id=$2,
+            cognitive_ready_event_id=$3,
+            retrieval_ready_node_id=$2,
             retrieval_ready_event_id=$3,
             updated_at=now()
         WHERE instance_id=$1
@@ -439,6 +401,8 @@ async def save_prepared_snapshot(
     if source_node_id:
         row = await db.fetchrow("SELECT event_id FROM aios.dag_node WHERE node_id=$1", source_node_id)
         event_id = row["event_id"] if row else None
+
+    serialized_hud = json.dumps(hud_json, default=str)
     await db.execute(
         """
         UPDATE aios.character_hud_readiness
@@ -458,7 +422,7 @@ async def save_prepared_snapshot(
         source_node_id,
         event_id,
         state_version,
-        json.dumps(hud_json),
+        serialized_hud,
         hud_text,
     )
 
