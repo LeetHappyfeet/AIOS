@@ -9,6 +9,7 @@ from aios_app.config import settings
 
 BASELINE_RECEIPT = "0001_aios_baseline"
 REFERENCE_DATA_MIGRATION = "20260913_baseline_reference_data.sql"
+HUD_DEFAULT_PROFILE_MIGRATION = "20260913_hud_default_profile.sql"
 
 REQUIRED_TABLES = {
     "character_identity",
@@ -17,6 +18,8 @@ REQUIRED_TABLES = {
     "character_hud_readiness",
     "character_epistemic_profile",
     "character_proposition_knowledge",
+    "hud_profile",
+    "character_hud_profile",
     "source_identity",
     "semantic_topology_node",
     "semantic_topology_edge",
@@ -144,6 +147,34 @@ async def check_database() -> int:
             print("Run: python -m aios_app.migrate")
             return 7
         print("OK: reconciliation policies 16/16")
+
+        hud_receipt = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM aios.schema_migration
+                WHERE migration_name=$1
+            )
+            """,
+            HUD_DEFAULT_PROFILE_MIGRATION,
+        )
+        if not hud_receipt:
+            print(f"FAIL: required HUD migration is missing: {HUD_DEFAULT_PROFILE_MIGRATION}")
+            print("Run: python -m aios_app.migrate")
+            return 8
+
+        default_hud = await conn.fetchrow(
+            """
+            SELECT profile_id, profile_name
+            FROM aios.hud_profile
+            WHERE profile_name='default'
+            """
+        )
+        if default_hud is None:
+            print("FAIL: required HUD default profile is missing.")
+            print("Run: python -m aios_app.migrate")
+            return 9
+        print(f"OK: HUD default profile {default_hud['profile_id']}")
 
         rows = await conn.fetch(
             """
