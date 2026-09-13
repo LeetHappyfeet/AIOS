@@ -181,13 +181,19 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if recent:
         lines.append("\nRECENT EVENTS:")
         for event in recent:
+            # The assembler clips oversized events into `text`. Prefer that
+            # bounded presentation copy over the original raw message_text so
+            # the recent-event token budget is actually enforceable.
+            rendered_text = event.get("text") or event.get("message_text")
+            if not rendered_text:
+                continue
             if event.get("message_text"):
                 stream = event.get("event_stream") or "runtime"
                 role = event.get("speaker_role") or "other"
                 speaker = event.get("speaker_id") or "unknown"
-                lines.append(f"- [{stream}|{role}:{speaker}] {event['message_text']}")
-            elif event.get("text"):
-                lines.append(f"- {event['text']}")
+                lines.append(f"- [{stream}|{role}:{speaker}] {rendered_text}")
+            else:
+                lines.append(f"- {rendered_text}")
 
     actions = frame.get("actions") or []
     if actions:
