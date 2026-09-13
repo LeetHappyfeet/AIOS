@@ -14,6 +14,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
 from aios_app.epistemic import context_resolver_legacy as legacy
+from aios_app.epistemic.knowledge import reconcile_context_acquisitions_for_claim
 from aios_app.epistemic.semantic_interpreter import (
     SEMANTIC_INTERPRETER_VERSION,
     interpret_frame,
@@ -104,6 +105,9 @@ async def resolve_claim_context(
             RESOLVER_VERSION,
             json.dumps({"rdf_projection": "deferred"}),
         )
+        # Re-resolution may have rebound or downgraded ownership. Keep the
+        # materialized /char plane synchronized with the current SQL receipt.
+        await reconcile_context_acquisitions_for_claim(db, claim_id=claim_id)
         return context
 
     meta = frame["meta"] if isinstance(frame["meta"], dict) else {}
@@ -163,6 +167,11 @@ async def resolve_claim_context(
         float(interpretation.confidence),
         json.dumps(semantic_meta),
     )
+
+    # If semantic interpretation changes a claim from durable character
+    # cognition into narrative/event/source evidence, retract any acquisition
+    # created under the older classification immediately.
+    await reconcile_context_acquisitions_for_claim(db, claim_id=claim_id)
 
     corrected = legacy.ClaimContext(
         claim_id=context.claim_id,
