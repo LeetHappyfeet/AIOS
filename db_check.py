@@ -8,6 +8,7 @@ from aios_app.config import settings
 
 
 BASELINE_RECEIPT = "0001_aios_baseline"
+REFERENCE_DATA_MIGRATION = "20260913_baseline_reference_data.sql"
 
 REQUIRED_TABLES = {
     "character_identity",
@@ -42,6 +43,7 @@ REQUIRED_TABLES = {
     "world_proposition_assertion",
     "document_unit",
     "document_metadata_observation",
+    "reconciliation_family_policy",
 }
 
 
@@ -102,9 +104,46 @@ async def check_database() -> int:
             print("This looks like a prototype-era database; use a fresh database with this branch.")
             return 5
 
-        print(
-            f"OK: baseline {baseline['migration_name']}  {baseline['applied_at']}"
+        print(f"OK: baseline {baseline['migration_name']}  {baseline['applied_at']}")
+
+        reference_receipt = await conn.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM aios.schema_migration
+                WHERE migration_name=$1
+            )
+            """,
+            REFERENCE_DATA_MIGRATION,
         )
+        if not reference_receipt:
+            print(f"FAIL: required reference-data migration is missing: {REFERENCE_DATA_MIGRATION}")
+            print("Run: python -m aios_app.migrate")
+            return 6
+
+        policy_count = await conn.fetchval(
+            "SELECT count(*) FROM aios.reconciliation_family_policy"
+        )
+        required_policy_count = await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM aios.reconciliation_family_policy
+            WHERE predicate_family = ANY($1::text[])
+            """,
+            [
+                "UNKNOWN", "IDENTITY", "SOCIAL", "MEMBERSHIP", "POSSESSION",
+                "EPISTEMIC", "MEMORY", "CAUSAL", "COMMUNICATION", "ACTION",
+                "TEMPORAL", "DESCRIPTIVE", "EMOTIONAL", "GOAL", "SPATIAL", "RULE",
+            ],
+        )
+        if policy_count < 16 or required_policy_count != 16:
+            print(
+                "FAIL: reconciliation policy reference data is incomplete "
+                f"({required_policy_count}/16 required families present)."
+            )
+            print("Run: python -m aios_app.migrate")
+            return 7
+        print("OK: reconciliation policies 16/16")
 
         rows = await conn.fetch(
             """
