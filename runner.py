@@ -7,7 +7,7 @@ import logging
 import os
 import socket
 import time
-from typing import Callable, Awaitable, Dict, Any
+from typing import Callable, Awaitable, Dict, Any, Optional
 from uuid import UUID
 
 from aios_app.config import settings
@@ -512,12 +512,7 @@ async def _execute_claimed_job(
 
 
 def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
-    """Return preferred and fallback lanes for one semantic worker.
-
-    With four default workers this reserves two low-latency lanes for live
-    epistemic construction, one for structural work, and one for background
-    maintenance. Fallbacks keep the pool fully utilized when a lane is empty.
-    """
+    """Return preferred and fallback lanes for one semantic worker."""
     live = SchedulingLane.LIVE.value
     structural = SchedulingLane.STRUCTURAL.value
     background = SchedulingLane.BACKGROUND.value
@@ -530,6 +525,23 @@ def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
     return [background], [background, structural, live, default]
 
 
+def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
+    """Reserve capacity for serial semantic stages that share the LIVE lane.
+
+    Worker 0 advances interpretation/context. Worker 1 advances the immediately
+    downstream proposition/materialization stages. This prevents a resolver
+    backlog from occupying every LIVE semantic worker while normalization ages
+    indefinitely. Structural/background workers keep their lane reservations,
+    and all workers fall back to ordinary lane scheduling when their reserved
+    stage has no runnable work.
+    """
+    if worker_index == 0:
+        return ["resolve_claim_context"]
+    if worker_index == 1:
+        return ["normalize_proposition", "project_character_knowledge"]
+    return None
+
+
 async def _claim_for_worker(
     db: Database,
     *,
@@ -540,13 +552,28 @@ async def _claim_for_worker(
 ) -> Optional[Dict[str, Any]]:
     preferred: Optional[list[str]] = None
     fallback: Optional[list[str]] = None
+    reserved_job_types: Optional[list[str]] = None
     if resource_class == ResourceClass.SEMANTIC:
         preferred, fallback = _semantic_lane_order(worker_index)
+        reserved_job_types = _semantic_stage_reservation(worker_index)
 
-    # Serialize only the short local claim operation. This lets the first
-    # worker's queued->running transition become visible before the next local
-    # worker selects work, preventing same-partition claim convoys.
     async with claim_gate:
+        # First honor a stage reservation. This is deliberately narrower than
+        # priority tweaking: if normalization is queued, worker 1 cannot be
+        # captured by a large resolver backlog.
+        if reserved_job_types:
+            job = await fetch_next_job(
+                db,
+                worker_id=worker_id,
+                resource_class=resource_class.value,
+                lease_seconds=settings.pipeline_lease_seconds,
+                scheduling_lanes=preferred,
+                prefer_uncontended=True,
+                job_types=reserved_job_types,
+            )
+            if job:
+                return job
+
         job = await fetch_next_job(
             db,
             worker_id=worker_id,
