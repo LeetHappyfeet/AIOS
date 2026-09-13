@@ -19,7 +19,7 @@ logger = logging.getLogger("aios.pipeline.worker")
 
 LIMINAL_WORLD_KEY = "liminal"
 WORKER_NAME = "claim_extractor"
-WORKER_VERSION = "v4-spacy-sections"
+WORKER_VERSION = "v5-spacy-section-fanout"
 
 # =================================================
 # spaCy
@@ -38,23 +38,15 @@ def _get_nlp():
     return _NLP
 
 
-def split_sentences(text: str) -> List[str]:
-    if not text:
-        return []
-    doc = _get_nlp()(text)
-    return [s.text.strip() for s in doc.sents if s.text.strip()]
-
-
-def extract_spo(sentence: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    doc = _get_nlp()(sentence)
-
+def _extract_spo_from_span(span) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extract the shallow SPO tuple from an already-parsed sentence span."""
     subject = predicate = obj = None
-    root = doc[:].root
+    root = span.root
 
     if root.pos_ == "VERB":
         predicate = root.lemma_
 
-        for tok in doc:
+        for tok in span:
             if subject is None and tok.dep_ in ("nsubj", "nsubjpass"):
                 subject = tok.text
             if obj is None and tok.dep_ in ("dobj", "pobj", "attr"):
@@ -64,18 +56,49 @@ def extract_spo(sentence: str) -> Tuple[Optional[str], Optional[str], Optional[s
 
     has_copula = any(child.dep_ == "cop" for child in root.children)
     if has_copula:
-        for tok in doc:
+        for tok in span:
             if tok.dep_ in ("nsubj", "nsubjpass"):
                 subject = tok.text
                 break
 
-        complement_tokens = sorted(set(root.subtree), key=lambda t: t.i)
+        complement_tokens = sorted(
+            (tok for tok in root.subtree if span.start <= tok.i < span.end),
+            key=lambda t: t.i,
+        )
         obj = " ".join(tok.text for tok in complement_tokens)
         predicate = "be_definition_of"
 
         return subject, predicate, obj
 
     return None, None, None
+
+
+def parse_section_once(
+    text: str,
+) -> List[Tuple[str, Optional[str], Optional[str], Optional[str]]]:
+    """
+    Parse a document section exactly once and fan the resulting sentence spans
+    out into shallow claim candidates.
+
+    Previously claim extraction parsed the complete section once for sentence
+    splitting and then invoked spaCy again for every sentence to extract SPO.
+    A section containing N sentences therefore required N + 1 parser passes.
+    Keeping the sentence spans from the original Doc reduces that to one pass.
+    """
+    if not text:
+        return []
+
+    doc = _get_nlp()(text)
+    parsed = []
+
+    for span in doc.sents:
+        sentence = span.text.strip()
+        if not sentence:
+            continue
+        subject, predicate, obj = _extract_spo_from_span(span)
+        parsed.append((sentence, subject, predicate, obj))
+
+    return parsed
 
 
 # =================================================
@@ -99,6 +122,9 @@ async def run_claim_extraction_for_section(
     A claim_candidate is still created when shallow SPO extraction cannot
     identify all three terms. That preserves the sentence as an observational
     RDF claim and keeps the ingestion lineage complete.
+
+    NLP is section-scoped: the section text is parsed once and sentence-level
+    extraction fans out from that single parsed Doc.
     """
 
     row = await db.fetchrow(
@@ -137,6 +163,19 @@ async def run_claim_extraction_for_section(
     document_id: Optional[UUID] = row["document_id"]
     content: str = row["content"]
 
+    # Parse the source section once. Sentence splitting and shallow SPO
+    # extraction both fan out from this same Doc instead of reparsing every
+    # sentence independently.
+    parsed_sentences = parse_section_once(content)
+    parsed_by_index = {
+        idx: (sentence, subject, predicate, obj)
+        for idx, (sentence, subject, predicate, obj) in enumerate(parsed_sentences)
+    }
+    parsed_by_text = {
+        sentence: (subject, predicate, obj)
+        for sentence, subject, predicate, obj in parsed_sentences
+    }
+
     # -------------------------------------------------
     # 1) Load or create extracted_sentence rows
     # -------------------------------------------------
@@ -157,10 +196,9 @@ async def run_claim_extraction_for_section(
             for r in existing
         ]
     else:
-        text_sentences = split_sentences(content)
         sentences = []
 
-        for idx, sent in enumerate(text_sentences):
+        for idx, (sent, _subject, _predicate, _obj) in enumerate(parsed_sentences):
             r = await db.execute_returning_row(
                 """
                 INSERT INTO aios.extracted_sentence (
@@ -195,7 +233,26 @@ async def run_claim_extraction_for_section(
         if exists:
             continue
 
-        subject, predicate, obj = extract_spo(sentence)
+        parsed = parsed_by_index.get(idx)
+        if parsed is not None and parsed[0] == sentence:
+            _sentence, subject, predicate, obj = parsed
+        else:
+            # Retry/recovery can encounter extracted_sentence rows created by
+            # an older sentence-boundary model. Reuse an exact text match from
+            # this section-level parse when possible rather than invoking a
+            # second spaCy pass.
+            spo = parsed_by_text.get(sentence)
+            if spo is not None:
+                subject, predicate, obj = spo
+            else:
+                logger.warning(
+                    "Section %s sentence %s no longer matches current parse; "
+                    "preserving raw claim without reparsing",
+                    section_id,
+                    idx,
+                )
+                subject = predicate = obj = None
+
         pivot = resolve_subject_pivot(
             subject,
             character_id=row["character_id"],
@@ -293,8 +350,10 @@ async def run_claim_extraction_for_section(
     await _mark_claim_stage_complete(db, event_id)
 
     logger.info(
-        "Section %s: inserted %d new claims; marked claim stage complete",
+        "Section %s: one spaCy pass produced %d sentences and inserted %d new claims; "
+        "marked claim stage complete",
         section_id,
+        len(parsed_sentences),
         inserted,
     )
 
