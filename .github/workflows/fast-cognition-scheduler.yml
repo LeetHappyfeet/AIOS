@@ -16,26 +16,30 @@ jobs:
           python-version: '3.10'
       - name: Install narrow dependencies
         run: python -m pip install --disable-pip-version-check pytest asyncpg requests qdrant-client pydantic python-dotenv
-      - name: Compile fast cognition, knowledge admission, and scheduler modules
+      - name: Compile fast cognition, knowledge admission, HUD, and scheduler modules
         run: |
           python -m py_compile \
             epistemic/message_cognition.py \
+            epistemic/semantic_interpreter.py \
             epistemic/knowledge.py \
             epistemic/normalizer.py \
             epistemic/context_resolver_v4.py \
             hud/readiness.py \
+            hud/render_text.py \
             pipeline/jobs.py \
             runner.py \
             runner_v2.py \
             tests/test_message_cognition.py \
+            tests/test_hud_semantic_regressions.py \
             tests/test_knowledge_admission.py \
             tests/test_runner_stage_scheduling.py
-      - name: Run fast cognition, knowledge admission, and stage scheduling tests
+      - name: Run fast cognition, HUD regression, knowledge admission, and stage scheduling tests
         run: |
           mkdir -p "$RUNNER_TEMP/aios-pythonpath"
           ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" \
             python -m pytest -q \
               tests/test_message_cognition.py \
+              tests/test_hud_semantic_regressions.py \
               tests/test_knowledge_admission.py \
               tests/test_runner_stage_scheduling.py
