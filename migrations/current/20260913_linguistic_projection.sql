@@ -1,3 +1,5 @@
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS aios.linguistic_projection (
     section_id uuid PRIMARY KEY
         REFERENCES aios.document_section(section_id) ON DELETE CASCADE,
@@ -12,3 +14,5 @@ CREATE TABLE IF NOT EXISTS aios.linguistic_projection (
 
 CREATE INDEX IF NOT EXISTS linguistic_projection_parser_idx
     ON aios.linguistic_projection (parser_name, parser_version, projection_version);
+
+COMMIT;
