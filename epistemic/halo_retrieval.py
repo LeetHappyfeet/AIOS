@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextvars import ContextVar
 import logging
 from typing import Any, Iterable, Optional
 
@@ -7,32 +9,40 @@ from aios_app.hud.context import HUDContext
 from aios_app.hud.relevance import HUDRelevanceScorer
 from aios_app.epistemic.retrieval import (
     POLICIES,
+    SEMANTIC_SEED_WAIT_SECONDS,
     RetrievalPolicy,
     TopologyRetriever as BaseTopologyRetriever,
 )
+from aios_app.world.retrieval_scope import build_retrieval_scope
+from aios_app.world.resolution import normalize_domain
 
 
 logger = logging.getLogger("aios.epistemic.halo")
 
-# The halo is intentionally small.  It expands retrieval context; it is not a
-# second recent-message window and its contents are never copied directly into
-# the HUD.
 HALO_PREDECESSOR_NODES = 4
 HALO_MAX_TEXT_CHARS = 2400
+SEMANTIC_SCOPE_MIN_HITS = 8
+
+_DEFAULT_WORLD_DOMAIN_BY_MODE = {
+    "memory": "history",
+    "event": "history",
+    "belief": "general",
+    "goal": "general",
+    "rule": "general",
+}
+_ACTIVE_WORLD_DOMAIN: ContextVar[str] = ContextVar(
+    "aios_active_world_retrieval_domain",
+    default="general",
+)
 
 
 class TopologyRetriever(BaseTopologyRetriever):
-    """Topology retrieval with a bounded, historically legal DAG context halo.
+    """Topology retrieval with a bounded DAG halo and world-scope prefilter.
 
-    The active DAG coordinate remains a hard generation boundary.  Before
-    semantic/vector and topology retrieval run, a few predecessor observations
-    from the same timeline are added to the retrieval query.  This lets nearby
-    context influence semantic recall while preserving all existing /char
-    ownership, instance-lineage, branch, and reconciliation constraints.
-
-    The halo never admits future nodes and never walks sideways into sibling
-    timelines.  Retrieved knowledge still has to pass the ordinary epistemic
-    SQL eligibility and cognitive admission layers before it can reach a HUD.
+    The world scope is resolved from the materialized SQL cache before vector
+    search. Qdrant receives only the currently legal world IDs, local canon is
+    searched first, and inherited worlds are queried only if local retrieval is
+    sparse. No recursive world traversal occurs on the HUD path.
     """
 
     def __init__(self, db: Any):
@@ -43,9 +53,6 @@ class TopologyRetriever(BaseTopologyRetriever):
         self,
         context: HUDContext,
     ) -> tuple[str, tuple[str, ...]]:
-        # Prefer the immutable source-perception cursor.  Runtime fallback keeps
-        # the mechanism useful for non-source-driven agents while remaining on
-        # their active timeline.
         timeline_id = context.source_timeline_id or context.timeline_id
         head_node_id = context.source_head_node_id or context.head_node_id
         if not timeline_id or not head_node_id:
@@ -98,8 +105,6 @@ class TopologyRetriever(BaseTopologyRetriever):
             )
 
         node_ids = tuple(str(row["node_id"]) for row in rows)
-        # Oldest-to-newest keeps the local sequence intelligible to the lexical
-        # and embedding query while the current focus remains last/strongest.
         halo_text = " ".join(
             str(row["message_text"]).strip()
             for row in reversed(rows)
@@ -114,6 +119,102 @@ class TopologyRetriever(BaseTopologyRetriever):
             self._halo_cache.pop(next(iter(self._halo_cache)))
         return result
 
+    async def _query_semantic_seed_propositions(
+        self,
+        context: HUDContext,
+        *,
+        query_text: str,
+        cache_key: tuple[Any, ...],
+    ) -> list[str]:
+        try:
+            domain = _ACTIVE_WORLD_DOMAIN.get()
+            scope = await build_retrieval_scope(
+                self.db,
+                world_id=context.world_id,
+                domain=domain,
+            )
+            hits = await asyncio.to_thread(
+                self.semantic.search_epistemic_staged,
+                query_text,
+                character_id=context.character_id,
+                instance_ids=context.lineage_instance_ids,
+                world_stages=scope.qdrant_world_stages,
+                min_hits=SEMANTIC_SCOPE_MIN_HITS,
+            )
+
+            proposition_ids: list[str] = []
+            seen: set[str] = set()
+            for _, _, payload in hits:
+                proposition_id = str(payload.get("proposition_id") or "")
+                if proposition_id and proposition_id not in seen:
+                    seen.add(proposition_id)
+                    proposition_ids.append(proposition_id)
+            self._semantic_seed_cache[cache_key] = proposition_ids
+            if len(self._semantic_seed_cache) > 64:
+                self._semantic_seed_cache.pop(next(iter(self._semantic_seed_cache)))
+            return proposition_ids
+        except Exception as exc:
+            logger.debug(
+                "Scoped semantic seed lookup unavailable; using topology/lexical fallback: %s",
+                exc,
+            )
+            self._semantic_seed_cache[cache_key] = []
+            return []
+        finally:
+            self._semantic_seed_deferred.discard(cache_key)
+
+    async def _semantic_seed_propositions(
+        self,
+        context: HUDContext,
+        *,
+        focus_text: str,
+        goals: Iterable[Any],
+    ) -> list[str]:
+        query_text = " ".join(
+            part for part in (
+                focus_text,
+                " ".join(str(goal) for goal in goals),
+            )
+            if part
+        ).strip()
+        if not query_text:
+            return []
+
+        domain = _ACTIVE_WORLD_DOMAIN.get()
+        lineage = tuple(str(value) for value in context.lineage_instance_ids)
+        cache_key = (
+            str(context.character_id),
+            str(context.world_id),
+            domain,
+            query_text,
+            lineage,
+        )
+        cached = self._semantic_seed_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if cache_key in self._semantic_seed_deferred:
+            return []
+
+        try:
+            return await asyncio.wait_for(
+                self._semantic_seed_flights.run(
+                    cache_key,
+                    lambda: self._query_semantic_seed_propositions(
+                        context,
+                        query_text=query_text,
+                        cache_key=cache_key,
+                    ),
+                ),
+                timeout=SEMANTIC_SEED_WAIT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            self._semantic_seed_deferred.add(cache_key)
+            logger.debug(
+                "HUD scoped semantic seed exceeded %.0f ms budget; using lexical/topology fallback",
+                SEMANTIC_SEED_WAIT_SECONDS * 1000.0,
+            )
+            return []
+
     async def retrieve_character_knowledge(
         self,
         context: HUDContext,
@@ -124,27 +225,34 @@ class TopologyRetriever(BaseTopologyRetriever):
         goals: Iterable[Any] = (),
         max_hops: Optional[int] = None,
         limit: Optional[int] = None,
+        world_domain: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         halo_text, halo_node_ids = await self._dag_halo(context)
         expanded_focus = " ".join(
             part for part in (halo_text, focus_text) if part
         ).strip()
 
-        result = await super().retrieve_character_knowledge(
-            context,
-            scorer,
-            mode=mode,
-            focus_text=expanded_focus,
-            goals=goals,
-            max_hops=max_hops,
-            limit=limit,
+        domain = normalize_domain(
+            world_domain or _DEFAULT_WORLD_DOMAIN_BY_MODE.get(mode, "general")
         )
+        token = _ACTIVE_WORLD_DOMAIN.set(domain)
+        try:
+            result = await super().retrieve_character_knowledge(
+                context,
+                scorer,
+                mode=mode,
+                focus_text=expanded_focus,
+                goals=goals,
+                max_hops=max_hops,
+                limit=limit,
+            )
+        finally:
+            _ACTIVE_WORLD_DOMAIN.reset(token)
 
-        # Diagnostics stay internal to the cognition layer.  We intentionally do
-        # not inject halo source text into result items or the HUD.
         logger.debug(
-            "DAG context halo mode=%s nodes=%s expanded_focus_chars=%d results=%d",
+            "DAG halo + world scope mode=%s domain=%s nodes=%s expanded_focus_chars=%d results=%d",
             mode,
+            domain,
             halo_node_ids,
             len(expanded_focus),
             len(result),
@@ -155,6 +263,7 @@ class TopologyRetriever(BaseTopologyRetriever):
 __all__ = [
     "HALO_PREDECESSOR_NODES",
     "HALO_MAX_TEXT_CHARS",
+    "SEMANTIC_SCOPE_MIN_HITS",
     "POLICIES",
     "RetrievalPolicy",
     "TopologyRetriever",

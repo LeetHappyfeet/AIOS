@@ -75,13 +75,52 @@ class SemanticQueryService:
         character_id: str,
         instance_ids: Iterable[Any],
         top_k: int | None = None,
+        world_ids: Iterable[Any] | None = None,
     ) -> list[tuple[str, float, dict[str, Any]]]:
         if not query_text.strip():
             return []
-        return self._request({
+        payload: dict[str, Any] = {
             "op": "search_epistemic",
             "query_text": query_text,
             "character_id": character_id,
             "instance_ids": [str(value) for value in instance_ids if value is not None],
             "top_k": top_k,
+        }
+        if world_ids is not None:
+            payload["world_ids"] = [str(value) for value in world_ids if value is not None]
+        return self._request(payload)
+
+    def search_epistemic_staged(
+        self,
+        query_text: str,
+        *,
+        character_id: str,
+        instance_ids: Iterable[Any],
+        world_stages: Iterable[Iterable[Any]],
+        top_k: int | None = None,
+        min_hits: int = 8,
+    ) -> list[tuple[str, float, dict[str, Any]]]:
+        """Search ordered world scopes while embedding the query only once.
+
+        Each stage is an allow-list of equivalent-priority worlds. The semantic
+        service searches stage 0 first and only widens when it has fewer than
+        ``min_hits`` unique results.
+        """
+        if not query_text.strip():
+            return []
+        stages = [
+            [str(value) for value in stage if value is not None]
+            for stage in world_stages
+        ]
+        stages = [stage for stage in stages if stage]
+        if not stages:
+            return []
+        return self._request({
+            "op": "search_epistemic_staged",
+            "query_text": query_text,
+            "character_id": character_id,
+            "instance_ids": [str(value) for value in instance_ids if value is not None],
+            "world_stages": stages,
+            "top_k": top_k,
+            "min_hits": max(1, int(min_hits)),
         })
