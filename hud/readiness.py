@@ -5,7 +5,11 @@ from typing import Optional
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.epistemic.message_cognition import commit_message_cognition, mark_enrichment_ready
+from aios_app.epistemic.message_cognition import (
+    INTERPRETER_VERSION,
+    commit_message_cognition,
+    mark_enrichment_ready,
+)
 from aios_app.pipeline.jobs import enqueue_job
 
 LIVE_PRIORITY = 15
@@ -158,10 +162,11 @@ async def source_node_retrieval_ready(
         FROM aios.message_cognitive_commit
         WHERE instance_id=$1
           AND node_id=$2
-          AND interpreter_version='message-cognition-v1'
+          AND interpreter_version=$3
         """,
         instance_id,
         node_id,
+        INTERPRETER_VERSION,
     )
     return bool(row)
 
@@ -181,9 +186,6 @@ async def source_node_topology_ready(
     if node_id is None:
         return True
 
-    # Aggregate counts alone cannot distinguish a genuinely zero-claim message
-    # from a source node that has not reached extraction yet. Require the
-    # extraction boundary before zero claims can mean "enrichment complete".
     section = await db.fetchrow(
         """
         SELECT claims_extracted_at
@@ -326,8 +328,6 @@ async def enqueue_live_turn_work(
     if committed:
         return 0
 
-    # A missing DAG coordinate is exceptional, but preserve the existing repair
-    # path rather than fanning out per-claim LIVE work.
     created = await _enqueue_live_job(
         db,
         job_type="dag_to_document_section",
