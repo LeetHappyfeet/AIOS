@@ -21,10 +21,7 @@ require_command() {
 
 printf '\nAIOS first-time setup\n\n'
 
-if [ "$(basename "$REPO_DIR")" != "aios_app" ]; then
-    fail "AIOS must currently be cloned into a directory named 'aios_app'.\nExpected layout: <workspace>/aios_app"
-fi
-
+[ -f "$REPO_DIR/__init__.py" ] || fail "This does not look like the AIOS application repository: missing __init__.py"
 [ -f "$REPO_DIR/aios_baseline.sql" ] || fail "Missing canonical database baseline: aios_baseline.sql"
 [ -d "$REPO_DIR/migrations/current" ] || fail "Missing active migrations directory: migrations/current"
 [ ! -e "$REPO_DIR/aios_schema.sql" ] || fail "Obsolete aios_schema.sql is present. Update the checkout before running first-time setup."
@@ -136,6 +133,24 @@ else
     ok "Virtual environment exists"
 fi
 
+# The repository itself is the Python package historically named `aios_app`.
+# Make that package name stable regardless of what directory the user chose for
+# the git clone. This avoids requiring clones to literally be named aios_app.
+SITE_PACKAGES="$($VENV_PYTHON -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+PACKAGE_LINK="$SITE_PACKAGES/aios_app"
+if [ -L "$PACKAGE_LINK" ]; then
+    CURRENT_TARGET="$(readlink -f "$PACKAGE_LINK" || true)"
+    if [ "$CURRENT_TARGET" != "$REPO_DIR" ]; then
+        rm "$PACKAGE_LINK"
+        ln -s "$REPO_DIR" "$PACKAGE_LINK"
+    fi
+elif [ -e "$PACKAGE_LINK" ]; then
+    fail "Cannot register AIOS package alias because $PACKAGE_LINK already exists and is not a symlink."
+else
+    ln -s "$REPO_DIR" "$PACKAGE_LINK"
+fi
+ok "Python package alias aios_app -> $REPO_DIR"
+
 "$VENV_PYTHON" -m pip install --upgrade pip
 "$VENV_PYTHON" -m pip install -r "$REPO_DIR/requirements.txt"
 ok "Python requirements installed"
@@ -146,6 +161,10 @@ else
     "$VENV_PYTHON" -m spacy download en_core_web_sm
     ok "spaCy en_core_web_sm installed"
 fi
+
+"$VENV_PYTHON" -c 'import aios_app; print(aios_app.__file__)' >/dev/null \
+    || fail "AIOS Python package alias could not be imported."
+ok "AIOS Python package import"
 
 printf '\nInitializing AIOS PostgreSQL database...\n'
 cd "$WORKSPACE_DIR"
