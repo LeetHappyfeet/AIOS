@@ -27,6 +27,7 @@ fi
 
 [ -f "$REPO_DIR/aios_baseline.sql" ] || fail "Missing canonical database baseline: aios_baseline.sql"
 [ -d "$REPO_DIR/migrations/current" ] || fail "Missing active migrations directory: migrations/current"
+[ ! -e "$REPO_DIR/aios_schema.sql" ] || fail "Obsolete aios_schema.sql is present. Update the checkout before running first-time setup."
 
 require_command python3 "Python 3 is required. Install Python 3.10 or newer and run 'bash setup.sh' again."
 require_command docker "Docker is required. Install Docker with the Compose plugin and run 'bash setup.sh' again."
@@ -42,6 +43,7 @@ ok "Python $PYTHON_VERSION"
 ok "Docker"
 ok "Docker Compose"
 ok "Canonical database baseline"
+ok "Post-baseline migration directory"
 
 printf '\nStarting AIOS infrastructure...\n'
 cd "$REPO_DIR"
@@ -145,15 +147,30 @@ else
     ok "spaCy en_core_web_sm installed"
 fi
 
-printf '\nInitializing AIOS database from canonical baseline...\n'
+printf '\nInitializing AIOS PostgreSQL database...\n'
 cd "$WORKSPACE_DIR"
-"$VENV_PYTHON" -m aios_app.migrate
-"$VENV_PYTHON" -m aios_app.db_check
+
+printf 'Database target: '
+"$VENV_PYTHON" -c 'from aios_app.config import settings; print(settings.db_dsn)'
+
+if ! "$VENV_PYTHON" -m aios_app.migrate; then
+    fail "AIOS database initialization failed. Fresh installs must use the canonical aios_baseline.sql plus migrations/current. If this Docker volume contains a prototype-era AIOS database, preserve it if needed and recreate the PostgreSQL volume before retrying."
+fi
+ok "Canonical baseline and migrations applied"
+
+"$VENV_PYTHON" -m aios_app.db_check || fail "AIOS database readiness check failed."
 ok "AIOS database ready"
+
+# A first-time setup should also prove that the migration path is safe to run
+# again, because every normal AIOS launch performs the same migration preflight.
+"$VENV_PYTHON" -m aios_app.migrate || fail "AIOS migration idempotency check failed."
+ok "Migration idempotency verified"
 
 printf '\n========================================\n'
 printf '        AIOS SETUP COMPLETE\n'
 printf '========================================\n\n'
+printf 'PostgreSQL was initialized from aios_baseline.sql and migrations/current/.\n'
+printf 'Normal AIOS startup will re-check migrations automatically.\n\n'
 printf 'Start AIOS with:\n\n'
 printf '    cd %s\n' "$REPO_DIR"
 printf '    bash run.sh\n\n'
