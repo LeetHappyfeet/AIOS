@@ -167,12 +167,7 @@ async def enqueue_job(
 # ---------------------------------------------------------------------
 
 async def _backfill_decompose_timeline_partitions(db: Database) -> None:
-    """Upgrade legacy queued/running frame jobs to causal timeline partitions.
-
-    Older jobs were enqueued before decomposition became timeline-aware. Doing
-    this lazily keeps an in-flight backlog safe across a normal code restart
-    without requiring a schema migration or manual queue cleanup.
-    """
+    """Upgrade legacy queued/running frame jobs to causal timeline partitions."""
     await db.execute(
         """
         UPDATE aios.pipeline_job pj
@@ -199,15 +194,13 @@ async def fetch_next_job(
     lease_seconds: int = 120,
     scheduling_lanes: Optional[list[str]] = None,
     prefer_uncontended: bool = True,
+    job_types: Optional[list[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Atomically lease the next runnable job for one execution class.
 
-    Lane filtering protects live epistemic work from maintenance starvation.
-    RDF workers additionally prefer every foreground lane over BACKGROUND so
-    topology publication cannot starve ordinary RDF work. Frame decomposition
-    is stricter: a timeline may have at most one running decomposition job, so
-    local antecedent resolution remains causally ordered while other timelines
-    can execute concurrently.
+    `job_types` provides a narrow stage reservation inside a resource/lane pool.
+    This is used by semantic workers so context resolution cannot monopolize all
+    LIVE workers and starve proposition normalization/materialization.
     """
 
     if resource_class == "NLP":
@@ -224,6 +217,10 @@ async def fetch_next_job(
               AND (
                     $4::text[] IS NULL
                     OR q.scheduling_lane = ANY($4::text[])
+              )
+              AND (
+                    $6::text[] IS NULL
+                    OR q.job_type = ANY($6::text[])
               )
               AND (
                     q.job_type <> 'decompose_claim_frames'
@@ -277,6 +274,7 @@ async def fetch_next_job(
         lease_seconds,
         scheduling_lanes,
         prefer_uncontended,
+        job_types,
     )
 
     if not row:
@@ -319,10 +317,6 @@ async def heartbeat_job(
 # ---------------------------------------------------------------------
 
 async def mark_running(db: Database, job_id: UUID) -> None:
-    """
-    Backward-compatible helper. New runners should not call this because
-    fetch_next_job() now performs the queued→running transition atomically.
-    """
     await db.execute(
         """
         UPDATE aios.pipeline_job
@@ -379,12 +373,6 @@ async def mark_failed(
 
 
 async def rebalance_queued_priorities(db: Database) -> int:
-    """
-    Apply the current pipeline priority policy to jobs already in the queue.
-
-    Eligibility is authoritative, so changing priority never changes what work
-    a job represents; it only changes runner admission order.
-    """
     row = await db.execute_returning_row(
         """
         WITH desired AS (
@@ -438,11 +426,6 @@ async def recover_stale_running_jobs(
     *,
     stale_after_seconds: int,
 ) -> int:
-    """Requeue jobs whose explicit worker lease has expired.
-
-    The legacy updated_at fallback is retained only for pre-migration running
-    rows that do not yet have lease metadata.
-    """
     row = await db.execute_returning_row(
         """
         WITH recovered AS (
