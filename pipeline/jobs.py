@@ -102,6 +102,20 @@ async def _partition_key_for_enqueue(
     return None
 
 
+def _effective_priority(job_type: str, requested: int) -> int:
+    """Apply queue-critical priority invariants at enqueue time.
+
+    The runner historically rebalanced queued priorities only at startup. Jobs
+    created after startup could therefore retain stale supervisor priorities and
+    starve even though the current scheduler policy assigned them a reserved
+    worker. Keep the character materializer ahead of normalization immediately;
+    rebalance_queued_priorities remains the repair path for legacy queued rows.
+    """
+    if job_type == "project_character_knowledge":
+        return min(int(requested), 30)
+    return int(requested)
+
+
 async def enqueue_job(
     db: Database,
     *,
@@ -122,6 +136,7 @@ async def enqueue_job(
         job_type=job_type,
         payload=payload,
     )
+    priority = _effective_priority(job_type, priority)
 
     row = await db.execute_returning_row(
         """
