@@ -10,11 +10,11 @@ fail() {
     exit 1
 }
 
-[ "$(basename "$REPO_DIR")" = "aios_app" ] \
-    || fail "AIOS must currently be located in a directory named 'aios_app'."
-
 [ -x "$VENV_PYTHON" ] \
     || fail "AIOS is not set up yet. Run ./setup.sh first."
+
+"$VENV_PYTHON" -c 'import aios_app' >/dev/null 2>&1 \
+    || fail "AIOS Python package alias is missing or invalid. Run ./setup.sh again."
 
 command -v docker >/dev/null 2>&1 \
     || fail "Docker is required to run the AIOS infrastructure."
