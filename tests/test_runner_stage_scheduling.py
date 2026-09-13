@@ -1,6 +1,8 @@
 import ast
 from pathlib import Path
 
+from aios_app.pipeline.jobs import _effective_priority
+
 
 def _reservation_returns() -> dict[int, list[str] | None]:
     tree = ast.parse(Path("runner.py").read_text(encoding="utf-8"))
@@ -53,3 +55,8 @@ def test_claim_api_supports_stage_filtering():
     )
     keyword_only = [arg.arg for arg in function.args.kwonlyargs]
     assert "job_types" in keyword_only
+
+
+def test_character_projector_priority_is_applied_at_enqueue_time():
+    assert _effective_priority("project_character_knowledge", 40) == 30
+    assert _effective_priority("normalize_proposition", 35) == 35
