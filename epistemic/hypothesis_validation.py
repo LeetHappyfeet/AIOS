@@ -208,7 +208,7 @@ async def apply_local_revalidation_invalidations(
     for item in affected:
         dtype = item["decision_type"]
         skey = item["subject_key"]
-        if dtype in {"semantic_owner", "world_assignment", "entity_referent"}:
+        if dtype in {"semantic_owner", "reality_membership", "world_assignment", "entity_referent"}:
             await db.execute(
                 """
                 UPDATE aios.semantic_topology_projection
