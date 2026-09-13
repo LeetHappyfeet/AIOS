@@ -208,7 +208,7 @@ async def apply_local_revalidation_invalidations(
     for item in affected:
         dtype = item["decision_type"]
         skey = item["subject_key"]
-        if dtype in {"semantic_owner", "reality_membership", "world_assignment", "entity_referent"}:
+        if dtype in {"semantic_owner", "world_assignment", "entity_referent"}:
             await db.execute(
                 """
                 UPDATE aios.semantic_topology_projection
@@ -216,6 +216,21 @@ async def apply_local_revalidation_invalidations(
                     updated_at=now(),
                     meta=meta || jsonb_build_object('reproject_reason','semantic_validation_stale')
                 WHERE claim_id::text=$1
+                """,
+                skey,
+            )
+        elif dtype == "reality_membership":
+            await db.execute(
+                """
+                UPDATE aios.semantic_topology_projection stp
+                SET projected_at=NULL,
+                    updated_at=now(),
+                    meta=stp.meta || jsonb_build_object('reproject_reason','reality_membership_stale')
+                WHERE stp.claim_id IN (
+                    SELECT o.claim_id
+                    FROM aios.observation o
+                    WHERE o.proposition_id::text=$1
+                )
                 """,
                 skey,
             )
