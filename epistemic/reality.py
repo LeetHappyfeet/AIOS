@@ -80,13 +80,7 @@ def _source_context_key(source_id: str, topic_key: object) -> str:
 
 
 def plan_reality_memberships(row: dict[str, Any]) -> tuple[RealityMembershipPlan, ...]:
-    """Plan memberships without declaring uncertain evidence to be world truth.
-
-    `world` means the concrete aios.world-backed reality context. `source` means
-    a source-implied, topic-local interpretation. Multiple plans can coexist.
-    Only a concrete `member` with authoritative confidence is eligible for the
-    world-assignment authority boundary.
-    """
+    """Plan memberships without declaring uncertain evidence to be world truth."""
     scope = _norm(row.get("epistemic_scope"))
     source_kind = _norm(row.get("source_kind"))
     source_id = row.get("source_id")
@@ -184,14 +178,11 @@ async def _ensure_world_context(db: Database, world_id: UUID) -> Optional[dict[s
         return None
 
     row = await db.fetchrow(
-        """
-        SELECT aios.ensure_world_reality_context($1) AS reality_context_id
-        """,
+        "SELECT aios.ensure_world_reality_context($1) AS reality_context_id",
         world_id,
     )
     if not row:
         return None
-    context_id = row["reality_context_id"]
     context = await db.fetchrow(
         """
         SELECT reality_context_id, context_key, context_kind, world_id,
@@ -199,7 +190,7 @@ async def _ensure_world_context(db: Database, world_id: UUID) -> Optional[dict[s
         FROM aios.reality_context
         WHERE reality_context_id=$1
         """,
-        context_id,
+        row["reality_context_id"],
     )
     return dict(context) if context else None
 
@@ -238,37 +229,37 @@ async def _ensure_source_context(db: Database, row: dict[str, Any]) -> dict[str,
     return dict(created)
 
 
-async def _upsert_membership(
+async def _upsert_claim_evidence(
     db: Database,
     *,
+    claim_id: UUID,
     proposition_id: UUID,
     context: dict[str, Any],
     plan: RealityMembershipPlan,
-    claim_id: object,
-) -> dict[str, Any]:
+) -> None:
     await db.execute(
         """
-        INSERT INTO aios.proposition_reality_membership (
-            proposition_id, reality_context_id, membership_status,
-            affinity, confidence, assigned_by, validation_decision_key, meta
+        INSERT INTO aios.proposition_reality_evidence (
+            claim_id, proposition_id, reality_context_id,
+            membership_status, affinity, confidence, assigned_by, meta
         )
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
-        ON CONFLICT (proposition_id, reality_context_id) DO UPDATE
-        SET membership_status=EXCLUDED.membership_status,
+        ON CONFLICT (claim_id, reality_context_id) DO UPDATE
+        SET proposition_id=EXCLUDED.proposition_id,
+            membership_status=EXCLUDED.membership_status,
             affinity=EXCLUDED.affinity,
             confidence=EXCLUDED.confidence,
             assigned_by=EXCLUDED.assigned_by,
-            validation_decision_key=EXCLUDED.validation_decision_key,
             updated_at=now(),
-            meta=aios.proposition_reality_membership.meta || EXCLUDED.meta
+            meta=aios.proposition_reality_evidence.meta || EXCLUDED.meta
         """,
+        claim_id,
         proposition_id,
         context["reality_context_id"],
         plan.membership_status,
         plan.affinity,
         plan.confidence,
         REALITY_RESOLVER_VERSION,
-        str(claim_id) if claim_id else None,
         json.dumps(
             {
                 "reason": plan.reason,
@@ -277,15 +268,101 @@ async def _upsert_membership(
             }
         ),
     )
+
+
+async def _recompute_membership(
+    db: Database,
+    *,
+    proposition_id: UUID,
+    context_id: UUID,
+) -> Optional[dict[str, Any]]:
+    rows = await db.fetch(
+        """
+        SELECT membership_status, affinity, confidence, claim_id
+        FROM aios.proposition_reality_evidence
+        WHERE proposition_id=$1
+          AND reality_context_id=$2
+        ORDER BY
+            CASE membership_status
+                WHEN 'member' THEN 4
+                WHEN 'compatible' THEN 3
+                WHEN 'candidate' THEN 2
+                WHEN 'challenged' THEN 1
+                ELSE 0
+            END DESC,
+            affinity DESC,
+            confidence DESC,
+            claim_id
+        """,
+        proposition_id,
+        context_id,
+    )
+
+    if not rows:
+        await db.execute(
+            """
+            DELETE FROM aios.proposition_reality_membership
+            WHERE proposition_id=$1
+              AND reality_context_id=$2
+              AND assigned_by=$3
+            """,
+            proposition_id,
+            context_id,
+            REALITY_RESOLVER_VERSION,
+        )
+        return None
+
+    best = rows[0]
+    max_affinity = max(float(r["affinity"] or 0.0) for r in rows)
+    max_confidence = max(float(r["confidence"] or 0.0) for r in rows)
+    await db.execute(
+        """
+        INSERT INTO aios.proposition_reality_membership (
+            proposition_id, reality_context_id, membership_status,
+            affinity, confidence, assigned_by, validation_decision_key, meta
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,NULL,$7::jsonb)
+        ON CONFLICT (proposition_id, reality_context_id) DO UPDATE
+        SET membership_status=EXCLUDED.membership_status,
+            affinity=EXCLUDED.affinity,
+            confidence=EXCLUDED.confidence,
+            assigned_by=EXCLUDED.assigned_by,
+            updated_at=now(),
+            meta=aios.proposition_reality_membership.meta || EXCLUDED.meta
+        """,
+        proposition_id,
+        context_id,
+        best["membership_status"],
+        max_affinity,
+        max_confidence,
+        REALITY_RESOLVER_VERSION,
+        json.dumps(
+            {
+                "evidence_count": len(rows),
+                "resolver_version": REALITY_RESOLVER_VERSION,
+            }
+        ),
+    )
+
+    context = await db.fetchrow(
+        """
+        SELECT reality_context_id, context_key, context_kind, world_id
+        FROM aios.reality_context
+        WHERE reality_context_id=$1
+        """,
+        context_id,
+    )
+    if not context:
+        return None
     return {
         "reality_context_id": context["reality_context_id"],
         "context_key": context["context_key"],
         "context_kind": context["context_kind"],
-        "world_id": context.get("world_id"),
-        "membership_status": plan.membership_status,
-        "affinity": plan.affinity,
-        "confidence": plan.confidence,
-        "reason": plan.reason,
+        "world_id": context["world_id"],
+        "membership_status": best["membership_status"],
+        "affinity": max_affinity,
+        "confidence": max_confidence,
+        "evidence_count": len(rows),
     }
 
 
@@ -295,11 +372,12 @@ async def resolve_claim_reality(
 ) -> Optional[RealityResolution]:
     """Materialize revisable reality hypotheses for one normalized claim.
 
-    This function does not insert world_proposition_assertion rows. A concrete
-    world assignment is returned only for authoritative runtime/world evidence;
-    source and external narrative evidence remains candidate/compatible state.
+    Claim-level evidence is preserved independently. Proposition-level reality
+    membership is recomputed from all surviving evidence for each context. This
+    function never inserts world_proposition_assertion rows.
     """
     proposition_id = _as_uuid(row.get("proposition_id"))
+    claim_id = _as_uuid(row.get("claim_id"))
     if proposition_id is None:
         return None
 
@@ -312,20 +390,31 @@ async def resolve_claim_reality(
             memberships=(),
         )
 
-    await db.execute(
-        """
-        DELETE FROM aios.proposition_reality_membership
-        WHERE proposition_id=$1
-          AND assigned_by=$2
-        """,
-        proposition_id,
-        REALITY_RESOLVER_VERSION,
-    )
+    old_context_ids: set[UUID] = set()
+    if claim_id is not None:
+        old_rows = await db.fetch(
+            """
+            SELECT reality_context_id
+            FROM aios.proposition_reality_evidence
+            WHERE claim_id=$1 AND assigned_by=$2
+            """,
+            claim_id,
+            REALITY_RESOLVER_VERSION,
+        )
+        old_context_ids = {r["reality_context_id"] for r in old_rows}
+        await db.execute(
+            """
+            DELETE FROM aios.proposition_reality_evidence
+            WHERE claim_id=$1 AND assigned_by=$2
+            """,
+            claim_id,
+            REALITY_RESOLVER_VERSION,
+        )
 
     world_id = _candidate_world_id(row)
     source_context: Optional[dict[str, Any]] = None
     world_context: Optional[dict[str, Any]] = None
-    memberships: list[dict[str, Any]] = []
+    new_context_ids: set[UUID] = set()
 
     for plan in plans:
         if plan.context_role == "source":
@@ -345,19 +434,71 @@ async def resolve_claim_reality(
         else:
             continue
 
-        memberships.append(
-            await _upsert_membership(
+        context_id = context["reality_context_id"]
+        new_context_ids.add(context_id)
+        if claim_id is not None:
+            await _upsert_claim_evidence(
                 db,
+                claim_id=claim_id,
                 proposition_id=proposition_id,
                 context=context,
                 plan=plan,
-                claim_id=row.get("claim_id"),
             )
+        else:
+            # Compatibility path for callers lacking a claim coordinate. It is
+            # intentionally rare; normal pipeline calls always carry claim_id.
+            await db.execute(
+                """
+                INSERT INTO aios.proposition_reality_membership (
+                    proposition_id, reality_context_id, membership_status,
+                    affinity, confidence, assigned_by, meta
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+                ON CONFLICT (proposition_id, reality_context_id) DO UPDATE
+                SET membership_status=EXCLUDED.membership_status,
+                    affinity=GREATEST(aios.proposition_reality_membership.affinity, EXCLUDED.affinity),
+                    confidence=GREATEST(aios.proposition_reality_membership.confidence, EXCLUDED.confidence),
+                    updated_at=now(),
+                    meta=aios.proposition_reality_membership.meta || EXCLUDED.meta
+                """,
+                proposition_id,
+                context_id,
+                plan.membership_status,
+                plan.affinity,
+                plan.confidence,
+                REALITY_RESOLVER_VERSION,
+                json.dumps({"reason": plan.reason, "resolver_version": REALITY_RESOLVER_VERSION}),
+            )
+
+    affected_context_ids = old_context_ids | new_context_ids
+    memberships: list[dict[str, Any]] = []
+    if claim_id is not None:
+        for context_id in affected_context_ids:
+            materialized = await _recompute_membership(
+                db,
+                proposition_id=proposition_id,
+                context_id=context_id,
+            )
+            if materialized and context_id in new_context_ids:
+                memberships.append(materialized)
+    else:
+        rows = await db.fetch(
+            """
+            SELECT prm.reality_context_id, rc.context_key, rc.context_kind, rc.world_id,
+                   prm.membership_status, prm.affinity, prm.confidence
+            FROM aios.proposition_reality_membership prm
+            JOIN aios.reality_context rc ON rc.reality_context_id=prm.reality_context_id
+            WHERE prm.proposition_id=$1
+              AND prm.reality_context_id=ANY($2::uuid[])
+            """,
+            proposition_id,
+            list(new_context_ids),
         )
+        memberships = [dict(r) for r in rows]
 
     if source_context and world_context:
         world_membership = next(
-            (m for m in memberships if m["context_key"] == world_context["context_key"]),
+            (m for m in memberships if m["reality_context_id"] == world_context["reality_context_id"]),
             None,
         )
         if world_membership:
@@ -369,9 +510,9 @@ async def resolve_claim_reality(
                 )
                 VALUES ($1,$2,'interprets',$3,$4,$5,$6::jsonb)
                 ON CONFLICT (from_context_id, to_context_id, relation_type) DO UPDATE
-                SET affinity=EXCLUDED.affinity,
-                    traversal_cost=EXCLUDED.traversal_cost,
-                    confidence=EXCLUDED.confidence,
+                SET affinity=GREATEST(aios.reality_context_edge.affinity, EXCLUDED.affinity),
+                    traversal_cost=LEAST(aios.reality_context_edge.traversal_cost, EXCLUDED.traversal_cost),
+                    confidence=GREATEST(aios.reality_context_edge.confidence, EXCLUDED.confidence),
                     updated_at=now(),
                     meta=aios.reality_context_edge.meta || EXCLUDED.meta
                 """,
