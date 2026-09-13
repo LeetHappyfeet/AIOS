@@ -17,6 +17,10 @@ from aios_app.semantic_index.query import SemanticQueryService
 logger = logging.getLogger("aios.hud.retrieval")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
 SEMANTIC_SEED_WAIT_SECONDS = 0.25
+TOPOLOGY_SQL_TIMEOUT_SECONDS = 2.0
+TOPOLOGY_FALLBACK_TIMEOUT_SECONDS = 1.0
+MAX_FOCUS_TERMS = 12
+MAX_TOPOLOGY_SEEDS = 64
 
 
 @dataclass(frozen=True)
@@ -29,41 +33,13 @@ class RetrievalPolicy:
 
 
 POLICIES = {
-    "memory": RetrievalPolicy(
-        "memory",
-        ("MEMORY", "EVENT"),
-        max_hops=3,
-        limit=60,
-        retain_topic_history=True,
-    ),
+    "memory": RetrievalPolicy("memory", ("MEMORY", "EVENT"), 3, 60, True),
     "belief": RetrievalPolicy(
-        "belief",
-        ("BELIEF", "TRAIT", "STATE", "CONCEPT"),
-        max_hops=2,
-        limit=60,
-        retain_topic_history=False,
+        "belief", ("BELIEF", "TRAIT", "STATE", "CONCEPT"), 2, 60, False
     ),
-    "goal": RetrievalPolicy(
-        "goal",
-        ("GOAL",),
-        max_hops=2,
-        limit=30,
-        retain_topic_history=False,
-    ),
-    "event": RetrievalPolicy(
-        "event",
-        ("EVENT",),
-        max_hops=2,
-        limit=40,
-        retain_topic_history=True,
-    ),
-    "rule": RetrievalPolicy(
-        "rule",
-        ("RULE",),
-        max_hops=1,
-        limit=30,
-        retain_topic_history=False,
-    ),
+    "goal": RetrievalPolicy("goal", ("GOAL",), 2, 30, False),
+    "event": RetrievalPolicy("event", ("EVENT",), 2, 40, True),
+    "rule": RetrievalPolicy("rule", ("RULE",), 1, 30, False),
 }
 
 
@@ -76,23 +52,208 @@ def _focus_terms(*values: Any) -> list[str]:
                 continue
             seen.add(word)
             result.append(word)
-            if len(result) >= 24:
+            if len(result) >= MAX_FOCUS_TERMS:
                 return result
     return result
 
 
+_RETRIEVAL_SQL = """
+WITH RECURSIVE
+eligible_nodes AS (
+    SELECT n.*
+    FROM aios.semantic_topology_node n
+    WHERE n.scope_key=$1
+      AND (
+          n.character_instance_id IS NULL
+          OR n.character_instance_id = ANY($2::uuid[])
+          OR (n.node_type='INSTANCE' AND n.node_key = ANY($3::text[]))
+      )
+),
+seed_candidates AS (
+    SELECT
+        topology_node_id,
+        significance,
+        CASE
+            WHEN node_type='INSTANCE' AND node_key=$4 THEN 0
+            WHEN cardinality($6::uuid[]) > 0
+                 AND proposition_id = ANY($6::uuid[]) THEN 1
+            ELSE 2
+        END AS seed_rank
+    FROM eligible_nodes
+    WHERE (node_type='INSTANCE' AND node_key=$4)
+       OR (
+            cardinality($5::text[]) > 0
+            AND EXISTS (
+                SELECT 1
+                FROM unnest($5::text[]) term
+                WHERE lower(COALESCE(label,'')) LIKE '%' || term || '%'
+                   OR lower(node_key) LIKE '%' || term || '%'
+            )
+       )
+       OR (
+            cardinality($6::uuid[]) > 0
+            AND proposition_id = ANY($6::uuid[])
+       )
+),
+seeds AS (
+    SELECT topology_node_id
+    FROM seed_candidates
+    ORDER BY seed_rank, significance DESC NULLS LAST, topology_node_id
+    LIMIT 64
+),
+walk(topology_node_id, depth) AS (
+    SELECT s.topology_node_id, 0
+    FROM seeds s
+
+    UNION
+
+    SELECT
+        CASE
+            WHEN e.parent_node_id=w.topology_node_id THEN e.child_node_id
+            ELSE e.parent_node_id
+        END,
+        w.depth + 1
+    FROM walk w
+    JOIN aios.semantic_topology_edge e
+      ON e.scope_key=$1
+     AND (
+         e.parent_node_id=w.topology_node_id
+         OR e.child_node_id=w.topology_node_id
+     )
+    JOIN eligible_nodes next_node
+      ON next_node.topology_node_id = CASE
+          WHEN e.parent_node_id=w.topology_node_id THEN e.child_node_id
+          ELSE e.parent_node_id
+      END
+    WHERE w.depth < $7
+),
+nearest AS (
+    SELECT
+        topology_node_id,
+        MIN(depth) AS topology_depth,
+        MIN(depth)::double precision AS topology_cost
+    FROM walk
+    GROUP BY topology_node_id
+),
+topology_props AS (
+    SELECT
+        n.proposition_id,
+        MIN(ne.topology_depth) AS topology_depth,
+        MIN(ne.topology_cost) AS topology_cost,
+        MAX(n.significance) AS topology_significance
+    FROM nearest ne
+    JOIN eligible_nodes n ON n.topology_node_id=ne.topology_node_id
+    WHERE n.proposition_id IS NOT NULL
+    GROUP BY n.proposition_id
+),
+owned AS (
+    SELECT DISTINCT ON (ck.proposition_id)
+        ck.instance_id,
+        ck.proposition_id,
+        ck.atom_id,
+        ck.epistemic_status,
+        ck.confidence,
+        ck.acquisition_mode,
+        ck.source_entity_id,
+        ck.first_node_id,
+        ck.last_node_id,
+        ck.updated_at,
+        ck.base_confidence,
+        ck.attention_weight,
+        ck.trust_weight,
+        ck.compatibility_weight,
+        ck.retention_weight,
+        ck.salience_weight,
+        ck.effective_confidence,
+        array_position($2::uuid[], ck.instance_id) AS instance_depth
+    FROM aios.character_active_proposition_knowledge ck
+    WHERE ck.instance_id = ANY($2::uuid[])
+      AND EXISTS (
+          SELECT 1
+          FROM aios.knowledge_acquisition_event kae
+          LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+          LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+          LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+          LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+          LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+          WHERE kae.instance_id=ck.evidence_instance_id
+            AND kae.proposition_id=ck.proposition_id
+            AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+      )
+    ORDER BY ck.proposition_id,
+             array_position($2::uuid[], ck.instance_id),
+             ck.updated_at DESC
+),
+classified AS (
+    SELECT
+        o.*,
+        p.topic_key,
+        p.canonical_text,
+        p.subject_norm,
+        p.predicate_norm,
+        p.object_norm,
+        p.polarity,
+        p.modality,
+        COALESCE(ctx.claim_kind, 'BELIEF') AS claim_kind,
+        ctx.predicate_family,
+        ctx.world_id AS source_world_id,
+        ctx.dag_node_id AS source_node_id,
+        tp.topology_depth,
+        tp.topology_cost,
+        tp.topology_significance
+    FROM topology_props tp
+    JOIN owned o ON o.proposition_id=tp.proposition_id
+    JOIN aios.proposition p ON p.proposition_id=o.proposition_id
+    LEFT JOIN LATERAL (
+        SELECT ccr.claim_kind, ccr.predicate_family,
+               ccr.world_id, ccr.dag_node_id
+        FROM aios.observation obs
+        JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
+        WHERE obs.proposition_id=p.proposition_id
+          AND (
+              ccr.character_instance_id IS NULL
+              OR ccr.character_instance_id = ANY($2::uuid[])
+          )
+        ORDER BY
+            array_position($2::uuid[], ccr.character_instance_id) NULLS LAST,
+            ccr.resolved_at DESC
+        LIMIT 1
+    ) ctx ON true
+    WHERE COALESCE(ctx.claim_kind, 'BELIEF') = ANY($8::text[])
+),
+topic_ranked AS (
+    SELECT c.*,
+           row_number() OVER (
+               PARTITION BY c.atom_id
+               ORDER BY
+                   c.instance_depth,
+                   c.updated_at DESC,
+                   c.effective_confidence DESC NULLS LAST,
+                   c.topology_cost,
+                   c.proposition_id
+           ) AS topic_recency_rank
+    FROM classified c
+)
+SELECT *
+FROM topic_ranked
+WHERE $9::boolean OR topic_recency_rank=1
+ORDER BY
+    topology_cost,
+    topology_depth,
+    topology_significance DESC,
+    instance_depth,
+    updated_at DESC
+LIMIT $10
+"""
+
+
 class TopologyRetriever:
-    """
-    Branch-safe retrieval over derived semantic topology.
+    """Branch-safe retrieval over derived semantic topology.
 
-    Hard eligibility happens in SQL before ranking:
-      * /char scope must match the active character.
-      * only the active character instance and its ancestors are visible.
-      * sibling experiential branches never enter the candidate set.
-
-    Topology is navigation, not truth. Reconciled character belief state is
-    authoritative for ordinary /char cognition; acquisition evidence remains
-    available underneath it for provenance and diagnostics.
+    The recursive walk intentionally carries only node id and depth and uses
+    UNION (not UNION ALL). PostgreSQL therefore deduplicates the same node at
+    the same depth during the recursion instead of materializing every distinct
+    path and collapsing them only after the graph has exploded.
     """
 
     def __init__(self, db: Database):
@@ -132,8 +293,7 @@ class TopologyRetriever:
             return proposition_ids
         except Exception as exc:
             logger.debug(
-                "Semantic seed lookup unavailable; using topology/lexical fallback: %s",
-                exc,
+                "Semantic seed lookup unavailable; using topology/lexical fallback: %s", exc
             )
             self._semantic_seed_cache[cache_key] = []
             return []
@@ -153,10 +313,8 @@ class TopologyRetriever:
         goals: Iterable[Any],
     ) -> list[str]:
         query_text = " ".join(
-            part for part in (
-                focus_text,
-                " ".join(str(goal) for goal in goals),
-            )
+            part
+            for part in (focus_text, " ".join(str(goal) for goal in goals))
             if part
         ).strip()
         if not query_text:
@@ -168,23 +326,17 @@ class TopologyRetriever:
             return cached
         if cache_key in self._semantic_seed_deferred:
             return []
-
         try:
             return await asyncio.wait_for(
                 self._semantic_seed_flights.run(
                     cache_key,
                     lambda: self._query_semantic_seed_propositions(
-                        context,
-                        query_text=query_text,
-                        cache_key=cache_key,
+                        context, query_text=query_text, cache_key=cache_key
                     ),
                 ),
                 timeout=SEMANTIC_SEED_WAIT_SECONDS,
             )
         except asyncio.TimeoutError:
-            # The shielded single-flight task keeps running and populates the
-            # cache when it finishes. Mark the key deferred so the other HUD
-            # semantic modes do not each pay the same timeout while it runs.
             self._semantic_seed_deferred.add(cache_key)
             logger.debug(
                 "HUD semantic seed exceeded %.0f ms budget; using lexical/topology fallback",
@@ -193,25 +345,16 @@ class TopologyRetriever:
             return []
 
     async def _anchor_context(
-        self,
-        context: HUDContext,
-        proposition_ids: list[Any],
+        self, context: HUDContext, proposition_ids: list[Any]
     ) -> dict[Any, dict[str, Any]]:
         if not proposition_ids:
             return {}
-
         rows = await self.db.fetch(
             """
             SELECT
-                sae.proposition_id,
-                sae.relationship_type,
-                sae.world_id,
-                sae.source_scope_key,
-                sae.target_scope_key,
-                sae.target_node_id,
-                sae.confidence,
-                sae.inference_source,
-                sae.inference_status,
+                sae.proposition_id, sae.relationship_type, sae.world_id,
+                sae.source_scope_key, sae.target_scope_key, sae.target_node_id,
+                sae.confidence, sae.inference_source, sae.inference_status,
                 sae.character_instance_id,
                 target.node_type AS target_type,
                 target.label AS target_label,
@@ -224,10 +367,7 @@ class TopologyRetriever:
               ON target.topology_node_id=sae.target_node_id
             LEFT JOIN aios.semantic_topology_edge e
               ON e.scope_key=sae.target_scope_key
-             AND (
-                 e.parent_node_id=sae.target_node_id
-                 OR e.child_node_id=sae.target_node_id
-             )
+             AND (e.parent_node_id=sae.target_node_id OR e.child_node_id=sae.target_node_id)
             LEFT JOIN aios.semantic_topology_node neighbor
               ON neighbor.topology_node_id=CASE
                   WHEN e.parent_node_id=sae.target_node_id THEN e.child_node_id
@@ -246,7 +386,6 @@ class TopologyRetriever:
             list(context.lineage_instance_ids),
             proposition_ids,
         )
-
         anchors: dict[Any, dict[str, Any]] = {}
         for row in rows:
             proposition_id = row["proposition_id"]
@@ -268,13 +407,10 @@ class TopologyRetriever:
                     "world_context": [],
                 }
                 anchors[proposition_id] = entry
-
             if not entry["world_visible"]:
                 continue
             context_node_id = row["context_node_id"]
-            if context_node_id is None:
-                continue
-            if len(entry["world_context"]) >= 8:
+            if context_node_id is None or len(entry["world_context"]) >= 8:
                 continue
             if any(item["node_id"] == context_node_id for item in entry["world_context"]):
                 continue
@@ -287,6 +423,37 @@ class TopologyRetriever:
                 }
             )
         return anchors
+
+    async def _fetch_rows(
+        self,
+        *,
+        scope_key: str,
+        lineage_ids: list[Any],
+        lineage_keys: list[str],
+        instance_id: str,
+        terms: list[str],
+        semantic_seed_ids: list[str],
+        hops: int,
+        policy: RetrievalPolicy,
+        row_limit: int,
+        timeout: float,
+    ) -> list[Any]:
+        return await asyncio.wait_for(
+            self.db.fetch(
+                _RETRIEVAL_SQL,
+                scope_key,
+                lineage_ids,
+                lineage_keys,
+                instance_id,
+                terms,
+                semantic_seed_ids,
+                hops,
+                list(policy.claim_kinds),
+                bool(policy.retain_topic_history),
+                row_limit,
+            ),
+            timeout=timeout,
+        )
 
     async def retrieve_character_knowledge(
         self,
@@ -313,235 +480,57 @@ class TopologyRetriever:
 
         semantic_started = time.perf_counter()
         semantic_seed_ids = await self._semantic_seed_propositions(
-            context,
-            focus_text=focus_text,
-            goals=goals,
+            context, focus_text=focus_text, goals=goals
         )
         semantic_ms = (time.perf_counter() - semantic_started) * 1000.0
 
         topology_started = time.perf_counter()
-        rows = await self.db.fetch(
-            """
-            WITH RECURSIVE
-            eligible_nodes AS (
-                SELECT n.*
-                FROM aios.semantic_topology_node n
-                WHERE n.scope_key=$1
-                  AND (
-                      n.character_instance_id IS NULL
-                      OR n.character_instance_id = ANY($2::uuid[])
-                      OR (
-                          n.node_type='INSTANCE'
-                          AND n.node_key = ANY($3::text[])
-                      )
-                  )
-            ),
-            seeds AS (
-                SELECT topology_node_id
-                FROM eligible_nodes
-                WHERE (
-                    node_type='INSTANCE'
-                    AND node_key=$4
-                )
-                OR (
-                    cardinality($5::text[]) > 0
-                    AND EXISTS (
-                        SELECT 1
-                        FROM unnest($5::text[]) term
-                        WHERE lower(COALESCE(label,'')) LIKE '%' || term || '%'
-                           OR lower(node_key) LIKE '%' || term || '%'
-                    )
-                )
-                OR (
-                    cardinality($6::uuid[]) > 0
-                    AND proposition_id = ANY($6::uuid[])
-                )
-            ),
-            walk(topology_node_id, depth, path_cost, path) AS (
-                SELECT s.topology_node_id, 0, 0.0::double precision,
-                       ARRAY[s.topology_node_id]::uuid[]
-                FROM seeds s
-
-                UNION ALL
-
-                SELECT
-                    CASE
-                        WHEN e.parent_node_id=w.topology_node_id THEN e.child_node_id
-                        ELSE e.parent_node_id
-                    END,
-                    w.depth + 1,
-                    w.path_cost + CASE e.edge_type
-                        WHEN 'experiential_branch' THEN 0.0
-                        WHEN 'forks_at' THEN 0.1
-                        WHEN 'contains_branch' THEN 0.35
-                        WHEN 'epistemic_transition' THEN 0.25
-                        WHEN 'about_topic' THEN 0.7
-                        WHEN 'subject_pivot' THEN 0.65
-                        WHEN 'object_pivot' THEN 0.65
-                        WHEN 'acquires' THEN 0.25
-                        WHEN 'acquired_from' THEN 1.1
-                        WHEN 'holds_belief_state' THEN 0.1
-                        WHEN 'contains_assertion' THEN 0.3
-                        WHEN 'asserts_topic' THEN 0.4
-                        ELSE 0.8
-                    END,
-                    w.path || CASE
-                        WHEN e.parent_node_id=w.topology_node_id THEN e.child_node_id
-                        ELSE e.parent_node_id
-                    END
-                FROM walk w
-                JOIN aios.semantic_topology_edge e
-                  ON e.scope_key=$1
-                 AND (
-                     e.parent_node_id=w.topology_node_id
-                     OR e.child_node_id=w.topology_node_id
-                 )
-                JOIN eligible_nodes next_node
-                  ON next_node.topology_node_id = CASE
-                      WHEN e.parent_node_id=w.topology_node_id THEN e.child_node_id
-                      ELSE e.parent_node_id
-                  END
-                WHERE w.depth < $7
-                  AND NOT (
-                      CASE
-                          WHEN e.parent_node_id=w.topology_node_id THEN e.child_node_id
-                          ELSE e.parent_node_id
-                      END = ANY(w.path)
-                  )
-            ),
-            nearest AS (
-                SELECT topology_node_id, MIN(depth) AS topology_depth,
-                       MIN(path_cost) AS topology_cost
-                FROM walk
-                GROUP BY topology_node_id
-            ),
-            topology_props AS (
-                SELECT
-                    n.proposition_id,
-                    MIN(ne.topology_depth) AS topology_depth,
-                    MIN(ne.topology_cost) AS topology_cost,
-                    MAX(n.significance) AS topology_significance
-                FROM nearest ne
-                JOIN eligible_nodes n ON n.topology_node_id=ne.topology_node_id
-                WHERE n.proposition_id IS NOT NULL
-                GROUP BY n.proposition_id
-            ),
-            owned AS (
-                SELECT DISTINCT ON (ck.proposition_id)
-                    ck.instance_id,
-                    ck.proposition_id,
-                    ck.atom_id,
-                    ck.epistemic_status,
-                    ck.confidence,
-                    ck.acquisition_mode,
-                    ck.source_entity_id,
-                    ck.first_node_id,
-                    ck.last_node_id,
-                    ck.updated_at,
-                    ck.base_confidence,
-                    ck.attention_weight,
-                    ck.trust_weight,
-                    ck.compatibility_weight,
-                    ck.retention_weight,
-                    ck.salience_weight,
-                    ck.effective_confidence,
-                    array_position($2::uuid[], ck.instance_id) AS instance_depth
-                FROM aios.character_active_proposition_knowledge ck
-                WHERE ck.instance_id = ANY($2::uuid[])
-                  AND EXISTS (
-                      SELECT 1
-                      FROM aios.knowledge_acquisition_event kae
-                      LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
-                      LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
-                      LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
-                      LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
-                      LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-                      WHERE kae.instance_id=ck.evidence_instance_id
-                        AND kae.proposition_id=ck.proposition_id
-                        AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
-                  )
-                ORDER BY ck.proposition_id,
-                         array_position($2::uuid[], ck.instance_id),
-                         ck.updated_at DESC
-            ),
-            classified AS (
-                SELECT
-                    o.*,
-                    p.topic_key,
-                    p.canonical_text,
-                    p.subject_norm,
-                    p.predicate_norm,
-                    p.object_norm,
-                    p.polarity,
-                    p.modality,
-                    COALESCE(ctx.claim_kind, 'BELIEF') AS claim_kind,
-                    ctx.predicate_family,
-                    ctx.world_id AS source_world_id,
-                    ctx.dag_node_id AS source_node_id,
-                    tp.topology_depth,
-                    tp.topology_cost,
-                    tp.topology_significance
-                FROM topology_props tp
-                JOIN owned o ON o.proposition_id=tp.proposition_id
-                JOIN aios.proposition p ON p.proposition_id=o.proposition_id
-                LEFT JOIN LATERAL (
-                    SELECT ccr.claim_kind, ccr.predicate_family,
-                           ccr.world_id, ccr.dag_node_id
-                    FROM aios.observation obs
-                    JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
-                    WHERE obs.proposition_id=p.proposition_id
-                      AND (
-                          ccr.character_instance_id IS NULL
-                          OR ccr.character_instance_id = ANY($2::uuid[])
-                      )
-                    ORDER BY
-                        array_position($2::uuid[], ccr.character_instance_id) NULLS LAST,
-                        ccr.resolved_at DESC
-                    LIMIT 1
-                ) ctx ON true
-                WHERE COALESCE(ctx.claim_kind, 'BELIEF') = ANY($8::text[])
-            ),
-            topic_ranked AS (
-                SELECT c.*,
-                       row_number() OVER (
-                           PARTITION BY c.atom_id
-                           ORDER BY
-                               c.instance_depth,
-                               c.updated_at DESC,
-                               c.effective_confidence DESC NULLS LAST,
-                               c.topology_cost,
-                               c.proposition_id
-                       ) AS topic_recency_rank
-                FROM classified c
+        topology_fallback = False
+        try:
+            rows = await self._fetch_rows(
+                scope_key=scope_key,
+                lineage_ids=lineage_ids,
+                lineage_keys=lineage_keys,
+                instance_id=str(context.instance_id),
+                terms=terms,
+                semantic_seed_ids=semantic_seed_ids,
+                hops=hops,
+                policy=policy,
+                row_limit=row_limit,
+                timeout=TOPOLOGY_SQL_TIMEOUT_SECONDS,
             )
-            SELECT *
-            FROM topic_ranked
-            WHERE $9::boolean OR topic_recency_rank=1
-            ORDER BY
-                topology_cost,
-                topology_depth,
-                topology_significance DESC,
-                instance_depth,
-                updated_at DESC
-            LIMIT $10
-            """,
-            scope_key,
-            lineage_ids,
-            lineage_keys,
-            str(context.instance_id),
-            terms,
-            semantic_seed_ids,
-            hops,
-            list(policy.claim_kinds),
-            bool(policy.retain_topic_history),
-            row_limit,
-        )
+        except asyncio.TimeoutError:
+            topology_fallback = True
+            logger.warning(
+                "HUD topology retrieval mode=%s exceeded %.1fs; retrying seed-only fallback",
+                mode,
+                TOPOLOGY_SQL_TIMEOUT_SECONDS,
+            )
+            try:
+                rows = await self._fetch_rows(
+                    scope_key=scope_key,
+                    lineage_ids=lineage_ids,
+                    lineage_keys=lineage_keys,
+                    instance_id=str(context.instance_id),
+                    terms=terms,
+                    semantic_seed_ids=semantic_seed_ids,
+                    hops=0,
+                    policy=policy,
+                    row_limit=row_limit,
+                    timeout=TOPOLOGY_FALLBACK_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "HUD topology seed-only fallback mode=%s exceeded %.1fs; returning no rows",
+                    mode,
+                    TOPOLOGY_FALLBACK_TIMEOUT_SECONDS,
+                )
+                rows = []
         topology_ms = (time.perf_counter() - topology_started) * 1000.0
 
         anchor_started = time.perf_counter()
         anchor_by_proposition = await self._anchor_context(
-            context,
-            [row["proposition_id"] for row in rows],
+            context, [row["proposition_id"] for row in rows]
         )
         anchor_ms = (time.perf_counter() - anchor_started) * 1000.0
 
@@ -552,16 +541,13 @@ class TopologyRetriever:
             anchor = anchor_by_proposition.get(item["proposition_id"])
             if anchor:
                 item["anchor"] = {
-                    key: value
-                    for key, value in anchor.items()
-                    if key != "world_context"
+                    key: value for key, value in anchor.items() if key != "world_context"
                 }
                 item["world_context"] = list(anchor.get("world_context") or [])
             candidate_world_id = (
                 anchor.get("world_id")
                 if anchor and anchor.get("world_id") is not None
-                else item.get("source_world_id")
-                or context.world_id
+                else item.get("source_world_id") or context.world_id
             )
             score = scorer.score(
                 item,
@@ -589,12 +575,12 @@ class TopologyRetriever:
                 "topic_recency_rank": int(item.get("topic_recency_rank") or 1),
                 "historical": int(item.get("topic_recency_rank") or 1) > 1,
                 "instance_depth": int(item.get("instance_depth") or 0),
+                "fallback": topology_fallback,
             }
             item["relevance"] = score.as_dict()
             item["relevance"]["topology"] = round(topology_bonus, 6)
             item["relevance"]["total"] = round(
-                float(item["relevance"]["total"]) + topology_bonus,
-                6,
+                float(item["relevance"]["total"]) + topology_bonus, 6
             )
             result.append(item)
 
@@ -649,10 +635,11 @@ class TopologyRetriever:
         total_ms = (time.perf_counter() - started) * 1000.0
         log = logger.info if total_ms >= 250.0 else logger.debug
         log(
-            "HUD topology retrieval mode=%s rows=%d semantic_seed_ms=%.1f "
+            "HUD topology retrieval mode=%s rows=%d fallback=%s semantic_seed_ms=%.1f "
             "topology_sql_ms=%.1f anchor_ms=%.1f conflict_ms=%.1f total_ms=%.1f",
             mode,
             len(result),
+            topology_fallback,
             semantic_ms,
             topology_ms,
             anchor_ms,
