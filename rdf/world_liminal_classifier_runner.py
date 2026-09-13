@@ -9,6 +9,7 @@ from uuid import UUID
 
 from ..db import Database
 from .fuseki import FusekiClient
+from .liminal_compaction import compact_liminal_claims
 from .world_liminal_classifier import classify_claim
 
 logger = logging.getLogger("aios.rdf.world_liminal_classifier")
@@ -18,7 +19,7 @@ GRAPH_IRI = "urn:aios:world:liminal"
 
 
 # -------------------------------------------------
-# Public entrypoint (NEW)
+# Public entrypoint
 # -------------------------------------------------
 
 async def classify_liminal_claims(
@@ -27,33 +28,45 @@ async def classify_liminal_claims(
     *,
     batch_size: int = 200,
 ) -> int:
-    """
-    Orchestrates classification of liminal claims.
+    """Classify active liminal claims and compact terminal projections.
 
-    - Fetches unclassified liminal claims
-    - Applies deterministic classifier
-    - Writes world:contentKind to RDF
-    - Logs action in rdf_promotion_log
+    Classification remains deterministic and observational.  After the batch,
+    claims that upstream semantic reconciliation has marked absorbed, promoted,
+    rejected, or historical are removed from the active liminal RDF graph.
+    Their PostgreSQL claims, observations, propositions and provenance remain.
     """
 
     rows = await _fetch_unclassified(db, batch_size)
-
-    if not rows:
-        return 0
+    classified = 0
 
     for row in rows:
         try:
             kind = classify_claim(row)
             _write_classification(fuseki, row["claim_id"], kind)
             await _log_classification(db, row["claim_id"], kind)
+            classified += 1
         except Exception:
             logger.exception(
                 "Failed classifying claim %s",
                 row["claim_id"],
             )
 
-    logger.info("Classified %d liminal claims", len(rows))
-    return len(rows)
+    # Liminal cleanup is deliberately downstream of semantic lifecycle state.
+    # It never decides whether evidence is redundant; it only enacts the
+    # decision already materialized by the consolidation layer.
+    compacted = await compact_liminal_claims(
+        db,
+        fuseki,
+        batch_size=max(batch_size, 500),
+    )
+
+    if classified or compacted:
+        logger.info(
+            "Liminal maintenance classified=%d compacted=%d",
+            classified,
+            compacted,
+        )
+    return classified
 
 
 # -------------------------------------------------
@@ -111,7 +124,6 @@ INSERT DATA {{
 }}
 """
     fuseki.update("world", sparql)
-
 
 
 # -------------------------------------------------
