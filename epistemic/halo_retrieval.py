@@ -13,8 +13,7 @@ from aios_app.epistemic.retrieval import (
     RetrievalPolicy,
     TopologyRetriever as BaseTopologyRetriever,
 )
-from aios_app.world.retrieval_scope import build_retrieval_scope
-from aios_app.world.resolution import normalize_domain
+from aios_app.epistemic.world_scope import build_retrieval_scope, normalize_domain
 
 
 logger = logging.getLogger("aios.epistemic.halo")
