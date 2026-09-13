@@ -8,8 +8,8 @@ from uuid import UUID
 
 from aios_app.db import Database
 
-INTERPRETER_VERSION = "message-cognition-v1"
-MAX_UNITS = 16
+INTERPRETER_VERSION = "message-cognition-v2"
+MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
@@ -17,58 +17,59 @@ _NEGATION_RE = re.compile(
     r"\b(?:not|never|no|cannot|can't|isn't|aren't|wasn't|weren't|doesn't|didn't|won't)\b",
     re.I,
 )
-
-_KIND_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
-        "MEMORY",
-        re.compile(
-            r"\b(?:remember(?:s|ed|ing)?|recall(?:s|ed|ing)?|memory|memories|forgot|forget(?:s|ting)?|recognize(?:s|d|ing)?)\b",
-            re.I,
-        ),
-    ),
-    (
-        "GOAL",
-        re.compile(
-            r"\b(?:want(?:s|ed|ing)?|intend(?:s|ed|ing)?|plan(?:s|ned|ning)?|goal|seek(?:s|ing)?|escape(?:s|d|ing)?|need(?:s|ed|ing)?|trying to|try to)\b",
-            re.I,
-        ),
-    ),
-    (
-        "BELIEF",
-        re.compile(
-            r"\b(?:believe(?:s|d|ing)?|think(?:s|ing)?|thought|know(?:s|ing)?|knew|suspect(?:s|ed|ing)?|assume(?:s|d|ing)?|wonder(?:s|ed|ing)?|uncertain|maybe|perhaps)\b",
-            re.I,
-        ),
-    ),
-    (
-        "RULE",
-        re.compile(
-            r"\b(?:must|mustn't|should|shouldn't|allowed|forbidden|required|cannot|can't|may not)\b",
-            re.I,
-        ),
-    ),
-    (
-        "RELATIONSHIP",
-        re.compile(
-            r"\b(?:friend|enemy|ally|partner|assistant|sidekick|battle buddy|trust(?:s|ed|ing)?|distrust(?:s|ed|ing)?|help(?:s|ed|ing)? you|help(?:s|ed|ing)? me)\b",
-            re.I,
-        ),
-    ),
-    (
-        "STATE",
-        re.compile(
-            r"\b(?:is|am|are|was|were|has|have|had|alive|dead|digital|data|inside|within|located|form|body|exist(?:s|ed|ing)?)\b",
-            re.I,
-        ),
-    ),
+_QUESTION_RE = re.compile(r"\?\s*$")
+_CAUSAL_DESIRE_RE = re.compile(
+    r"\b(?:made|makes|making|caused|causes|causing)\s+(?:me|you|him|her|them|us|[a-z0-9_-]+)\s+want\b",
+    re.I,
 )
 
-_SALIENCE_RE = re.compile(
-    r"\b(?:remember(?:s|ed|ing)?|recall(?:s|ed|ing)?|know(?:s|ing)?|knew|believe(?:s|d|ing)?|"
-    r"think(?:s|ing)?|thought|want(?:s|ed|ing)?|need(?:s|ed|ing)?|plan(?:s|ned|ning)?|"
-    r"intend(?:s|ed|ing)?|goal|must|cannot|can't|alive|dead|digital|data|computer|world|body|"
-    r"form|escape(?:s|d|ing)?|help(?:s|ed|ing)?|partner|assistant|friend|enemy|trust(?:s|ed|ing)?|"
-    r"uncertain|maybe|real|exist(?:s|ed|ing)?|location|inside|outside|moved|arrived|left|gave|took)\b",
+# The fast interpreter is deliberately conservative. It recognizes grammatical
+# shapes instead of treating a trigger word anywhere in a sentence as cognition.
+_SUBJECT = r"(?P<subject>I|you|she|he|they|we|[A-Za-z][A-Za-z0-9_-]{1,48})"
+_GOAL_RE = re.compile(
+    rf"\b{_SUBJECT}\s+(?P<verb>want(?:s|ed)?|intend(?:s|ed)?|plan(?:s|ned)?|need(?:s|ed)?|"
+    rf"seek(?:s|ed)?|tr(?:y|ies|ied)|is\s+trying|was\s+trying|decide(?:s|d)?|resolve(?:s|d)?|prepare(?:s|d)?)"
+    r"\s+(?P<object>(?:to\s+)?[^.!?]{2,220})",
+    re.I,
+)
+_MEMORY_RE = re.compile(
+    rf"\b{_SUBJECT}\s+(?P<verb>remember(?:s|ed)?|recall(?:s|ed)?|recognize(?:s|d)?|forgot|forgets|forget)"
+    r"\s+(?P<object>[^.!?]{2,220})",
+    re.I,
+)
+_BELIEF_RE = re.compile(
+    rf"\b{_SUBJECT}\s+(?P<verb>believe(?:s|d)?|think(?:s)?|thought|know(?:s)?|knew|suspect(?:s|ed)?|"
+    rf"assume(?:s|d)?|wonder(?:s|ed)?)\s+(?P<object>[^.!?]{{2,220}})",
+    re.I,
+)
+_UNCERTAIN_RE = re.compile(
+    rf"\b{_SUBJECT}\s+(?P<verb>is|was|seems|seemed)\s+(?P<object>uncertain|unsure|confused)\b(?P<tail>[^.!?]{{0,180}})",
+    re.I,
+)
+_RULE_RE = re.compile(
+    rf"\b{_SUBJECT}\s+(?P<verb>must|mustn't|should|shouldn't|cannot|can't|may\s+not|is\s+required\s+to|"
+    rf"is\s+allowed\s+to|is\s+forbidden\s+to)\s+(?P<object>[^.!?]{{2,220}})",
+    re.I,
+)
+_RELATIONSHIP_RE = re.compile(
+    r"\b(?:friend|enemy|ally|partner|assistant|sidekick|battle buddy|trust(?:s|ed|ing)?|"
+    r"distrust(?:s|ed|ing)?|offer(?:s|ed|ing)?\s+to\s+help|help(?:s|ed|ing)?\s+(?:me|you|her|him|them)|"
+    r"work(?:s|ed|ing)?\s+(?:with|for))\b",
+    re.I,
+)
+_STATE_TERMS_RE = re.compile(
+    r"\b(?:alive|dead|digital|data|computer|body|form|real|physical|trapped|free|inside|outside|within|"
+    r"located|location|exists?|existing|conscious|awake|asleep|injured|armed|powered|human|artificial)\b",
+    re.I,
+)
+_STATE_RE = re.compile(
+    rf"\b{_SUBJECT}\s+(?P<verb>is|am|are|was|were|has|have|had|exists?|became|becomes|remains?)\s+"
+    r"(?P<object>[^.!?]{2,220})",
+    re.I,
+)
+_EVENT_RE = re.compile(
+    r"\b(?:arrived|left|moved|entered|escaped|attacked|fought|gave|took|opened|closed|activated|"
+    r"deactivated|created|destroyed|transferred|rescued|captured|released|changed|returned|appeared|vanished)\b",
     re.I,
 )
 
@@ -77,6 +78,26 @@ _STOPWORDS = {
     "had", "has", "have", "he", "her", "hers", "him", "his", "i", "in", "is", "it",
     "its", "me", "my", "of", "on", "or", "our", "she", "that", "the", "their", "them",
     "they", "this", "to", "was", "we", "were", "with", "you", "your",
+}
+
+_PERSISTENCE = {
+    "MEMORY": "durable",
+    "BELIEF": "until_contradicted",
+    "GOAL": "session",
+    "RULE": "until_contradicted",
+    "RELATIONSHIP": "until_contradicted",
+    "STATE": "until_changed",
+    "EVENT": "turn",
+}
+
+_KIND_BASE_SALIENCE = {
+    "MEMORY": 0.78,
+    "BELIEF": 0.72,
+    "GOAL": 0.82,
+    "RULE": 0.74,
+    "RELATIONSHIP": 0.70,
+    "STATE": 0.68,
+    "EVENT": 0.48,
 }
 
 
@@ -91,18 +112,194 @@ class CognitiveUnit:
     meta: dict
 
 
+@dataclass(frozen=True)
+class ParsedCandidate:
+    kind: str
+    subject_text: str | None
+    predicate: str
+    object_text: str
+    confidence: float
+    reason: str
+
+
 def _sentences(text: str) -> list[str]:
     return [part.strip() for part in _SENTENCE_RE.split(text or "") if part.strip()]
 
 
-def _kind(text: str) -> str:
-    for kind, pattern in _KIND_RULES:
-        if pattern.search(text):
-            return kind
-    return "EVENT"
+def _identity_aliases(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    clean = re.sub(r"[^a-z0-9_-]+", " ", value.lower()).strip()
+    aliases = {clean} if clean else set()
+    for token in re.split(r"[_\-\s]+", clean):
+        if len(token) >= 2 and not token.isdigit():
+            aliases.add(token)
+    # Common character identifiers look like Shego_001. The lexical stem is a
+    # useful explicit-name alias, while short numeric suffixes are not.
+    stem = re.sub(r"[_-]?\d+$", "", clean).strip("_- ")
+    if stem:
+        aliases.add(stem)
+    return aliases
 
 
-def _topic_key(text: str, *, character_id: str, speaker_id: str | None) -> str:
+def _same_identity(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    return bool(_identity_aliases(left) & _identity_aliases(right))
+
+
+def _resolve_subject(
+    subject: str | None,
+    *,
+    character_id: str,
+    speaker_id: str | None,
+    viewpoint_id: str | None,
+) -> tuple[str | None, bool]:
+    if not subject:
+        return None, False
+    raw = subject.strip().lower()
+    character_aliases = _identity_aliases(character_id)
+    speaker_aliases = _identity_aliases(speaker_id)
+    viewpoint_aliases = _identity_aliases(viewpoint_id)
+
+    if raw in {"i", "we"}:
+        owner = speaker_id or viewpoint_id
+        return owner, _same_identity(owner, character_id)
+    if raw == "you":
+        # In ordinary dialogue, second person points at the active character
+        # when somebody else is speaking, but at the other participant when the
+        # character is the speaker.
+        if speaker_id and not _same_identity(speaker_id, character_id):
+            return character_id, True
+        return "other", False
+    if raw in {"she", "he", "they"}:
+        # Narrative pronouns are resolved only when the message explicitly has
+        # the active character viewpoint; otherwise keep them unowned.
+        if viewpoint_aliases & character_aliases:
+            return character_id, True
+        return None, False
+    if raw in character_aliases:
+        return character_id, True
+    if raw in speaker_aliases:
+        return speaker_id, _same_identity(speaker_id, character_id)
+    return subject, False
+
+
+def _canonical_subject(owner: str | None, fallback: str | None) -> str:
+    value = owner or fallback or "someone"
+    return re.sub(r"[_-]\d+$", "", str(value)).replace("_", " ").strip()
+
+
+def _clean_object(value: str) -> str:
+    text = re.sub(r"\s+", " ", value.strip(" \t\n\r,;:-"))
+    return text[:220].rstrip()
+
+
+def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
+    subject = _canonical_subject(owner, candidate.subject_text)
+    obj = _clean_object(candidate.object_text)
+    predicate = candidate.predicate.lower().strip()
+
+    if candidate.kind == "MEMORY":
+        return f"{subject} remembers {obj}."
+    if candidate.kind == "BELIEF":
+        if predicate in {"is", "was", "seems", "seemed"} and obj.startswith(("uncertain", "unsure", "confused")):
+            return f"{subject} is {obj}."
+        return f"{subject} {predicate} {obj}."
+    if candidate.kind == "GOAL":
+        if predicate.startswith(("decide", "resolve", "prepare")):
+            return f"{subject} intends {obj}."
+        return f"{subject} {predicate} {obj}."
+    if candidate.kind == "RULE":
+        return f"{subject} {predicate} {obj}."
+    if candidate.kind == "STATE":
+        return f"{subject} {predicate} {obj}."
+    return f"{subject}: {obj}." if candidate.subject_text else f"{obj}."
+
+
+def _parse_sentence(sentence: str) -> ParsedCandidate | None:
+    # Questions describe conversational pressure, not settled cognition. This
+    # single rule eliminates most false goals such as "what do you want?" and
+    # "you want me to be your assistant?".
+    if _QUESTION_RE.search(sentence):
+        return None
+
+    match = _MEMORY_RE.search(sentence)
+    if match:
+        return ParsedCandidate(
+            "MEMORY", match.group("subject"), match.group("verb"),
+            match.group("object"), 0.94, "memory_predicate",
+        )
+
+    match = _BELIEF_RE.search(sentence)
+    if match:
+        return ParsedCandidate(
+            "BELIEF", match.group("subject"), match.group("verb"),
+            match.group("object"), 0.92, "belief_predicate",
+        )
+
+    match = _UNCERTAIN_RE.search(sentence)
+    if match:
+        obj = f"{match.group('object')}{match.group('tail') or ''}"
+        return ParsedCandidate(
+            "BELIEF", match.group("subject"), match.group("verb"),
+            obj, 0.90, "uncertainty_state",
+        )
+
+    match = _RULE_RE.search(sentence)
+    if match:
+        return ParsedCandidate(
+            "RULE", match.group("subject"), match.group("verb"),
+            match.group("object"), 0.93, "deontic_predicate",
+        )
+
+    if not _CAUSAL_DESIRE_RE.search(sentence):
+        match = _GOAL_RE.search(sentence)
+        if match:
+            obj = match.group("object")
+            # "want X to do Y" is a desire about another actor, not necessarily
+            # the subject's own intended action. Keep only direct infinitive or
+            # noun-goal complements here; archaeology can recover subtler cases.
+            return ParsedCandidate(
+                "GOAL", match.group("subject"), match.group("verb"),
+                obj, 0.91, "goal_predicate",
+            )
+
+    # Relationship statements are useful even when asserted by another speaker;
+    # they are observations available to the character rather than private goals.
+    if _RELATIONSHIP_RE.search(sentence):
+        words = _WORD_RE.findall(sentence)
+        subject = words[0] if words else None
+        return ParsedCandidate(
+            "RELATIONSHIP", subject, "relates", sentence, 0.82,
+            "relationship_predicate",
+        )
+
+    match = _STATE_RE.search(sentence)
+    if match and _STATE_TERMS_RE.search(match.group("object")):
+        return ParsedCandidate(
+            "STATE", match.group("subject"), match.group("verb"),
+            match.group("object"), 0.86, "bounded_state_predicate",
+        )
+
+    if _EVENT_RE.search(sentence):
+        words = _WORD_RE.findall(sentence)
+        subject = words[0] if words else None
+        return ParsedCandidate(
+            "EVENT", subject, "event", sentence, 0.70,
+            "event_predicate",
+        )
+
+    return None
+
+
+def _topic_key(
+    text: str,
+    *,
+    character_id: str,
+    owner: str | None,
+    kind: str,
+) -> str:
     tokens = [
         token
         for token in _WORD_RE.findall(text.lower())
@@ -110,41 +307,32 @@ def _topic_key(text: str, *, character_id: str, speaker_id: str | None) -> str:
         and token not in _STOPWORDS
         and token not in {"not", "never", "cannot", "can't"}
     ]
-    preferred: list[str] = []
-    for value in (character_id, speaker_id):
-        clean = re.sub(r"[^a-z0-9_'-]+", " ", (value or "").lower()).strip()
-        if clean:
-            preferred.extend(part for part in clean.split() if part not in preferred)
+    preferred: list[str] = [kind.lower()]
+    for value in (owner, character_id):
+        for token in _identity_aliases(value):
+            if token and token not in preferred:
+                preferred.append(token)
+                break
     for token in tokens:
         if token not in preferred:
             preferred.append(token)
-        if len(preferred) >= 5:
+        if len(preferred) >= 6:
             break
-    return ":".join(preferred[:5]) or "message"
+    return ":".join(preferred[:6]) or f"{kind.lower()}:message"
 
 
-def _score(
-    text: str,
+def _score_candidate(
+    candidate: ParsedCandidate,
     *,
+    character_owned: bool,
     index: int,
     total: int,
-    character_id: str,
-    speaker_id: str | None,
 ) -> float:
-    score = 0.15
-    hits = len(_SALIENCE_RE.findall(text))
-    score += min(0.50, hits * 0.12)
-    lower = text.lower()
-    if character_id and character_id.lower() in lower:
-        score += 0.12
-    if speaker_id and speaker_id.lower() in lower:
-        score += 0.08
-    if index < 2 or index >= max(0, total - 2):
-        score += 0.06
-    if "?" in text:
-        score += 0.04
-    if len(text) > 320:
-        score -= 0.05
+    score = _KIND_BASE_SALIENCE[candidate.kind]
+    if character_owned:
+        score += 0.10
+    if index >= max(0, total - 2):
+        score += 0.03
     return max(0.0, min(1.0, score))
 
 
@@ -160,41 +348,77 @@ def interpret_message(
     if not sentences:
         return []
 
+    perspective_id = viewpoint_id or speaker_id
     ranked: list[tuple[float, int, CognitiveUnit]] = []
-    seen: set[str] = set()
+    seen_sources: set[str] = set()
+    seen_semantics: set[tuple[str, str, int]] = set()
+
     for index, sentence in enumerate(sentences):
-        normalized = " ".join(_WORD_RE.findall(sentence.lower()))
-        if not normalized or normalized in seen:
+        normalized_source = " ".join(_WORD_RE.findall(sentence.lower()))
+        if not normalized_source or normalized_source in seen_sources:
             continue
-        seen.add(normalized)
-        salience = _score(
-            sentence,
-            index=index,
-            total=len(sentences),
+        seen_sources.add(normalized_source)
+
+        candidate = _parse_sentence(sentence)
+        if candidate is None:
+            continue
+
+        owner, character_owned = _resolve_subject(
+            candidate.subject_text,
             character_id=character_id,
             speaker_id=speaker_id,
+            viewpoint_id=viewpoint_id,
         )
-        if len(sentences) > 4 and salience < 0.27:
+
+        # Private cognition belongs in the active character HUD only when the
+        # grammatical subject resolves to that character. Statements by another
+        # speaker remain useful only for externally observable kinds.
+        if candidate.kind in {"MEMORY", "BELIEF", "GOAL", "RULE"} and not character_owned:
             continue
-        kind = _kind(sentence)
+
+        canonical = _canonical_text(candidate, owner=owner)
         polarity = -1 if _NEGATION_RE.search(sentence) else 1
+        topic_key = _topic_key(
+            canonical,
+            character_id=character_id,
+            owner=owner,
+            kind=candidate.kind,
+        )
+        semantic_key = (candidate.kind, topic_key, polarity)
+        if semantic_key in seen_semantics:
+            continue
+        seen_semantics.add(semantic_key)
+
+        salience = _score_candidate(
+            candidate,
+            character_owned=character_owned,
+            index=index,
+            total=len(sentences),
+        )
+        confidence = max(0.50, min(0.99, candidate.confidence))
         unit = CognitiveUnit(
-            text=sentence,
-            claim_kind=kind,
-            topic_key=_topic_key(
-                sentence,
-                character_id=character_id,
-                speaker_id=speaker_id,
-            ),
+            text=canonical,
+            claim_kind=candidate.kind,
+            topic_key=topic_key,
             polarity=polarity,
             salience=salience,
-            confidence=max(0.45, min(0.90, 0.48 + salience * 0.42)),
+            confidence=confidence,
             meta={
                 "message_scope": True,
                 "speaker_id": speaker_id,
                 "speaker_role": speaker_role,
                 "viewpoint_id": viewpoint_id,
+                "perspective_id": perspective_id,
+                "semantic_owner": owner,
+                "character_owned": character_owned,
                 "sentence_index": index,
+                "source_text": sentence[:500],
+                "predicate": candidate.predicate.lower(),
+                "object": _clean_object(candidate.object_text),
+                "parse_reason": candidate.reason,
+                "persistence": _PERSISTENCE[candidate.kind],
+                "parse_confidence": confidence,
+                "epistemic_confidence": 0.72 if character_owned else 0.58,
             },
         )
         ranked.append((salience, index, unit))
@@ -317,6 +541,7 @@ async def commit_message_cognition(
         ],
         "bounded": True,
         "max_units": MAX_UNITS,
+        "interpreter_version": INTERPRETER_VERSION,
     }
 
     commit_row = await db.execute_returning_row(
