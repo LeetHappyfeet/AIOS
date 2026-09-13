@@ -32,7 +32,9 @@ cd aios_app
 bash setup.sh
 ```
 
-`setup.sh` checks Python and Docker, starts the Compose infrastructure, waits for PostgreSQL, Qdrant, and Fuseki, loads the canonical AIOS ontology, creates the native Python virtual environment in `~/AIOS-workspace/.venv`, installs the Python requirements and spaCy model, then runs the current AIOS database migrations and database check.
+`setup.sh` checks Python and Docker, starts the Compose infrastructure, waits for PostgreSQL, Qdrant, and Fuseki, loads the canonical AIOS ontology, creates the native Python virtual environment in `~/AIOS-workspace/.venv`, installs the Python requirements and spaCy model, then initializes PostgreSQL from `aios_baseline.sql`, applies any post-baseline migrations in `migrations/current/`, and runs the database check.
+
+The database model is intentionally simple: `aios_baseline.sql` is the immutable fresh-install schema and all later schema changes are immutable migrations layered on top. Prototype-era migration chains are no longer replayed on a new install.
 
 The default PostgreSQL connection remains:
 
