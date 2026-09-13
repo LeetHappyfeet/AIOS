@@ -4,6 +4,8 @@
 
 AIOS gives long-running agents continuity beyond a single prompt or chat. It maintains persistent memory, world and character state, timelines, and knowledge, then provides the active agent with a focused **HUD** containing the context it needs for the current generation.
 
+**Want to try it first?** Open the [AIOS Google Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing) for a guided demo without setting up a full local installation.
+
 > **Status:** AIOS is experimental and under active development.
 >
 > **License:** AIOS is source-available proprietary software for personal use by natural persons. See the [AIOS Personal Use License 1.0](LICENSE).
@@ -64,12 +66,27 @@ AIOS READY
 Required services: 4/4 ready
 ```
 
-The default local endpoints are:
+## Open the Gradio Interface
+
+Once AIOS is running, point your browser to:
 
 ```text
-API:    http://127.0.0.1:8000
-Web UI: http://127.0.0.1:7860
+http://127.0.0.1:7860
 ```
+
+Port **7860** is the Gradio web interface. If you are opening AIOS from another computer or phone on the same network, replace `127.0.0.1` with the IP address of the machine running AIOS, for example:
+
+```text
+http://192.168.1.50:7860
+```
+
+The AIOS API runs separately on port **8000**:
+
+```text
+http://127.0.0.1:8000
+```
+
+Most users who simply want to inspect and use AIOS should start with the Gradio interface on port 7860. Client integrations use the API on port 8000.
 
 ## Running AIOS Later
 
