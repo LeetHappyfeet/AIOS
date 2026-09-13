@@ -26,6 +26,8 @@ _NONASSERTIVE_DISCOURSE = {
     "quoted_question",
 }
 _QUESTION_END_RE = re.compile(r"\?\s*[\"'”’\)\]]*\s*$")
+STALE_RETRACTION_BATCH = 64
+PROJECT_BATCH_MAX = 128
 
 
 def _json_object(value: object) -> dict:
@@ -42,7 +44,7 @@ def _json_object(value: object) -> dict:
             raise ValueError("expected JSON object metadata")
         return decoded
     try:
-        return dict(value)  # asyncpg codecs/custom mappings may already be mapping-like
+        return dict(value)
     except (TypeError, ValueError) as exc:
         raise ValueError("expected object-like metadata") from exc
 
@@ -61,14 +63,7 @@ def _context_acquisition_eligible_values(
     raw_text: Optional[str],
     discourse_mode: Optional[str],
 ) -> bool:
-    """Return whether resolved context is eligible for settled /char knowledge.
-
-    Context-generated acquisitions are deliberately narrower than generic
-    knowledge acquisitions.  Encountering a proposition is not the same as
-    currently accepting it.  Narrative/speaker/source claims, event fragments,
-    questions and explicitly non-assertive discourse stay in evidence/episode
-    topology rather than being promoted to settled character knowledge.
-    """
+    """Return whether resolved context is eligible for settled /char knowledge."""
     if (epistemic_scope or "").lower() != "character":
         return False
     if character_instance_id is None or str(character_instance_id) != str(instance_id):
@@ -202,7 +197,6 @@ async def reconcile_context_acquisitions_for_claim(
     *,
     claim_id: UUID,
 ) -> int:
-    """Remove context-generated /char acquisitions no longer justified by context."""
     rows = await db.fetch(
         """
         SELECT *
@@ -226,28 +220,52 @@ async def reconcile_stale_context_acquisitions(
     db: Database,
     *,
     instance_id: Optional[UUID] = None,
-    limit: int = 500,
+    limit: int = STALE_RETRACTION_BATCH,
 ) -> int:
-    """Bounded repair pass for acquisitions created before the current context receipt."""
+    """Retract only acquisitions current SQL already proves are stale.
+
+    The old repair pass selected hundreds of arbitrary context acquisitions and
+    re-resolved each one in Python. Under a large backlog that turned one LIVE
+    projector job into minutes of database round trips. This query performs the
+    eligibility test set-wise and returns only rows that require mutation.
+    """
     rows = await db.fetch(
         """
-        SELECT DISTINCT claim_id
-        FROM aios.knowledge_acquisition_event
-        WHERE claim_id IS NOT NULL
-          AND lower(COALESCE(meta->>'source','')) LIKE 'context-resolver%'
-          AND ($2::uuid IS NULL OR instance_id=$2)
-        ORDER BY claim_id
+        SELECT kae.*
+        FROM aios.knowledge_acquisition_event kae
+        LEFT JOIN aios.claim_context_resolution ccr
+          ON ccr.claim_id=kae.claim_id
+        LEFT JOIN aios.claim_candidate cc
+          ON cc.claim_id=kae.claim_id
+        LEFT JOIN aios.claim_semantic_frame_projection sfp
+          ON sfp.claim_id=kae.claim_id
+        LEFT JOIN aios.claim_semantic_frame sf
+          ON sf.frame_id=sfp.primary_frame_id
+        WHERE kae.claim_id IS NOT NULL
+          AND lower(COALESCE(kae.meta->>'source','')) LIKE 'context-resolver%'
+          AND ($2::uuid IS NULL OR kae.instance_id=$2)
+          AND (
+                ccr.claim_id IS NULL
+             OR lower(COALESCE(ccr.epistemic_scope,'')) <> 'character'
+             OR ccr.character_instance_id IS DISTINCT FROM kae.instance_id
+             OR upper(COALESCE(ccr.claim_kind,'')) NOT IN (
+                    'BELIEF','MEMORY','GOAL','RULE','STATE','TRAIT','RELATIONSHIP'
+                )
+             OR lower(COALESCE(sf.discourse_mode,'')) IN (
+                    'question','hypothetical','counterfactual','conditional','quoted_question'
+                )
+             OR COALESCE(cc.raw_text,'') ~ '\\?\\s*["''”’\\)\\]]*\\s*$'
+          )
+        ORDER BY kae.created_at, kae.acquisition_id
         LIMIT $1
         """,
-        limit,
+        max(1, min(int(limit), PROJECT_BATCH_MAX)),
         instance_id,
     )
     retracted = 0
     for row in rows:
-        retracted += await reconcile_context_acquisitions_for_claim(
-            db,
-            claim_id=row["claim_id"],
-        )
+        await _retract_acquisition_row(db, row)
+        retracted += 1
     return retracted
 
 
@@ -315,16 +333,13 @@ async def project_knowledge_acquisitions_once(
     limit: int = 200,
     instance_id: Optional[UUID] = None,
 ) -> int:
-    # Re-resolution is allowed to change epistemic ownership. Clean old
-    # context-generated acquisitions before materializing anything new so the
-    # /char plane reflects current belief eligibility rather than historical
-    # evidence routing.
     await reconcile_stale_context_acquisitions(
         db,
         instance_id=instance_id,
-        limit=max(limit, 500),
+        limit=STALE_RETRACTION_BATCH,
     )
 
+    projection_limit = max(1, min(int(limit), PROJECT_BATCH_MAX))
     rows = await db.fetch(
         """
         SELECT *
@@ -347,7 +362,7 @@ async def project_knowledge_acquisitions_once(
         ORDER BY created_at
         LIMIT $1
         """,
-        limit,
+        projection_limit,
         instance_id,
     )
     projected = 0
@@ -439,9 +454,6 @@ async def project_knowledge_acquisitions_once(
             weights["effective_confidence"],
         )
 
-        # Keep the legacy claim-level projection populated when a concrete
-        # source claim exists. New prompt construction should prefer the
-        # proposition-level table.
         if row["claim_id"] is not None:
             await db.execute(
                 """
@@ -494,7 +506,6 @@ async def acquire_document(
     epistemic_status: str = "observed",
     confidence: Optional[float] = None,
 ) -> dict:
-    """Queue every normalized proposition observed in a document for one character."""
     exists = await db.fetchrow(
         "SELECT 1 FROM aios.source_document WHERE document_id=$1",
         document_id,
