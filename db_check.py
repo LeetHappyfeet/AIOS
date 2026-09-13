@@ -7,6 +7,8 @@ import asyncpg
 from aios_app.config import settings
 
 
+BASELINE_RECEIPT = "0001_aios_baseline"
+
 REQUIRED_TABLES = {
     "character_identity",
     "character_instance",
@@ -59,7 +61,8 @@ async def check_database() -> int:
             "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='aios')"
         )
         if not schema_exists:
-            print("FAIL: schema 'aios' does not exist. Load aios_schema.sql first.")
+            print("FAIL: schema 'aios' does not exist.")
+            print("Run: python -m aios_app.migrate")
             return 2
 
         rows = await conn.fetch(
@@ -67,6 +70,7 @@ async def check_database() -> int:
             SELECT table_name
             FROM information_schema.tables
             WHERE table_schema='aios'
+              AND table_type='BASE TABLE'
             """
         )
         present = {r["table_name"] for r in rows}
@@ -80,25 +84,43 @@ async def check_database() -> int:
             print("Run: python -m aios_app.migrate")
             return 3
 
-        migration_count = await conn.fetchval(
+        if "schema_migration" not in present:
+            print("FAIL: migration ledger is missing.")
+            print("Run: python -m aios_app.migrate")
+            return 4
+
+        baseline = await conn.fetchrow(
             """
-            SELECT count(*)
-            FROM information_schema.tables
-            WHERE table_schema='aios'
-              AND table_name='schema_migration'
-            """
+            SELECT migration_name, sha256, applied_at
+            FROM aios.schema_migration
+            WHERE migration_name=$1
+            """,
+            BASELINE_RECEIPT,
         )
-        if migration_count:
-            rows = await conn.fetch(
-                """
-                SELECT migration_name, applied_at
-                FROM aios.schema_migration
-                ORDER BY migration_name
-                """
-            )
-            print("Applied migrations:")
+        if baseline is None:
+            print("FAIL: database is not on the canonical AIOS baseline line.")
+            print("This looks like a prototype-era database; use a fresh database with this branch.")
+            return 5
+
+        print(
+            f"OK: baseline {baseline['migration_name']}  {baseline['applied_at']}"
+        )
+
+        rows = await conn.fetch(
+            """
+            SELECT migration_name, applied_at
+            FROM aios.schema_migration
+            WHERE migration_name <> $1
+            ORDER BY migration_name
+            """,
+            BASELINE_RECEIPT,
+        )
+        if rows:
+            print("Post-baseline migrations:")
             for row in rows:
                 print(f"  {row['migration_name']}  {row['applied_at']}")
+        else:
+            print("Post-baseline migrations: none")
 
         liminal = await conn.fetchrow(
             "SELECT world_id, world_key FROM aios.world WHERE world_key='liminal'"
