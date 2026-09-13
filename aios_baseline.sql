@@ -1,8 +1,13 @@
+-- AIOS canonical PostgreSQL baseline schema
+-- Generated from the working AIOS development database schema on 2026-09-13.
+-- This file defines a fresh-install baseline only. Historical migration receipts
+-- and one-off repair tables are intentionally excluded. Future schema changes
+-- should be applied as immutable migrations layered on top of this baseline.
+
 --
 -- PostgreSQL database dump
 --
 
-\restrict Zfd6egfSwrHUmOA16fPupmPPc0ZmvH0RgGaQNiQrqb6UlrCcGHC5pMr80pCGDt5
 
 -- Dumped from database version 16.11 (Debian 16.11-1.pgdg13+1)
 -- Dumped by pg_dump version 16.11 (Ubuntu 16.11-1.pgdg22.04+1)
@@ -4677,33 +4682,6 @@ CREATE TABLE aios.reconciliation_family_policy (
 
 
 --
--- Name: repair_20260906_orphan_claims; Type: TABLE; Schema: aios; Owner: -
---
-
-CREATE TABLE aios.repair_20260906_orphan_claims (
-    claim_id uuid
-);
-
-
---
--- Name: repair_20260906_sections; Type: TABLE; Schema: aios; Owner: -
---
-
-CREATE TABLE aios.repair_20260906_sections (
-    section_id uuid
-);
-
-
---
--- Name: repair_20260906_unrecoverable_orphans; Type: TABLE; Schema: aios; Owner: -
---
-
-CREATE TABLE aios.repair_20260906_unrecoverable_orphans (
-    claim_id uuid
-);
-
-
---
 -- Name: retention_event; Type: TABLE; Schema: aios; Owner: -
 --
 
@@ -4731,17 +4709,6 @@ CREATE TABLE aios.retention_event (
 --
 
 COMMENT ON TABLE aios.retention_event IS 'Append-only audit history for logical retention transitions.';
-
-
---
--- Name: schema_migration; Type: TABLE; Schema: aios; Owner: -
---
-
-CREATE TABLE aios.schema_migration (
-    migration_name text NOT NULL,
-    sha256 text NOT NULL,
-    applied_at timestamp with time zone DEFAULT now() NOT NULL
-);
 
 
 --
@@ -6302,14 +6269,6 @@ ALTER TABLE ONLY aios.reconciliation_family_policy
 
 ALTER TABLE ONLY aios.retention_event
     ADD CONSTRAINT retention_event_pkey PRIMARY KEY (event_id);
-
-
---
--- Name: schema_migration schema_migration_pkey; Type: CONSTRAINT; Schema: aios; Owner: -
---
-
-ALTER TABLE ONLY aios.schema_migration
-    ADD CONSTRAINT schema_migration_pkey PRIMARY KEY (migration_name);
 
 
 --
@@ -9984,5 +9943,4 @@ ALTER TABLE ONLY aios.world_timeline_binding
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Zfd6egfSwrHUmOA16fPupmPPc0ZmvH0RgGaQNiQrqb6UlrCcGHC5pMr80pCGDt5
 
