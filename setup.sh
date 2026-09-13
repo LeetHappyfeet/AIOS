@@ -25,6 +25,9 @@ if [ "$(basename "$REPO_DIR")" != "aios_app" ]; then
     fail "AIOS must currently be cloned into a directory named 'aios_app'.\nExpected layout: <workspace>/aios_app"
 fi
 
+[ -f "$REPO_DIR/aios_baseline.sql" ] || fail "Missing canonical database baseline: aios_baseline.sql"
+[ -d "$REPO_DIR/migrations/current" ] || fail "Missing active migrations directory: migrations/current"
+
 require_command python3 "Python 3 is required. Install Python 3.10 or newer and run 'bash setup.sh' again."
 require_command docker "Docker is required. Install Docker with the Compose plugin and run 'bash setup.sh' again."
 
@@ -38,6 +41,7 @@ python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1
 ok "Python $PYTHON_VERSION"
 ok "Docker"
 ok "Docker Compose"
+ok "Canonical database baseline"
 
 printf '\nStarting AIOS infrastructure...\n'
 cd "$REPO_DIR"
@@ -141,7 +145,7 @@ else
     ok "spaCy en_core_web_sm installed"
 fi
 
-printf '\nPreparing AIOS database...\n'
+printf '\nInitializing AIOS database from canonical baseline...\n'
 cd "$WORKSPACE_DIR"
 "$VENV_PYTHON" -m aios_app.migrate
 "$VENV_PYTHON" -m aios_app.db_check
