@@ -79,7 +79,10 @@ BEGIN
     SET dirty_version=aios.rdf_character_belief_dirty.dirty_version + 1,
         dirty_at=now();
 
-    RETURN COALESCE(NEW, OLD);
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
 END;
 $$;
 
