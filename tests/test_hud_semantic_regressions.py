@@ -35,6 +35,33 @@ def test_negated_state_keeps_negation_in_canonical_text():
     assert "not real" in states[0].text.lower()
 
 
+def test_capitalized_event_pronoun_resolves_to_character_owner():
+    units = interpret_message(
+        "He moved quietly through the apartment.",
+        character_id="Alex",
+        speaker_id="Alex",
+        speaker_role="character",
+        viewpoint_id="Alex",
+    )
+    events = [unit for unit in units if unit.claim_kind == "EVENT"]
+    assert events
+    assert events[0].meta["semantic_owner"] == "Alex"
+    assert not events[0].text.startswith("e:")
+
+
+def test_capitalized_possessive_event_does_not_create_truncated_owner():
+    units = interpret_message(
+        "His deal changed when he moved here.",
+        character_id="Alex",
+        speaker_id="Alex",
+        speaker_role="character",
+        viewpoint_id="Alex",
+    )
+    events = [unit for unit in units if unit.claim_kind == "EVENT"]
+    assert events
+    assert events[0].meta["semantic_owner"] not in {"e", "is"}
+
+
 def test_slow_interpreter_treats_try_as_event():
     interpreted = interpret_frame(
         predicate="try",
