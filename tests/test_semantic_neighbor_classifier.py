@@ -34,6 +34,35 @@ def test_existing_conflict_is_candidate_hint_not_proof():
     assert features["exclusive_slot_conflict"] is False
 
 
+def test_mia_descriptive_be_facts_do_not_form_conflict_clique():
+    descriptors = ["vulnerable", "delicate", "new", "sure", "handsome"]
+    base = proposition(subject_norm="mia", predicate_norm="be", object_norm=descriptors[0])
+    for descriptor in descriptors[1:]:
+        relation, _, features = classify_neighbor_pair(
+            similarity=0.93,
+            a=base,
+            b=proposition(subject_norm="mia", predicate_norm="be", object_norm=descriptor),
+            conflict_type="exclusive_object",
+        )
+        assert relation != "CONTRADICTS"
+        assert features["exclusive_slot_conflict"] is False
+
+
+def test_voice_qualities_are_compatible_descriptions():
+    relation, _, features = classify_neighbor_pair(
+        similarity=0.91,
+        a=proposition(subject_norm="her voice", predicate_norm="be", object_norm="low"),
+        b=proposition(
+            subject_norm="her voice",
+            predicate_norm="be",
+            object_norm="soft, genuinely touched",
+        ),
+        conflict_type="exclusive_object",
+    )
+    assert relation != "CONTRADICTS"
+    assert features["exclusive_slot_conflict"] is False
+
+
 def test_opposite_polarity_requires_same_semantic_target():
     relation, confidence, features = classify_neighbor_pair(
         similarity=0.94,
