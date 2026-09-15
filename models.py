@@ -111,6 +111,9 @@ class IngestOut(BaseModel):
     event_id: int
     node_id: UUID
     timeline_id: UUID
+    disposition: Literal["new", "active_replay", "superseded_reselection"] = "new"
+    source_head_node_id: Optional[UUID] = None
+    source_current: bool = True
 
 
 # -------------------------------------------------

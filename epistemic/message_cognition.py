@@ -12,7 +12,7 @@ INTERPRETER_VERSION = "message-cognition-v3"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
-_WORD_RE = re.compile(r"[a-z0-9_'-]+")
+_WORD_RE = re.compile(r"[a-z0-9_'-]+", re.I)
 _NEGATION_RE = re.compile(
     r"\b(?:not|never|no|cannot|can't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|doesn't|didn't|won't)\b",
     re.I,
@@ -55,6 +55,12 @@ _RELATIONSHIP_RE = re.compile(
     r"work(?:s|ed|ing)?\s+(?:with|for))\b",
     re.I,
 )
+_RELATIONSHIP_SUBJECT_RE = re.compile(
+    r"(?:^|[\s\"'“‘(])(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
+    r"(?=\s+(?:am|is|are|was|were|be|being|become|became|remain|remains|trust|trusts|distrust|distrusts|work|works)\b|"
+    r"(?:['’](?:m|re|s|ve|d|ll))\b)",
+    re.I,
+)
 _STATE_TERMS_RE = re.compile(
     r"\b(?:alive|dead|digital|data|computer|body|form|real|physical|trapped|free|inside|outside|within|"
     r"located|location|exists?|existing|conscious|awake|asleep|injured|armed|powered|human|artificial)\b",
@@ -79,35 +85,18 @@ _STOPWORDS = {
 }
 
 _PERSISTENCE = {
-    "MEMORY": "durable",
-    "BELIEF": "until_contradicted",
-    "GOAL": "session",
-    "RULE": "until_contradicted",
-    "RELATIONSHIP": "until_contradicted",
-    "STATE": "until_changed",
-    "EVENT": "turn",
+    "MEMORY": "durable", "BELIEF": "until_contradicted", "GOAL": "session",
+    "RULE": "until_contradicted", "RELATIONSHIP": "until_contradicted",
+    "STATE": "until_changed", "EVENT": "turn",
 }
-
 _KIND_BASE_SALIENCE = {
-    "MEMORY": 0.78,
-    "BELIEF": 0.72,
-    "GOAL": 0.82,
-    "RULE": 0.74,
-    "RELATIONSHIP": 0.70,
-    "STATE": 0.68,
-    "EVENT": 0.48,
+    "MEMORY": 0.78, "BELIEF": 0.72, "GOAL": 0.82, "RULE": 0.74,
+    "RELATIONSHIP": 0.70, "STATE": 0.68, "EVENT": 0.48,
 }
-
 _NEGATED_VERBS = {
-    "isn't": "is not",
-    "aren't": "are not",
-    "wasn't": "was not",
-    "weren't": "were not",
-    "hasn't": "does not have",
-    "haven't": "do not have",
-    "hadn't": "did not have",
+    "isn't": "is not", "aren't": "are not", "wasn't": "was not", "weren't": "were not",
+    "hasn't": "does not have", "haven't": "do not have", "hadn't": "did not have",
 }
-
 
 @dataclass(frozen=True)
 class CognitiveUnit:
@@ -118,7 +107,6 @@ class CognitiveUnit:
     salience: float
     confidence: float
     meta: dict
-
 
 @dataclass(frozen=True)
 class ParsedCandidate:
@@ -229,8 +217,8 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
         if match:
             return ParsedCandidate("GOAL", match.group("subject"), match.group("verb"), match.group("object"), 0.91, "goal_predicate")
     if _RELATIONSHIP_RE.search(sentence):
-        words = _WORD_RE.findall(sentence)
-        subject = words[0] if words else None
+        subject_match = _RELATIONSHIP_SUBJECT_RE.search(sentence)
+        subject = subject_match.group("subject") if subject_match else None
         return ParsedCandidate("RELATIONSHIP", subject, "relates", sentence, 0.82, "relationship_predicate")
     match = _STATE_RE.search(sentence)
     if match and _STATE_TERMS_RE.search(match.group("object")):
@@ -296,28 +284,16 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         salience = _score_candidate(candidate, character_owned=character_owned, index=index, total=len(sentences))
         confidence = max(0.50, min(0.99, candidate.confidence))
         unit = CognitiveUnit(
-            text=canonical,
-            claim_kind=candidate.kind,
-            topic_key=topic_key,
-            polarity=polarity,
-            salience=salience,
-            confidence=confidence,
+            text=canonical, claim_kind=candidate.kind, topic_key=topic_key, polarity=polarity,
+            salience=salience, confidence=confidence,
             meta={
-                "message_scope": True,
-                "speaker_id": speaker_id,
-                "speaker_role": speaker_role,
-                "viewpoint_id": viewpoint_id,
-                "perspective_id": perspective_id,
-                "semantic_owner": owner,
-                "character_owned": character_owned,
-                "sentence_index": index,
-                "source_text": sentence[:500],
-                "predicate": candidate.predicate.lower(),
-                "object": _clean_object(candidate.object_text),
-                "parse_reason": candidate.reason,
-                "persistence": _PERSISTENCE[candidate.kind],
-                "parse_confidence": confidence,
-                "epistemic_confidence": 0.72 if character_owned else 0.58,
+                "message_scope": True, "speaker_id": speaker_id, "speaker_role": speaker_role,
+                "viewpoint_id": viewpoint_id, "perspective_id": perspective_id,
+                "semantic_owner": owner, "character_owned": character_owned,
+                "sentence_index": index, "source_text": sentence[:500],
+                "predicate": candidate.predicate.lower(), "object": _clean_object(candidate.object_text),
+                "parse_reason": candidate.reason, "persistence": _PERSISTENCE[candidate.kind],
+                "parse_confidence": confidence, "epistemic_confidence": 0.72 if character_owned else 0.58,
             },
         )
         ranked.append((salience, index, unit))
@@ -346,11 +322,9 @@ async def _reconcile_unit(db: Database, *, instance_id: UUID, unit_id: UUID, cla
     previous_id = previous["unit_id"]
     await db.execute("UPDATE aios.message_cognitive_unit SET status='superseded' WHERE unit_id=$1", previous_id)
     await db.execute(
-        """
-        UPDATE aios.message_cognitive_unit
+        """UPDATE aios.message_cognitive_unit
         SET supersedes_unit_id=$2, meta=meta || jsonb_build_object('reconciled_polarity_flip', true)
-        WHERE unit_id=$1
-        """,
+        WHERE unit_id=$1""",
         unit_id, previous_id,
     )
     return previous_id
@@ -381,19 +355,13 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
         await _advance_cognitive_cursor(db, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
         return True
     units = interpret_message(
-        text,
-        character_id=str(row["character_id"]),
-        speaker_id=row["speaker_id"],
-        speaker_role=row["speaker_role"],
-        viewpoint_id=row["viewpoint_id"],
+        text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
+        speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
     )
     summary = {
-        "unit_count": len(units),
-        "kinds": sorted({unit.claim_kind for unit in units}),
+        "unit_count": len(units), "kinds": sorted({unit.claim_kind for unit in units}),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
-        "bounded": True,
-        "max_units": MAX_UNITS,
-        "interpreter_version": INTERPRETER_VERSION,
+        "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
     }
     commit_row = await db.execute_returning_row(
         """
@@ -401,8 +369,7 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
             instance_id, node_id, timeline_id, event_id, character_id,
             speaker_id, speaker_role, viewpoint_id, interpreter_version,
             source_text_hash, summary, committed_at
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,now())
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,now())
         ON CONFLICT (instance_id, node_id) DO UPDATE
         SET timeline_id=EXCLUDED.timeline_id, event_id=EXCLUDED.event_id,
             character_id=EXCLUDED.character_id, speaker_id=EXCLUDED.speaker_id,
@@ -424,20 +391,15 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
             INSERT INTO aios.message_cognitive_unit (
                 commit_id, ordinal, claim_kind, text, topic_key, polarity,
                 salience, confidence, status, meta
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9::jsonb)
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9::jsonb)
             RETURNING unit_id
             """,
             commit_id, ordinal, unit.claim_kind, unit.text, unit.topic_key, unit.polarity,
             unit.salience, unit.confidence, json.dumps(unit.meta),
         )
         await _reconcile_unit(
-            db,
-            instance_id=instance_id,
-            unit_id=unit_row["unit_id"],
-            claim_kind=unit.claim_kind,
-            topic_key=unit.topic_key,
-            polarity=unit.polarity,
+            db, instance_id=instance_id, unit_id=unit_row["unit_id"], claim_kind=unit.claim_kind,
+            topic_key=unit.topic_key, polarity=unit.polarity,
         )
     await _advance_cognitive_cursor(db, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
     return True
