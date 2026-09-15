@@ -33,6 +33,23 @@ ensure_proposition = legacy.ensure_proposition
 
 async def _apply_epistemic_admission(db: Database, *, claim_id: UUID) -> None:
     """Keep non-assertive atoms without promoting them as truth-bearing memory."""
+    # Re-normalization first recreates the legacy 'support' row. Remove the
+    # previous scoped role before converting that support row so the unique
+    # (proposition, observation, evidence_role) key remains idempotent.
+    await db.execute(
+        """
+        DELETE FROM aios.proposition_evidence pe
+        USING aios.proposition p, aios.observation o
+        WHERE pe.proposition_id=p.proposition_id
+          AND pe.observation_id=o.observation_id
+          AND o.claim_id=$1
+          AND pe.evidence_role IN ('supposition','conditional','counterfactual','inquiry')
+          AND lower(COALESCE(p.modality,'asserted')) IN (
+              'hypothetical','conditional','counterfactual','question'
+          )
+        """,
+        claim_id,
+    )
     await db.execute(
         """
         UPDATE aios.proposition_evidence pe
