@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import copy
 import json
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
 from aios_app.db import Database
 from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
+from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.epistemic.message_cognition import current_message_cognition
+
+
+logger = logging.getLogger("aios.epistemic.cognitive_context")
+PREPARED_RETRIEVAL_TTL_SECONDS = 15.0
+PREPARED_RETRIEVAL_CACHE_SIZE = 32
 
 
 class RelevanceScorer(Protocol):
@@ -33,6 +42,14 @@ class CognitiveKnowledgeSnapshot:
     anchored_knowledge_count: int
     visible_world_context_count: int
     invisible_anchor_count: int
+
+
+@dataclass(frozen=True)
+class PreparedRetrievalSnapshot:
+    topology_knowledge: list[dict[str, Any]]
+    legacy_knowledge: list[dict[str, Any]]
+    missing_modes: dict[str, bool]
+    prepared_at: float
 
 
 def _json_value(value: Any, default: Any) -> Any:
@@ -120,6 +137,10 @@ class CognitiveContextService:
     def __init__(self, db: Database):
         self.db = db
         self.retriever = TopologyRetriever(db)
+        self._prepared_retrieval: dict[tuple[Any, ...], PreparedRetrievalSnapshot] = {}
+        self._prepared_retrieval_flights: AsyncSingleFlight[
+            tuple[Any, ...], PreparedRetrievalSnapshot
+        ] = AsyncSingleFlight()
 
     async def resolve_attention_inputs(
         self,
@@ -210,54 +231,92 @@ class CognitiveContextService:
             goals=goals,
         )
 
-    async def resolve_knowledge(
+    def _prepared_retrieval_key(
+        self,
+        context: HUDContext,
+        attention: CognitiveAttentionInputs,
+        hud_profile: Any,
+    ) -> tuple[Any, ...]:
+        return (
+            str(context.instance_id),
+            str(context.character_id),
+            str(context.source_head_node_id or ""),
+            int(context.state_version or 0),
+            tuple(str(value) for value in context.lineage_instance_ids),
+            attention.retrieval_focus_text,
+            json.dumps(attention.goals, sort_keys=True, default=str),
+            int(hud_profile.entity_hops),
+            int(hud_profile.semantic_retrieval_limit),
+            int(hud_profile.deep_memory_limit),
+        )
+
+    async def prepare_retrieval(
         self,
         context: HUDContext,
         scorer: RelevanceScorer,
         attention: CognitiveAttentionInputs,
         hud_profile: Any,
-    ) -> CognitiveKnowledgeSnapshot:
+    ) -> PreparedRetrievalSnapshot:
+        """Speculatively prepare established-memory candidates for the next HUD.
+
+        Current-message cognitive commits are intentionally excluded. They are
+        always read fresh by ``resolve_knowledge`` so a prewarm that starts
+        before fast cognition completes can never freeze an incomplete turn.
+        """
+        snapshot, cache_hit = await self._prepared_or_resolve(
+            context,
+            scorer,
+            attention,
+            hud_profile,
+        )
+        logger.debug(
+            "Retrieval prewarm instance=%s node=%s cache_hit=%s candidates=%d legacy=%d",
+            context.instance_id,
+            context.source_head_node_id,
+            cache_hit,
+            len(snapshot.topology_knowledge),
+            len(snapshot.legacy_knowledge),
+        )
+        return snapshot
+
+    async def _prepared_or_resolve(
+        self,
+        context: HUDContext,
+        scorer: RelevanceScorer,
+        attention: CognitiveAttentionInputs,
+        hud_profile: Any,
+    ) -> tuple[PreparedRetrievalSnapshot, bool]:
+        key = self._prepared_retrieval_key(context, attention, hud_profile)
+        now = time.monotonic()
+        cached = self._prepared_retrieval.get(key)
+        if cached is not None:
+            if now - cached.prepared_at <= PREPARED_RETRIEVAL_TTL_SECONDS:
+                return cached, True
+            self._prepared_retrieval.pop(key, None)
+
+        snapshot = await self._prepared_retrieval_flights.run(
+            key,
+            lambda: self._resolve_retrieval_candidates(
+                key,
+                context,
+                scorer,
+                attention,
+                hud_profile,
+            ),
+        )
+        return snapshot, False
+
+    async def _resolve_retrieval_candidates(
+        self,
+        key: tuple[Any, ...],
+        context: HUDContext,
+        scorer: RelevanceScorer,
+        attention: CognitiveAttentionInputs,
+        hud_profile: Any,
+    ) -> PreparedRetrievalSnapshot:
+        started = time.perf_counter()
         focus_text = attention.retrieval_focus_text
         goals = attention.goals
-
-        # Fast cognition is generation-critical and deliberately independent of
-        # topology/vector/RDF completion. It is merged first so token budgeting
-        # favors the current message's committed semantics.
-        fast_rows = await current_message_cognition(
-            self.db,
-            instance_id=context.instance_id,
-            node_id=context.source_head_node_id,
-        )
-        fast_knowledge: list[dict[str, Any]] = []
-        for rank, row in enumerate(fast_rows):
-            kind = str(row.get("claim_kind") or "BELIEF").upper()
-            text = str(row.get("text") or "").strip()
-            if not text:
-                continue
-            confidence = float(row.get("confidence") or 0.5)
-            fast_knowledge.append({
-                "proposition_id": f"cognitive:{row['unit_id']}",
-                "topic_key": row.get("topic_key"),
-                "text": text,
-                "subject_norm": context.character_id,
-                "predicate_norm": "message_cognition",
-                "object_norm": text,
-                "polarity": row.get("polarity") or 1,
-                "modality": "asserted",
-                "claim_kind": kind,
-                "predicate_family": "COGNITIVE_COMMIT",
-                "epistemic_status": "observed",
-                "confidence": confidence,
-                "effective_confidence": confidence,
-                "salience_weight": float(row.get("salience") or 0.5),
-                "source_node_id": row.get("node_id"),
-                "acquisition_mode": "message_cognitive_commit",
-                "updated_at": None,
-                "conflicts": [],
-                "cognitive_commit": True,
-                "tier": 0 if kind in {"GOAL", "RULE"} else 1,
-                "relevance": {"total": 10.0 - rank * 0.01, "source": "message_cognitive_commit"},
-            })
 
         topology_memories = await self.retriever.retrieve_character_knowledge(
             context, scorer, mode="memory", focus_text=focus_text, goals=goals,
@@ -300,6 +359,97 @@ class CognitiveContextService:
             if any(missing_modes.values())
             else []
         )
+        snapshot = PreparedRetrievalSnapshot(
+            topology_knowledge=topology_knowledge,
+            legacy_knowledge=legacy_knowledge,
+            missing_modes=missing_modes,
+            prepared_at=time.monotonic(),
+        )
+        self._prepared_retrieval[key] = snapshot
+        while len(self._prepared_retrieval) > PREPARED_RETRIEVAL_CACHE_SIZE:
+            oldest_key = min(
+                self._prepared_retrieval,
+                key=lambda cache_key: self._prepared_retrieval[cache_key].prepared_at,
+            )
+            self._prepared_retrieval.pop(oldest_key, None)
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        log = logger.info if elapsed_ms >= 250.0 else logger.debug
+        log(
+            "Prepared retrieval instance=%s node=%s candidates=%d legacy=%d elapsed_ms=%.1f",
+            context.instance_id,
+            context.source_head_node_id,
+            len(topology_knowledge),
+            len(legacy_knowledge),
+            elapsed_ms,
+        )
+        return snapshot
+
+    async def resolve_knowledge(
+        self,
+        context: HUDContext,
+        scorer: RelevanceScorer,
+        attention: CognitiveAttentionInputs,
+        hud_profile: Any,
+    ) -> CognitiveKnowledgeSnapshot:
+        # Fast cognition is generation-critical and deliberately independent of
+        # topology/vector/RDF completion. It is merged fresh on every HUD build
+        # even when the expensive established-memory retrieval was prewarmed.
+        fast_rows = await current_message_cognition(
+            self.db,
+            instance_id=context.instance_id,
+            node_id=context.source_head_node_id,
+        )
+        fast_knowledge: list[dict[str, Any]] = []
+        for rank, row in enumerate(fast_rows):
+            kind = str(row.get("claim_kind") or "BELIEF").upper()
+            text = str(row.get("text") or "").strip()
+            if not text:
+                continue
+            confidence = float(row.get("confidence") or 0.5)
+            fast_knowledge.append({
+                "proposition_id": f"cognitive:{row['unit_id']}",
+                "topic_key": row.get("topic_key"),
+                "text": text,
+                "subject_norm": context.character_id,
+                "predicate_norm": "message_cognition",
+                "object_norm": text,
+                "polarity": row.get("polarity") or 1,
+                "modality": "asserted",
+                "claim_kind": kind,
+                "predicate_family": "COGNITIVE_COMMIT",
+                "epistemic_status": "observed",
+                "confidence": confidence,
+                "effective_confidence": confidence,
+                "salience_weight": float(row.get("salience") or 0.5),
+                "source_node_id": row.get("node_id"),
+                "acquisition_mode": "message_cognitive_commit",
+                "updated_at": None,
+                "conflicts": [],
+                "cognitive_commit": True,
+                "tier": 0 if kind in {"GOAL", "RULE"} else 1,
+                "relevance": {"total": 10.0 - rank * 0.01, "source": "message_cognitive_commit"},
+            })
+
+        prepared, cache_hit = await self._prepared_or_resolve(
+            context,
+            scorer,
+            attention,
+            hud_profile,
+        )
+        # HUD shaping mutates candidate dictionaries (for example when hiding
+        # provenance), so never hand the cache's objects directly to callers.
+        topology_knowledge = copy.deepcopy(prepared.topology_knowledge)
+        legacy_knowledge = copy.deepcopy(prepared.legacy_knowledge)
+        missing_modes = dict(prepared.missing_modes)
+
+        if cache_hit:
+            logger.debug(
+                "HUD retrieval cache hit instance=%s node=%s age_ms=%.1f",
+                context.instance_id,
+                context.source_head_node_id,
+                (time.monotonic() - prepared.prepared_at) * 1000.0,
+            )
 
         merged = list(fast_knowledge) + list(topology_knowledge)
         for item in legacy_knowledge:

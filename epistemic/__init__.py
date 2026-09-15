@@ -10,6 +10,7 @@ from .generated import create_generated_fact
 from .generated_validated import resolve_generated_facts_validated
 from .entity_validator import resolve_character_referent
 from .hypothesis_validation import MatrixOutcome, record_validation_decision
+from .reality import REALITY_RESOLVER_VERSION, resolve_claim_reality
 
 from . import topology as _topology
 from . import topology_claims as _topology_claims
@@ -31,6 +32,50 @@ def _matrix_outcome_from_ownership(result):
         stability=float(verification.get("stability") if verification.get("stability") is not None else 1.0),
         status=str(verification.get("status") or ("verified" if result.status == "resolved" else "insufficient_evidence")),
         matrix=dict(verification.get("matrix") or {}),
+    )
+
+
+def _matrix_outcome_from_reality(reality, *, require_concrete_world: bool = False):
+    memberships = list(reality.memberships if reality else ())
+    matrix = {}
+    for item in memberships:
+        context_key = str(item["context_key"])
+        matrix[context_key] = {
+            "affinity": int(round(float(item["affinity"]) * 5)),
+            "confidence": int(round(float(item["confidence"]) * 5)),
+            "established_world": 3 if item.get("world_id") is not None else 0,
+            "member": 2 if item.get("membership_status") == "member" else 0,
+        }
+
+    ranked = sorted(
+        (
+            (key, sum(axes.values()))
+            for key, axes in matrix.items()
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    winner_key = ranked[0][0] if ranked else None
+    winner_score = ranked[0][1] if ranked else 0
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0
+
+    if require_concrete_world:
+        proposed = str(reality.selected_world_id) if reality and reality.selected_world_id else (winner_key or "unassigned")
+        status = "verified" if reality and reality.selected_world_id else "fragile"
+        winner = str(reality.selected_world_id) if reality and reality.selected_world_id else winner_key
+    else:
+        proposed = reality.top_context_key if reality and reality.top_context_key else "unresolved"
+        status = "verified" if winner_key else "insufficient_evidence"
+        winner = winner_key
+
+    return MatrixOutcome(
+        proposed_key=str(proposed),
+        winner_key=winner,
+        winner_score=winner_score,
+        runner_up_score=runner_up,
+        margin=winner_score - runner_up,
+        stability=1.0 if winner_key else 0.0,
+        status=status,
+        matrix=matrix,
     )
 
 
@@ -67,22 +112,76 @@ async def _resolve_and_verify_semantic_ownership(db, row):
             meta={"resolution_source": result.resolution_source},
         )
 
-        if row.get("world_id"):
+        # Reality membership is deliberately independent of semantic ownership.
+        # A source can own a proposition while that proposition remains merely a
+        # candidate description of one or more concrete worlds.
+        reality = await resolve_claim_reality(db, row)
+        if reality is not None:
+            reality_dependencies = [
+                ("decision", f"semantic_owner:{claim_id}"),
+                ("claim_context", str(claim_id)),
+                ("proposition", str(reality.proposition_id)),
+            ]
+            if row.get("source_id"):
+                reality_dependencies.append(("source", str(row["source_id"])))
+            if row.get("world_id"):
+                reality_dependencies.append(("world", str(row["world_id"])))
+            if row.get("target_world_id"):
+                reality_dependencies.append(("world", str(row["target_world_id"])))
+
+            reality_outcome = _matrix_outcome_from_reality(reality)
+            await record_validation_decision(
+                db,
+                decision_type="reality_membership",
+                decision_key=str(claim_id),
+                subject_type="proposition",
+                subject_key=str(reality.proposition_id),
+                outcome=reality_outcome,
+                selected_value=reality.top_context_key,
+                resolver_version=REALITY_RESOLVER_VERSION,
+                dependencies=reality_dependencies,
+                meta={
+                    "memberships": [
+                        {
+                            **item,
+                            "reality_context_id": str(item["reality_context_id"]),
+                            "world_id": str(item["world_id"]) if item.get("world_id") else None,
+                        }
+                        for item in reality.memberships
+                    ]
+                },
+            )
+
+            world_outcome = _matrix_outcome_from_reality(
+                reality,
+                require_concrete_world=True,
+            )
             await record_validation_decision(
                 db,
                 decision_type="world_assignment",
                 decision_key=str(claim_id),
                 subject_type="claim",
                 subject_key=str(claim_id),
-                outcome=outcome,
-                selected_value=(str(row["world_id"]) if result.owner_kind == "world" else None),
-                resolver_version="world-assignment-recursive-v1",
+                outcome=world_outcome,
+                selected_value=(
+                    str(reality.selected_world_id)
+                    if reality.world_assignment_verified
+                    else None
+                ),
+                resolver_version="world-assignment-reality-v1",
                 dependencies=[
-                    ("decision", f"semantic_owner:{claim_id}"),
-                    ("world", str(row["world_id"])),
+                    ("decision", f"reality_membership:{claim_id}"),
                     ("claim_context", str(claim_id)),
-                ],
-                meta={"owner_kind": result.owner_kind},
+                ] + (
+                    [("world", str(reality.selected_world_id))]
+                    if reality.selected_world_id
+                    else []
+                ),
+                meta={
+                    "authority_boundary": "reality_context_to_aios.world",
+                    "world_assignment_verified": reality.world_assignment_verified,
+                    "top_context_key": reality.top_context_key,
+                },
             )
     return result
 
@@ -115,4 +214,5 @@ __all__ = [
     "record_acquisition",
     "create_generated_fact",
     "resolve_generated_facts_once",
+    "resolve_claim_reality",
 ]

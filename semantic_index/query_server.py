@@ -39,6 +39,16 @@ class _Handler(socketserver.StreamRequestHandler):
                     character_id=str(request.get("character_id") or ""),
                     instance_ids=request.get("instance_ids") or [],
                     top_k=request.get("top_k"),
+                    world_ids=request.get("world_ids"),
+                )
+            elif op == "search_epistemic_staged":
+                hits = service.search_epistemic_staged(
+                    str(request.get("query_text") or ""),
+                    character_id=str(request.get("character_id") or ""),
+                    instance_ids=request.get("instance_ids") or [],
+                    world_stages=request.get("world_stages") or [],
+                    top_k=request.get("top_k"),
+                    min_hits=int(request.get("min_hits") or 8),
                 )
             elif op == "search":
                 hits = service.search(

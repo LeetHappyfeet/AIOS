@@ -6,9 +6,12 @@ import logging
 from typing import List, Optional, Tuple
 from uuid import UUID
 
-import spacy
-
 from aios_app.db import Database
+from aios_app.epistemic.linguistic_projection import (
+    parse_text,
+    persist_projection,
+    sentence_docs,
+)
 from aios_app.epistemic.pivots import resolve_subject_pivot
 
 logger = logging.getLogger("aios.pipeline.worker")
@@ -19,35 +22,11 @@ logger = logging.getLogger("aios.pipeline.worker")
 
 LIMINAL_WORLD_KEY = "liminal"
 WORKER_NAME = "claim_extractor"
-WORKER_VERSION = "v4-spacy-sections"
-
-# =================================================
-# spaCy
-# =================================================
-
-_NLP = None
+WORKER_VERSION = "v6-persisted-section-fanout"
 
 
-def _get_nlp():
-    """Load spaCy on first claim-extraction work, not during runner startup."""
-    global _NLP
-    if _NLP is None:
-        logger.info("Loading spaCy model en_core_web_sm for claim extraction")
-        _NLP = spacy.load("en_core_web_sm", disable=["ner", "textcat"])
-        logger.info("spaCy claim extraction model ready")
-    return _NLP
-
-
-def split_sentences(text: str) -> List[str]:
-    if not text:
-        return []
-    doc = _get_nlp()(text)
-    return [s.text.strip() for s in doc.sents if s.text.strip()]
-
-
-def extract_spo(sentence: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    doc = _get_nlp()(sentence)
-
+def _extract_spo_from_doc(doc) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extract the shallow SPO tuple from an already-parsed sentence Doc."""
     subject = predicate = obj = None
     root = doc[:].root
 
@@ -78,6 +57,23 @@ def extract_spo(sentence: str) -> Tuple[Optional[str], Optional[str], Optional[s
     return None, None, None
 
 
+def _parsed_sentences_from_doc(doc) -> List[Tuple[str, Optional[str], Optional[str], Optional[str]]]:
+    parsed = []
+    for sentence in sentence_docs(doc):
+        subject, predicate, obj = _extract_spo_from_doc(sentence.doc)
+        parsed.append((sentence.text, subject, predicate, obj))
+    return parsed
+
+
+def parse_section_once(
+    text: str,
+) -> List[Tuple[str, Optional[str], Optional[str], Optional[str]]]:
+    """Parse a section once and fan sentence-level shallow claims from it."""
+    if not text:
+        return []
+    return _parsed_sentences_from_doc(parse_text(text))
+
+
 # =================================================
 # Worker entrypoint
 # =================================================
@@ -90,15 +86,9 @@ async def run_claim_extraction_for_section(
     """
     Section-scoped claim extraction.
 
-    Guarantees:
-      - extracted_sentence rows exist
-      - claim_candidate rows exist
-      - claims_extracted_at is set exactly once
-      - the originating ingest_event receives claims_processed_at
-
-    A claim_candidate is still created when shallow SPO extraction cannot
-    identify all three terms. That preserves the sentence as an observational
-    RDF claim and keeps the ingestion lineage complete.
+    The source section is parsed exactly once with the full shared linguistic
+    model. That parse is persisted as a regenerable projection and both shallow
+    claim extraction and later semantic-frame decomposition fan out from it.
     """
 
     row = await db.fetchrow(
@@ -137,6 +127,21 @@ async def run_claim_extraction_for_section(
     document_id: Optional[UUID] = row["document_id"]
     content: str = row["content"]
 
+    # One expensive inference pass. Persist before fan-out so retries and
+    # semantic-frame jobs can reuse the exact same linguistic analysis.
+    section_doc = parse_text(content)
+    await persist_projection(db, section_id=section_id, text=content, doc=section_doc)
+    parsed_sentences = _parsed_sentences_from_doc(section_doc)
+
+    parsed_by_index = {
+        idx: (sentence, subject, predicate, obj)
+        for idx, (sentence, subject, predicate, obj) in enumerate(parsed_sentences)
+    }
+    parsed_by_text = {
+        sentence: (subject, predicate, obj)
+        for sentence, subject, predicate, obj in parsed_sentences
+    }
+
     # -------------------------------------------------
     # 1) Load or create extracted_sentence rows
     # -------------------------------------------------
@@ -157,10 +162,9 @@ async def run_claim_extraction_for_section(
             for r in existing
         ]
     else:
-        text_sentences = split_sentences(content)
         sentences = []
 
-        for idx, sent in enumerate(text_sentences):
+        for idx, (sent, _subject, _predicate, _obj) in enumerate(parsed_sentences):
             r = await db.execute_returning_row(
                 """
                 INSERT INTO aios.extracted_sentence (
@@ -195,7 +199,25 @@ async def run_claim_extraction_for_section(
         if exists:
             continue
 
-        subject, predicate, obj = extract_spo(sentence)
+        parsed = parsed_by_index.get(idx)
+        if parsed is not None and parsed[0] == sentence:
+            _sentence, subject, predicate, obj = parsed
+        else:
+            # Old rows may have been created by an earlier sentence-boundary
+            # model. Prefer an exact match from this projection and never spend
+            # another NLP inference pass merely to recover a retry.
+            spo = parsed_by_text.get(sentence)
+            if spo is not None:
+                subject, predicate, obj = spo
+            else:
+                logger.warning(
+                    "Section %s sentence %s no longer matches current projection; "
+                    "preserving raw claim without reparsing",
+                    section_id,
+                    idx,
+                )
+                subject = predicate = obj = None
+
         pivot = resolve_subject_pivot(
             subject,
             character_id=row["character_id"],
@@ -293,8 +315,10 @@ async def run_claim_extraction_for_section(
     await _mark_claim_stage_complete(db, event_id)
 
     logger.info(
-        "Section %s: inserted %d new claims; marked claim stage complete",
+        "Section %s: persisted one linguistic parse, produced %d sentences, "
+        "inserted %d new claims; marked claim stage complete",
         section_id,
+        len(parsed_sentences),
         inserted,
     )
 

@@ -219,6 +219,21 @@ async def apply_local_revalidation_invalidations(
                 """,
                 skey,
             )
+        elif dtype == "reality_membership":
+            await db.execute(
+                """
+                UPDATE aios.semantic_topology_projection stp
+                SET projected_at=NULL,
+                    updated_at=now(),
+                    meta=stp.meta || jsonb_build_object('reproject_reason','reality_membership_stale')
+                WHERE stp.claim_id IN (
+                    SELECT o.claim_id
+                    FROM aios.observation o
+                    WHERE o.proposition_id::text=$1
+                )
+                """,
+                skey,
+            )
         elif dtype in {"proposition_relation", "event_identity"}:
             parts = skey.split(":", 1)
             if len(parts) == 2:

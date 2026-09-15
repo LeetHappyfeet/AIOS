@@ -10,10 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from typing import Optional
 from uuid import UUID
 
 from aios_app.hud import readiness as _readiness
+from aios_app.hud.profile import get_profile as get_hud_profile
+from aios_app.hud.relevance import HUDRelevanceScorer
 from aios_app.hud.readiness import (
     enqueue_live_turn_work,
     readiness_state,
@@ -21,6 +24,7 @@ from aios_app.hud.readiness import (
     source_node_retrieval_ready,
     source_node_topology_ready,
 )
+from aios_app.plugins.types import PluginRuntimeContext
 
 from . import runtime as _runtime
 from .source_cursor import advance_matching_runtime_source_cursor
@@ -30,6 +34,9 @@ logger = logging.getLogger("aios.world")
 WorldRuntimeService = _runtime.WorldRuntimeService
 RuntimeConflict = _runtime.RuntimeConflict
 RuntimeNotFound = _runtime.RuntimeNotFound
+
+RETRIEVAL_PREWARM_DEBOUNCE_SECONDS = 0.12
+_runtime_services: weakref.WeakSet = weakref.WeakSet()
 
 
 async def _invalidate_current_snapshot(service, instance_id: UUID, node_id: Optional[UUID]) -> None:
@@ -88,10 +95,141 @@ async def _coalesce_live_generation(
         return 0
 
 
+# Keep track of runtime services in this process so source-cursor ingestion can
+# warm the exact HUD cognition service that will serve the later request.  This
+# avoids a second cache or another worker process just for speculation.
+if not getattr(WorldRuntimeService, "_retrieval_prewarm_registration_v1", False):
+    _original_runtime_init = WorldRuntimeService.__init__
+
+    def _registered_runtime_init(self, *args, **kwargs):
+        _original_runtime_init(self, *args, **kwargs)
+        self._retrieval_prewarm_tasks = {}
+        _runtime_services.add(self)
+
+    async def _run_retrieval_prewarm(
+        self,
+        *,
+        instance_id: UUID,
+        source_head_node_id: UUID,
+    ) -> None:
+        # A tiny debounce collapses transcript replay/reconciliation bursts. The
+        # next source head cancels this task before expensive retrieval begins.
+        await asyncio.sleep(RETRIEVAL_PREWARM_DEBOUNCE_SECONDS)
+
+        state = await self.get_state(instance_id)
+        if state.get("source_head_node_id") != source_head_node_id:
+            return
+
+        context = await self.hud.context_resolver.resolve(instance_id)
+        if context.source_head_node_id != source_head_node_id:
+            return
+
+        raw_state = await self.hud._runtime_state(instance_id)
+        plugin_snapshot = await self.hud.plugin_manager.collect(
+            PluginRuntimeContext(
+                instance_id=context.instance_id,
+                character_id=context.character_id,
+                entity_id=context.entity_id,
+                world_id=context.world_id,
+                world_key=context.world_key,
+                timeline_id=context.timeline_id,
+                location_entity_id=context.location_entity_id,
+                raw_state=raw_state,
+            )
+        )
+        hud_profile = await get_hud_profile(
+            self.db,
+            character_id=context.character_id,
+        )
+        attention = await self.hud.cognition.resolve_attention_inputs(
+            context,
+            raw_state,
+            plugin_snapshot,
+            recent_limit=hud_profile.recent_event_limit,
+        )
+        scorer = HUDRelevanceScorer(
+            context,
+            focus_text=attention.retrieval_focus_text,
+            goals=attention.goals,
+        )
+
+        started = time.perf_counter()
+        await self.hud.cognition.prepare_retrieval(
+            context,
+            scorer,
+            attention,
+            hud_profile,
+        )
+        after = await self.get_state(instance_id)
+        if after.get("source_head_node_id") != source_head_node_id:
+            logger.debug(
+                "Discarding completed retrieval prewarm for stale head instance=%s node=%s",
+                instance_id,
+                source_head_node_id,
+            )
+            return
+
+        logger.debug(
+            "Retrieval prewarm ready instance=%s node=%s elapsed_ms=%.1f",
+            instance_id,
+            source_head_node_id,
+            (time.perf_counter() - started) * 1000.0,
+        )
+
+    def _schedule_retrieval_prewarm(
+        self,
+        *,
+        instance_id: UUID,
+        source_head_node_id: Optional[UUID],
+    ) -> None:
+        if source_head_node_id is None:
+            return
+
+        prior = self._retrieval_prewarm_tasks.get(instance_id)
+        if prior is not None and not prior.done():
+            prior.cancel()
+
+        task = asyncio.create_task(
+            _run_retrieval_prewarm(
+                self,
+                instance_id=instance_id,
+                source_head_node_id=source_head_node_id,
+            )
+        )
+        self._retrieval_prewarm_tasks[instance_id] = task
+        self._background_tasks.add(task)
+
+        def _finished(done: asyncio.Task) -> None:
+            self._background_tasks.discard(done)
+            if self._retrieval_prewarm_tasks.get(instance_id) is done:
+                self._retrieval_prewarm_tasks.pop(instance_id, None)
+            if done.cancelled():
+                return
+            try:
+                exc = done.exception()
+            except asyncio.CancelledError:
+                return
+            if exc is not None:
+                logger.error(
+                    "Retrieval prewarm failed instance=%s node=%s: %s",
+                    instance_id,
+                    source_head_node_id,
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_finished)
+
+    WorldRuntimeService.__init__ = _registered_runtime_init
+    WorldRuntimeService.schedule_retrieval_prewarm = _schedule_retrieval_prewarm
+    WorldRuntimeService._retrieval_prewarm_registration_v1 = True
+
+
 # Ingest must advance the exact source cursor and dirty the runtime, but it must
-# not promote every transient reconciliation head into LIVE semantic work.  The
-# explicit HUD request (or activation prewarm) below promotes only the final,
-# current source-head generation.
+# not promote every transient reconciliation head into LIVE semantic work.  It
+# may, however, stage established-memory retrieval.  Latest-head cancellation
+# plus the debounce above prevents historical reconciliation from becoming a
+# second semantic backlog.
 if not getattr(_readiness, "_head_only_dirty_v1", False):
     async def _mark_matching_runtime_dirty_head_only(
         db,
@@ -103,7 +241,7 @@ if not getattr(_readiness, "_head_only_dirty_v1", False):
         source_timeline_id: UUID,
         source_head_node_id: UUID,
         source_head_event_id: int,
-    ) -> None:
+    ) -> list[UUID]:
         instance_ids = await advance_matching_runtime_source_cursor(
             db,
             character_id=character_id,
@@ -122,6 +260,13 @@ if not getattr(_readiness, "_head_only_dirty_v1", False):
                 source_head_node_id=source_head_node_id,
                 source_head_event_id=source_head_event_id,
             )
+            for service in list(_runtime_services):
+                if getattr(service, "db", None) is db:
+                    service.schedule_retrieval_prewarm(
+                        instance_id=instance_id,
+                        source_head_node_id=source_head_node_id,
+                    )
+        return list(instance_ids)
 
     _readiness.mark_matching_runtime_dirty = _mark_matching_runtime_dirty_head_only
     _readiness._head_only_dirty_v1 = True
