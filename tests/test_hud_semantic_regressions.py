@@ -1,5 +1,6 @@
 from aios_app.epistemic.message_cognition import INTERPRETER_VERSION, interpret_message
 from aios_app.epistemic.semantic_interpreter import interpret_frame
+from aios_app.hud.recent_events import project_recent_events
 from aios_app.hud.render_text import render_hud_text
 
 
@@ -35,6 +36,33 @@ def test_negated_state_keeps_negation_in_canonical_text():
     assert "not real" in states[0].text.lower()
 
 
+def test_capitalized_event_pronoun_resolves_to_character_owner():
+    units = interpret_message(
+        "He moved quietly through the apartment.",
+        character_id="Alex",
+        speaker_id="Alex",
+        speaker_role="character",
+        viewpoint_id="Alex",
+    )
+    events = [unit for unit in units if unit.claim_kind == "EVENT"]
+    assert events
+    assert events[0].meta["semantic_owner"] == "Alex"
+    assert not events[0].text.startswith("e:")
+
+
+def test_capitalized_possessive_event_does_not_create_truncated_owner():
+    units = interpret_message(
+        "His deal changed when he moved here.",
+        character_id="Alex",
+        speaker_id="Alex",
+        speaker_role="character",
+        viewpoint_id="Alex",
+    )
+    events = [unit for unit in units if unit.claim_kind == "EVENT"]
+    assert events
+    assert events[0].meta["semantic_owner"] not in {"e", "is"}
+
+
 def test_slow_interpreter_treats_try_as_event():
     interpreted = interpret_frame(
         predicate="try",
@@ -68,3 +96,36 @@ def test_recent_event_renderer_prefers_budget_clipped_text():
     rendered = render_hud_text(frame)
     assert "bounded recent event" in rendered
     assert "RAW RAW RAW" not in rendered
+
+
+def test_recent_semantic_event_is_rendered_as_narrative_not_fake_speaker():
+    frame = {
+        "identity": {"character_id": "Alex"},
+        "presence": {"world_key": "test", "instance_id": "i", "state_version": 1},
+        "recent_events": [{"text": "His: His deal was that he'd moved here."}],
+        "actions": [],
+    }
+    rendered = render_hud_text(frame)
+    assert "His: His deal" not in rendered
+    assert "- His deal was that he'd moved here." in rendered
+
+
+def test_recent_event_projection_prefers_semantic_projection_for_same_source_node():
+    projected = project_recent_events(
+        [
+            {"node_id": "n1", "message_text": "a very long raw source turn"},
+            {"source_node_id": "n1", "text": "Alex arrived at the apartment."},
+        ]
+    )
+    assert [row["text"] for row in projected] == ["Alex arrived at the apartment."]
+
+
+def test_recent_event_projection_deduplicates_identical_narrative_events():
+    projected = project_recent_events(
+        [
+            {"text": "Alex: He opened the door."},
+            {"text": "He opened the door."},
+        ]
+    )
+    assert len(projected) == 1
+    assert projected[0]["text"] == "He opened the door."

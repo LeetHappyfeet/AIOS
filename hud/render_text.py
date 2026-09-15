@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from aios_app.hud.recent_events import project_recent_events
+
 
 def _name(value: Mapping[str, Any]) -> str:
     return str(
@@ -19,36 +21,27 @@ def _render_plugin_field(field: Mapping[str, Any]) -> str:
     value = field.get("value")
     field_type = str(field.get("field_type") or "text")
     unit = field.get("unit")
-
     if field_type == "gauge":
         minimum = field.get("minimum")
         maximum = field.get("maximum")
-        if minimum is not None and maximum is not None:
-            rendered = f"{value} / {maximum}"
-        else:
-            rendered = str(value)
+        rendered = f"{value} / {maximum}" if minimum is not None and maximum is not None else str(value)
     else:
         rendered = str(value)
-
     if unit:
         rendered = f"{rendered} {unit}"
     return f"{label}: {rendered}"
-
 
 
 def _knowledge_annotation(item: Mapping[str, Any]) -> str:
     anchor = item.get("anchor") or {}
     if not anchor:
         return ""
-
     relationship = str(anchor.get("relationship") or "references").replace("_", " ")
     target_label = anchor.get("target_label")
     visible = bool(anchor.get("world_visible"))
-
     bits = [relationship]
     if target_label:
         bits.append(f"about {target_label}")
-
     if visible:
         labels = []
         for entry in item.get("world_context") or []:
@@ -62,56 +55,42 @@ def _knowledge_annotation(item: Mapping[str, Any]) -> str:
             bits.append("context: " + ", ".join(labels))
     else:
         bits.append("anchored context outside visible world; neighbors withheld")
-
     return " [" + "; ".join(bits) + "]"
 
 
 def render_hud_text(frame: Mapping[str, Any]) -> str:
     """Deterministically render the canonical HUD JSON into an LLM-facing surface."""
-
     identity = frame.get("identity") or {}
     presence = frame.get("presence") or {}
     state = frame.get("state") or {}
     scene = frame.get("scene") or {}
-
     lines = [
         f"=== AIOS HUD: {_name(identity)} ===",
         f"World: {presence.get('world_key', 'unknown')}",
         f"Instance: {presence.get('instance_id', 'unknown')}",
         f"State version: {presence.get('state_version', 'unknown')}",
     ]
-
     location = scene.get("location")
     if location:
         lines.append(f"Location: {_name(location)}")
     elif presence.get("location_entity_id"):
         lines.append(f"Location entity: {presence['location_entity_id']}")
-
-    stats = [
-        f"{key}={state[key]}"
-        for key in ("health", "stamina", "energy")
-        if state.get(key) is not None
-    ]
+    stats = [f"{key}={state[key]}" for key in ("health", "stamina", "energy") if state.get(key) is not None]
     if stats:
         lines.append("State: " + "  ".join(stats))
-
     physical = state.get("physical") or {}
     emotional = state.get("emotional") or {}
     if physical:
         lines.append("Physical: " + ", ".join(f"{k}={v}" for k, v in physical.items()))
     if emotional:
         lines.append("Emotion: " + ", ".join(f"{k}={v}" for k, v in emotional.items()))
-
-    plugin_sections = frame.get("plugin_sections") or []
-    for section in plugin_sections:
+    for section in frame.get("plugin_sections") or []:
         title = str(section.get("title") or section.get("key") or "PLUGIN")
         fields = section.get("fields") or []
-        if not fields:
-            continue
-        lines.append(f"\n{title.upper()}:")
-        for field in fields:
-            lines.append("- " + _render_plugin_field(field))
-
+        if fields:
+            lines.append(f"\n{title.upper()}:")
+            for field in fields:
+                lines.append("- " + _render_plugin_field(field))
     actors = scene.get("actors") or []
     objects = scene.get("objects") or []
     if actors:
@@ -122,7 +101,6 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("\nPRESENT OBJECTS:")
         for obj in objects:
             lines.append(f"- {_name(obj)}")
-
     relationships = frame.get("relationships") or []
     if relationships:
         lines.append("\nRELATIONSHIPS:")
@@ -135,20 +113,17 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             if rel.get("familiarity") is not None:
                 bits.append(f"familiarity={rel['familiarity']}")
             lines.append("- " + " | ".join(bits))
-
     inventory = frame.get("inventory") or []
     if inventory:
         lines.append("\nINVENTORY:")
         for item in inventory:
             equipped = " [equipped]" if item.get("equipped") else ""
             lines.append(f"- {_name(item)} x{item.get('quantity', 1)}{equipped}")
-
     memories = frame.get("memories") or []
     if memories:
         lines.append("\nACTIVE MEMORY:")
         for item in memories:
             lines.append(f"-{_knowledge_annotation(item)} {item.get('text', '')}")
-
     beliefs = frame.get("beliefs") or []
     if beliefs:
         lines.append("\nKNOWLEDGE / BELIEFS:")
@@ -156,12 +131,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             status = item.get("epistemic_status") or "known"
             confidence = item.get("effective_confidence")
             suffix = f" confidence={confidence:.2f}" if isinstance(confidence, (float, int)) else ""
-            lines.append(
-                f"- [{status}{suffix}]{_knowledge_annotation(item)} {item.get('text', '')}"
-            )
+            lines.append(f"- [{status}{suffix}]{_knowledge_annotation(item)} {item.get('text', '')}")
             for conflict in item.get("conflicts") or []:
                 lines.append(f"  ! conflicts with: {conflict.get('text', '')}")
-
     goals = frame.get("goals") or []
     if goals:
         lines.append("\nGOALS:")
@@ -169,7 +141,6 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             text = goal.get("text") if isinstance(goal, dict) else str(goal)
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
             lines.append(f"-{annotation} {text}")
-
     rules = frame.get("rules") or []
     if rules:
         lines.append("\nWORLD RULES:")
@@ -177,13 +148,14 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             text = rule.get("text") or rule.get("rule_key") or str(rule)
             lines.append(f"-{_knowledge_annotation(rule)} {text}")
 
-    recent = frame.get("recent_events") or []
+    # Recent events are episodic context, not a speaker transcript. Project
+    # semantic events into narrative form, collapse exact duplicates, and prefer
+    # a bounded semantic projection over the raw source turn when both point at
+    # the same source node.
+    recent = project_recent_events(frame.get("recent_events") or [])
     if recent:
         lines.append("\nRECENT EVENTS:")
         for event in recent:
-            # The assembler clips oversized events into `text`. Prefer that
-            # bounded presentation copy over the original raw message_text so
-            # the recent-event token budget is actually enforceable.
             rendered_text = event.get("text") or event.get("message_text")
             if not rendered_text:
                 continue
@@ -194,10 +166,8 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
                 lines.append(f"- [{stream}|{role}:{speaker}] {rendered_text}")
             else:
                 lines.append(f"- {rendered_text}")
-
     actions = frame.get("actions") or []
     if actions:
         lines.append("\nAVAILABLE ACTIONS: " + ", ".join(str(action) for action in actions))
-
     lines.append("\nStay inside this HUD's epistemic and branch boundaries.")
     return "\n".join(lines)

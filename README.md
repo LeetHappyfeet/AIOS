@@ -1,3 +1,5 @@
+THIS IS AN ARCHITECTURAL EXPERIMENT THAT MAY BE ROLLED INTO THE DEVELOPMENT BRANCH.
+
 # AIOS
 
 **AIOS is a persistent memory and runtime system for AI agents and characters.**
