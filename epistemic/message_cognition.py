@@ -55,6 +55,15 @@ _RELATIONSHIP_RE = re.compile(
     r"work(?:s|ed|ing)?\s+(?:with|for))\b",
     re.I,
 )
+# Relationship/state language often arrives through copular contractions. Do
+# not use the first lexical token as semantic subject: "I'm not your assistant"
+# would otherwise assign ownership to the token "I'm" instead of first person.
+_RELATIONSHIP_SUBJECT_RE = re.compile(
+    r"(?:^|[\s\"'“‘(])(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
+    r"(?=\s+(?:am|is|are|was|were|be|being|become|became|remain|remains|trust|trusts|distrust|distrusts|work|works)\b|"
+    r"(?:['’](?:m|re|s|ve|d|ll))\b)",
+    re.I,
+)
 _STATE_TERMS_RE = re.compile(
     r"\b(?:alive|dead|digital|data|computer|body|form|real|physical|trapped|free|inside|outside|within|"
     r"located|location|exists?|existing|conscious|awake|asleep|injured|armed|powered|human|artificial)\b",
@@ -249,8 +258,8 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
                 "GOAL", match.group("subject"), match.group("verb"), match.group("object"), 0.91, "goal_predicate"
             )
     if _RELATIONSHIP_RE.search(sentence):
-        words = _WORD_RE.findall(sentence)
-        subject = words[0] if words else None
+        subject_match = _RELATIONSHIP_SUBJECT_RE.search(sentence)
+        subject = subject_match.group("subject") if subject_match else None
         return ParsedCandidate(
             "RELATIONSHIP", subject, "relates", sentence, 0.82, "relationship_predicate"
         )
@@ -399,6 +408,7 @@ async def _reconcile_unit(
         unit_id,
         claim_kind,
         topic_key,
+        polarity,
     )
     if not previous or int(previous["polarity"] or 1) == polarity:
         return None
@@ -437,220 +447,57 @@ async def commit_message_cognition(
     )
     if not row:
         return False
-
-    text = str(row["message_text"] or "").strip()
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    lock_key = f"message-cognition:{instance_id}:{node_id}"
-
-    # HUD readiness may request the same node concurrently. Hold a PostgreSQL
-    # advisory lock on one pooled session while the rebuild uses ordinary DB
-    # helpers on other sessions. Every cognition writer for this node takes the
-    # same lock, so delete/upsert/reconcile cannot interleave across requests.
-    async with db.connection() as lock_con:
-        await lock_con.execute(
-            "SELECT pg_advisory_lock(hashtextextended($1, 0))", lock_key
+    units = interpret_message(
+        row["message_text"] or "",
+        character_id=row["character_id"],
+        speaker_id=row["speaker_id"],
+        speaker_role=row["speaker_role"],
+        viewpoint_id=row["viewpoint_id"],
+    )
+    payload_hash = hashlib.sha256((row["message_text"] or "").encode("utf-8")).hexdigest()
+    commit_id = await db.fetchval(
+        """
+        INSERT INTO aios.message_cognitive_commit(
+            instance_id,node_id,timeline_id,event_id,interpreter_version,payload_hash
+        ) VALUES($1,$2,$3,$4,$5,$6)
+        ON CONFLICT(instance_id,node_id,interpreter_version)
+        DO UPDATE SET payload_hash=EXCLUDED.payload_hash
+        RETURNING commit_id
+        """,
+        instance_id,
+        node_id,
+        row["timeline_id"],
+        row["event_id"],
+        INTERPRETER_VERSION,
+        payload_hash,
+    )
+    await db.execute(
+        "DELETE FROM aios.message_cognitive_unit WHERE commit_id=$1",
+        commit_id,
+    )
+    for unit in units:
+        unit_id = await db.fetchval(
+            """
+            INSERT INTO aios.message_cognitive_unit(
+                commit_id,claim_kind,topic_key,polarity,text,salience,confidence,meta,status
+            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'active')
+            RETURNING unit_id
+            """,
+            commit_id,
+            unit.claim_kind,
+            unit.topic_key,
+            unit.polarity,
+            unit.text,
+            unit.salience,
+            unit.confidence,
+            json.dumps(unit.meta),
         )
-        try:
-            # Re-check only after acquiring the lock: a competing request may
-            # have completed while this request was waiting.
-            existing = await db.fetchrow(
-                """
-                SELECT commit_id, source_text_hash, interpreter_version
-                FROM aios.message_cognitive_commit
-                WHERE instance_id=$1 AND node_id=$2
-                """,
-                instance_id,
-                node_id,
-            )
-            if (
-                existing
-                and existing["source_text_hash"] == digest
-                and existing["interpreter_version"] == INTERPRETER_VERSION
-            ):
-                await _advance_cognitive_cursor(
-                    db,
-                    instance_id=instance_id,
-                    node_id=node_id,
-                    event_id=row["event_id"],
-                )
-                return True
-
-            units = interpret_message(
-                text,
-                character_id=str(row["character_id"]),
-                speaker_id=row["speaker_id"],
-                speaker_role=row["speaker_role"],
-                viewpoint_id=row["viewpoint_id"],
-            )
-            summary = {
-                "unit_count": len(units),
-                "kinds": sorted({unit.claim_kind for unit in units}),
-                "participants": [
-                    value for value in (row["speaker_id"], row["character_id"]) if value
-                ],
-                "bounded": True,
-                "max_units": MAX_UNITS,
-                "interpreter_version": INTERPRETER_VERSION,
-            }
-            commit_row = await db.execute_returning_row(
-                """
-                INSERT INTO aios.message_cognitive_commit (
-                    instance_id, node_id, timeline_id, event_id, character_id,
-                    speaker_id, speaker_role, viewpoint_id, interpreter_version,
-                    source_text_hash, summary, committed_at
-                )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,now())
-                ON CONFLICT (instance_id, node_id) DO UPDATE
-                SET timeline_id=EXCLUDED.timeline_id, event_id=EXCLUDED.event_id,
-                    character_id=EXCLUDED.character_id, speaker_id=EXCLUDED.speaker_id,
-                    speaker_role=EXCLUDED.speaker_role, viewpoint_id=EXCLUDED.viewpoint_id,
-                    interpreter_version=EXCLUDED.interpreter_version,
-                    source_text_hash=EXCLUDED.source_text_hash, summary=EXCLUDED.summary,
-                    committed_at=now(), enrichment_completed_at=NULL
-                RETURNING commit_id
-                """,
-                instance_id,
-                node_id,
-                row["timeline_id"],
-                row["event_id"],
-                row["character_id"],
-                row["speaker_id"],
-                row["speaker_role"],
-                row["viewpoint_id"],
-                INTERPRETER_VERSION,
-                digest,
-                json.dumps(summary),
-            )
-            commit_id = commit_row["commit_id"]
-
-            # Upsert instead of delete-then-insert. This makes recomputation
-            # independently idempotent even if a prior attempt was interrupted.
-            for ordinal, unit in enumerate(units):
-                unit_row = await db.execute_returning_row(
-                    """
-                    INSERT INTO aios.message_cognitive_unit (
-                        commit_id, ordinal, claim_kind, text, topic_key, polarity,
-                        salience, confidence, status, supersedes_unit_id, meta
-                    )
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active',NULL,$9::jsonb)
-                    ON CONFLICT (commit_id, ordinal) DO UPDATE
-                    SET claim_kind=EXCLUDED.claim_kind,
-                        text=EXCLUDED.text,
-                        topic_key=EXCLUDED.topic_key,
-                        polarity=EXCLUDED.polarity,
-                        salience=EXCLUDED.salience,
-                        confidence=EXCLUDED.confidence,
-                        status='active',
-                        supersedes_unit_id=NULL,
-                        meta=EXCLUDED.meta
-                    RETURNING unit_id
-                    """,
-                    commit_id,
-                    ordinal,
-                    unit.claim_kind,
-                    unit.text,
-                    unit.topic_key,
-                    unit.polarity,
-                    unit.salience,
-                    unit.confidence,
-                    json.dumps(unit.meta),
-                )
-                await _reconcile_unit(
-                    db,
-                    instance_id=instance_id,
-                    unit_id=unit_row["unit_id"],
-                    claim_kind=unit.claim_kind,
-                    topic_key=unit.topic_key,
-                    polarity=unit.polarity,
-                )
-
-            # If a newer interpretation yields fewer units, old tail ordinals
-            # must not remain visible as current cognition.
-            await db.execute(
-                """
-                UPDATE aios.message_cognitive_unit
-                SET status='superseded',
-                    meta=meta || jsonb_build_object(
-                        'retired_by_recompute', true,
-                        'interpreter_version', $3::text
-                    )
-                WHERE commit_id=$1
-                  AND ordinal >= $2
-                  AND status='active'
-                """,
-                commit_id,
-                len(units),
-                INTERPRETER_VERSION,
-            )
-
-            await _advance_cognitive_cursor(
-                db,
-                instance_id=instance_id,
-                node_id=node_id,
-                event_id=row["event_id"],
-            )
-            return True
-        finally:
-            await lock_con.execute(
-                "SELECT pg_advisory_unlock(hashtextextended($1, 0))", lock_key
-            )
-
-
-async def _advance_cognitive_cursor(
-    db: Database, *, instance_id: UUID, node_id: UUID, event_id: int | None
-) -> None:
-    await db.execute(
-        """
-        UPDATE aios.character_hud_readiness
-        SET cognitive_ready_node_id=$2, cognitive_ready_event_id=$3,
-            retrieval_ready_node_id=$2, retrieval_ready_event_id=$3, updated_at=now()
-        WHERE instance_id=$1
-        """,
-        instance_id,
-        node_id,
-        event_id,
-    )
-
-
-async def current_message_cognition(
-    db: Database, *, instance_id: UUID, node_id: UUID | None
-) -> list[dict]:
-    if node_id is None:
-        return []
-    rows = await db.fetch(
-        """
-        SELECT u.unit_id, u.claim_kind, u.text, u.topic_key, u.polarity,
-               u.salience, u.confidence, u.meta, c.node_id, c.event_id
-        FROM aios.message_cognitive_commit c
-        JOIN aios.message_cognitive_unit u ON u.commit_id=c.commit_id
-        WHERE c.instance_id=$1 AND c.node_id=$2 AND u.status='active'
-        ORDER BY u.salience DESC, u.ordinal
-        """,
-        instance_id,
-        node_id,
-    )
-    return [dict(row) for row in rows]
-
-
-async def mark_enrichment_ready(
-    db: Database, *, instance_id: UUID, node_id: UUID
-) -> None:
-    row = await db.fetchrow(
-        "SELECT event_id FROM aios.dag_node WHERE node_id=$1", node_id
-    )
-    event_id = row["event_id"] if row else None
-    await db.execute(
-        """
-        UPDATE aios.character_hud_readiness
-        SET enrichment_ready_node_id=$2, enrichment_ready_event_id=$3, updated_at=now()
-        WHERE instance_id=$1
-        """,
-        instance_id,
-        node_id,
-        event_id,
-    )
-    await db.execute(
-        "UPDATE aios.message_cognitive_commit SET enrichment_completed_at=now() WHERE instance_id=$1 AND node_id=$2",
-        instance_id,
-        node_id,
-    )
+        await _reconcile_unit(
+            db,
+            instance_id=instance_id,
+            unit_id=unit_id,
+            claim_kind=unit.claim_kind,
+            topic_key=unit.topic_key,
+            polarity=unit.polarity,
+        )
+    return True
