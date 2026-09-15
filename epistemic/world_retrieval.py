@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Iterable
 
 from aios_app.epistemic.world_scope import build_retrieval_scope
@@ -27,14 +28,21 @@ class WorldPropositionRetriever:
     ) -> list[dict[str, Any]]:
         if not query_text.strip() or context.world_id is None:
             return []
-        scope = await build_retrieval_scope(self.db, world_id=context.world_id, domain=domain)
-        hits = self.semantic.search_epistemic_staged(
+
+        scope = await build_retrieval_scope(
+            self.db,
+            world_id=context.world_id,
+            domain=domain,
+        )
+        hits = await asyncio.to_thread(
+            self.semantic.search_epistemic_staged,
             query_text,
             character_id=context.character_id,
             instance_ids=context.lineage_instance_ids,
             world_stages=scope.qdrant_world_stages,
             min_hits=max(8, min(limit, 24)),
         )
+
         ids: list[str] = []
         seen: set[str] = set()
         for _, _, payload in hits:
@@ -72,10 +80,12 @@ class WorldPropositionRetriever:
             ORDER BY p.proposition_id, ccr.resolved_at DESC
             """,
             ids,
-            list(scope.world_ids),
+            list(scope.all_world_ids),
             list(claim_kinds),
         )
+
         rank_by_id = {pid: rank for rank, pid in enumerate(ids)}
+        current_world = str(context.world_id)
         result: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
@@ -96,10 +106,16 @@ class WorldPropositionRetriever:
                 updated_at=None,
                 causal_distance=None,
             )
+            source_world = str(item.get("source_world_id") or "")
             item["retrieval_scope"] = "world"
-            item["retrieval_reason"] = "world_identity_semantic"
+            item["retrieval_reason"] = (
+                "world_current_semantic"
+                if source_world == current_world
+                else "world_lineage_semantic"
+            )
             item["epistemic_status"] = "PUBLIC_WORLD"
             item["relevance"] = score.as_dict()
             result.append(item)
+
         result.sort(key=lambda item: -float(item["relevance"]["total"]))
         return result[:limit]
