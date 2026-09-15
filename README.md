@@ -1,10 +1,12 @@
+![AIOS](Banner.png)
 
+**AIOS is a persistent memory runtime for AI agents and characters.**
 
-# AIOS
+AIOS gives long-running agents continuity beyond a single prompt or conversation. It remembers events, maintains changing world state, tracks what individual characters know and believe, and retrieves the information that matters for the current moment.
 
-**AIOS is a persistent memory and runtime system for AI agents and characters.**
+Unlike a simple retrieval system, AIOS treats memory as something that evolves. New information can reinforce existing memories, contradict them, update them, or belong only to a particular character, timeline, or world.
 
-AIOS gives long-running agents continuity beyond a single prompt or chat. It maintains persistent memory, world and character state, timelines, and knowledge, then provides the active agent with a focused **HUD** containing the context it needs for the current generation.
+The result is a focused **HUD** that gives an AI the context it needs without stuffing its prompt with the entire history.
 
 **Want to try it first?** Open the [AIOS Google Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing) for a guided demo without setting up a full local installation.
 
@@ -16,24 +18,28 @@ AIOS gives long-running agents continuity beyond a single prompt or chat. It mai
 
 AIOS is intended for persistent assistants, role-playing characters, agents, and other applications where remembering similar text is not enough.
 
-It keeps track of what happened, when it happened, where information came from, what belongs to the shared world, and what individual characters know or believe. The HUD turns that larger persistent state into a smaller context that a client can provide to an LLM.
+It keeps track of what happened, when it happened, where information came from, what belongs to the shared world, and what individual characters know, remember, or believe. It can preserve different perspectives and conflicting information instead of forcing everything into a single version of events.
 
-Vector retrieval is part of AIOS, but AIOS is not designed as a conventional RAG system. Memory, chronology, character knowledge, world state, and deterministic state are maintained as parts of a larger runtime rather than being decided by similarity search alone.
+AIOS is more than a retrieval system. It builds persistent memory around agents and characters, keeping track of events, knowledge, beliefs, relationships, world state, and changing information over time. Retrieval is one part of that larger runtime.
+
+The HUD turns this persistent state into focused context for the active agent. The larger memory remains available without requiring an entire history to be placed into every prompt.
 
 ## What's Changed
 
-This release is a substantial update from previous versions of AIOS.
+This release substantially expands AIOS as a persistent memory runtime.
 
-- **Better live performance.** AIOS can process multiple kinds of memory work concurrently and gives live conversation work priority over heavier background processing. Large semantic workloads should be less likely to stall an active conversation.
-- **Stronger character and world memory.** AIOS more clearly separates shared world information from what an individual character has actually experienced, learned, remembered, or believes.
-- **Improved long-term consistency.** New information can be reconciled with existing memory instead of simply accumulating indefinitely. This gives AIOS a better foundation for contradictions, changing beliefs, corrections, and evolving world state.
-- **Shared worlds and individual perspectives.** Characters can participate in a common world timeline while retaining their own knowledge and experience history.
-- **Deterministic state.** AIOS now has a separate foundation for information that should be exact rather than inferred through semantic memory, such as locations, counters, status effects, and game or simulation state.
-- **More reliable HUD generation.** The runtime performs stronger readiness checks before treating memory as current enough for generation, reducing the chance of returning a HUD built from partially processed state.
-- **Much easier installation.** PostgreSQL, Qdrant, and Fuseki are now managed through Docker Compose while AIOS itself remains a native Python application. First-time setup, database initialization, migrations, startup, and shutdown are handled by included scripts.
-- **More validation and testing.** The project now has broader automated coverage around memory, scheduling, character knowledge, world state, HUD readiness, and fresh installations.
+- **Memory consolidation.** AIOS can turn many overlapping observations into stronger, more useful memories while retaining the underlying evidence. This reduces repetitive retrieval without throwing away the details that produced a memory.
+- **Better handling of disagreement.** Conflicting memories, observations, and beliefs can remain distinct instead of being flattened into one answer. Corrections and changing information can be reconciled with what came before.
+- **World-aware memory.** Information is associated more carefully with the world and timeline where it belongs, reducing leakage between unrelated contexts and improving continuity across sessions that share a world.
+- **Character perspective.** Shared facts can coexist with what individual characters personally know, believe, remember, or experienced. Characters can participate in a common world while retaining their own histories and perspectives.
+- **Faster live conversations.** Immediate conversational memory can become available without waiting for every deeper background analysis task to finish. Live conversation work is prioritized while heavier memory processing continues asynchronously.
+- **Smarter retrieval.** AIOS can prepare likely-needed context ahead of a HUD request and retrieve from a more consolidated memory representation rather than simply surfacing large numbers of similar observations.
+- **More efficient processing.** Text analysis can be reused across multiple parts of the memory system, reducing duplicated work while preserving the richer processing used for long-term memory.
+- **More reliable ingest and replay behavior.** Current, historical, replayed, and superseded information are handled more deliberately so old work is less likely to be mistaken for the active state of a conversation.
+- **Deterministic state remains separate.** Information that must be exact, such as locations, counters, status effects, and game or simulation state, has a separate foundation from semantic memory.
+- **Stronger validation and installation.** Fresh-database setup, migrations, runtime readiness, memory behavior, retrieval, world state, and character knowledge have broader automated coverage, while first-time setup remains script-driven.
 
-The overall direction is simple: AIOS is moving from an advanced retrieval and memory system toward a persistent runtime that can maintain what an agent knows, what the world contains, and how both change over time.
+AIOS is a persistent memory runtime designed to maintain what happened, what each agent knows, what the world contains, and how all of those things change over time.
 
 ## First-Time Installation
 
@@ -46,7 +52,7 @@ AIOS currently requires:
 Clone the repository and run the setup script:
 
 ```bash
-git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git
+git clone https://github.com/LeetHappyfeet/AIOS.git
 cd AIOS
 bash setup.sh
 ```
