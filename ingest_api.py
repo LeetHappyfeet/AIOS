@@ -155,6 +155,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
         )
 
         replacement_parent_node_id = None
+        source_slot_replaced = False
         if source_event_id:
             prior = await db.fetchrow(
                 """
@@ -182,6 +183,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                 event_id,
             )
             if prior:
+                source_slot_replaced = True
                 replacement_parent_node_id = prior["parent_node_id"]
                 await db.execute(
                     """
@@ -211,6 +213,16 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             edge_type="alternative" if replacement_parent_node_id else "next",
         )
 
+        # A source cursor may move backwards only when the request is actually
+        # changing the selected alternative in a stable source slot. Merely
+        # coming from SillyTavern is not permission to rewind runtime state.
+        allow_source_rewind = bool(
+            source_event_id
+            and (
+                source_slot_replaced
+                or disposition is IngestEventDisposition.SUPERSEDED_RESELECTION
+            )
+        )
         await db.execute(
             """
             UPDATE aios.character_runtime_state rs
@@ -243,7 +255,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             req.user_name,
             req.scope_key or settings.default_scope,
             event_id,
-            bool(source_event_id),
+            allow_source_rewind,
         )
 
         await mark_matching_runtime_dirty(
