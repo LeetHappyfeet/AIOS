@@ -47,8 +47,7 @@ async def _apply_epistemic_admission(db: Database, *, claim_id: UUID) -> None:
                 'epistemic_admission_policy', 'epistemic-scope-v1',
                 'effective_modality', COALESCE(p.modality,'asserted')
             )
-        FROM aios.proposition p
-        JOIN aios.observation o ON o.proposition_id=p.proposition_id
+        FROM aios.proposition p, aios.observation o
         WHERE pe.proposition_id=p.proposition_id
           AND pe.observation_id=o.observation_id
           AND o.claim_id=$1
