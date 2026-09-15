@@ -33,18 +33,22 @@ ensure_proposition = legacy.ensure_proposition
 
 async def _apply_epistemic_admission(db: Database, *, claim_id: UUID) -> None:
     """Keep non-assertive atoms without promoting them as truth-bearing memory."""
-    # Re-normalization first recreates the legacy 'support' row. Remove the
-    # previous scoped role before converting that support row so the unique
-    # (proposition, observation, evidence_role) key remains idempotent.
+    # Modality belongs to this observation/frame occurrence, not proposition
+    # identity: the same proposition may be asserted in one source and merely
+    # supposed in another. observation_proposition gives us that exact edge.
     await db.execute(
         """
         DELETE FROM aios.proposition_evidence pe
-        USING aios.proposition p, aios.observation o
-        WHERE pe.proposition_id=p.proposition_id
-          AND pe.observation_id=o.observation_id
+        USING aios.observation o,
+              aios.observation_proposition op,
+              aios.claim_semantic_frame f
+        WHERE pe.observation_id=o.observation_id
+          AND op.observation_id=pe.observation_id
+          AND op.proposition_id=pe.proposition_id
+          AND f.frame_id=op.frame_id
           AND o.claim_id=$1
           AND pe.evidence_role IN ('supposition','conditional','counterfactual','inquiry')
-          AND lower(COALESCE(p.modality,'asserted')) IN (
+          AND lower(COALESCE(f.modality,'asserted')) IN (
               'hypothetical','conditional','counterfactual','question'
           )
         """,
@@ -53,7 +57,7 @@ async def _apply_epistemic_admission(db: Database, *, claim_id: UUID) -> None:
     await db.execute(
         """
         UPDATE aios.proposition_evidence pe
-        SET evidence_role = CASE lower(COALESCE(p.modality,'asserted'))
+        SET evidence_role = CASE lower(COALESCE(f.modality,'asserted'))
             WHEN 'hypothetical' THEN 'supposition'
             WHEN 'conditional' THEN 'conditional'
             WHEN 'counterfactual' THEN 'counterfactual'
@@ -62,29 +66,36 @@ async def _apply_epistemic_admission(db: Database, *, claim_id: UUID) -> None:
         END,
             meta = COALESCE(pe.meta,'{}'::jsonb) || jsonb_build_object(
                 'epistemic_admission_policy', 'epistemic-scope-v1',
-                'effective_modality', COALESCE(p.modality,'asserted')
+                'effective_modality', COALESCE(f.modality,'asserted'),
+                'semantic_frame_id', f.frame_id::text
             )
-        FROM aios.proposition p, aios.observation o
-        WHERE pe.proposition_id=p.proposition_id
-          AND pe.observation_id=o.observation_id
+        FROM aios.observation o,
+             aios.observation_proposition op,
+             aios.claim_semantic_frame f
+        WHERE pe.observation_id=o.observation_id
+          AND op.observation_id=pe.observation_id
+          AND op.proposition_id=pe.proposition_id
+          AND f.frame_id=op.frame_id
           AND o.claim_id=$1
-          AND lower(COALESCE(p.modality,'asserted')) IN (
+          AND lower(COALESCE(f.modality,'asserted')) IN (
               'hypothetical','conditional','counterfactual','question'
           )
         """,
         claim_id,
     )
 
-    # The legacy normalizer creates character acquisition rows while preserving
-    # atomization. Retract only the admission edge for non-assertive primary
-    # propositions; the proposition, observation, frame, and evidence remain.
+    # The legacy normalizer creates one primary character-acquisition edge.
+    # Remove that edge when the primary frame is non-assertive while retaining
+    # the proposition, observation, frames, and scoped evidence.
     await db.execute(
         """
         DELETE FROM aios.knowledge_acquisition_event kae
-        USING aios.proposition p
+        USING aios.claim_semantic_frame_projection sfp,
+              aios.claim_semantic_frame f
         WHERE kae.claim_id=$1
-          AND kae.proposition_id=p.proposition_id
-          AND lower(COALESCE(p.modality,'asserted')) IN (
+          AND sfp.claim_id=kae.claim_id
+          AND f.frame_id=sfp.primary_frame_id
+          AND lower(COALESCE(f.modality,'asserted')) IN (
               'hypothetical','conditional','counterfactual','question'
           )
         """,
