@@ -4,12 +4,7 @@ from enum import Enum
 
 
 class IngestEventDisposition(str, Enum):
-    """Identity-level result of resolving an incoming ingest event.
-
-    This deliberately describes event identity only. Runtime/DAG side effects
-    remain the responsibility of the caller so replay short-circuiting can be
-    introduced separately.
-    """
+    """Identity-level result of resolving an incoming ingest event."""
 
     NEW = "new"
     ACTIVE_REPLAY = "active_replay"
@@ -17,20 +12,23 @@ class IngestEventDisposition(str, Enum):
 
 
 def classify_ingest_event(*, inserted: bool, was_superseded: bool) -> IngestEventDisposition:
-    """Classify an ingest-event resolution without changing downstream behavior.
-
-    NEW
-        The dedupe identity did not previously exist.
-    ACTIVE_REPLAY
-        The exact immutable event already exists and is currently active. This
-        is the case Part 2 may safely short-circuit before DAG/runtime work.
-    SUPERSEDED_RESELECTION
-        The exact immutable event exists but was superseded, e.g. a user swipes
-        back to an earlier SillyTavern alternative. This must remain actionable
-        and must not be treated as an idempotent no-op.
-    """
+    """Classify one resolved immutable ingest event."""
     if inserted:
         return IngestEventDisposition.NEW
     if was_superseded:
         return IngestEventDisposition.SUPERSEDED_RESELECTION
     return IngestEventDisposition.ACTIVE_REPLAY
+
+
+def should_short_circuit_replay(
+    disposition: IngestEventDisposition,
+    *,
+    has_dag_node: bool,
+) -> bool:
+    """Return true only when an exact active replay is already DAG-durable.
+
+    A duplicate whose DAG node is not yet present is allowed to continue so a
+    concurrent/partially completed first request can still finish structural
+    ingestion. Superseded re-selections remain actionable for swipe handling.
+    """
+    return disposition is IngestEventDisposition.ACTIVE_REPLAY and has_dag_node
