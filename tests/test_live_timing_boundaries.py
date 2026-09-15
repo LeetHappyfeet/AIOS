@@ -6,11 +6,10 @@ import pytest
 
 import aios_app.world as world
 from aios_app.hud import readiness as readiness
-from aios_app.world import source_cursor
 
 
 @pytest.mark.asyncio
-async def test_ingest_dirty_hook_advances_marks_and_enqueues_live_work(monkeypatch):
+async def test_ingest_dirty_hook_advances_and_marks_without_live_enqueue(monkeypatch):
     instance_id = uuid4()
     timeline_id = uuid4()
     node_id = uuid4()
@@ -23,15 +22,16 @@ async def test_ingest_dirty_hook_advances_marks_and_enqueues_live_work(monkeypat
     async def fake_mark(*args, **kwargs):
         calls.append(("dirty", kwargs["source_head_node_id"]))
 
-    async def fake_enqueue(*args, **kwargs):
-        calls.append(("enqueue", kwargs["node_id"]))
-        return 1
+    async def forbidden_enqueue(*args, **kwargs):
+        raise AssertionError("historical ingest must not promote LIVE work")
 
-    # mark_matching_runtime_dirty imports the cursor helper lazily from the
-    # source_cursor module, so patch the symbol where it is actually resolved.
-    monkeypatch.setattr(source_cursor, "advance_matching_runtime_source_cursor", fake_advance)
+    # aios_app.world replaces readiness.mark_matching_runtime_dirty with its
+    # head-only wrapper during package import. That wrapper resolves the source
+    # cursor helper from the aios_app.world module namespace, not readiness or
+    # source_cursor directly.
+    monkeypatch.setattr(world, "advance_matching_runtime_source_cursor", fake_advance)
     monkeypatch.setattr(readiness, "mark_source_dirty", fake_mark)
-    monkeypatch.setattr(readiness, "enqueue_live_turn_work", fake_enqueue)
+    monkeypatch.setattr(readiness, "enqueue_live_turn_work", forbidden_enqueue)
 
     await readiness.mark_matching_runtime_dirty(
         object(),
@@ -44,11 +44,7 @@ async def test_ingest_dirty_hook_advances_marks_and_enqueues_live_work(monkeypat
         source_head_event_id=7,
     )
 
-    assert calls == [
-        ("advance", node_id),
-        ("dirty", node_id),
-        ("enqueue", node_id),
-    ]
+    assert calls == [("advance", node_id), ("dirty", node_id)]
 
 
 class _FakeDB:
