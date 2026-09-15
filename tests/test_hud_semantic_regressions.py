@@ -1,5 +1,6 @@
 from aios_app.epistemic.message_cognition import INTERPRETER_VERSION, interpret_message
 from aios_app.epistemic.semantic_interpreter import interpret_frame
+from aios_app.hud.recent_events import project_recent_events
 from aios_app.hud.render_text import render_hud_text
 
 
@@ -95,3 +96,36 @@ def test_recent_event_renderer_prefers_budget_clipped_text():
     rendered = render_hud_text(frame)
     assert "bounded recent event" in rendered
     assert "RAW RAW RAW" not in rendered
+
+
+def test_recent_semantic_event_is_rendered_as_narrative_not_fake_speaker():
+    frame = {
+        "identity": {"character_id": "Alex"},
+        "presence": {"world_key": "test", "instance_id": "i", "state_version": 1},
+        "recent_events": [{"text": "His: His deal was that he'd moved here."}],
+        "actions": [],
+    }
+    rendered = render_hud_text(frame)
+    assert "His: His deal" not in rendered
+    assert "- His deal was that he'd moved here." in rendered
+
+
+def test_recent_event_projection_prefers_semantic_projection_for_same_source_node():
+    projected = project_recent_events(
+        [
+            {"node_id": "n1", "message_text": "a very long raw source turn"},
+            {"source_node_id": "n1", "text": "Alex arrived at the apartment."},
+        ]
+    )
+    assert [row["text"] for row in projected] == ["Alex arrived at the apartment."]
+
+
+def test_recent_event_projection_deduplicates_identical_narrative_events():
+    projected = project_recent_events(
+        [
+            {"text": "Alex: He opened the door."},
+            {"text": "He opened the door."},
+        ]
+    )
+    assert len(projected) == 1
+    assert projected[0]["text"] == "He opened the door."
