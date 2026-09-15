@@ -13,6 +13,8 @@ from aios_app.epistemic.retrieval import (
     RetrievalPolicy,
     TopologyRetriever as BaseTopologyRetriever,
 )
+from aios_app.epistemic.world_projection import build_character_world_query
+from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
 from aios_app.epistemic.world_scope import build_retrieval_scope, normalize_domain
 
 
@@ -36,17 +38,18 @@ _ACTIVE_WORLD_DOMAIN: ContextVar[str] = ContextVar(
 
 
 class TopologyRetriever(BaseTopologyRetriever):
-    """Topology retrieval with a bounded DAG halo and world-scope prefilter.
+    """Federated /char + public /world retrieval with a bounded DAG halo.
 
-    The world scope is resolved from the materialized SQL cache before vector
-    search. Qdrant receives only the currently legal world IDs, local canon is
-    searched first, and inherited worlds are queried only if local retrieval is
-    sparse. No recursive world traversal occurs on the HUD path.
+    World reachability is resolved from the materialized SQL scope before vector
+    search. Current-world knowledge is searched first, compatible predecessor
+    worlds follow through the same staged scope, and character-owned propositions
+    win deduplication when the same proposition is visible through both paths.
     """
 
     def __init__(self, db: Any):
         super().__init__(db)
         self._halo_cache: dict[tuple[str, str], tuple[str, tuple[str, ...]]] = {}
+        self.world = WorldPropositionRetriever(db)
 
     async def _dag_halo(
         self,
@@ -230,13 +233,15 @@ class TopologyRetriever(BaseTopologyRetriever):
         expanded_focus = " ".join(
             part for part in (halo_text, focus_text) if part
         ).strip()
-
         domain = normalize_domain(
             world_domain or _DEFAULT_WORLD_DOMAIN_BY_MODE.get(mode, "general")
         )
+        policy = POLICIES.get(mode)
+        effective_limit = int(limit or (policy.limit if policy else 30))
+
         token = _ACTIVE_WORLD_DOMAIN.set(domain)
         try:
-            result = await super().retrieve_character_knowledge(
+            char_result = await super().retrieve_character_knowledge(
                 context,
                 scorer,
                 mode=mode,
@@ -248,12 +253,66 @@ class TopologyRetriever(BaseTopologyRetriever):
         finally:
             _ACTIVE_WORLD_DOMAIN.reset(token)
 
+        world_result: list[dict[str, Any]] = []
+        try:
+            projection = await build_character_world_query(
+                self.db,
+                context,
+                focus_text=focus_text,
+                halo_text=halo_text,
+                goals=goals,
+            )
+            world_result = await self.world.retrieve(
+                context,
+                scorer,
+                query_text=projection.query_text,
+                domain=domain,
+                claim_kinds=policy.claim_kinds if policy else (),
+                limit=effective_limit,
+            )
+        except Exception as exc:
+            logger.debug("Public world retrieval unavailable; preserving /char result: %s", exc)
+
+        merged: list[dict[str, Any]] = []
+        seen_propositions: set[str] = set()
+        for item in char_result:
+            proposition_id = str(item.get("proposition_id") or "")
+            if proposition_id:
+                seen_propositions.add(proposition_id)
+            item.setdefault("retrieval_scope", "character")
+            item.setdefault("retrieval_reason", "owned")
+            merged.append(item)
+
+        for item in world_result:
+            proposition_id = str(item.get("proposition_id") or "")
+            if proposition_id and proposition_id in seen_propositions:
+                continue
+            if proposition_id:
+                seen_propositions.add(proposition_id)
+            merged.append(item)
+
+        def _score(item: dict[str, Any]) -> float:
+            relevance = item.get("relevance") or {}
+            try:
+                return float(relevance.get("total") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        merged.sort(
+            key=lambda item: (
+                0 if item.get("retrieval_scope") == "character" else 1,
+                -_score(item),
+            )
+        )
+        result = merged[:effective_limit]
+
         logger.debug(
-            "DAG halo + world scope mode=%s domain=%s nodes=%s expanded_focus_chars=%d results=%d",
+            "Federated halo mode=%s domain=%s nodes=%s char=%d world=%d merged=%d",
             mode,
             domain,
             halo_node_ids,
-            len(expanded_focus),
+            len(char_result),
+            len(world_result),
             len(result),
         )
         return result
