@@ -6,19 +6,27 @@ The v2 linguistic decomposer remains the English adapter. After it stores its
 resolved frames, this facade interprets every frame into the language-neutral
 semantic vocabulary and persists typed semantic roles/content links.
 
-Semantic decomposition now reuses the persisted source-level linguistic
-projection when possible. The legacy decomposer itself remains unchanged: a
-projection-aware NLP adapter supplies an already-parsed sentence Doc, so the
-semantic behavior is preserved while repeated spaCy inference is avoided.
+Semantic decomposition reuses the persisted source-level linguistic projection
+when possible. A conservative scope/boundary adapter now sits in front of the
+legacy English decomposer so imagined/conditional content cannot silently
+become asserted and strong punctuation cannot turn discourse markers into
+subjects.
 """
 
 from contextvars import ContextVar
+from dataclasses import replace
 import json
 import logging
 from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.epistemic import semantic_frames_legacy as legacy
+from aios_app.epistemic.epistemic_scope import (
+    SCOPE_ASSERTED,
+    classify_scope,
+    effective_scope,
+    split_strong_clauses,
+)
 from aios_app.epistemic.linguistic_projection import (
     ensure_projection,
     get_nlp,
@@ -63,11 +71,59 @@ def _install_projection_aware_nlp() -> None:
     legacy._NLP = _ProjectionAwareNLP(base)
 
 
-# Compatibility export used by existing unit tests/debugging. Outside a
-# projected context this behaves exactly like the old sentence parser.
+_LEGACY_DECOMPOSE_SENTENCE = legacy.decompose_sentence
+
+
+def _scoped_decompose_sentence(sentence: str):
+    """Decompose strong clauses separately and inherit non-assertive scope."""
+    parts = split_strong_clauses(sentence)
+    if not parts:
+        return []
+    sentence_scope = classify_scope(sentence)
+    combined = []
+    offset = 0
+    for part in parts:
+        drafts = _LEGACY_DECOMPOSE_SENTENCE(part)
+        part_scope = effective_scope(part, sentence_scope)
+        for draft in drafts:
+            meta = dict(draft.meta)
+            meta.update({
+                "epistemic_scope_policy": "epistemic-scope-v1",
+                "local_modality": draft.modality,
+                "effective_modality": part_scope if part_scope != SCOPE_ASSERTED else draft.modality,
+                "strong_clause_segmented": len(parts) > 1,
+            })
+            modality = part_scope if part_scope != SCOPE_ASSERTED else draft.modality
+            combined.append(replace(
+                draft,
+                index=draft.index + offset,
+                parent_index=(draft.parent_index + offset if draft.parent_index is not None else None),
+                object_frame_index=(
+                    draft.object_frame_index + offset
+                    if draft.object_frame_index is not None
+                    else None
+                ),
+                modality=modality,
+                discourse_mode=(
+                    part_scope if part_scope != SCOPE_ASSERTED else draft.discourse_mode
+                ),
+                meta=meta,
+            ))
+        offset += len(drafts)
+    return combined
+
+
+# The legacy DB writer resolves this global at call time. Installing the wrapper
+# here lets all normal semantic-frame jobs use the corrected decomposition while
+# preserving the established storage contract and resolver implementation.
+if legacy.decompose_sentence is not _scoped_decompose_sentence:
+    legacy.decompose_sentence = _scoped_decompose_sentence
+
+
+# Compatibility export used by existing unit tests/debugging.
 def decompose_sentence(sentence: str):
     _install_projection_aware_nlp()
-    return legacy.decompose_sentence(sentence)
+    return _scoped_decompose_sentence(sentence)
 
 
 _SUBJECT_ROLE = {
