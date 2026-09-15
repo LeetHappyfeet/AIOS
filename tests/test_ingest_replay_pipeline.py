@@ -69,9 +69,13 @@ def install_structural_mocks(monkeypatch, *, timeline_id=None, node_id=None):
 async def test_exact_active_replay_returns_before_pipeline_side_effects(monkeypatch):
     timeline_id = uuid4()
     node_id = uuid4()
+    active_head_id = uuid4()
     db = FakeDB(
         {"event_id": 41, "inserted": False, "was_superseded": False},
-        [{"node_id": node_id, "timeline_id": timeline_id}],
+        [
+            {"node_id": node_id, "timeline_id": timeline_id},
+            {"source_head_node_id": active_head_id},
+        ],
     )
 
     async def forbidden(*args, **kwargs):
@@ -86,25 +90,55 @@ async def test_exact_active_replay_returns_before_pipeline_side_effects(monkeypa
     assert out.event_id == 41
     assert out.node_id == node_id
     assert out.timeline_id == timeline_id
+    assert out.disposition == "active_replay"
+    assert out.source_head_node_id == active_head_id
+    assert out.source_current is False
     assert db.executes == []
-    assert len(db.fetchrow_calls) == 1
+    assert len(db.fetchrow_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_exact_active_replay_reports_current_when_it_is_runtime_head(monkeypatch):
+    timeline_id = uuid4()
+    node_id = uuid4()
+    db = FakeDB(
+        {"event_id": 41, "inserted": False, "was_superseded": False},
+        [
+            {"node_id": node_id, "timeline_id": timeline_id},
+            {"source_head_node_id": node_id},
+        ],
+    )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("durable active replay must not enter structural/HUD pipeline")
+
+    monkeypatch.setattr(ingest_api, "get_or_create_timeline", forbidden)
+    monkeypatch.setattr(ingest_api, "add_node_and_edge", forbidden)
+    monkeypatch.setattr(ingest_api, "mark_matching_runtime_dirty", forbidden)
+
+    out = await ingest_api.ingest_message(db, request())
+
+    assert out.disposition == "active_replay"
+    assert out.source_head_node_id == node_id
+    assert out.source_current is True
 
 
 @pytest.mark.asyncio
 async def test_new_sillytavern_message_does_not_get_blanket_rewind_permission(monkeypatch):
     db = FakeDB(
         {"event_id": 42, "inserted": True, "was_superseded": False},
-        [None],
+        [None, None],
     )
     _, _, calls = install_structural_mocks(monkeypatch)
 
-    await ingest_api.ingest_message(db, request(message_id=13))
+    out = await ingest_api.ingest_message(db, request(message_id=13))
 
     runtime_updates = [call for call in db.executes if "character_runtime_state" in call[0]]
     assert len(runtime_updates) == 1
     assert runtime_updates[0][1][-1] is False
     assert len(calls["dag"]) == 1
     assert len(calls["dirty"]) == 1
+    assert out.disposition == "new"
 
 
 @pytest.mark.asyncio
@@ -112,17 +146,18 @@ async def test_changed_text_same_source_slot_is_replacement_and_can_rewind(monke
     parent_node_id = uuid4()
     db = FakeDB(
         {"event_id": 52, "inserted": True, "was_superseded": False},
-        [{"event_id": 51, "node_id": uuid4(), "parent_node_id": parent_node_id}],
+        [{"event_id": 51, "node_id": uuid4(), "parent_node_id": parent_node_id}, None],
     )
     _, _, calls = install_structural_mocks(monkeypatch)
 
-    await ingest_api.ingest_message(db, request(text="Regenerated answer", message_id=20))
+    out = await ingest_api.ingest_message(db, request(text="Regenerated answer", message_id=20))
 
     assert any("superseded_at=now()" in sql for sql, _ in db.executes)
     assert calls["dag"][0]["parent_node_id"] == parent_node_id
     assert calls["dag"][0]["edge_type"] == "alternative"
     runtime_updates = [call for call in db.executes if "character_runtime_state" in call[0]]
     assert runtime_updates[0][1][-1] is True
+    assert out.disposition == "new"
 
 
 @pytest.mark.asyncio
@@ -131,13 +166,14 @@ async def test_old_swipe_reselection_reactivates_and_reuses_existing_event(monke
     parent_node_id = uuid4()
     db = FakeDB(
         {"event_id": 61, "inserted": False, "was_superseded": True},
-        [{"event_id": 62, "node_id": uuid4(), "parent_node_id": parent_node_id}],
+        [{"event_id": 62, "node_id": uuid4(), "parent_node_id": parent_node_id}, None],
     )
     _, _, calls = install_structural_mocks(monkeypatch, node_id=old_node_id)
 
     out = await ingest_api.ingest_message(db, request(text="Old swipe", message_id=30))
 
     assert out.event_id == 61
+    assert out.disposition == "superseded_reselection"
     assert any("SET superseded_at=NULL" in sql for sql, _ in db.executes)
     assert any("superseded_at=now()" in sql for sql, _ in db.executes)
     assert calls["dag"][0]["event_id"] == 61
@@ -149,13 +185,14 @@ async def test_old_swipe_reselection_reactivates_and_reuses_existing_event(monke
 async def test_active_replay_without_dag_node_repairs_structural_ingest(monkeypatch):
     db = FakeDB(
         {"event_id": 71, "inserted": False, "was_superseded": False},
-        [None, None],
+        [None, None, None],
     )
     _, _, calls = install_structural_mocks(monkeypatch)
 
     out = await ingest_api.ingest_message(db, request(message_id=40))
 
     assert out.event_id == 71
+    assert out.disposition == "active_replay"
     assert calls["timeline"] == 1
     assert len(calls["dag"]) == 1
     assert len(calls["dirty"]) == 1
