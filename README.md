@@ -1,6 +1,6 @@
 ![AIOS](Banner.png)
 
-**AIOS is a persistent memory runtime for AI agents and characters.**
+**AIOS is a persistent memory runtime for AI agents.**
 
 AIOS gives long-running agents continuity beyond a single prompt or conversation. It remembers events, maintains changing world state, tracks what individual characters know and believe, and retrieves the information that matters for the current moment.
 
