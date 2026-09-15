@@ -314,7 +314,7 @@ async def project_character_belief_state(
                 "PREFIX xsd:  <http://www.w3.org/2001/XMLSchema#>\n"
                 f"INSERT DATA {{ GRAPH <{char_graph}> {{\n"
                 + "\n".join(insert_triples)
-                + "\n} } }"
+                + "\n} }"
             )
         # One HTTP UpdateRequest = one bounded TDB2 write transaction for the
         # coalesced belief batch, rather than DELETE+INSERT for the whole graph.
