@@ -17,6 +17,42 @@ from aios_app.ingest_identity import (
 from aios_app.models import IngestIn, IngestOut
 
 
+async def _runtime_source_head(db, req: IngestIn, timeline_id):
+    row = await db.fetchrow(
+        """
+        SELECT rs.source_head_node_id
+        FROM aios.character_runtime_state rs
+        JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
+        JOIN aios.timeline rt ON rt.timeline_id=rs.timeline_id
+        WHERE ci.character_id=$1
+          AND rt.session_id IS NOT DISTINCT FROM $2
+          AND rt.user_name IS NOT DISTINCT FROM $3
+          AND rt.scope_key=$4
+          AND rs.source_timeline_id=$5
+        ORDER BY rs.updated_at DESC, rs.instance_id
+        LIMIT 1
+        """,
+        req.character_id,
+        req.session_id,
+        req.user_name,
+        req.scope_key or settings.default_scope,
+        timeline_id,
+    )
+    return row["source_head_node_id"] if row else None
+
+
+def _ingest_out(*, event_id, node_id, timeline_id, disposition, source_head_node_id):
+    return IngestOut(
+        ok=True,
+        event_id=event_id,
+        node_id=node_id,
+        timeline_id=timeline_id,
+        disposition=disposition.value,
+        source_head_node_id=source_head_node_id,
+        source_current=bool(source_head_node_id == node_id),
+    )
+
+
 async def ingest_message(db, req: IngestIn) -> IngestOut:
     """Persist one chat message with end-to-end replay idempotency."""
     message_text = req.text
@@ -109,7 +145,9 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
 
     # An exact active replay that already reached the DAG is completely durable.
     # Return its original coordinates before any source-slot, cursor, HUD-dirty,
-    # or downstream structural work can be repeated.
+    # or downstream structural work can be repeated. The response separately
+    # exposes the actual runtime source head so clients do not mistake a reused
+    # historical node for the current generation boundary.
     existing_node = None
     if disposition is IngestEventDisposition.ACTIVE_REPLAY:
         existing_node = await db.fetchrow(
@@ -123,11 +161,13 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             event_id,
         )
         if should_short_circuit_replay(disposition, has_dag_node=bool(existing_node)):
-            return IngestOut(
-                ok=True,
+            source_head_node_id = await _runtime_source_head(db, req, existing_node["timeline_id"])
+            return _ingest_out(
                 event_id=event_id,
                 node_id=existing_node["node_id"],
                 timeline_id=existing_node["timeline_id"],
+                disposition=disposition,
+                source_head_node_id=source_head_node_id,
             )
 
     # Only a genuine re-selection of a previously superseded swipe is
@@ -268,6 +308,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             source_head_node_id=node_id,
             source_head_event_id=event_id,
         )
+        source_head_node_id = await _runtime_source_head(db, req, timeline_id)
     except Exception as exc:
         await db.execute(
             """
@@ -283,4 +324,10 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             detail=f"DAG ingestion failed for event_id={event_id}: {exc}",
         ) from exc
 
-    return IngestOut(ok=True, event_id=event_id, node_id=node_id, timeline_id=timeline_id)
+    return _ingest_out(
+        event_id=event_id,
+        node_id=node_id,
+        timeline_id=timeline_id,
+        disposition=disposition,
+        source_head_node_id=source_head_node_id,
+    )
