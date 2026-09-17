@@ -120,12 +120,13 @@ class HUDAssembler:
         effective_recent_limit = (
             hud_profile.recent_event_limit if recent_limit is None else recent_limit
         )
+        cognitive_recent_limit = self.cognition.retrieval_policy.recent_context_limit
 
         attention = await self.cognition.resolve_attention_inputs(
             context,
             raw_state,
             plugin_snapshot,
-            recent_limit=effective_recent_limit,
+            recent_limit=cognitive_recent_limit,
         )
         scorer = HUDRelevanceScorer(
             context,
@@ -136,7 +137,6 @@ class HUDAssembler:
             context,
             scorer,
             attention,
-            hud_profile,
         )
         knowledge = list(cognitive_snapshot.knowledge)
 
