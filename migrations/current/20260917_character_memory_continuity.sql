@@ -533,7 +533,7 @@ $$;
 CREATE OR REPLACE FUNCTION aios.refresh_beliefs_from_memory_continuity()
 RETURNS trigger
 LANGUAGE plpgsql
-AS $
+AS $$
 DECLARE
     rec record;
 BEGIN
@@ -566,7 +566,7 @@ BEGIN
     END LOOP;
     RETURN NEW;
 END;
-$;
+$$;
 
 DROP TRIGGER IF EXISTS trg_refresh_beliefs_from_memory_continuity
 ON aios.character_epistemic_profile;
@@ -577,7 +577,7 @@ FOR EACH ROW
 EXECUTE FUNCTION aios.refresh_beliefs_from_memory_continuity();
 
 -- Reconcile existing targets so the new default is visible immediately.
-DO $
+DO $$
 DECLARE
     rec record;
 BEGIN
