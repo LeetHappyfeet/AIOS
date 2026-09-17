@@ -15,7 +15,6 @@ from typing import Optional
 from uuid import UUID
 
 from aios_app.hud import readiness as _readiness
-from aios_app.hud.profile import get_profile as get_hud_profile
 from aios_app.hud.relevance import HUDRelevanceScorer
 from aios_app.hud.readiness import (
     enqueue_live_turn_work,
@@ -137,15 +136,11 @@ if not getattr(WorldRuntimeService, "_retrieval_prewarm_registration_v1", False)
                 raw_state=raw_state,
             )
         )
-        hud_profile = await get_hud_profile(
-            self.db,
-            character_id=context.character_id,
-        )
         attention = await self.hud.cognition.resolve_attention_inputs(
             context,
             raw_state,
             plugin_snapshot,
-            recent_limit=hud_profile.recent_event_limit,
+            recent_limit=self.hud.cognition.retrieval_policy.recent_context_limit,
         )
         scorer = HUDRelevanceScorer(
             context,
@@ -158,7 +153,6 @@ if not getattr(WorldRuntimeService, "_retrieval_prewarm_registration_v1", False)
             context,
             scorer,
             attention,
-            hud_profile,
         )
         after = await self.get_state(instance_id)
         if after.get("source_head_node_id") != source_head_node_id:
