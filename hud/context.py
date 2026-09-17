@@ -25,8 +25,8 @@ class HUDContext:
     location_entity_id: Optional[UUID]
     lineage_world_ids: tuple[UUID, ...]
     lineage_instance_ids: tuple[UUID, ...]
-    cognitive_instance_ids: tuple[UUID, ...]
     scene_entity_ids: frozenset[UUID]
+    cognitive_instance_ids: tuple[UUID, ...] = ()
 
     def world_visible(self, candidate_world_id: Optional[UUID]) -> bool:
         """Only the current branch and its ancestors are implicitly visible."""
