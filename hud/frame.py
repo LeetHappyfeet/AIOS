@@ -223,7 +223,10 @@ class HUDAssembler:
                     item.pop(key, None)
 
         rules = await self._rules(context, scorer)
-        recent_events = self._recent_events(attention.recent_newest, scorer)
+        recent_events = self._recent_events(
+            attention.recent_newest[: max(0, int(effective_recent_limit))],
+            scorer,
+        )
 
         memories: list[dict[str, Any]] = []
         beliefs: list[dict[str, Any]] = []
