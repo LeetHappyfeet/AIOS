@@ -186,7 +186,7 @@ async def classify_neighbor_relations_once(
             conflict_type=row["conflict_type"],
         )
 
-        await db.execute(
+        inserted = await db.fetchrow(
             """
             INSERT INTO aios.semantic_neighbor_relation (
                 proposition_id, neighbor_proposition_id,
@@ -195,6 +195,7 @@ async def classify_neighbor_relations_once(
             )
             VALUES ($1,$2,$3,$4,$5,$6,'candidate',$7::jsonb,$8::jsonb)
             ON CONFLICT DO NOTHING
+            RETURNING 1 AS inserted
             """,
             row["proposition_id"],
             row["neighbor_proposition_id"],
@@ -208,7 +209,8 @@ async def classify_neighbor_relations_once(
                 "proposition_b": b,
             }),
         )
-        written += 1
+        if inserted:
+            written += 1
 
     if written:
         logger.info(
