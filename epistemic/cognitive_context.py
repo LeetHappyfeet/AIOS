@@ -247,7 +247,7 @@ class CognitiveContextService:
             str(context.character_id),
             str(context.source_head_node_id or ""),
             int(context.state_version or 0),
-            tuple(str(value) for value in context.lineage_instance_ids),
+            tuple(str(value) for value in context.cognitive_instance_ids),
             attention.retrieval_focus_text,
             json.dumps(attention.goals, sort_keys=True, default=str),
             int((retrieval_policy or self.retrieval_policy).memory_hops),
@@ -518,7 +518,7 @@ class CognitiveContextService:
             """
             SELECT
                 ck.instance_id AS evidence_instance_id,
-                array_position($2::uuid[], ck.instance_id) - 1 AS instance_depth,
+                array_position($1::uuid[], ck.instance_id) - 1 AS instance_depth,
                 ck.epistemic_status,
                 ck.confidence,
                 ck.acquisition_mode,
@@ -570,11 +570,11 @@ class CognitiveContextService:
                       ELSE pc.proposition_a_id
                   END
                 JOIN aios.character_proposition_knowledge other_ck
-                  ON other_ck.instance_id = ANY($2::uuid[])
+                  ON other_ck.instance_id = ANY($1::uuid[])
                  AND other_ck.proposition_id=other.proposition_id
                 WHERE pc.proposition_a_id=p.proposition_id OR pc.proposition_b_id=p.proposition_id
             ) conflicts ON true
-            WHERE ck.instance_id = ANY($2::uuid[])
+            WHERE ck.instance_id = ANY($1::uuid[])
               AND EXISTS (
                   SELECT 1
                   FROM aios.knowledge_acquisition_event kae
@@ -587,10 +587,10 @@ class CognitiveContextService:
                     AND kae.proposition_id=ck.proposition_id
                     AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
               )
-            ORDER BY array_position($2::uuid[], ck.instance_id), ck.updated_at DESC
+            ORDER BY array_position($1::uuid[], ck.instance_id), ck.updated_at DESC
             LIMIT 250
             """,
-            list(context.lineage_instance_ids),
+            list(context.cognitive_instance_ids),
         )
 
         result: list[dict[str, Any]] = []
