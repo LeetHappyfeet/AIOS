@@ -278,7 +278,7 @@ class TopologyRetriever:
                 self.semantic.search_epistemic,
                 query_text,
                 character_id=context.character_id,
-                instance_ids=context.lineage_instance_ids,
+                instance_ids=context.cognitive_instance_ids,
             )
             proposition_ids: list[str] = []
             seen: set[str] = set()
@@ -319,7 +319,7 @@ class TopologyRetriever:
         ).strip()
         if not query_text:
             return []
-        lineage = tuple(str(value) for value in context.lineage_instance_ids)
+        lineage = tuple(str(value) for value in context.cognitive_instance_ids)
         cache_key = (str(context.character_id), query_text, lineage)
         cached = self._semantic_seed_cache.get(cache_key)
         if cached is not None:
@@ -383,7 +383,7 @@ class TopologyRetriever:
             """,
             f"char:{context.character_id}",
             context.character_id,
-            list(context.lineage_instance_ids),
+            list(context.cognitive_instance_ids),
             proposition_ids,
         )
         anchors: dict[Any, dict[str, Any]] = {}
@@ -474,8 +474,8 @@ class TopologyRetriever:
         hops = max(0, min(int(max_hops if max_hops is not None else policy.max_hops), 6))
         row_limit = max(1, min(int(limit if limit is not None else policy.limit), 250))
         scope_key = f"char:{context.character_id}"
-        lineage_ids = list(context.lineage_instance_ids)
-        lineage_keys = [str(value) for value in context.lineage_instance_ids]
+        lineage_ids = list(context.cognitive_instance_ids)
+        lineage_keys = [str(value) for value in context.cognitive_instance_ids]
         terms = _focus_terms(focus_text, " ".join(str(goal) for goal in goals))
 
         semantic_started = time.perf_counter()
