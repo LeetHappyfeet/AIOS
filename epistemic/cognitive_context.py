@@ -590,7 +590,6 @@ class CognitiveContextService:
             ORDER BY array_position($2::uuid[], ck.instance_id), ck.updated_at DESC
             LIMIT 250
             """,
-            context.instance_id,
             list(context.lineage_instance_ids),
         )
 
