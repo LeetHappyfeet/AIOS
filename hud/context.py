@@ -25,6 +25,7 @@ class HUDContext:
     location_entity_id: Optional[UUID]
     lineage_world_ids: tuple[UUID, ...]
     lineage_instance_ids: tuple[UUID, ...]
+    cognitive_instance_ids: tuple[UUID, ...]
     scene_entity_ids: frozenset[UUID]
 
     def world_visible(self, candidate_world_id: Optional[UUID]) -> bool:
@@ -131,6 +132,18 @@ class HUDContextResolver:
         )
         lineage_instance_ids = tuple(row["instance_id"] for row in instance_lineage) or (instance_id,)
 
+        cognitive_scope = await self.db.fetch(
+            """
+            SELECT instance_id
+            FROM aios.cognitive_evidence_instances($1::uuid)
+            ORDER BY depth, instance_id
+            """,
+            instance_id,
+        )
+        cognitive_instance_ids = (
+            tuple(row["instance_id"] for row in cognitive_scope) or lineage_instance_ids
+        )
+
         scene_ids = {state["entity_id"]}
         if state["location_entity_id"]:
             scene_ids.add(state["location_entity_id"])
@@ -163,5 +176,6 @@ class HUDContextResolver:
             location_entity_id=state["location_entity_id"],
             lineage_world_ids=lineage_world_ids,
             lineage_instance_ids=lineage_instance_ids,
+            cognitive_instance_ids=cognitive_instance_ids,
             scene_entity_ids=frozenset(scene_ids),
         )
