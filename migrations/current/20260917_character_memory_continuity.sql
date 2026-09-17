@@ -530,8 +530,54 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION aios.refresh_beliefs_from_memory_continuity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $
+DECLARE
+    rec record;
+BEGIN
+    IF TG_OP='UPDATE' AND OLD.memory_continuity IS NOT DISTINCT FROM NEW.memory_continuity THEN
+        RETURN NEW;
+    END IF;
+
+    FOR rec IN
+        SELECT target.instance_id, atoms.atom_id
+        FROM aios.character_instance target
+        CROSS JOIN LATERAL (
+            SELECT DISTINCT p.atom_id
+            FROM aios.character_proposition_knowledge cpk
+            JOIN aios.character_instance evidence_ci
+              ON evidence_ci.instance_id=cpk.instance_id
+            JOIN aios.proposition p ON p.proposition_id=cpk.proposition_id
+            WHERE evidence_ci.character_id=NEW.character_id
+              AND p.atom_id IS NOT NULL
+
+            UNION
+
+            SELECT bs.atom_id
+            FROM aios.character_belief_state bs
+            WHERE bs.instance_id=target.instance_id
+        ) atoms
+        WHERE target.character_id=NEW.character_id
+        ORDER BY target.instance_id, atoms.atom_id
+    LOOP
+        PERFORM aios.reconcile_character_belief_atom(rec.instance_id, rec.atom_id);
+    END LOOP;
+    RETURN NEW;
+END;
+$;
+
+DROP TRIGGER IF EXISTS trg_refresh_beliefs_from_memory_continuity
+ON aios.character_epistemic_profile;
+CREATE TRIGGER trg_refresh_beliefs_from_memory_continuity
+AFTER INSERT OR UPDATE OF memory_continuity
+ON aios.character_epistemic_profile
+FOR EACH ROW
+EXECUTE FUNCTION aios.refresh_beliefs_from_memory_continuity();
+
 -- Reconcile existing targets so the new default is visible immediately.
-DO $$
+DO $
 DECLARE
     rec record;
 BEGIN
