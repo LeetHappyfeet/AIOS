@@ -247,7 +247,7 @@ class CognitiveContextService:
             str(context.character_id),
             str(context.source_head_node_id or ""),
             int(context.state_version or 0),
-            tuple(str(value) for value in context.cognitive_instance_ids),
+            tuple(str(value) for value in (context.cognitive_instance_ids or context.lineage_instance_ids)),
             attention.retrieval_focus_text,
             json.dumps(attention.goals, sort_keys=True, default=str),
             int((retrieval_policy or self.retrieval_policy).memory_hops),
@@ -590,7 +590,7 @@ class CognitiveContextService:
             ORDER BY array_position($1::uuid[], ck.instance_id), ck.updated_at DESC
             LIMIT 250
             """,
-            list(context.cognitive_instance_ids),
+            list((context.cognitive_instance_ids or context.lineage_instance_ids)),
         )
 
         result: list[dict[str, Any]] = []
