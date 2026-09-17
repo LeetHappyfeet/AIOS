@@ -12,6 +12,10 @@ from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.epistemic.message_cognition import current_message_cognition
+from aios_app.epistemic.retrieval_policy import (
+    CognitiveRetrievalPolicy,
+    DEFAULT_COGNITIVE_RETRIEVAL_POLICY,
+)
 
 
 logger = logging.getLogger("aios.epistemic.cognitive_context")
@@ -134,9 +138,10 @@ def admit_cognitive_candidates(
 class CognitiveContextService:
     """Resolve source visibility and character cognition before HUD presentation."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, *, retrieval_policy: CognitiveRetrievalPolicy | None = None):
         self.db = db
         self.retriever = TopologyRetriever(db)
+        self.retrieval_policy = retrieval_policy or DEFAULT_COGNITIVE_RETRIEVAL_POLICY
         self._prepared_retrieval: dict[tuple[Any, ...], PreparedRetrievalSnapshot] = {}
         self._prepared_retrieval_flights: AsyncSingleFlight[
             tuple[Any, ...], PreparedRetrievalSnapshot
@@ -235,7 +240,7 @@ class CognitiveContextService:
         self,
         context: HUDContext,
         attention: CognitiveAttentionInputs,
-        hud_profile: Any,
+        retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> tuple[Any, ...]:
         return (
             str(context.instance_id),
@@ -245,9 +250,13 @@ class CognitiveContextService:
             tuple(str(value) for value in context.lineage_instance_ids),
             attention.retrieval_focus_text,
             json.dumps(attention.goals, sort_keys=True, default=str),
-            int(hud_profile.entity_hops),
-            int(hud_profile.semantic_retrieval_limit),
-            int(hud_profile.deep_memory_limit),
+            int((retrieval_policy or self.retrieval_policy).memory_hops),
+            int((retrieval_policy or self.retrieval_policy).belief_hops),
+            int((retrieval_policy or self.retrieval_policy).event_hops),
+            int((retrieval_policy or self.retrieval_policy).goal_hops),
+            int((retrieval_policy or self.retrieval_policy).rule_hops),
+            int((retrieval_policy or self.retrieval_policy).semantic_retrieval_limit),
+            int((retrieval_policy or self.retrieval_policy).deep_memory_limit),
         )
 
     async def prepare_retrieval(
@@ -255,7 +264,7 @@ class CognitiveContextService:
         context: HUDContext,
         scorer: RelevanceScorer,
         attention: CognitiveAttentionInputs,
-        hud_profile: Any,
+        retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> PreparedRetrievalSnapshot:
         """Speculatively prepare established-memory candidates for the next HUD.
 
@@ -267,7 +276,7 @@ class CognitiveContextService:
             context,
             scorer,
             attention,
-            hud_profile,
+            retrieval_policy,
         )
         logger.debug(
             "Retrieval prewarm instance=%s node=%s cache_hit=%s candidates=%d legacy=%d",
@@ -284,9 +293,9 @@ class CognitiveContextService:
         context: HUDContext,
         scorer: RelevanceScorer,
         attention: CognitiveAttentionInputs,
-        hud_profile: Any,
+        retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> tuple[PreparedRetrievalSnapshot, bool]:
-        key = self._prepared_retrieval_key(context, attention, hud_profile)
+        key = self._prepared_retrieval_key(context, attention, retrieval_policy)
         now = time.monotonic()
         cached = self._prepared_retrieval.get(key)
         if cached is not None:
@@ -301,7 +310,7 @@ class CognitiveContextService:
                 context,
                 scorer,
                 attention,
-                hud_profile,
+                retrieval_policy,
             ),
         )
         return snapshot, False
@@ -312,36 +321,37 @@ class CognitiveContextService:
         context: HUDContext,
         scorer: RelevanceScorer,
         attention: CognitiveAttentionInputs,
-        hud_profile: Any,
+        retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> PreparedRetrievalSnapshot:
         started = time.perf_counter()
         focus_text = attention.retrieval_focus_text
         goals = attention.goals
+        policy = retrieval_policy or self.retrieval_policy
 
         topology_memories = await self.retriever.retrieve_character_knowledge(
             context, scorer, mode="memory", focus_text=focus_text, goals=goals,
-            max_hops=max(3 if hud_profile.deep_memory_limit > 0 else 2, int(hud_profile.entity_hops)),
-            limit=min(250, hud_profile.semantic_retrieval_limit + max(0, hud_profile.deep_memory_limit)),
+            max_hops=policy.effective_memory_hops,
+            limit=policy.memory_limit,
         )
         topology_beliefs = await self.retriever.retrieve_character_knowledge(
             context, scorer, mode="belief", focus_text=focus_text, goals=goals,
-            max_hops=max(2, int(hud_profile.entity_hops)),
-            limit=hud_profile.semantic_retrieval_limit,
+            max_hops=policy.belief_hops,
+            limit=policy.semantic_retrieval_limit,
         )
         topology_goals = await self.retriever.retrieve_character_knowledge(
             context, scorer, mode="goal", focus_text=focus_text, goals=goals,
-            max_hops=max(1, int(hud_profile.entity_hops)),
-            limit=min(hud_profile.semantic_retrieval_limit, 30),
+            max_hops=policy.goal_hops,
+            limit=min(policy.semantic_retrieval_limit, 30),
         )
         topology_events = await self.retriever.retrieve_character_knowledge(
             context, scorer, mode="event", focus_text=focus_text, goals=goals,
-            max_hops=max(2, int(hud_profile.entity_hops)),
-            limit=min(hud_profile.semantic_retrieval_limit, 40),
+            max_hops=policy.event_hops,
+            limit=min(policy.semantic_retrieval_limit, 40),
         )
         topology_rules = await self.retriever.retrieve_character_knowledge(
             context, scorer, mode="rule", focus_text=focus_text, goals=goals,
-            max_hops=max(1, int(hud_profile.entity_hops)),
-            limit=min(hud_profile.semantic_retrieval_limit, 30),
+            max_hops=policy.rule_hops,
+            limit=min(policy.semantic_retrieval_limit, 30),
         )
 
         topology_knowledge = (
@@ -390,7 +400,7 @@ class CognitiveContextService:
         context: HUDContext,
         scorer: RelevanceScorer,
         attention: CognitiveAttentionInputs,
-        hud_profile: Any,
+        retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> CognitiveKnowledgeSnapshot:
         # Fast cognition is generation-critical and deliberately independent of
         # topology/vector/RDF completion. It is merged fresh on every HUD build
@@ -435,7 +445,7 @@ class CognitiveContextService:
             context,
             scorer,
             attention,
-            hud_profile,
+            retrieval_policy,
         )
         # HUD shaping mutates candidate dictionaries (for example when hiding
         # provenance), so never hand the cache's objects directly to callers.
@@ -507,6 +517,8 @@ class CognitiveContextService:
         rows = await self.db.fetch(
             """
             SELECT
+                ck.instance_id AS evidence_instance_id,
+                array_position($2::uuid[], ck.instance_id) - 1 AS instance_depth,
                 ck.epistemic_status,
                 ck.confidence,
                 ck.acquisition_mode,
@@ -539,7 +551,7 @@ class CognitiveContextService:
                 FROM aios.observation o
                 JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
                 WHERE o.proposition_id=p.proposition_id
-                ORDER BY (ccr.character_instance_id=$1) DESC, ccr.resolved_at DESC
+                ORDER BY (ccr.character_instance_id=ck.instance_id) DESC, ccr.resolved_at DESC
                 LIMIT 1
             ) ctx ON true
             LEFT JOIN LATERAL (
@@ -558,11 +570,11 @@ class CognitiveContextService:
                       ELSE pc.proposition_a_id
                   END
                 JOIN aios.character_proposition_knowledge other_ck
-                  ON other_ck.instance_id=$1
+                  ON other_ck.instance_id = ANY($2::uuid[])
                  AND other_ck.proposition_id=other.proposition_id
                 WHERE pc.proposition_a_id=p.proposition_id OR pc.proposition_b_id=p.proposition_id
             ) conflicts ON true
-            WHERE ck.instance_id=$1
+            WHERE ck.instance_id = ANY($2::uuid[])
               AND EXISTS (
                   SELECT 1
                   FROM aios.knowledge_acquisition_event kae
@@ -575,10 +587,11 @@ class CognitiveContextService:
                     AND kae.proposition_id=ck.proposition_id
                     AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
               )
-            ORDER BY ck.updated_at DESC
+            ORDER BY array_position($2::uuid[], ck.instance_id), ck.updated_at DESC
             LIMIT 250
             """,
             context.instance_id,
+            list(context.lineage_instance_ids),
         )
 
         result: list[dict[str, Any]] = []
