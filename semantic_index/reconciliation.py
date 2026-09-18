@@ -485,6 +485,15 @@ async def reconcile_neighbor_relations_once(
           AND r.relation = ANY($4::text[])
           AND EXISTS (
               SELECT 1
+              FROM aios.semantic_validation_decision d
+              WHERE d.decision_type IN ('proposition_relation','event_identity')
+                AND d.decision_key=(r.proposition_id::text || ':' || r.neighbor_proposition_id::text)
+                AND d.selected_value=r.relation
+                AND d.status='verified'
+                AND d.resolver_version=r.features->>'verifier_version'
+          )
+          AND EXISTS (
+              SELECT 1
               FROM aios.semantic_topology_node a
               JOIN aios.semantic_topology_node b
                 ON b.scope_key=a.scope_key
