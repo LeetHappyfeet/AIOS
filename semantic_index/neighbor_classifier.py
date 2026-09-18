@@ -10,7 +10,7 @@ from .relation_validator import validate_neighbor_relation
 
 logger = logging.getLogger("aios.semantic_neighbor_classifier")
 
-NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v3-scope"
+NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v4-event-identity"
 
 
 def classify_neighbor_pair(
@@ -49,6 +49,8 @@ async def classify_neighbor_relations_once(
             pa.predicate_norm AS a_predicate_norm,
             pa.object_norm AS a_object_norm,
             pa.polarity AS a_polarity,
+            ca.observation_id AS a_observation_id,
+            ca.claim_id AS a_claim_id,
             ca.claim_kind AS a_claim_kind,
             ca.predicate_family AS a_predicate_family,
             ca.semantic_confidence AS a_semantic_confidence,
@@ -63,6 +65,8 @@ async def classify_neighbor_relations_once(
             pb.predicate_norm AS b_predicate_norm,
             pb.object_norm AS b_object_norm,
             pb.polarity AS b_polarity,
+            cb.observation_id AS b_observation_id,
+            cb.claim_id AS b_claim_id,
             cb.claim_kind AS b_claim_kind,
             cb.predicate_family AS b_predicate_family,
             cb.semantic_confidence AS b_semantic_confidence,
@@ -78,6 +82,8 @@ async def classify_neighbor_relations_once(
         JOIN aios.proposition pb ON pb.proposition_id=snc.neighbor_proposition_id
         LEFT JOIN LATERAL (
             SELECT
+                o.observation_id,
+                o.claim_id,
                 ccr.claim_kind,
                 ccr.predicate_family,
                 CASE
@@ -95,6 +101,8 @@ async def classify_neighbor_relations_once(
         ) ca ON true
         LEFT JOIN LATERAL (
             SELECT
+                o.observation_id,
+                o.claim_id,
                 ccr.claim_kind,
                 ccr.predicate_family,
                 CASE
@@ -146,6 +154,8 @@ async def classify_neighbor_relations_once(
     for row in rows:
         a = {
             "topic_key": row["a_topic_key"],
+            "observation_id": str(row["a_observation_id"]) if row["a_observation_id"] else None,
+            "claim_id": str(row["a_claim_id"]) if row["a_claim_id"] else None,
             "subject_norm": row["a_subject_norm"],
             "predicate_norm": row["a_predicate_norm"],
             "object_norm": row["a_object_norm"],
@@ -166,6 +176,8 @@ async def classify_neighbor_relations_once(
         }
         b = {
             "topic_key": row["b_topic_key"],
+            "observation_id": str(row["b_observation_id"]) if row["b_observation_id"] else None,
+            "claim_id": str(row["b_claim_id"]) if row["b_claim_id"] else None,
             "subject_norm": row["b_subject_norm"],
             "predicate_norm": row["b_predicate_norm"],
             "object_norm": row["b_object_norm"],
@@ -242,6 +254,8 @@ async def classify_neighbor_relations_once(
         ) ca ON true
         LEFT JOIN LATERAL (
             SELECT
+                o.observation_id,
+                o.claim_id,
                 ccr.claim_kind,
                 ccr.predicate_family,
                 ccr.world_id,
@@ -514,6 +528,8 @@ async def classify_neighbor_relations_once(
         ) ca ON true
         LEFT JOIN LATERAL (
             SELECT
+                o.observation_id,
+                o.claim_id,
                 ccr.claim_kind,
                 ccr.predicate_family,
                 ccr.world_id,
