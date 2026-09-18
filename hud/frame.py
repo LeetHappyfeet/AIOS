@@ -10,7 +10,7 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
 from aios_app.hud.profile import get_profile as get_hud_profile
-from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
@@ -78,8 +78,8 @@ class HUDAssembler:
 
     Historical/source eligibility, semantic retrieval, flat-knowledge fallback,
     deduplication, and semantic admission live in CognitiveContextService.
-    This layer performs attention scoring, presentation shaping, token budgeting,
-    and deterministic frame assembly only.
+    This layer performs presentation shaping, token budgeting, and deterministic
+    frame assembly only. Durable recall selection is cognition-owned.
     """
 
     def __init__(
@@ -128,15 +128,17 @@ class HUDAssembler:
             plugin_snapshot,
             recent_limit=cognitive_recent_limit,
         )
-        scorer = HUDRelevanceScorer(
+        cognitive_snapshot = await self.cognition.resolve_knowledge(
+            context,
+            None,
+            attention,
+        )
+        # Presentation-only scene/entity ranking still uses the cognition-owned
+        # scorer; durable memory selection has already completed above.
+        scorer = CognitiveRelevanceScorer(
             context,
             focus_text=attention.retrieval_focus_text,
             goals=attention.goals,
-        )
-        cognitive_snapshot = await self.cognition.resolve_knowledge(
-            context,
-            scorer,
-            attention,
         )
         knowledge = list(cognitive_snapshot.knowledge)
 
@@ -223,28 +225,10 @@ class HUDAssembler:
                     item.pop(key, None)
 
         rules = await self._rules(context, scorer)
-        recent_events = self._recent_events(
-            attention.recent_newest[: max(0, int(effective_recent_limit))],
-            scorer,
-        )
-
-        memories: list[dict[str, Any]] = []
-        beliefs: list[dict[str, Any]] = []
-        semantic_goals: list[dict[str, Any]] = []
-        semantic_rules: list[dict[str, Any]] = []
-        semantic_events: list[dict[str, Any]] = []
-        for item in knowledge:
-            kind = str(item.get("claim_kind") or "BELIEF").upper()
-            if kind == "MEMORY":
-                memories.append(item)
-            elif kind == "GOAL":
-                semantic_goals.append(item)
-            elif kind == "RULE":
-                semantic_rules.append(item)
-            elif kind == "EVENT":
-                semantic_events.append(item)
-            else:
-                beliefs.append(item)
+        memories = list(cognitive_snapshot.recalled_memories)
+        beliefs = list(cognitive_snapshot.beliefs)
+        semantic_goals = list(cognitive_snapshot.goals)
+        semantic_rules = list(cognitive_snapshot.rules)
 
         goal_items = [
             {"text": str(goal), "source": "runtime", "tier": 0}
@@ -254,7 +238,12 @@ class HUDAssembler:
             {**item, "source": "character_knowledge"}
             for item in semantic_rules
         ]
-        event_items = list(reversed(recent_events)) + semantic_events
+        # Historical semantic EVENTs are recalled memories. Only bounded source/
+        # runtime chronology belongs in RECENT EVENTS.
+        event_items = self._recent_events(
+            cognitive_snapshot.current_events[: max(0, int(effective_recent_limit))],
+            scorer,
+        )
 
         memories = _trim_to_budget(
             memories, section_caps["memories"], lambda x: x.get("text", "")
