@@ -59,3 +59,37 @@ def test_semantic_frames_split_dash_before_subject_resolution():
     subjects = {(frame.subject or "").lower() for frame in frames}
     assert "i" in subjects
     assert "and" not in subjects
+
+
+def test_semantic_frames_do_not_link_across_sentence_boundary():
+    text = (
+        'Did you rehearse that in the hallway?" '
+        "She pulls up a window on the screen—a log file, timestamps in neat little rows, "
+        "and slides it across the desktop like she's flicking a card across a table."
+    )
+    frames = decompose_sentence(text)
+    assert frames
+    by_index = {frame.index: frame for frame in frames}
+
+    rehearse = next(frame for frame in frames if frame.predicate_canonical == "rehearse")
+    assert rehearse.object_frame_index is None
+
+    for frame in frames:
+        if frame.parent_index is not None:
+            assert frame.parent_index in by_index
+        if frame.object_frame_index is not None:
+            assert frame.object_frame_index in by_index
+
+    assert not any(
+        "log file" in (frame.subject or "").lower()
+        for frame in frames
+    )
+
+
+def test_semantic_frames_preserve_same_sentence_nested_clauses():
+    frames = decompose_sentence(
+        "Mia spent the whole night feeding me log files and setting three alarms I didn't ask for."
+    )
+    predicates = {(frame.predicate_canonical or "").lower() for frame in frames}
+    assert {"spend", "feed", "set", "ask"} <= predicates
+    assert any(frame.parent_index is not None for frame in frames)
