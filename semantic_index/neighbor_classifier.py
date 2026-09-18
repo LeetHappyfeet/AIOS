@@ -10,7 +10,7 @@ from .relation_validator import validate_neighbor_relation
 
 logger = logging.getLogger("aios.semantic_neighbor_classifier")
 
-NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v5-dag-event-identity"
+NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v5"
 
 
 def classify_neighbor_pair(
