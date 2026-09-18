@@ -117,3 +117,65 @@ def test_explicit_conflict_can_defeat_similarity_equivalence():
     )
     assert relation == "CONTRADICTS"
     assert features["adversarial_verification"]["winner_key"] == "CONTRADICTS"
+
+
+def test_same_event_confidence_cannot_invert_weak_event_classification():
+    relation, confidence, features = validate_neighbor_relation(
+        similarity=0.99,
+        a={
+            "subject_norm": "alex",
+            "predicate_norm": "get",
+            "object_norm": "access",
+            "polarity": 1,
+            "topic_key": "access/get",
+            "claim_kind": "EVENT",
+            "semantic_confidence": 0.66,
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        b={
+            "subject_norm": "alex",
+            "predicate_norm": "get",
+            "object_norm": "permission",
+            "polarity": 1,
+            "topic_key": "access/get",
+            "claim_kind": "EVENT",
+            "semantic_confidence": 0.90,
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        conflict_type=None,
+    )
+    assert relation == "SAME_EVENT"
+    assert confidence <= 0.66
+    assert features["event_semantic_confidence"] == 0.66
+
+
+def test_missing_semantic_confidence_preserves_legacy_relation_scoring():
+    relation, confidence, features = validate_neighbor_relation(
+        similarity=0.91,
+        a={
+            "subject_norm": "renamon",
+            "predicate_norm": "open",
+            "object_norm": "door",
+            "polarity": 1,
+            "topic_key": "door/open",
+            "claim_kind": "EVENT",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        b={
+            "subject_norm": "renamon",
+            "predicate_norm": "swing open",
+            "object_norm": "door",
+            "polarity": 1,
+            "topic_key": "door/open",
+            "claim_kind": "EVENT",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        conflict_type=None,
+    )
+    assert relation == "SAME_EVENT"
+    assert confidence > 0.66
+    assert features["event_semantic_confidence"] is None
