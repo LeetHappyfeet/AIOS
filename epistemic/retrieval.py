@@ -191,7 +191,7 @@ episodic_owned AS (
     SELECT DISTINCT ON (cpk.proposition_id)
         cpk.instance_id,
         cpk.proposition_id,
-        cpk.atom_id,
+        p.atom_id,
         cpk.epistemic_status,
         cpk.confidence,
         cpk.acquisition_mode,
@@ -208,6 +208,7 @@ episodic_owned AS (
         cpk.effective_confidence,
         array_position($2::uuid[], cpk.instance_id) AS instance_depth
     FROM aios.character_proposition_knowledge cpk
+    JOIN aios.proposition p ON p.proposition_id=cpk.proposition_id
     JOIN aios.knowledge_acquisition_event kae
       ON kae.instance_id=cpk.instance_id
      AND kae.proposition_id=cpk.proposition_id
