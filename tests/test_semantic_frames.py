@@ -54,3 +54,41 @@ def test_xcomp_subject_inheritance_does_not_loop():
     assert frames
     assert any(f.predicate_canonical == "stop" for f in frames)
     assert any(f.predicate_canonical == "hurt" for f in frames)
+
+
+
+def test_modifier_clauses_are_not_semantic_object_frames():
+    frames = decompose_sentence(
+        "Alex almost got flagged because Alex waved at the drone."
+    )
+    flagged = next(f for f in frames if f.predicate_canonical == "flag")
+    waved = next(f for f in frames if f.predicate_canonical == "wave")
+    assert waved.parent_index == flagged.index
+    assert flagged.object_frame_index is None
+
+
+def test_relative_clause_is_not_semantic_object_frame():
+    frames = decompose_sentence(
+        "A green flame that stretched itself across the screen flickered."
+    )
+    flicker = next(f for f in frames if f.predicate_canonical == "flicker")
+    stretch = next(f for f in frames if f.predicate_canonical == "stretch")
+    assert stretch.frame_role == "relcl"
+    assert flicker.object_frame_index is None
+
+
+def test_explicit_object_survives_unrelated_child_clause():
+    frames = decompose_sentence(
+        "You ate a granola bar because you missed dinner."
+    )
+    ate = next(f for f in frames if f.predicate_canonical == "eat")
+    assert ate.object_text is not None
+    assert "granola bar" in ate.object_text.lower()
+    assert ate.object_frame_index is None
+
+
+def test_proposition_taking_predicate_keeps_nested_content():
+    frames = decompose_sentence("Shego believes Alex stole the laptop.")
+    belief = next(f for f in frames if f.predicate_canonical == "believe")
+    stole = next(f for f in frames if f.predicate_canonical == "steal")
+    assert belief.object_frame_index == stole.index
