@@ -422,6 +422,37 @@ async def _semantic_pivot_parent(
     return row["topology_node_id"] if row else None
 
 
+async def _retract_superseded_cluster_topology(
+    db: Database,
+) -> set[str]:
+    """Remove materialized cluster pivots whose source cluster is no longer current.
+
+    Clustering runs are historical snapshots, but semantic topology represents the
+    current accepted structure.  A superseded cluster candidate must therefore
+    stop contributing its pivot and membership/boundary edges.  Deleting the
+    derived pivot is sufficient because topology edges reference nodes with
+    ON DELETE CASCADE; reconciliation receipts retain history via ON DELETE SET NULL.
+    """
+    rows = await db.fetch(
+        """
+        DELETE FROM aios.semantic_topology_node n
+        USING aios.semantic_reconciliation_receipt r,
+              aios.semantic_cluster_classification cc,
+              aios.semantic_cluster_candidate c
+        WHERE r.source_kind='cluster'
+          AND r.topology_node_id=n.topology_node_id
+          AND cc.classification_id::text=r.source_id
+          AND c.cluster_id=cc.cluster_id
+          AND c.status='stale'
+          AND n.node_key LIKE 'cluster:%'
+          AND n.meta->>'reconciler_version'=$1
+        RETURNING n.scope_key
+        """,
+        RECONCILER_VERSION,
+    )
+    return {str(row["scope_key"]) for row in rows}
+
+
 async def reconcile_clusters_once(
     db: Database,
     fuseki: FusekiClient,
@@ -453,7 +484,7 @@ async def reconcile_clusters_once(
         cfg.batch_size,
     )
     written = 0
-    affected_scopes: set[str] = set()
+    affected_scopes = await _retract_superseded_cluster_topology(db)
 
     for row in rows:
         scopes = await _cluster_scope_rows(db, cluster_id=row["cluster_id"])
