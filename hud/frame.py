@@ -370,6 +370,11 @@ class HUDAssembler:
                     "suppressed_by_reason": suppressed,
                     "stage": "pre_hud",
                 },
+                "recall_selection": {
+                    "selected": len(knowledge),
+                    "suppressed_by_reason": cognitive_snapshot.recall_suppressed,
+                    "stage": "cognition",
+                },
                 "focus_text": attention.focus_text,
                 "plugin_focus_text": attention.plugin_focus_text,
                 "plugin_status": plugin_snapshot.get("status") or {},
