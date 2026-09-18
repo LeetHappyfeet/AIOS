@@ -466,7 +466,22 @@ async def reconcile_neighbor_relations_once(
         WHERE r.embedding_version=$1
           AND r.classifier_version=$2
           AND r.status='candidate'
-          AND r.confidence >= $3
+          AND (
+              (r.relation <> 'SAME_EVENT' AND r.confidence >= $3)
+              OR (
+                  r.relation = 'SAME_EVENT'
+                  AND r.features->>'verifier_version' = 'semantic-relation-verifier-v6'
+                  AND r.features->>'event_structure_support' = 'true'
+                  AND r.features->>'occurrence_context' = 'true'
+                  AND r.features->>'worlds_compatible' = 'true'
+                  AND r.features->>'timelines_compatible' = 'true'
+                  AND COALESCE(r.features->>'role_reversal','false') = 'false'
+                  AND COALESCE(r.features->>'semantic_conflict','false') = 'false'
+                  AND r.features->'adversarial_verification'->>'status' = 'verified'
+                  AND r.features->'adversarial_verification'->>'winner_key' = 'SAME_EVENT'
+                  AND r.features->'adversarial_verification'->>'proposed_key' = 'SAME_EVENT'
+              )
+          )
           AND r.relation = ANY($4::text[])
           AND EXISTS (
               SELECT 1
