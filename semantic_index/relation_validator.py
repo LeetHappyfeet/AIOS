@@ -4,7 +4,7 @@ from typing import Any
 
 from aios_app.epistemic.hypothesis_validation import evaluate_matrix
 
-RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v5-event-identity"
+RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v6-dag-event-identity"
 
 # These predicates represent narrow, single-valued semantic slots closely
 # enough that two different positive values can be treated as competitors.
@@ -118,7 +118,11 @@ def validate_neighbor_relation(
         a.get("observation_id") and a.get("observation_id") == b.get("observation_id")
     )
     same_claim = bool(a.get("claim_id") and a.get("claim_id") == b.get("claim_id"))
-    occurrence_context = same_observation or same_claim
+    same_dag_node = bool(a.get("dag_node_id") and a.get("dag_node_id") == b.get("dag_node_id"))
+    # Observation and claim IDs identify evidence records. A DAG node is the
+    # shared source/discourse envelope in which multiple claims may describe
+    # one occurrence.
+    occurrence_context = same_dag_node
     role_reversal = bool(
         a.get("subject_norm")
         and a.get("object_norm")
@@ -128,14 +132,23 @@ def validate_neighbor_relation(
         and a.get("object_norm") == b.get("subject_norm")
         and not same_subject
     )
+    same_predicate_family = bool(
+        a.get("predicate_family")
+        and b.get("predicate_family")
+        and str(a.get("predicate_family")).upper() == str(b.get("predicate_family")).upper()
+    )
+    communication_event = bool(
+        same_predicate_family and str(a.get("predicate_family")).upper() == "COMMUNICATION"
+    )
     event_structure_support = bool(
         same_polarity
-        and (
-            (same_subject and same_predicate)
-            or (same_subject and same_object)
-            or (same_predicate and same_object)
-        )
+        and same_subject
+        and same_predicate
+        and same_predicate_family
     )
+    # Generic communication predicates identify the speech act, not its
+    # content. Different complements in one message are separate utterances.
+    communication_content_compatible = not communication_event or same_object
     a_semantic_confidence = a.get("semantic_confidence")
     b_semantic_confidence = b.get("semantic_confidence")
     event_semantic_confidence = None
@@ -201,8 +214,10 @@ def validate_neighbor_relation(
             "world": 0 if worlds_compatible else -8,
             "occurrence": 4 if occurrence_context else -4,
             "subject": 2 if same_subject else -2,
-            "predicate": 2 if same_predicate else -1,
+            "predicate": 2 if same_predicate else -3,
+            "predicate_family": 1 if same_predicate_family else -4,
             "object": 2 if same_object else -1,
+            "communication_content": 0 if communication_content_compatible else -8,
             "polarity": 1 if same_polarity else -4,
             # Embeddings establish semantic similarity, not occurrence
             # identity, so they are deliberately only supporting evidence.
@@ -250,6 +265,7 @@ def validate_neighbor_relation(
         and timelines_compatible
         and occurrence_context
         and event_structure_support
+        and communication_content_compatible
         and not role_reversal
         and same_polarity
         and similarity >= 0.80
@@ -298,7 +314,11 @@ def validate_neighbor_relation(
         "timelines_compatible": timelines_compatible,
         "same_observation": same_observation,
         "same_claim": same_claim,
+        "same_dag_node": same_dag_node,
         "occurrence_context": occurrence_context,
+        "same_predicate_family": same_predicate_family,
+        "communication_event": communication_event,
+        "communication_content_compatible": communication_content_compatible,
         "role_reversal": role_reversal,
         "event_structure_support": event_structure_support,
         "both_events": both_events,
