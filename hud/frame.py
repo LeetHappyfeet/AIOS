@@ -141,6 +141,12 @@ class HUDAssembler:
             goals=attention.goals,
         )
         knowledge = list(cognitive_snapshot.knowledge)
+        presentation_knowledge = (
+            list(cognitive_snapshot.recalled_memories)
+            + list(cognitive_snapshot.beliefs)
+            + list(cognitive_snapshot.goals)
+            + list(cognitive_snapshot.rules)
+        )
 
         section_caps = {
             "scene": hud_profile.scene_budget,
@@ -180,10 +186,10 @@ class HUDAssembler:
         )
 
         if not hud_profile.include_conflicts:
-            for item in knowledge:
+            for item in presentation_knowledge:
                 item["conflicts"] = []
         if not hud_profile.include_provenance:
-            for item in knowledge:
+            for item in presentation_knowledge:
                 for key in (
                     "source_entity_id",
                     "source_world_id",
@@ -211,7 +217,7 @@ class HUDAssembler:
                         for entry in item["world_context"]
                     ]
         if not hud_profile.include_confidence:
-            for item in knowledge:
+            for item in presentation_knowledge:
                 for key in (
                     "confidence",
                     "base_confidence",
@@ -349,8 +355,8 @@ class HUDAssembler:
                 "topology_partial_fallback": cognitive_snapshot.topology_partial_fallback,
                 "anchor_retrieval": cognitive_snapshot.anchored_knowledge_count > 0,
                 "anchor_partial_fallback": (
-                    bool(knowledge)
-                    and cognitive_snapshot.anchored_knowledge_count < len(knowledge)
+                    bool(presentation_knowledge)
+                    and cognitive_snapshot.anchored_knowledge_count < len(presentation_knowledge)
                 ),
                 "anchor_count": cognitive_snapshot.anchored_knowledge_count,
                 "anchor_invisible_count": cognitive_snapshot.invisible_anchor_count,
