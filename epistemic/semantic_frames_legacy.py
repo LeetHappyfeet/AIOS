@@ -304,22 +304,30 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
     for idx, root in enumerate(roots):
         subject_token = _find_subject(root)
         object_token = _find_object(root)
+        # parent_index preserves general syntactic clause topology. An
+        # object-frame link is narrower: it means the child proposition actually
+        # occupies the predicate's semantic content/object slot. Do not turn
+        # causal, temporal, relative, or other modifiers into proposition
+        # objects merely because spaCy represents them as subordinate clauses.
+        predicate_lemma = root.lemma_.lower()
+        proposition_taking = predicate_lemma in PROPOSITION_PREDICATES
         child_clause = next(
             (
                 c for c in root.children
-                if c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"}
+                if c.dep_ in {"ccomp", "xcomp"}
                 and c.i in root_to_index
                 and c.sent.start == root.sent.start
                 and c.sent.end == root.sent.end
+                and proposition_taking
             ),
             None,
         )
-        if child_clause is None and object_token is not None:
+        if child_clause is None and object_token is not None and proposition_taking:
             child_clause = next(
                 (
                     c for c in object_token.subtree
                     if c.i != object_token.i
-                    and c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"}
+                    and c.dep_ in {"ccomp", "xcomp"}
                     and c.i in root_to_index
                     and c.sent.start == root.sent.start
                     and c.sent.end == root.sent.end
@@ -353,7 +361,10 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
         if passive_reporting:
             subject = None
 
-        object_text = None if object_frame_index is not None else _phrase(object_token)
+        # Preserve an explicit lexical object even when the predicate also has
+        # proposition-valued content. The normalizer must never lose a concrete
+        # object merely because another clause is structurally attached.
+        object_text = _phrase(object_token)
         named_entities = [
             {"text": ent.text, "label": ent.label_}
             for ent in doc.ents
@@ -393,6 +404,8 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
                 "named_entities": named_entities,
                 "inside_direct_quote": _inside_quote(root, quote_spans),
                 "addressee_text": _find_addressee(root) if predicate in REPORTING_PREDICATES else None,
+                "clause_relation": root.dep_.lower() if root.dep_ != "ROOT" else None,
+                "semantic_object_clause": child_clause.dep_.lower() if child_clause is not None else None,
             },
         ))
 
