@@ -87,7 +87,12 @@ async def classify_neighbor_relations_once(
                 ccr.claim_kind,
                 ccr.predicate_family,
                 CASE
-                    WHEN (ccr.meta->>'semantic_confidence') ~ '^[0-9]+([.][0-9]+)?
+                    WHEN (ccr.meta->>'semantic_confidence') ~ '^[0-9]+([.][0-9]+)?$'
+                    THEN (ccr.meta->>'semantic_confidence')::double precision
+                    ELSE NULL
+                END AS semantic_confidence,
+                ccr.world_id,
+                ccr.timeline_id,
                 ccr.epistemic_scope,
                 ccr.origin_character_id AS character_id,
                 ccr.character_instance_id,
@@ -105,7 +110,11 @@ async def classify_neighbor_relations_once(
                 ccr.claim_kind,
                 ccr.predicate_family,
                 CASE
-                    WHEN (ccr.meta->>'semantic_confidence') ~ '^[0-9]+([.][0-9]+)?
+                    WHEN (ccr.meta->>'semantic_confidence') ~ '^[0-9]+([.][0-9]+)?$'
+                    THEN (ccr.meta->>'semantic_confidence')::double precision
+                    ELSE NULL
+                END AS semantic_confidence,
+                ccr.world_id,
                 ccr.timeline_id,
                 ccr.epistemic_scope,
                 ccr.origin_character_id AS character_id,
