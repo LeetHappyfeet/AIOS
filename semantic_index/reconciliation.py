@@ -39,7 +39,7 @@ def _json_object(value: Any) -> dict[str, Any]:
         raise ValueError("expected object-like metadata") from exc
 
 
-RECONCILER_VERSION = "semantic-reconciliation-v1"
+RECONCILER_VERSION = "semantic-reconciliation-v2"\nEVENT_RESOLVER_VERSION = "semantic-event-resolver-v1"
 
 PAIR_EDGE_TYPES = {
     "EQUIVALENT": "semantic_equivalent",
@@ -253,7 +253,7 @@ async def reconcile_neighbor_relations_once(
         cfg.embedding_version,
         NEIGHBOR_CLASSIFIER_VERSION,
         cfg.reconcile_relation_min_confidence,
-        list(PAIR_EDGE_TYPES),
+        list(PAIR_EDGE_TYPES) + ["SAME_EVENT"],
         cfg.batch_size,
     )
     written = 0
@@ -281,42 +281,85 @@ async def reconcile_neighbor_relations_once(
             if exists:
                 continue
 
-            decision = _decision_from_row(scope)
-            parent = scope["a_node"]
-            child = scope["b_node"]
-            if str(parent) > str(child) and row["relation"] != "REFINES":
-                parent, child = child, parent
+            if row["relation"] == "SAME_EVENT":
+                semantic_event_id, action = await _resolve_semantic_event_pair(
+                    db,
+                    proposition_a=row["proposition_id"],
+                    proposition_b=row["neighbor_proposition_id"],
+                    confidence=float(row["confidence"]),
+                    source_id=source_id,
+                    world_id=scope.get("world_id"),
+                    evidence={
+                        "features": _json_object(row["features"]),
+                        "classifier_evidence": _json_object(row["evidence"]),
+                    },
+                )
+                event_node = None
+                if semantic_event_id is not None:
+                    event_node = await _materialize_semantic_event(
+                        db,
+                        semantic_event_id=semantic_event_id,
+                        scope=scope,
+                        confidence=float(row["confidence"]),
+                        source_id=source_id,
+                    )
+                await _record_receipt(
+                    db,
+                    receipt_key=receipt_key,
+                    source_kind="neighbor_relation",
+                    source_id=source_id,
+                    scope_key=scope["scope_key"],
+                    scope_partition_key=partition_key,
+                    action=action,
+                    topology_node_id=event_node,
+                    classifier_version=NEIGHBOR_CLASSIFIER_VERSION,
+                    confidence=float(row["confidence"]),
+                    status=("candidate" if semantic_event_id is None else "accepted"),
+                    meta={
+                        "relation": "SAME_EVENT",
+                        "semantic_event_id": (
+                            str(semantic_event_id) if semantic_event_id else None
+                        ),
+                        "resolver_version": EVENT_RESOLVER_VERSION,
+                    },
+                )
+            else:
+                decision = _decision_from_row(scope)
+                parent = scope["a_node"]
+                child = scope["b_node"]
+                if str(parent) > str(child) and row["relation"] != "REFINES":
+                    parent, child = child, parent
 
-            edge_id = await _upsert_edge(
-                db,
-                decision=decision,
-                parent=parent,
-                child=child,
-                edge_type=PAIR_EDGE_TYPES[row["relation"]],
-                significance=max(0.5, float(row["confidence"])),
-                inference_source="semantic_vector_classifier",
-                inference_status="accepted",
-                inference_confidence=float(row["confidence"]),
-                meta={
-                    "reconciler_version": RECONCILER_VERSION,
-                    "classifier_version": NEIGHBOR_CLASSIFIER_VERSION,
-                    "relation": row["relation"],
-                    "features": _json_object(row["features"]),
-                },
-            )
-            await _record_receipt(
-                db,
-                receipt_key=receipt_key,
-                source_kind="neighbor_relation",
-                source_id=source_id,
-                scope_key=scope["scope_key"],
-                scope_partition_key=partition_key,
-                action=PAIR_EDGE_TYPES[row["relation"]],
-                topology_edge_id=edge_id,
-                classifier_version=NEIGHBOR_CLASSIFIER_VERSION,
-                confidence=float(row["confidence"]),
-                meta={"relation": row["relation"]},
-            )
+                edge_id = await _upsert_edge(
+                    db,
+                    decision=decision,
+                    parent=parent,
+                    child=child,
+                    edge_type=PAIR_EDGE_TYPES[row["relation"]],
+                    significance=max(0.5, float(row["confidence"])),
+                    inference_source="semantic_vector_classifier",
+                    inference_status="accepted",
+                    inference_confidence=float(row["confidence"]),
+                    meta={
+                        "reconciler_version": RECONCILER_VERSION,
+                        "classifier_version": NEIGHBOR_CLASSIFIER_VERSION,
+                        "relation": row["relation"],
+                        "features": _json_object(row["features"]),
+                    },
+                )
+                await _record_receipt(
+                    db,
+                    receipt_key=receipt_key,
+                    source_kind="neighbor_relation",
+                    source_id=source_id,
+                    scope_key=scope["scope_key"],
+                    scope_partition_key=partition_key,
+                    action=PAIR_EDGE_TYPES[row["relation"]],
+                    topology_edge_id=edge_id,
+                    classifier_version=NEIGHBOR_CLASSIFIER_VERSION,
+                    confidence=float(row["confidence"]),
+                    meta={"relation": row["relation"]},
+                )
             affected_scopes.add(scope["scope_key"])
             written += 1
 
