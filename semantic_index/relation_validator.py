@@ -4,7 +4,7 @@ from typing import Any
 
 from aios_app.epistemic.hypothesis_validation import evaluate_matrix
 
-RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v4-scope"
+RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v5-event-identity"
 
 # These predicates represent narrow, single-valued semantic slots closely
 # enough that two different positive values can be treated as competitors.
@@ -110,7 +110,32 @@ def validate_neighbor_relation(
     same_timeline = bool(a.get("timeline_id") and a.get("timeline_id") == b.get("timeline_id"))
     same_world = bool(a.get("world_id") and a.get("world_id") == b.get("world_id"))
     worlds_known = bool(a.get("world_id") and b.get("world_id"))
+    timelines_known = bool(a.get("timeline_id") and b.get("timeline_id"))
+    worlds_compatible = not worlds_known or same_world
+    timelines_compatible = not timelines_known or same_timeline
     both_events = a.get("claim_kind") == "EVENT" and b.get("claim_kind") == "EVENT"
+    same_observation = bool(
+        a.get("observation_id") and a.get("observation_id") == b.get("observation_id")
+    )
+    same_claim = bool(a.get("claim_id") and a.get("claim_id") == b.get("claim_id"))
+    occurrence_context = same_observation or same_claim
+    role_reversal = bool(
+        a.get("subject_norm")
+        and a.get("object_norm")
+        and b.get("subject_norm")
+        and b.get("object_norm")
+        and a.get("subject_norm") == b.get("object_norm")
+        and a.get("object_norm") == b.get("subject_norm")
+        and not same_subject
+    )
+    event_structure_support = bool(
+        same_polarity
+        and (
+            (same_subject and same_predicate)
+            or (same_subject and same_object)
+            or (same_predicate and same_object)
+        )
+    )
     a_semantic_confidence = a.get("semantic_confidence")
     b_semantic_confidence = b.get("semantic_confidence")
     event_semantic_confidence = None
@@ -168,12 +193,25 @@ def validate_neighbor_relation(
             "semantic_conflict": conflict_penalty,
         },
         "SAME_EVENT": {
-            "event": 3 if both_events else -3,
-            "timeline": 3 if same_timeline else -3,
-            "world": 2 if same_world else (-3 if worlds_known else 0),
-            "subject": 1 if same_subject else 0,
-            "vector": 2 if similarity >= 0.86 else (1 if similarity >= 0.80 else -2),
-            "semantic_conflict": conflict_penalty,
+            # EVENT/world/timeline are eligibility constraints, not identity
+            # evidence.  In particular, a timeline is a container and may hold
+            # many repetitions of the same action.
+            "event": 0 if both_events else -8,
+            "timeline": 0 if timelines_compatible else -8,
+            "world": 0 if worlds_compatible else -8,
+            "occurrence": 4 if occurrence_context else -4,
+            "subject": 2 if same_subject else -2,
+            "predicate": 2 if same_predicate else -1,
+            "object": 2 if same_object else -1,
+            "polarity": 1 if same_polarity else -4,
+            # Embeddings establish semantic similarity, not occurrence
+            # identity, so they are deliberately only supporting evidence.
+            "vector": 1 if similarity >= 0.86 else (0 if similarity >= 0.80 else -1),
+            # Swapping actor and target is positive evidence that these are
+            # different participant assignments, even when vector similarity
+            # is extremely high.
+            "role_reversal": -8 if role_reversal else 0,
+            "semantic_conflict": -8 if semantic_conflict else 0,
         },
         "SAME_TOPIC": {
             "topic": 3 if same_topic else -2,
@@ -206,7 +244,16 @@ def validate_neighbor_relation(
         proposed = "EQUIVALENT"
     elif object_refinement:
         proposed = "REFINES"
-    elif both_events and same_timeline and similarity >= 0.80:
+    elif (
+        both_events
+        and worlds_compatible
+        and timelines_compatible
+        and occurrence_context
+        and event_structure_support
+        and not role_reversal
+        and same_polarity
+        and similarity >= 0.80
+    ):
         proposed = "SAME_EVENT"
     elif same_topic:
         proposed = "SAME_TOPIC"
@@ -247,6 +294,13 @@ def validate_neighbor_relation(
         "same_topic": same_topic,
         "same_timeline": same_timeline,
         "same_world": same_world,
+        "worlds_compatible": worlds_compatible,
+        "timelines_compatible": timelines_compatible,
+        "same_observation": same_observation,
+        "same_claim": same_claim,
+        "occurrence_context": occurrence_context,
+        "role_reversal": role_reversal,
+        "event_structure_support": event_structure_support,
         "both_events": both_events,
         "a_semantic_confidence": a_semantic_confidence,
         "b_semantic_confidence": b_semantic_confidence,
