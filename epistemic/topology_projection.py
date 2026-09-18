@@ -551,7 +551,8 @@ async def project_semantic_scope(
 
     state = await db.fetchrow(
         """
-        SELECT scope_key, scope_kind, dirty_version, projected_version, dirty_at,
+        SELECT scope_key, scope_kind, rdf_dataset, rdf_graph,
+               dirty_version, projected_version, dirty_at,
                rdf_change_cursor, rdf_delta_ready,
                COALESCE((
                    SELECT max(change_id)
@@ -595,17 +596,33 @@ async def project_semantic_scope(
         scope_key,
     )
     if not scope:
+        # The final topology node may itself have been deleted. PostgreSQL is
+        # authoritative, so an empty scope must retract any old live RDF rather
+        # than merely advancing the ledger.
+        if state["rdf_dataset"] and state["rdf_graph"]:
+            fuseki.update(
+                str(state["rdf_dataset"]),
+                f"CLEAR SILENT GRAPH <{state['rdf_graph']}>",
+            )
         await db.execute(
             """
             UPDATE aios.semantic_scope_projection_state
             SET projected_version=dirty_version,
+                rdf_change_cursor=GREATEST(rdf_change_cursor,$2),
+                rdf_delta_ready=true,
                 status='ready', projected_at=now(), last_error=NULL,
                 updated_at=now()
             WHERE scope_key=$1
             """,
             scope_key,
+            int(state["target_change_id"] or 0),
         )
-        return {"scope_key": scope_key, "projected": False, "reason": "empty_scope"}
+        await db.execute(
+            "DELETE FROM aios.semantic_rdf_change WHERE scope_key=$1 AND change_id <= $2",
+            scope_key,
+            int(state["target_change_id"] or 0),
+        )
+        return {"scope_key": scope_key, "projected": True, "reason": "empty_scope_cleared"}
 
     decision = _TOPOLOGY_MODULE.TopologyDecision(
         scope_kind=scope["scope_kind"],
@@ -676,6 +693,12 @@ async def project_semantic_scope(
         dataset,
         graph,
         target_version,
+        target_change_id,
+    )
+
+    await db.execute(
+        "DELETE FROM aios.semantic_rdf_change WHERE scope_key=$1 AND change_id <= $2",
+        scope_key,
         target_change_id,
     )
 
