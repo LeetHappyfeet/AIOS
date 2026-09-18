@@ -217,6 +217,8 @@ def test_event_neighbors_on_same_timeline_can_be_same_event():
             object_norm="warehouse",
             claim_kind="EVENT",
             predicate_family="action",
+            observation_id="obs-1",
+            claim_id="claim-1",
         ),
         b=proposition(
             topic_key="event-b",
@@ -224,6 +226,8 @@ def test_event_neighbors_on_same_timeline_can_be_same_event():
             object_norm="warehouse",
             claim_kind="EVENT",
             predicate_family="action",
+            observation_id="obs-1",
+            claim_id="claim-1",
         ),
         conflict_type=None,
     )
