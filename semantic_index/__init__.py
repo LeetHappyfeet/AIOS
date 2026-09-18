@@ -15,7 +15,6 @@ from .validation_adapter import (
 
 _original_neighbor_classifier = _neighbor_classifier.classify_neighbor_relations_once
 _original_neighbor_reconciliation = _reconciliation.reconcile_neighbor_relations_once
-_neighbor_classifier.NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v4-event-identity"
 _neighbor_classifier.classify_neighbor_pair = _validate_neighbor_relation
 
 
