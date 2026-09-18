@@ -111,6 +111,14 @@ def validate_neighbor_relation(
     same_world = bool(a.get("world_id") and a.get("world_id") == b.get("world_id"))
     worlds_known = bool(a.get("world_id") and b.get("world_id"))
     both_events = a.get("claim_kind") == "EVENT" and b.get("claim_kind") == "EVENT"
+    a_semantic_confidence = a.get("semantic_confidence")
+    b_semantic_confidence = b.get("semantic_confidence")
+    event_semantic_confidence = None
+    if both_events and a_semantic_confidence is not None and b_semantic_confidence is not None:
+        event_semantic_confidence = min(
+            max(0.0, min(1.0, float(a_semantic_confidence))),
+            max(0.0, min(1.0, float(b_semantic_confidence))),
+        )
     scope_relation = classify_scope_relation(a, b)
 
     object_refinement = bool(
@@ -218,6 +226,15 @@ def validate_neighbor_relation(
     if relation != "UNRESOLVED":
         evidence_ratio = max(0.0, min(1.0, (outcome.winner_score + 6) / 16))
         confidence = min(0.98, 0.55 * float(similarity) + 0.45 * evidence_ratio)
+        # Do not allow a downstream identity relation to become more certain
+        # than the upstream semantic classifications that made it eligible.
+        # EVENT is intentionally broad, and open-class predicates may only be
+        # classified as ACTION/EVENT with moderate confidence. Collapsing that
+        # uncertainty to a boolean "both_events" previously allowed vector
+        # similarity to invert a 0.66 semantic classification into a 0.98
+        # SAME_EVENT assertion.
+        if relation == "SAME_EVENT" and event_semantic_confidence is not None:
+            confidence = min(confidence, event_semantic_confidence)
 
     interpretation = _epistemic_interpretation(relation, scope_relation)
     features = {
@@ -231,6 +248,9 @@ def validate_neighbor_relation(
         "same_timeline": same_timeline,
         "same_world": same_world,
         "both_events": both_events,
+        "a_semantic_confidence": a_semantic_confidence,
+        "b_semantic_confidence": b_semantic_confidence,
+        "event_semantic_confidence": event_semantic_confidence,
         "legacy_conflict_type": conflict_type,
         "polarity_conflict": polarity_conflict,
         "exclusive_slot_conflict": exclusive_slot_conflict,
