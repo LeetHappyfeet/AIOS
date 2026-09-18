@@ -107,13 +107,28 @@ def _span_text(tokens: Iterable) -> Optional[str]:
 def _phrase(token) -> Optional[str]:
     if token is None:
         return None
+
+    # Build the phrase by walking outward from its head instead of filtering a
+    # flattened subtree. Filtering only the clause-root token leaves that
+    # clause's descendants behind ("flame that itself into something...").
+    # Pruning the whole branch keeps nominal arguments local to their head.
     sentence_start = token.sent.start
     sentence_end = token.sent.end
-    tokens = [
-        t for t in token.subtree
-        if sentence_start <= t.i < sentence_end
-        and (t.dep_ not in CLAUSE_DEPS or t.i == token.i)
-    ]
+    tokens = []
+    stack = [token]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if current.i in seen:
+            continue
+        seen.add(current.i)
+        if not (sentence_start <= current.i < sentence_end):
+            continue
+        tokens.append(current)
+        for child in current.children:
+            if child.dep_ in CLAUSE_DEPS:
+                continue
+            stack.append(child)
     return _span_text(tokens)
 
 
@@ -487,6 +502,33 @@ async def _recent_antecedents(db: Database, claim_id: UUID, limit: int = 5) -> l
     return [dict(row) for row in rows]
 
 
+def _draft_antecedent_candidates(drafts: list[FrameDraft], before_index: int) -> list[dict]:
+    """Return current-claim candidates nearest-first for local coreference."""
+    candidates: list[dict] = []
+    for draft in reversed([item for item in drafts if item.index < before_index]):
+        named_entities = draft.meta.get("named_entities", [])
+        subject_kind = _guess_kind(
+            draft.subject,
+            named_entities,
+            predicate=draft.predicate_canonical,
+            object_text=draft.object_text,
+        )
+        object_kind = _guess_kind(draft.object_text, named_entities)
+        if draft.subject:
+            candidates.append({
+                "subject_text": draft.subject,
+                "subject_kind_guess": subject_kind,
+                "subject_entity_key": None,
+            })
+        if draft.object_text:
+            candidates.append({
+                "subject_text": draft.object_text,
+                "subject_kind_guess": object_kind,
+                "subject_entity_key": None,
+            })
+    return candidates
+
+
 def _choose_antecedent(value: Optional[str], candidates: list[dict]) -> tuple[Optional[str], Optional[str], float]:
     clean = _norm(value)
     if clean not in PRONOUN_PERSON | PRONOUN_NEUTRAL:
@@ -662,8 +704,24 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
 
     for draft in drafts:
         frame_id = inserted[draft.index]
-        subject_resolved, subject_key, subject_ref_conf = _choose_antecedent(draft.subject, antecedents)
-        object_resolved, object_key, object_ref_conf = _choose_antecedent(draft.object_text, antecedents)
+        # Resolve ordinary third-person/neutral pronouns against the current
+        # claim before consulting persisted discourse. This prevents a nearby
+        # "it" from jumping backward to an unrelated older quote or entity.
+        local_antecedents = _draft_antecedent_candidates(drafts, draft.index)
+        subject_resolved, subject_key, subject_ref_conf = _choose_antecedent(
+            draft.subject, local_antecedents
+        )
+        if _norm(subject_resolved) == _norm(draft.subject) and subject_ref_conf <= 0.20:
+            subject_resolved, subject_key, subject_ref_conf = _choose_antecedent(
+                draft.subject, antecedents
+            )
+        object_resolved, object_key, object_ref_conf = _choose_antecedent(
+            draft.object_text, local_antecedents
+        )
+        if _norm(object_resolved) == _norm(draft.object_text) and object_ref_conf <= 0.20:
+            object_resolved, object_key, object_ref_conf = _choose_antecedent(
+                draft.object_text, antecedents
+            )
         perspective_holder, _, perspective_holder_conf = _choose_antecedent(draft.meta.get("perspective_holder_text"), antecedents)
         perspective_addressee, _, perspective_addressee_conf = _choose_antecedent(draft.meta.get("perspective_addressee_text"), antecedents)
         perspective_kind = draft.meta.get("perspective_kind")
