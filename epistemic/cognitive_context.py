@@ -12,6 +12,7 @@ from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.epistemic.message_cognition import current_message_cognition
+from aios_app.epistemic.relevance import CognitiveRelevanceScorer, select_recalled_cognition
 from aios_app.epistemic.retrieval_policy import (
     CognitiveRetrievalPolicy,
     DEFAULT_COGNITIVE_RETRIEVAL_POLICY,
@@ -40,6 +41,11 @@ class CognitiveAttentionInputs:
 @dataclass(frozen=True)
 class CognitiveKnowledgeSnapshot:
     knowledge: list[dict[str, Any]]
+    recalled_memories: list[dict[str, Any]]
+    beliefs: list[dict[str, Any]]
+    goals: list[dict[str, Any]]
+    rules: list[dict[str, Any]]
+    current_events: list[dict[str, Any]]
     topology_retrieval: bool
     topology_partial_fallback: bool
     firewall_suppressed: dict[str, int]
@@ -262,7 +268,7 @@ class CognitiveContextService:
     async def prepare_retrieval(
         self,
         context: HUDContext,
-        scorer: RelevanceScorer,
+        scorer: RelevanceScorer | None,
         attention: CognitiveAttentionInputs,
         retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> PreparedRetrievalSnapshot:
@@ -291,7 +297,7 @@ class CognitiveContextService:
     async def _prepared_or_resolve(
         self,
         context: HUDContext,
-        scorer: RelevanceScorer,
+        scorer: RelevanceScorer | None,
         attention: CognitiveAttentionInputs,
         retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> tuple[PreparedRetrievalSnapshot, bool]:
@@ -319,7 +325,7 @@ class CognitiveContextService:
         self,
         key: tuple[Any, ...],
         context: HUDContext,
-        scorer: RelevanceScorer,
+        scorer: RelevanceScorer | None,
         attention: CognitiveAttentionInputs,
         retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> PreparedRetrievalSnapshot:
@@ -327,6 +333,9 @@ class CognitiveContextService:
         focus_text = attention.retrieval_focus_text
         goals = attention.goals
         policy = retrieval_policy or self.retrieval_policy
+        scorer = scorer or CognitiveRelevanceScorer(
+            context, focus_text=focus_text, goals=goals
+        )
 
         topology_memories = await self.retriever.retrieve_character_knowledge(
             context, scorer, mode="memory", focus_text=focus_text, goals=goals,
@@ -398,10 +407,16 @@ class CognitiveContextService:
     async def resolve_knowledge(
         self,
         context: HUDContext,
-        scorer: RelevanceScorer,
+        scorer: RelevanceScorer | None,
         attention: CognitiveAttentionInputs,
         retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> CognitiveKnowledgeSnapshot:
+        scorer = scorer or CognitiveRelevanceScorer(
+            context,
+            focus_text=attention.retrieval_focus_text,
+            goals=attention.goals,
+        )
+
         # Fast cognition is generation-critical and deliberately independent of
         # topology/vector/RDF completion. It is merged fresh on every HUD build
         # even when the expensive established-memory retrieval was prewarmed.
@@ -489,6 +504,29 @@ class CognitiveContextService:
             knowledge,
             visible_source_node_ids=attention.visible_source_node_ids,
         )
+        knowledge, recall_suppressed = select_recalled_cognition(
+            knowledge,
+            focus_text=attention.retrieval_focus_text,
+        )
+        for reason, count in recall_suppressed.items():
+            if count:
+                suppressed[reason] = suppressed.get(reason, 0) + count
+
+        recalled_memories: list[dict[str, Any]] = []
+        beliefs: list[dict[str, Any]] = []
+        goals: list[dict[str, Any]] = []
+        rules: list[dict[str, Any]] = []
+        for item in knowledge:
+            kind = str(item.get("claim_kind") or "BELIEF").upper()
+            if kind in {"MEMORY", "EVENT"}:
+                recalled_memories.append(item)
+            elif kind == "GOAL":
+                goals.append(item)
+            elif kind == "RULE":
+                rules.append(item)
+            else:
+                beliefs.append(item)
+
         anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
         visible_world_context_count = sum(
             len(item.get("world_context") or [])
@@ -501,6 +539,11 @@ class CognitiveContextService:
         )
         return CognitiveKnowledgeSnapshot(
             knowledge=knowledge,
+            recalled_memories=recalled_memories,
+            beliefs=beliefs,
+            goals=goals,
+            rules=rules,
+            current_events=list(reversed(attention.recent_newest)),
             topology_retrieval=bool(topology_knowledge),
             topology_partial_fallback=bool(legacy_knowledge),
             firewall_suppressed=suppressed,
@@ -512,7 +555,7 @@ class CognitiveContextService:
     async def _flat_character_knowledge(
         self,
         context: HUDContext,
-        scorer: RelevanceScorer,
+        scorer: RelevanceScorer | None,
     ) -> list[dict[str, Any]]:
         rows = await self.db.fetch(
             """
