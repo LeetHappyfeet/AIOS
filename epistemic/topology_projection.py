@@ -23,8 +23,10 @@ def install_deferred_projection(topology_module: Any, topology_claims_module: An
     """Replace per-item Fuseki rewrites with a dirty-scope projection boundary.
 
     Topology derivation remains authoritative in PostgreSQL. RDF publication is
-    coalesced into project_semantic_scope jobs, where large scopes are rebuilt
-    through a bounded staging graph before the live graph is replaced.
+    coalesced into project_semantic_scope jobs. Once a scope has a synchronized
+    baseline, normal publication consumes the PostgreSQL mutation outbox and
+    touches only changed RDF resources. Full staged rebuilds remain the
+    bootstrap/repair path.
     """
 
     global _REAL_PROJECT_SCOPE_RDF, _TOPOLOGY_MODULE
@@ -195,6 +197,161 @@ def _anchor_triples(scope_iri: str, anchor: Any) -> list[str]:
     ]
 
 
+
+def _scope_iri(scope_key: str) -> str:
+    return f"urn:aios:topology-scope:{quote(scope_key, safe='')}"
+
+
+def _delete_change_sparql(graph: str, scope_iri: str, change: Any) -> str:
+    kind = str(change["object_kind"])
+    object_id = change["object_id"]
+    old = _TOPOLOGY_MODULE._json_object(change["old_state"])
+
+    if kind == "node":
+        iri = f"urn:aios:topology-node:{object_id}"
+        return (
+            f"DELETE WHERE {{ GRAPH <{graph}> {{ <{scope_iri}> "
+            f"<urn:aios:topology#hasNode> <{iri}> . }} }}; "
+            f"DELETE WHERE {{ GRAPH <{graph}> {{ <{iri}> ?p ?o . }} }}"
+        )
+
+    if kind == "edge":
+        iri = f"urn:aios:topology-edge:{object_id}"
+        statements = [
+            (
+                f"DELETE WHERE {{ GRAPH <{graph}> {{ <{scope_iri}> "
+                f"<urn:aios:topology#hasEdge> <{iri}> . }} }}"
+            ),
+            f"DELETE WHERE {{ GRAPH <{graph}> {{ <{iri}> ?p ?o . }} }}",
+        ]
+        if old.get("parent_node_id") and old.get("child_node_id") and old.get("edge_type"):
+            parent = f"urn:aios:topology-node:{old['parent_node_id']}"
+            child = f"urn:aios:topology-node:{old['child_node_id']}"
+            pred = quote(str(old["edge_type"]), safe="")
+            statements.append(
+                f"DELETE DATA {{ GRAPH <{graph}> {{ <{parent}> "
+                f"<urn:aios:topology#{pred}> <{child}> . }} }}"
+            )
+        return "; ".join(statements)
+
+    iri = f"urn:aios:semantic-anchor:{object_id}"
+    statements = [
+        (
+            f"DELETE WHERE {{ GRAPH <{graph}> {{ <{scope_iri}> "
+            f"<urn:aios:anchor#hasAnchor> <{iri}> . }} }}"
+        ),
+        f"DELETE WHERE {{ GRAPH <{graph}> {{ <{iri}> ?p ?o . }} }}",
+    ]
+    if old.get("source_node_id") and old.get("target_node_id") and old.get("relationship_type"):
+        source = f"urn:aios:topology-node:{old['source_node_id']}"
+        target = f"urn:aios:topology-node:{old['target_node_id']}"
+        pred = quote(str(old["relationship_type"]), safe="")
+        statements.append(
+            f"DELETE DATA {{ GRAPH <{graph}> {{ <{source}> "
+            f"<urn:aios:anchor#{pred}> <{target}> . }} }}"
+        )
+    return "; ".join(statements)
+
+
+async def _current_change_triples(
+    db: Database,
+    *,
+    scope_iri: str,
+    change: Any,
+) -> list[str]:
+    kind = str(change["object_kind"])
+    object_id = change["object_id"]
+    if kind == "node":
+        row = await db.fetchrow(
+            """
+            SELECT topology_node_id, node_type, node_key, label
+            FROM aios.semantic_topology_node
+            WHERE topology_node_id=$1
+            """,
+            object_id,
+        )
+        return _node_triples(scope_iri, row) if row else []
+    if kind == "edge":
+        row = await db.fetchrow(
+            """
+            SELECT edge_id, parent_node_id, child_node_id, edge_type,
+                   inference_source, inference_status, inference_confidence,
+                   meta AS edge_meta
+            FROM aios.semantic_topology_edge
+            WHERE edge_id=$1
+            """,
+            object_id,
+        )
+        return _edge_triples(scope_iri, row) if row else []
+
+    row = await db.fetchrow(
+        """
+        SELECT anchor_edge_id, source_node_id, target_node_id,
+               relationship_type, target_scope_key, confidence,
+               inference_source, inference_status
+        FROM aios.semantic_anchor_edge
+        WHERE anchor_edge_id=$1
+        """,
+        object_id,
+    )
+    return _anchor_triples(scope_iri, row) if row else []
+
+
+async def _project_scope_rdf_delta(
+    db: Database,
+    fuseki: Any,
+    *,
+    decision: Any,
+    from_change_id: int,
+    target_change_id: int,
+) -> tuple[str, str, int]:
+    """Apply coalesced PostgreSQL topology mutations directly to the live graph."""
+
+    dataset, graph = _TOPOLOGY_MODULE._rdf_graph(decision)
+    scope_iri = _scope_iri(decision.scope_key)
+    changes = await db.fetch(
+        """
+        SELECT DISTINCT ON (object_kind, object_id)
+               change_id, object_kind, object_id, operation, old_state
+        FROM aios.semantic_rdf_change
+        WHERE scope_key=$1
+          AND change_id > $2
+          AND change_id <= $3
+        ORDER BY object_kind, object_id, change_id DESC
+        """,
+        decision.scope_key,
+        from_change_id,
+        target_change_id,
+    )
+
+    if not changes:
+        return dataset, graph, 0
+
+    # Each changed object is retracted first, then its current authoritative
+    # PostgreSQL representation is inserted if the object still exists.
+    # This naturally coalesces insert/update/delete churn between checkpoints.
+    changed = 0
+    for change in changes:
+        fuseki.update(dataset, _delete_change_sparql(graph, scope_iri, change))
+        triples = await _current_change_triples(db, scope_iri=scope_iri, change=change)
+        if triples:
+            fuseki.update(
+                dataset,
+                f"INSERT DATA {{ GRAPH <{graph}> {{ " + " ".join(triples) + " } }",
+            )
+        changed += 1
+
+    logger.info(
+        "Projected RDF delta scope=%s dataset=%s changes=%s cursor=%s..%s",
+        decision.scope_key,
+        dataset,
+        changed,
+        from_change_id,
+        target_change_id,
+    )
+    return dataset, graph, changed
+
+
 class _RdfBatchWriter:
     def __init__(
         self,
@@ -254,7 +411,7 @@ async def _project_scope_rdf_batched(
 
     dataset, graph = _TOPOLOGY_MODULE._rdf_graph(decision)
     staging_graph = f"{graph}:staging:{target_version}"
-    scope_iri = f"urn:aios:topology-scope:{quote(decision.scope_key, safe='')}"
+    scope_iri = _scope_iri(decision.scope_key)
 
     fuseki.update(dataset, f"CLEAR SILENT GRAPH <{staging_graph}>")
 
@@ -350,8 +507,7 @@ async def _project_scope_rdf_batched(
         fuseki.update(
             dataset,
             (
-                f"COPY SILENT GRAPH <{staging_graph}> TO GRAPH <{graph}>; "
-                f"CLEAR SILENT GRAPH <{staging_graph}>"
+                f"MOVE SILENT GRAPH <{staging_graph}> TO GRAPH <{graph}>"
             ),
         )
     except Exception:
@@ -396,6 +552,12 @@ async def project_semantic_scope(
     state = await db.fetchrow(
         """
         SELECT scope_key, scope_kind, dirty_version, projected_version, dirty_at,
+               rdf_change_cursor, rdf_delta_ready,
+               COALESCE((
+                   SELECT max(change_id)
+                   FROM aios.semantic_rdf_change c
+                   WHERE c.scope_key=semantic_scope_projection_state.scope_key
+               ), rdf_change_cursor) AS target_change_id,
                (
                     dirty_at IS NULL
                     OR dirty_at <= now() - make_interval(secs => $2)
@@ -465,13 +627,24 @@ async def project_semantic_scope(
         scope_key,
     )
 
+    target_change_id = int(state["target_change_id"] or 0)
+    delta_ready = bool(state["rdf_delta_ready"])
     try:
-        dataset, graph = await _project_scope_rdf_batched(
-            db,
-            fuseki,
-            decision=decision,
-            target_version=target_version,
-        )
+        if delta_ready:
+            dataset, graph, _ = await _project_scope_rdf_delta(
+                db,
+                fuseki,
+                decision=decision,
+                from_change_id=int(state["rdf_change_cursor"] or 0),
+                target_change_id=target_change_id,
+            )
+        else:
+            dataset, graph = await _project_scope_rdf_batched(
+                db,
+                fuseki,
+                decision=decision,
+                target_version=target_version,
+            )
     except Exception as exc:
         await db.execute(
             """
@@ -490,6 +663,8 @@ async def project_semantic_scope(
         SET rdf_dataset=$2,
             rdf_graph=$3,
             projected_version=GREATEST(projected_version,$4),
+            rdf_change_cursor=GREATEST(rdf_change_cursor,$5),
+            rdf_delta_ready=true,
             status=CASE WHEN dirty_version <= $4 THEN 'ready' ELSE 'dirty' END,
             projected_at=now(),
             last_error=NULL,
@@ -501,6 +676,7 @@ async def project_semantic_scope(
         dataset,
         graph,
         target_version,
+        target_change_id,
     )
 
     logger.info(
