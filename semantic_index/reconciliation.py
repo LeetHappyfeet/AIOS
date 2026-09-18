@@ -39,14 +39,14 @@ def _json_object(value: Any) -> dict[str, Any]:
         raise ValueError("expected object-like metadata") from exc
 
 
-RECONCILER_VERSION = "semantic-reconciliation-v1"
+RECONCILER_VERSION = "semantic-reconciliation-v2"
+EVENT_RESOLVER_VERSION = "semantic-event-resolver-v1"
 
 PAIR_EDGE_TYPES = {
     "EQUIVALENT": "semantic_equivalent",
     "REFINES": "semantic_refinement",
     "CONTRADICTS": "semantic_contradicts",
     "SAME_TOPIC": "semantic_same_topic",
-    "SAME_EVENT": "semantic_same_event",
 }
 
 PIVOT_NODE_TYPES = {
@@ -171,7 +171,9 @@ async def _preferred_scope_nodes(
             COALESCE(a.world_id,b.world_id) AS world_id,
             COALESCE(a.source_id,b.source_id) AS source_id,
             a.topology_node_id AS a_node,
-            b.topology_node_id AS b_node
+            b.topology_node_id AS b_node,
+            a.proposition_id AS proposition_a,
+            b.proposition_id AS proposition_b
         FROM aios.semantic_topology_node a
         JOIN aios.semantic_topology_node b
           ON b.scope_key=a.scope_key
@@ -212,6 +214,240 @@ async def _safe_reproject_scope(
         return None
 
 
+async def _semantic_event_for_proposition(db: Database, proposition_id: UUID) -> UUID | None:
+    row = await db.fetchrow(
+        """
+        SELECT semantic_event_id
+        FROM aios.semantic_event_membership
+        WHERE proposition_id=$1 AND status='active'
+        ORDER BY created_at
+        LIMIT 1
+        """,
+        proposition_id,
+    )
+    return row["semantic_event_id"] if row else None
+
+
+async def _semantic_event_evidence(db: Database, proposition_id: UUID) -> dict[str, Any]:
+    row = await db.fetchrow(
+        """
+        SELECT observation_id, claim_id, timeline_id, dag_node_id
+        FROM aios.observation
+        WHERE proposition_id=$1
+        ORDER BY observed_at
+        LIMIT 1
+        """,
+        proposition_id,
+    )
+    return dict(row) if row else {}
+
+
+async def _attach_semantic_event_member(
+    db: Database,
+    *,
+    semantic_event_id: UUID,
+    proposition_id: UUID,
+    confidence: float,
+    source_id: str,
+) -> None:
+    evidence = await _semantic_event_evidence(db, proposition_id)
+    await db.execute(
+        """
+        INSERT INTO aios.semantic_event_membership (
+            semantic_event_id, proposition_id, observation_id, claim_id,
+            membership_confidence, assigned_by, evidence_source_id,
+            status, meta, created_at, updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'active','{}'::jsonb,now(),now())
+        ON CONFLICT (semantic_event_id, proposition_id) DO UPDATE
+        SET membership_confidence=GREATEST(
+                aios.semantic_event_membership.membership_confidence,
+                EXCLUDED.membership_confidence
+            ),
+            evidence_source_id=EXCLUDED.evidence_source_id,
+            assigned_by=EXCLUDED.assigned_by,
+            status='active',
+            updated_at=now()
+        """,
+        semantic_event_id,
+        proposition_id,
+        evidence.get("observation_id"),
+        evidence.get("claim_id"),
+        confidence,
+        EVENT_RESOLVER_VERSION,
+        source_id,
+    )
+
+
+async def _resolve_semantic_event_pair(
+    db: Database,
+    *,
+    proposition_a: UUID,
+    proposition_b: UUID,
+    confidence: float,
+    source_id: str,
+    world_id: UUID | None,
+    evidence: dict[str, Any],
+) -> tuple[UUID | None, str]:
+    """Resolve accepted SAME_EVENT evidence without assuming transitive identity."""
+    event_a = await _semantic_event_for_proposition(db, proposition_a)
+    event_b = await _semantic_event_for_proposition(db, proposition_b)
+
+    if event_a is not None and event_b is not None:
+        if event_a == event_b:
+            return event_a, "existing_semantic_event"
+
+        left, right = sorted((event_a, event_b), key=str)
+        await db.execute(
+            """
+            INSERT INTO aios.semantic_event_merge_candidate (
+                event_a_id, event_b_id, source_id, confidence, status,
+                resolver_version, evidence, created_at, updated_at
+            )
+            VALUES ($1,$2,$3,$4,'candidate',$5,$6::jsonb,now(),now())
+            ON CONFLICT (event_a_id, event_b_id, source_id) DO UPDATE
+            SET confidence=GREATEST(
+                    aios.semantic_event_merge_candidate.confidence,
+                    EXCLUDED.confidence
+                ),
+                evidence=aios.semantic_event_merge_candidate.evidence || EXCLUDED.evidence,
+                updated_at=now()
+            """,
+            left, right, source_id, confidence, EVENT_RESOLVER_VERSION,
+            json.dumps(evidence),
+        )
+        return None, "semantic_event_merge_candidate"
+
+    semantic_event_id = event_a or event_b
+    created = semantic_event_id is None
+    if created:
+        ev_a = await _semantic_event_evidence(db, proposition_a)
+        ev_b = await _semantic_event_evidence(db, proposition_b)
+        shared_timeline = (
+            ev_a.get("timeline_id")
+            if ev_a.get("timeline_id") is not None
+            and ev_a.get("timeline_id") == ev_b.get("timeline_id")
+            else None
+        )
+        shared_dag = (
+            ev_a.get("dag_node_id")
+            if ev_a.get("dag_node_id") is not None
+            and ev_a.get("dag_node_id") == ev_b.get("dag_node_id")
+            else None
+        )
+        left, right = sorted((str(proposition_a), str(proposition_b)))
+        event_key = f"same-event:{NEIGHBOR_CLASSIFIER_VERSION}:{left}:{right}"
+        row = await db.fetchrow(
+            """
+            INSERT INTO aios.semantic_event (
+                event_key, world_id, timeline_id, dag_node_id, status,
+                confidence, resolver_version, meta, created_at, updated_at
+            )
+            VALUES ($1,$2,$3,$4,'active',$5,$6,$7::jsonb,now(),now())
+            ON CONFLICT (event_key) DO UPDATE
+            SET confidence=GREATEST(aios.semantic_event.confidence, EXCLUDED.confidence),
+                updated_at=now()
+            RETURNING semantic_event_id
+            """,
+            event_key, world_id, shared_timeline, shared_dag, confidence,
+            EVENT_RESOLVER_VERSION,
+            json.dumps({
+                "source": "semantic_neighbor_relation",
+                "classifier_version": NEIGHBOR_CLASSIFIER_VERSION,
+            }),
+        )
+        semantic_event_id = row["semantic_event_id"]
+
+    await _attach_semantic_event_member(
+        db, semantic_event_id=semantic_event_id, proposition_id=proposition_a,
+        confidence=confidence, source_id=source_id,
+    )
+    await _attach_semantic_event_member(
+        db, semantic_event_id=semantic_event_id, proposition_id=proposition_b,
+        confidence=confidence, source_id=source_id,
+    )
+    await db.execute(
+        """
+        UPDATE aios.semantic_event
+        SET confidence=GREATEST(confidence,$2), updated_at=now()
+        WHERE semantic_event_id=$1
+        """,
+        semantic_event_id, confidence,
+    )
+    return semantic_event_id, (
+        "create_semantic_event" if created else "attach_semantic_event_member"
+    )
+
+
+async def _materialize_semantic_event(
+    db: Database,
+    *,
+    semantic_event_id: UUID,
+    scope: dict[str, Any],
+    confidence: float,
+    source_id: str,
+) -> UUID:
+    event = await db.fetchrow(
+        """
+        SELECT timeline_id, dag_node_id
+        FROM aios.semantic_event
+        WHERE semantic_event_id=$1
+        """,
+        semantic_event_id,
+    )
+    decision = _decision_from_row(scope)
+    event_node = await _upsert_node(
+        db,
+        decision=decision,
+        node_type="EVENT",
+        node_key=f"semantic_event:{semantic_event_id}:{_scope_partition(scope)}",
+        label="SEMANTIC_EVENT",
+        timeline_id=event["timeline_id"] if event else None,
+        dag_node_id=event["dag_node_id"] if event else None,
+        proposition_id=None,
+        claim_id=None,
+        assertion_id=None,
+        significance=max(0.5, confidence),
+        meta={
+            "semantic_role": "canonical_event_identity",
+            "semantic_event_id": str(semantic_event_id),
+            "reconciler_version": RECONCILER_VERSION,
+            "resolver_version": EVENT_RESOLVER_VERSION,
+        },
+    )
+
+    structural_parent = await _semantic_pivot_parent(db, scope=scope)
+    if structural_parent is not None:
+        await _upsert_edge(
+            db, decision=decision, parent=structural_parent, child=event_node,
+            edge_type="contains_semantic_event",
+            significance=max(0.5, confidence),
+            inference_source="semantic_event_resolver",
+            inference_status="accepted",
+            inference_confidence=confidence,
+            meta={"semantic_event_id": str(semantic_event_id)},
+        )
+
+    for proposition_id, member_node in (
+        (scope["proposition_a"], scope["a_node"]),
+        (scope["proposition_b"], scope["b_node"]),
+    ):
+        await _upsert_edge(
+            db, decision=decision, parent=event_node, child=member_node,
+            edge_type="semantic_event_evidence",
+            significance=max(0.5, confidence),
+            inference_source="semantic_event_resolver",
+            inference_status="accepted",
+            inference_confidence=confidence,
+            meta={
+                "semantic_event_id": str(semantic_event_id),
+                "proposition_id": str(proposition_id),
+                "source_id": source_id,
+            },
+        )
+    return event_node
+
+
 async def reconcile_neighbor_relations_once(
     db: Database,
     fuseki: FusekiClient,
@@ -230,8 +466,32 @@ async def reconcile_neighbor_relations_once(
         WHERE r.embedding_version=$1
           AND r.classifier_version=$2
           AND r.status='candidate'
-          AND r.confidence >= $3
+          AND (
+              (r.relation <> 'SAME_EVENT' AND r.confidence >= $3)
+              OR (
+                  r.relation = 'SAME_EVENT'
+                  AND r.features->>'verifier_version' = 'semantic-relation-verifier-v6'
+                  AND r.features->>'event_structure_support' = 'true'
+                  AND r.features->>'occurrence_context' = 'true'
+                  AND r.features->>'worlds_compatible' = 'true'
+                  AND r.features->>'timelines_compatible' = 'true'
+                  AND COALESCE(r.features->>'role_reversal','false') = 'false'
+                  AND COALESCE(r.features->>'semantic_conflict','false') = 'false'
+                  AND r.features->'adversarial_verification'->>'status' = 'verified'
+                  AND r.features->'adversarial_verification'->>'winner_key' = 'SAME_EVENT'
+                  AND r.features->'adversarial_verification'->>'proposed_key' = 'SAME_EVENT'
+              )
+          )
           AND r.relation = ANY($4::text[])
+          AND EXISTS (
+              SELECT 1
+              FROM aios.semantic_validation_decision d
+              WHERE d.decision_type IN ('proposition_relation','event_identity')
+                AND d.decision_key=(r.proposition_id::text || ':' || r.neighbor_proposition_id::text)
+                AND d.selected_value=r.relation
+                AND d.status='verified'
+                AND d.resolver_version=r.features->>'verifier_version'
+          )
           AND EXISTS (
               SELECT 1
               FROM aios.semantic_topology_node a
@@ -253,7 +513,7 @@ async def reconcile_neighbor_relations_once(
         cfg.embedding_version,
         NEIGHBOR_CLASSIFIER_VERSION,
         cfg.reconcile_relation_min_confidence,
-        list(PAIR_EDGE_TYPES),
+        list(PAIR_EDGE_TYPES) + ["SAME_EVENT"],
         cfg.batch_size,
     )
     written = 0
@@ -281,42 +541,85 @@ async def reconcile_neighbor_relations_once(
             if exists:
                 continue
 
-            decision = _decision_from_row(scope)
-            parent = scope["a_node"]
-            child = scope["b_node"]
-            if str(parent) > str(child) and row["relation"] != "REFINES":
-                parent, child = child, parent
+            if row["relation"] == "SAME_EVENT":
+                semantic_event_id, action = await _resolve_semantic_event_pair(
+                    db,
+                    proposition_a=row["proposition_id"],
+                    proposition_b=row["neighbor_proposition_id"],
+                    confidence=float(row["confidence"]),
+                    source_id=source_id,
+                    world_id=scope.get("world_id"),
+                    evidence={
+                        "features": _json_object(row["features"]),
+                        "classifier_evidence": _json_object(row["evidence"]),
+                    },
+                )
+                event_node = None
+                if semantic_event_id is not None:
+                    event_node = await _materialize_semantic_event(
+                        db,
+                        semantic_event_id=semantic_event_id,
+                        scope=scope,
+                        confidence=float(row["confidence"]),
+                        source_id=source_id,
+                    )
+                await _record_receipt(
+                    db,
+                    receipt_key=receipt_key,
+                    source_kind="neighbor_relation",
+                    source_id=source_id,
+                    scope_key=scope["scope_key"],
+                    scope_partition_key=partition_key,
+                    action=action,
+                    topology_node_id=event_node,
+                    classifier_version=NEIGHBOR_CLASSIFIER_VERSION,
+                    confidence=float(row["confidence"]),
+                    status=("candidate" if semantic_event_id is None else "accepted"),
+                    meta={
+                        "relation": "SAME_EVENT",
+                        "semantic_event_id": (
+                            str(semantic_event_id) if semantic_event_id else None
+                        ),
+                        "resolver_version": EVENT_RESOLVER_VERSION,
+                    },
+                )
+            else:
+                decision = _decision_from_row(scope)
+                parent = scope["a_node"]
+                child = scope["b_node"]
+                if str(parent) > str(child) and row["relation"] != "REFINES":
+                    parent, child = child, parent
 
-            edge_id = await _upsert_edge(
-                db,
-                decision=decision,
-                parent=parent,
-                child=child,
-                edge_type=PAIR_EDGE_TYPES[row["relation"]],
-                significance=max(0.5, float(row["confidence"])),
-                inference_source="semantic_vector_classifier",
-                inference_status="accepted",
-                inference_confidence=float(row["confidence"]),
-                meta={
-                    "reconciler_version": RECONCILER_VERSION,
-                    "classifier_version": NEIGHBOR_CLASSIFIER_VERSION,
-                    "relation": row["relation"],
-                    "features": _json_object(row["features"]),
-                },
-            )
-            await _record_receipt(
-                db,
-                receipt_key=receipt_key,
-                source_kind="neighbor_relation",
-                source_id=source_id,
-                scope_key=scope["scope_key"],
-                scope_partition_key=partition_key,
-                action=PAIR_EDGE_TYPES[row["relation"]],
-                topology_edge_id=edge_id,
-                classifier_version=NEIGHBOR_CLASSIFIER_VERSION,
-                confidence=float(row["confidence"]),
-                meta={"relation": row["relation"]},
-            )
+                edge_id = await _upsert_edge(
+                    db,
+                    decision=decision,
+                    parent=parent,
+                    child=child,
+                    edge_type=PAIR_EDGE_TYPES[row["relation"]],
+                    significance=max(0.5, float(row["confidence"])),
+                    inference_source="semantic_vector_classifier",
+                    inference_status="accepted",
+                    inference_confidence=float(row["confidence"]),
+                    meta={
+                        "reconciler_version": RECONCILER_VERSION,
+                        "classifier_version": NEIGHBOR_CLASSIFIER_VERSION,
+                        "relation": row["relation"],
+                        "features": _json_object(row["features"]),
+                    },
+                )
+                await _record_receipt(
+                    db,
+                    receipt_key=receipt_key,
+                    source_kind="neighbor_relation",
+                    source_id=source_id,
+                    scope_key=scope["scope_key"],
+                    scope_partition_key=partition_key,
+                    action=PAIR_EDGE_TYPES[row["relation"]],
+                    topology_edge_id=edge_id,
+                    classifier_version=NEIGHBOR_CLASSIFIER_VERSION,
+                    confidence=float(row["confidence"]),
+                    meta={"relation": row["relation"]},
+                )
             affected_scopes.add(scope["scope_key"])
             written += 1
 
@@ -422,6 +725,37 @@ async def _semantic_pivot_parent(
     return row["topology_node_id"] if row else None
 
 
+async def _retract_superseded_cluster_topology(
+    db: Database,
+) -> set[str]:
+    """Remove materialized cluster pivots whose source cluster is no longer current.
+
+    Clustering runs are historical snapshots, but semantic topology represents the
+    current accepted structure.  A superseded cluster candidate must therefore
+    stop contributing its pivot and membership/boundary edges.  Deleting the
+    derived pivot is sufficient because topology edges reference nodes with
+    ON DELETE CASCADE; reconciliation receipts retain history via ON DELETE SET NULL.
+    """
+    rows = await db.fetch(
+        """
+        DELETE FROM aios.semantic_topology_node n
+        USING aios.semantic_reconciliation_receipt r,
+              aios.semantic_cluster_classification cc,
+              aios.semantic_cluster_candidate c
+        WHERE r.source_kind='cluster'
+          AND r.topology_node_id=n.topology_node_id
+          AND cc.classification_id::text=r.source_id
+          AND c.cluster_id=cc.cluster_id
+          AND c.status='stale'
+          AND n.node_key LIKE 'cluster:%'
+          AND n.meta->>'reconciler_version'=$1
+        RETURNING n.scope_key
+        """,
+        RECONCILER_VERSION,
+    )
+    return {str(row["scope_key"]) for row in rows}
+
+
 async def reconcile_clusters_once(
     db: Database,
     fuseki: FusekiClient,
@@ -453,7 +787,7 @@ async def reconcile_clusters_once(
         cfg.batch_size,
     )
     written = 0
-    affected_scopes: set[str] = set()
+    affected_scopes = await _retract_superseded_cluster_topology(db)
 
     for row in rows:
         scopes = await _cluster_scope_rows(db, cluster_id=row["cluster_id"])

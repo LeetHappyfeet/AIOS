@@ -10,7 +10,7 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
 from aios_app.hud.profile import get_profile as get_hud_profile
-from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
@@ -78,8 +78,8 @@ class HUDAssembler:
 
     Historical/source eligibility, semantic retrieval, flat-knowledge fallback,
     deduplication, and semantic admission live in CognitiveContextService.
-    This layer performs attention scoring, presentation shaping, token budgeting,
-    and deterministic frame assembly only.
+    This layer performs presentation shaping, token budgeting, and deterministic
+    frame assembly only. Durable recall selection is cognition-owned.
     """
 
     def __init__(
@@ -120,25 +120,33 @@ class HUDAssembler:
         effective_recent_limit = (
             hud_profile.recent_event_limit if recent_limit is None else recent_limit
         )
+        cognitive_recent_limit = self.cognition.retrieval_policy.recent_context_limit
 
         attention = await self.cognition.resolve_attention_inputs(
             context,
             raw_state,
             plugin_snapshot,
-            recent_limit=effective_recent_limit,
+            recent_limit=cognitive_recent_limit,
         )
-        scorer = HUDRelevanceScorer(
+        cognitive_snapshot = await self.cognition.resolve_knowledge(
+            context,
+            None,
+            attention,
+        )
+        # Presentation-only scene/entity ranking still uses the cognition-owned
+        # scorer; durable memory selection has already completed above.
+        scorer = CognitiveRelevanceScorer(
             context,
             focus_text=attention.retrieval_focus_text,
             goals=attention.goals,
         )
-        cognitive_snapshot = await self.cognition.resolve_knowledge(
-            context,
-            scorer,
-            attention,
-            hud_profile,
-        )
         knowledge = list(cognitive_snapshot.knowledge)
+        presentation_knowledge = (
+            list(cognitive_snapshot.recalled_memories)
+            + list(cognitive_snapshot.beliefs)
+            + list(cognitive_snapshot.goals)
+            + list(cognitive_snapshot.rules)
+        )
 
         section_caps = {
             "scene": hud_profile.scene_budget,
@@ -178,10 +186,10 @@ class HUDAssembler:
         )
 
         if not hud_profile.include_conflicts:
-            for item in knowledge:
+            for item in presentation_knowledge:
                 item["conflicts"] = []
         if not hud_profile.include_provenance:
-            for item in knowledge:
+            for item in presentation_knowledge:
                 for key in (
                     "source_entity_id",
                     "source_world_id",
@@ -209,7 +217,7 @@ class HUDAssembler:
                         for entry in item["world_context"]
                     ]
         if not hud_profile.include_confidence:
-            for item in knowledge:
+            for item in presentation_knowledge:
                 for key in (
                     "confidence",
                     "base_confidence",
@@ -223,25 +231,10 @@ class HUDAssembler:
                     item.pop(key, None)
 
         rules = await self._rules(context, scorer)
-        recent_events = self._recent_events(attention.recent_newest, scorer)
-
-        memories: list[dict[str, Any]] = []
-        beliefs: list[dict[str, Any]] = []
-        semantic_goals: list[dict[str, Any]] = []
-        semantic_rules: list[dict[str, Any]] = []
-        semantic_events: list[dict[str, Any]] = []
-        for item in knowledge:
-            kind = str(item.get("claim_kind") or "BELIEF").upper()
-            if kind == "MEMORY":
-                memories.append(item)
-            elif kind == "GOAL":
-                semantic_goals.append(item)
-            elif kind == "RULE":
-                semantic_rules.append(item)
-            elif kind == "EVENT":
-                semantic_events.append(item)
-            else:
-                beliefs.append(item)
+        memories = list(cognitive_snapshot.recalled_memories)
+        beliefs = list(cognitive_snapshot.beliefs)
+        semantic_goals = list(cognitive_snapshot.goals)
+        semantic_rules = list(cognitive_snapshot.rules)
 
         goal_items = [
             {"text": str(goal), "source": "runtime", "tier": 0}
@@ -251,7 +244,12 @@ class HUDAssembler:
             {**item, "source": "character_knowledge"}
             for item in semantic_rules
         ]
-        event_items = list(reversed(recent_events)) + semantic_events
+        # Historical semantic EVENTs are recalled memories. Only bounded source/
+        # runtime chronology belongs in RECENT EVENTS.
+        event_items = self._recent_events(
+            cognitive_snapshot.current_events[: max(0, int(effective_recent_limit))],
+            scorer,
+        )
 
         memories = _trim_to_budget(
             memories, section_caps["memories"], lambda x: x.get("text", "")
@@ -357,8 +355,8 @@ class HUDAssembler:
                 "topology_partial_fallback": cognitive_snapshot.topology_partial_fallback,
                 "anchor_retrieval": cognitive_snapshot.anchored_knowledge_count > 0,
                 "anchor_partial_fallback": (
-                    bool(knowledge)
-                    and cognitive_snapshot.anchored_knowledge_count < len(knowledge)
+                    bool(presentation_knowledge)
+                    and cognitive_snapshot.anchored_knowledge_count < len(presentation_knowledge)
                 ),
                 "anchor_count": cognitive_snapshot.anchored_knowledge_count,
                 "anchor_invisible_count": cognitive_snapshot.invisible_anchor_count,
@@ -371,6 +369,11 @@ class HUDAssembler:
                     "suppressed": sum(suppressed.values()),
                     "suppressed_by_reason": suppressed,
                     "stage": "pre_hud",
+                },
+                "recall_selection": {
+                    "selected": len(knowledge),
+                    "suppressed_by_reason": cognitive_snapshot.recall_suppressed,
+                    "stage": "cognition",
                 },
                 "focus_text": attention.focus_text,
                 "plugin_focus_text": attention.plugin_focus_text,

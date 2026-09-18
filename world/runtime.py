@@ -15,6 +15,7 @@ from aios_app.dag import get_or_create_timeline, add_node_and_edge
 from aios_app.hud.frame import HUDAssembler
 from aios_app.hud.render_text import render_hud_text
 from aios_app.hud.singleflight import AsyncSingleFlight
+from aios_app.epistemic.belief_reconciliation import reconcile_instance_beliefs
 from aios_app.hud.readiness import (
     ensure_readiness_row,
     enqueue_live_turn_work,
@@ -208,7 +209,8 @@ class WorldRuntimeService:
             world_id,
             user_name,
         )
-        if not instance:
+        instance_created = instance is None
+        if instance_created:
             instance = await self.db.execute_returning_row(
                 """
                 INSERT INTO aios.character_instance (
@@ -222,6 +224,12 @@ class WorldRuntimeService:
                 user_name,
             )
         instance_id = instance["instance_id"]
+
+        # A new session instance has no local belief rows yet. Materialize its
+        # current beliefs from the character's configured continuity scope
+        # before HUD retrieval so established memory is available immediately.
+        if instance_created:
+            await reconcile_instance_beliefs(self.db, instance_id=instance_id)
 
         timeline_id = await get_or_create_timeline(
             self.db,

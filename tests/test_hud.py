@@ -3,6 +3,7 @@ from uuid import uuid4
 from aios_app.hud.context import HUDContext
 from aios_app.hud.relevance import HUDRelevanceScorer
 from aios_app.hud.render_text import render_hud_text
+from aios_app.epistemic.retrieval import TopologyRetriever
 
 
 def _context():
@@ -145,3 +146,51 @@ def test_text_renderer_withholds_invisible_world_neighbors():
 
     assert "anchored context outside visible world; neighbors withheld" in text
     assert "secret sibling location" not in text
+
+
+def test_canonical_event_collapse_returns_one_recall_candidate():
+    event_id = uuid4()
+    prop_a = uuid4()
+    prop_b = uuid4()
+    dag_node_id = uuid4()
+    items = [
+        {
+            "proposition_id": prop_a,
+            "claim_kind": "EVENT",
+            "text": "shego_001 | set | the alarm",
+            "relevance": {"total": 2.0},
+        },
+        {
+            "proposition_id": prop_b,
+            "claim_kind": "EVENT",
+            "text": "shego_001 | set | three alarms",
+            "relevance": {"total": 2.0},
+        },
+    ]
+    event = {
+        "semantic_event_id": event_id,
+        "event_confidence": 0.66,
+        "dag_node_id": dag_node_id,
+        "member_proposition_ids": [prop_a, prop_b],
+    }
+    collapsed = TopologyRetriever._collapse_canonical_events(
+        items, {prop_a: event, prop_b: event}
+    )
+
+    assert len(collapsed) == 1
+    assert collapsed[0]["semantic_event_id"] == event_id
+    assert collapsed[0]["text"] == "shego_001 | set | three alarms"
+    assert collapsed[0]["semantic_event_members"] == [prop_a, prop_b]
+    assert collapsed[0]["retrieval_reason"] == "canonical_semantic_event"
+
+
+def test_canonical_event_collapse_leaves_unconsolidated_event_available():
+    prop_id = uuid4()
+    item = {
+        "proposition_id": prop_id,
+        "claim_kind": "EVENT",
+        "text": "alex | open | the door",
+        "relevance": {"total": 1.5},
+    }
+
+    assert TopologyRetriever._collapse_canonical_events([item], {}) == [item]

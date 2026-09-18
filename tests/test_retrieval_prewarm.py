@@ -9,6 +9,7 @@ from aios_app.epistemic.cognitive_context import (
     CognitiveAttentionInputs,
     CognitiveContextService,
 )
+from aios_app.epistemic.retrieval_policy import CognitiveRetrievalPolicy
 
 
 class _FakeRetriever:
@@ -78,11 +79,16 @@ def _attention():
     )
 
 
-def _profile():
-    return SimpleNamespace(
-        entity_hops=2,
+def _policy():
+    return CognitiveRetrievalPolicy(
+        memory_hops=3,
+        belief_hops=2,
+        event_hops=2,
+        goal_hops=1,
+        rule_hops=1,
         semantic_retrieval_limit=60,
         deep_memory_limit=20,
+        recent_context_limit=12,
     )
 
 
@@ -97,13 +103,13 @@ async def test_prepare_retrieval_reuses_exact_source_head_cache():
         context,
         _Scorer(),
         _attention(),
-        _profile(),
+        _policy(),
     )
     second = await service.prepare_retrieval(
         context,
         _Scorer(),
         _attention(),
-        _profile(),
+        _policy(),
     )
 
     assert first is second
@@ -123,13 +129,13 @@ async def test_prepare_retrieval_does_not_cross_source_heads():
         first_context,
         _Scorer(),
         _attention(),
-        _profile(),
+        _policy(),
     )
     await service.prepare_retrieval(
         second_context,
         _Scorer(),
         _attention(),
-        _profile(),
+        _policy(),
     )
 
     assert fake.calls == [

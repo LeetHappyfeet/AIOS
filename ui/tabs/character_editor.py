@@ -40,6 +40,38 @@ async def _load_character(character_id: str):
     )
 
 
+async def _load_memory_continuity(character_id: str) -> str:
+    value = await db.fetchval(
+        """
+        SELECT COALESCE(
+            (SELECT memory_continuity
+             FROM aios.character_epistemic_profile
+             WHERE character_id=$1),
+            'character'
+        )
+        """,
+        character_id,
+    )
+    return str(value or "character")
+
+
+async def _save_memory_continuity(character_id: str, memory_continuity: str) -> None:
+    mode = str(memory_continuity or "character").strip().lower()
+    if mode not in {"isolated", "user", "character"}:
+        raise ValueError(f"Unsupported memory continuity mode '{mode}'")
+    await db.execute(
+        """
+        INSERT INTO aios.character_epistemic_profile (character_id, memory_continuity)
+        VALUES ($1,$2)
+        ON CONFLICT (character_id) DO UPDATE
+        SET memory_continuity=EXCLUDED.memory_continuity,
+            updated_at=now()
+        """,
+        character_id,
+        mode,
+    )
+
+
 async def _save_character(character_id: str, values: dict[str, Any]) -> None:
     row = await db.fetchrow(
         "SELECT 1 FROM aios.character_identity WHERE character_id=$1",
@@ -278,6 +310,17 @@ def render():
                     is_canonical = gr.Checkbox(label="Canonical identity", value=True)
                     is_mutable = gr.Checkbox(label="Identity mutable")
 
+                memory_continuity = gr.Dropdown(
+                    label="Memory continuity",
+                    choices=["character", "user", "isolated"],
+                    value="character",
+                    info=(
+                        "character: persistent across this character_id; "
+                        "user: persistent only for the same runtime user; "
+                        "isolated: current experiential lineage only"
+                    ),
+                )
+
                 save_identity = gr.Button("Save identity")
 
             with gr.Tab("HUD / Memory Profile"):
@@ -384,7 +427,7 @@ def render():
             species, gender, age_descriptor, visual_summary, primary_role,
             archetype, default_tone, speech_style, content_rating,
             moral_constraints, process_ontology, is_canonical, is_mutable,
-            profile_name, profile_description, token_budget, recent_event_limit,
+            memory_continuity, profile_name, profile_description, token_budget, recent_event_limit,
             memory_budget, belief_budget, relationship_budget, scene_budget,
             inventory_budget, rules_budget, goals_budget, entity_hops,
             semantic_retrieval_limit, deep_memory_limit,
@@ -402,6 +445,7 @@ def render():
                 raise gr.Error(f"Character '{cid}' not found")
 
             profile = run_async(get_profile(db, character_id=cid))
+            continuity = run_async(_load_memory_continuity(cid))
             runtime = run_async(_runtime_rows(cid))
             speakers = run_async(_speaker_rows(cid, int(diag_limit or 30)))
 
@@ -424,6 +468,7 @@ def render():
                 bool(row["process_ontology"]),
                 bool(row["is_canonical"]),
                 bool(row["is_mutable"]),
+                continuity,
             ]
             return identity + _profile_values(profile) + [
                 runtime,
@@ -441,6 +486,7 @@ def render():
             cid, canonical, display, entity, canon_value, franchise_value,
             species_value, gender_value, age_value, visual, role, archetype_value,
             tones, speech, rating, constraints, ontology, canonical_flag, mutable,
+            continuity,
         ):
             if not cid:
                 raise gr.Error("character_id is required")
@@ -468,7 +514,11 @@ def render():
                 "is_mutable": mutable,
             }
             run_async(_save_character(cid, values))
-            return f"Saved identity parameters for **{cid}**."
+            run_async(_save_memory_continuity(cid, continuity))
+            return (
+                f"Saved identity parameters for **{cid}** "
+                f"with memory continuity **{continuity}**."
+            )
 
         save_identity.click(
             fn=save_identity_click,
@@ -477,7 +527,7 @@ def render():
                 canon, franchise, species, gender, age_descriptor,
                 visual_summary, primary_role, archetype, default_tone,
                 speech_style, content_rating, moral_constraints,
-                process_ontology, is_canonical, is_mutable,
+                process_ontology, is_canonical, is_mutable, memory_continuity,
             ],
             outputs=status,
         )

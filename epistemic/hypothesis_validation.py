@@ -235,16 +235,12 @@ async def apply_local_revalidation_invalidations(
                 skey,
             )
         elif dtype in {"proposition_relation", "event_identity"}:
-            parts = skey.split(":", 1)
-            if len(parts) == 2:
-                await db.execute(
-                    """
-                    DELETE FROM aios.semantic_neighbor_relation
-                    WHERE (proposition_id::text=$1 AND neighbor_proposition_id::text=$2)
-                       OR (proposition_id::text=$2 AND neighbor_proposition_id::text=$1)
-                    """,
-                    parts[0], parts[1],
-                )
+            # The classifier receipt is durable. Validation staleness means the
+            # interpretation must be re-evaluated under current evidence; it
+            # does not mean classifier version X never evaluated this pair.
+            # Keeping the relation row preserves the classifier fixpoint and
+            # prevents validation churn from recreating classifier work.
+            continue
         elif dtype == "epistemic_promotion":
             await db.execute(
                 """

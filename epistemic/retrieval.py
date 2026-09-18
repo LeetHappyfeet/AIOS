@@ -9,7 +9,7 @@ from typing import Any, Iterable, Optional
 
 from aios_app.db import Database
 from aios_app.hud.context import HUDContext
-from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.semantic_index.query import SemanticQueryService
 
@@ -146,7 +146,7 @@ topology_props AS (
     WHERE n.proposition_id IS NOT NULL
     GROUP BY n.proposition_id
 ),
-owned AS (
+belief_owned AS (
     SELECT DISTINCT ON (ck.proposition_id)
         ck.instance_id,
         ck.proposition_id,
@@ -183,6 +183,53 @@ owned AS (
     ORDER BY ck.proposition_id,
              array_position($2::uuid[], ck.instance_id),
              ck.updated_at DESC
+),
+episodic_owned AS (
+    -- EVENT/MEMORY evidence is experiential knowledge, not a belief winner.
+    -- Read it from admitted character acquisition rather than requiring the
+    -- character_belief_state projection to resolve positive.
+    SELECT DISTINCT ON (cpk.proposition_id)
+        cpk.instance_id,
+        cpk.proposition_id,
+        p.atom_id,
+        cpk.epistemic_status,
+        cpk.confidence,
+        cpk.acquisition_mode,
+        cpk.source_entity_id,
+        cpk.first_node_id,
+        cpk.last_node_id,
+        cpk.updated_at,
+        cpk.base_confidence,
+        cpk.attention_weight,
+        cpk.trust_weight,
+        cpk.compatibility_weight,
+        cpk.retention_weight,
+        cpk.salience_weight,
+        cpk.effective_confidence,
+        array_position($2::uuid[], cpk.instance_id) AS instance_depth
+    FROM aios.character_proposition_knowledge cpk
+    JOIN aios.proposition p ON p.proposition_id=cpk.proposition_id
+    JOIN aios.knowledge_acquisition_event kae
+      ON kae.instance_id=cpk.instance_id
+     AND kae.proposition_id=cpk.proposition_id
+    JOIN aios.observation obs ON obs.proposition_id=cpk.proposition_id
+    JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
+    LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+    LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+    LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+    LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+    LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+    WHERE cpk.instance_id = ANY($2::uuid[])
+      AND ccr.claim_kind IN ('EVENT','MEMORY')
+      AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+    ORDER BY cpk.proposition_id,
+             array_position($2::uuid[], cpk.instance_id),
+             cpk.updated_at DESC
+),
+owned AS (
+    SELECT * FROM belief_owned
+    UNION
+    SELECT * FROM episodic_owned
 ),
 classified AS (
     SELECT
@@ -278,7 +325,7 @@ class TopologyRetriever:
                 self.semantic.search_epistemic,
                 query_text,
                 character_id=context.character_id,
-                instance_ids=context.lineage_instance_ids,
+                instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
             )
             proposition_ids: list[str] = []
             seen: set[str] = set()
@@ -319,7 +366,7 @@ class TopologyRetriever:
         ).strip()
         if not query_text:
             return []
-        lineage = tuple(str(value) for value in context.lineage_instance_ids)
+        lineage = tuple(str(value) for value in (context.cognitive_instance_ids or context.lineage_instance_ids))
         cache_key = (str(context.character_id), query_text, lineage)
         cached = self._semantic_seed_cache.get(cache_key)
         if cached is not None:
@@ -343,6 +390,88 @@ class TopologyRetriever:
                 SEMANTIC_SEED_WAIT_SECONDS * 1000.0,
             )
             return []
+
+    async def _canonical_event_memberships(
+        self, proposition_ids: list[Any]
+    ) -> dict[Any, dict[str, Any]]:
+        """Map retrieved EVENT propositions onto their canonical occurrence.
+
+        Pairwise SAME_EVENT evidence stays below this boundary. Retrieval exposes
+        one recall candidate per canonical semantic event while retaining member
+        proposition ids as provenance.
+        """
+        if not proposition_ids:
+            return {}
+        rows = await self.db.fetch(
+            """
+            SELECT
+                sem.semantic_event_id,
+                sem.confidence AS event_confidence,
+                sem.world_id,
+                sem.timeline_id,
+                sem.dag_node_id,
+                m.proposition_id,
+                (
+                    SELECT array_agg(m2.proposition_id ORDER BY m2.proposition_id)
+                    FROM aios.semantic_event_membership m2
+                    WHERE m2.semantic_event_id=sem.semantic_event_id
+                      AND m2.status='active'
+                ) AS member_proposition_ids
+            FROM aios.semantic_event_membership m
+            JOIN aios.semantic_event sem
+              ON sem.semantic_event_id=m.semantic_event_id
+             AND sem.status='active'
+            WHERE m.status='active'
+              AND m.proposition_id = ANY($1::uuid[])
+            """,
+            proposition_ids,
+        )
+        return {
+            row["proposition_id"]: {
+                "semantic_event_id": row["semantic_event_id"],
+                "event_confidence": row["event_confidence"],
+                "world_id": row["world_id"],
+                "timeline_id": row["timeline_id"],
+                "dag_node_id": row["dag_node_id"],
+                "member_proposition_ids": list(row["member_proposition_ids"] or []),
+            }
+            for row in rows
+        }
+
+    @staticmethod
+    def _collapse_canonical_events(
+        items: list[dict[str, Any]],
+        event_by_proposition: dict[Any, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Collapse retrieved descriptions of one occurrence into one memory."""
+        passthrough: list[dict[str, Any]] = []
+        grouped: dict[Any, list[dict[str, Any]]] = {}
+        for item in items:
+            event = event_by_proposition.get(item.get("proposition_id"))
+            if not event or str(item.get("claim_kind") or "").upper() != "EVENT":
+                passthrough.append(item)
+                continue
+            grouped.setdefault(event["semantic_event_id"], []).append(item)
+
+        for event_id, members in grouped.items():
+            # Prefer the strongest retrieval hit; on ties retain the richer
+            # canonical description rather than an underspecified paraphrase.
+            representative = max(
+                members,
+                key=lambda item: (
+                    float((item.get("relevance") or {}).get("total") or 0.0),
+                    len(str(item.get("text") or "")),
+                    str(item.get("proposition_id") or ""),
+                ),
+            )
+            event = event_by_proposition[representative["proposition_id"]]
+            representative["semantic_event_id"] = event_id
+            representative["semantic_event_confidence"] = event["event_confidence"]
+            representative["semantic_event_members"] = event["member_proposition_ids"]
+            representative["semantic_event_dag_node_id"] = event["dag_node_id"]
+            representative["retrieval_reason"] = "canonical_semantic_event"
+            passthrough.append(representative)
+        return passthrough
 
     async def _anchor_context(
         self, context: HUDContext, proposition_ids: list[Any]
@@ -383,7 +512,7 @@ class TopologyRetriever:
             """,
             f"char:{context.character_id}",
             context.character_id,
-            list(context.lineage_instance_ids),
+            list((context.cognitive_instance_ids or context.lineage_instance_ids)),
             proposition_ids,
         )
         anchors: dict[Any, dict[str, Any]] = {}
@@ -458,7 +587,7 @@ class TopologyRetriever:
     async def retrieve_character_knowledge(
         self,
         context: HUDContext,
-        scorer: HUDRelevanceScorer,
+        scorer: CognitiveRelevanceScorer,
         *,
         mode: str,
         focus_text: str = "",
@@ -474,8 +603,8 @@ class TopologyRetriever:
         hops = max(0, min(int(max_hops if max_hops is not None else policy.max_hops), 6))
         row_limit = max(1, min(int(limit if limit is not None else policy.limit), 250))
         scope_key = f"char:{context.character_id}"
-        lineage_ids = list(context.lineage_instance_ids)
-        lineage_keys = [str(value) for value in context.lineage_instance_ids]
+        lineage_ids = list((context.cognitive_instance_ids or context.lineage_instance_ids))
+        lineage_keys = [str(value) for value in (context.cognitive_instance_ids or context.lineage_instance_ids)]
         terms = _focus_terms(focus_text, " ".join(str(goal) for goal in goals))
 
         semantic_started = time.perf_counter()
@@ -565,8 +694,8 @@ class TopologyRetriever:
                 causal_distance=item.get("topology_depth"),
             )
             topology_bonus = (
-                1.5 / (1.0 + float(item.get("topology_cost") or 0.0))
-                + 0.7 * float(item.get("topology_significance") or 0.0)
+                0.45 / (1.0 + float(item.get("topology_cost") or 0.0))
+                + 0.25 * float(item.get("topology_significance") or 0.0)
             )
             item["topology"] = {
                 "depth": int(item.get("topology_depth") or 0),
@@ -625,10 +754,14 @@ class TopologyRetriever:
                 item["conflicts"] = by_proposition.get(item["proposition_id"], [])
         conflict_ms = (time.perf_counter() - conflict_started) * 1000.0
 
+        event_by_proposition = await self._canonical_event_memberships(
+            [item["proposition_id"] for item in result]
+        )
+        result = self._collapse_canonical_events(result, event_by_proposition)
         result.sort(
             key=lambda item: (
-                item["topology"]["historical"],
                 -item["relevance"]["total"],
+                item["topology"]["historical"],
                 item["topology"]["cost"],
             )
         )

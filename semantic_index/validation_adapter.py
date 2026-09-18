@@ -42,6 +42,8 @@ async def record_new_relation_decisions(db, *, limit: int = 500) -> int:
               WHERE d.decision_type IN ('proposition_relation','event_identity')
                 AND d.decision_key=(r.proposition_id::text || ':' || r.neighbor_proposition_id::text)
                 AND d.status <> 'stale'
+                AND d.resolver_version=$1
+                AND d.selected_value=r.relation
           )
         ORDER BY r.created_at
         LIMIT $2

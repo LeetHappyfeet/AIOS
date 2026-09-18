@@ -303,7 +303,7 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
     return [unit for _, _, unit in selected]
 
 
-async def _reconcile_unit(db: Database, *, instance_id: UUID, unit_id: UUID, claim_kind: str, topic_key: str, polarity: int) -> UUID | None:
+async def _reconcile_unit(db: Any, *, instance_id: UUID, unit_id: UUID, claim_kind: str, topic_key: str, polarity: int) -> UUID | None:
     if claim_kind not in {"BELIEF", "STATE", "GOAL", "RELATIONSHIP", "RULE"}:
         return None
     previous = await db.fetchrow(
@@ -331,7 +331,24 @@ async def _reconcile_unit(db: Database, *, instance_id: UUID, unit_id: UUID, cla
 
 
 async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: UUID) -> bool:
-    row = await db.fetchrow(
+    # The same live node can be scheduled concurrently by activation/HUD work.
+    # Serialize the full rebuild so DELETE + ordinal INSERT is one atomic owner.
+    lock_key = f"message-cognition::{instance_id}::{node_id}"
+    async with db.connection() as con:
+        async with con.transaction():
+            await con.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                lock_key,
+            )
+            return await _commit_message_cognition_locked(
+                con, instance_id=instance_id, node_id=node_id
+            )
+
+
+async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_id: UUID) -> bool:
+    # Re-read only after acquiring the lock. A competing worker may have
+    # completed this exact cognition commit while we were waiting.
+    row = await con.fetchrow(
         """
         SELECT dn.node_id, dn.timeline_id, dn.event_id, dn.message_text,
                dn.speaker_id, dn.speaker_role::text AS speaker_role,
@@ -347,12 +364,12 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
         return False
     text = str(row["message_text"] or "").strip()
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    existing = await db.fetchrow(
+    existing = await con.fetchrow(
         "SELECT commit_id, source_text_hash, interpreter_version FROM aios.message_cognitive_commit WHERE instance_id=$1 AND node_id=$2",
         instance_id, node_id,
     )
     if existing and existing["source_text_hash"] == digest and existing["interpreter_version"] == INTERPRETER_VERSION:
-        await _advance_cognitive_cursor(db, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
+        await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
         return True
     units = interpret_message(
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
@@ -363,7 +380,7 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
     }
-    commit_row = await db.execute_returning_row(
+    commit_row = await con.fetchrow(
         """
         INSERT INTO aios.message_cognitive_commit (
             instance_id, node_id, timeline_id, event_id, character_id,
@@ -384,9 +401,9 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
         digest, json.dumps(summary),
     )
     commit_id = commit_row["commit_id"]
-    await db.execute("DELETE FROM aios.message_cognitive_unit WHERE commit_id=$1", commit_id)
+    await con.execute("DELETE FROM aios.message_cognitive_unit WHERE commit_id=$1", commit_id)
     for ordinal, unit in enumerate(units):
-        unit_row = await db.execute_returning_row(
+        unit_row = await con.fetchrow(
             """
             INSERT INTO aios.message_cognitive_unit (
                 commit_id, ordinal, claim_kind, text, topic_key, polarity,
@@ -398,11 +415,25 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
             unit.salience, unit.confidence, json.dumps(unit.meta),
         )
         await _reconcile_unit(
-            db, instance_id=instance_id, unit_id=unit_row["unit_id"], claim_kind=unit.claim_kind,
+            con, instance_id=instance_id, unit_id=unit_row["unit_id"], claim_kind=unit.claim_kind,
             topic_key=unit.topic_key, polarity=unit.polarity,
         )
-    await _advance_cognitive_cursor(db, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
+    await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
     return True
+
+
+async def _advance_cognitive_cursor_on_connection(
+    con: Any, *, instance_id: UUID, node_id: UUID, event_id: int | None
+) -> None:
+    await con.execute(
+        """
+        UPDATE aios.character_hud_readiness
+        SET cognitive_ready_node_id=$2, cognitive_ready_event_id=$3,
+            retrieval_ready_node_id=$2, retrieval_ready_event_id=$3, updated_at=now()
+        WHERE instance_id=$1
+        """,
+        instance_id, node_id, event_id,
+    )
 
 
 async def _advance_cognitive_cursor(db: Database, *, instance_id: UUID, node_id: UUID, event_id: int | None) -> None:
