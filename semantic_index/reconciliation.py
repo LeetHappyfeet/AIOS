@@ -39,14 +39,14 @@ def _json_object(value: Any) -> dict[str, Any]:
         raise ValueError("expected object-like metadata") from exc
 
 
-RECONCILER_VERSION = "semantic-reconciliation-v2"\nEVENT_RESOLVER_VERSION = "semantic-event-resolver-v1"
+RECONCILER_VERSION = "semantic-reconciliation-v2"
+EVENT_RESOLVER_VERSION = "semantic-event-resolver-v1"
 
 PAIR_EDGE_TYPES = {
     "EQUIVALENT": "semantic_equivalent",
     "REFINES": "semantic_refinement",
     "CONTRADICTS": "semantic_contradicts",
     "SAME_TOPIC": "semantic_same_topic",
-    "SAME_EVENT": "semantic_same_event",
 }
 
 PIVOT_NODE_TYPES = {
@@ -171,7 +171,9 @@ async def _preferred_scope_nodes(
             COALESCE(a.world_id,b.world_id) AS world_id,
             COALESCE(a.source_id,b.source_id) AS source_id,
             a.topology_node_id AS a_node,
-            b.topology_node_id AS b_node
+            b.topology_node_id AS b_node,
+            a.proposition_id AS proposition_a,
+            b.proposition_id AS proposition_b
         FROM aios.semantic_topology_node a
         JOIN aios.semantic_topology_node b
           ON b.scope_key=a.scope_key
