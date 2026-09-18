@@ -9,7 +9,7 @@ from typing import Any, Iterable, Optional
 
 from aios_app.db import Database
 from aios_app.hud.context import HUDContext
-from aios_app.hud.relevance import HUDRelevanceScorer
+from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.semantic_index.query import SemanticQueryService
 
@@ -458,7 +458,7 @@ class TopologyRetriever:
     async def retrieve_character_knowledge(
         self,
         context: HUDContext,
-        scorer: HUDRelevanceScorer,
+        scorer: CognitiveRelevanceScorer,
         *,
         mode: str,
         focus_text: str = "",
@@ -565,8 +565,8 @@ class TopologyRetriever:
                 causal_distance=item.get("topology_depth"),
             )
             topology_bonus = (
-                1.5 / (1.0 + float(item.get("topology_cost") or 0.0))
-                + 0.7 * float(item.get("topology_significance") or 0.0)
+                0.45 / (1.0 + float(item.get("topology_cost") or 0.0))
+                + 0.25 * float(item.get("topology_significance") or 0.0)
             )
             item["topology"] = {
                 "depth": int(item.get("topology_depth") or 0),
@@ -627,8 +627,8 @@ class TopologyRetriever:
 
         result.sort(
             key=lambda item: (
-                item["topology"]["historical"],
                 -item["relevance"]["total"],
+                item["topology"]["historical"],
                 item["topology"]["cost"],
             )
         )
