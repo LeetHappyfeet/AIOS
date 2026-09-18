@@ -1,1 +1,12 @@
-"""Compatibility exports for cognition-owned relevance.\n\nNew code must import from ``aios_app.epistemic.relevance``. This module remains\ntemporarily so plugins/tests using the historical HUD import do not break.\n"""\n\nfrom aios_app.epistemic.relevance import (\n    CognitiveRelevanceBreakdown as RelevanceBreakdown,\n    CognitiveRelevanceScorer as HUDRelevanceScorer,\n)\n\n__all__ = ["HUDRelevanceScorer", "RelevanceBreakdown"]\n
+"""Compatibility exports for cognition-owned relevance.
+
+New code must import from aios_app.epistemic.relevance. This module remains
+temporarily so plugins and tests using the historical HUD import do not break.
+"""
+
+from aios_app.epistemic.relevance import (
+    CognitiveRelevanceBreakdown as RelevanceBreakdown,
+    CognitiveRelevanceScorer as HUDRelevanceScorer,
+)
+
+__all__ = ["HUDRelevanceScorer", "RelevanceBreakdown"]
