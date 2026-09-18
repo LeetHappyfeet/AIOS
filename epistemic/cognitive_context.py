@@ -268,8 +268,8 @@ class CognitiveContextService:
     async def prepare_retrieval(
         self,
         context: HUDContext,
-        scorer: RelevanceScorer | None = None,
-        attention: CognitiveAttentionInputs | None = None,
+        scorer: RelevanceScorer | None,
+        attention: CognitiveAttentionInputs,
         retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> PreparedRetrievalSnapshot:
         """Speculatively prepare established-memory candidates for the next HUD.
@@ -278,8 +278,6 @@ class CognitiveContextService:
         always read fresh by ``resolve_knowledge`` so a prewarm that starts
         before fast cognition completes can never freeze an incomplete turn.
         """
-        if attention is None:
-            raise ValueError("attention is required")
         snapshot, cache_hit = await self._prepared_or_resolve(
             context,
             scorer,
@@ -413,8 +411,6 @@ class CognitiveContextService:
         attention: CognitiveAttentionInputs | None = None,
         retrieval_policy: CognitiveRetrievalPolicy | None = None,
     ) -> CognitiveKnowledgeSnapshot:
-        if attention is None:
-            raise ValueError("attention is required")
         scorer = scorer or CognitiveRelevanceScorer(
             context,
             focus_text=attention.retrieval_focus_text,
