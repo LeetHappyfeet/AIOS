@@ -4,7 +4,7 @@ from typing import Any
 
 from aios_app.epistemic.hypothesis_validation import evaluate_matrix
 
-RELATION_VERIFIER_VERSION = "semantic-relation-matrix-v6-dag-event-identity"
+RELATION_VERIFIER_VERSION = "semantic-relation-verifier-v6"
 
 # These predicates represent narrow, single-valued semantic slots closely
 # enough that two different positive values can be treated as competitors.
