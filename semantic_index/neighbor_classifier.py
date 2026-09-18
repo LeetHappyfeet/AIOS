@@ -10,7 +10,7 @@ from .relation_validator import validate_neighbor_relation
 
 logger = logging.getLogger("aios.semantic_neighbor_classifier")
 
-NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v4-event-identity"
+NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v5-dag-event-identity"
 
 
 def classify_neighbor_pair(
@@ -51,6 +51,7 @@ async def classify_neighbor_relations_once(
             pa.polarity AS a_polarity,
             ca.observation_id AS a_observation_id,
             ca.claim_id AS a_claim_id,
+            ca.dag_node_id AS a_dag_node_id,
             ca.claim_kind AS a_claim_kind,
             ca.predicate_family AS a_predicate_family,
             ca.semantic_confidence AS a_semantic_confidence,
@@ -67,6 +68,7 @@ async def classify_neighbor_relations_once(
             pb.polarity AS b_polarity,
             cb.observation_id AS b_observation_id,
             cb.claim_id AS b_claim_id,
+            cb.dag_node_id AS b_dag_node_id,
             cb.claim_kind AS b_claim_kind,
             cb.predicate_family AS b_predicate_family,
             cb.semantic_confidence AS b_semantic_confidence,
@@ -84,6 +86,7 @@ async def classify_neighbor_relations_once(
             SELECT
                 o.observation_id,
                 o.claim_id,
+                o.dag_node_id,
                 ccr.claim_kind,
                 ccr.predicate_family,
                 CASE
@@ -107,6 +110,7 @@ async def classify_neighbor_relations_once(
             SELECT
                 o.observation_id,
                 o.claim_id,
+                o.dag_node_id,
                 ccr.claim_kind,
                 ccr.predicate_family,
                 CASE
@@ -164,6 +168,7 @@ async def classify_neighbor_relations_once(
             "topic_key": row["a_topic_key"],
             "observation_id": str(row["a_observation_id"]) if row["a_observation_id"] else None,
             "claim_id": str(row["a_claim_id"]) if row["a_claim_id"] else None,
+            "dag_node_id": str(row["a_dag_node_id"]) if row["a_dag_node_id"] else None,
             "subject_norm": row["a_subject_norm"],
             "predicate_norm": row["a_predicate_norm"],
             "object_norm": row["a_object_norm"],
@@ -186,6 +191,7 @@ async def classify_neighbor_relations_once(
             "topic_key": row["b_topic_key"],
             "observation_id": str(row["b_observation_id"]) if row["b_observation_id"] else None,
             "claim_id": str(row["b_claim_id"]) if row["b_claim_id"] else None,
+            "dag_node_id": str(row["b_dag_node_id"]) if row["b_dag_node_id"] else None,
             "subject_norm": row["b_subject_norm"],
             "predicate_norm": row["b_predicate_norm"],
             "object_norm": row["b_object_norm"],
