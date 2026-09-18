@@ -75,41 +75,56 @@ _LEGACY_DECOMPOSE_SENTENCE = legacy.decompose_sentence
 
 
 def _scoped_decompose_sentence(sentence: str):
-    """Decompose strong clauses separately and inherit non-assertive scope."""
-    parts = split_strong_clauses(sentence)
-    if not parts:
+    """Decompose NLP sentences and strong clauses as independent frame forests."""
+    clean = (sentence or "").strip()
+    if not clean:
         return []
-    sentence_scope = classify_scope(sentence)
+
+    # claim_candidate.raw_text is not guaranteed to contain exactly one
+    # grammatical sentence.  Parse the full text once, then prevent frame
+    # topology from crossing sentence boundaries before applying the existing
+    # strong-punctuation splitter inside each sentence.
+    doc = legacy._get_nlp()(clean)
+    sentence_parts = [span.text.strip() for span in doc.sents if span.text.strip()]
+    if not sentence_parts:
+        sentence_parts = [clean]
+
     combined = []
     offset = 0
-    for part in parts:
-        drafts = _LEGACY_DECOMPOSE_SENTENCE(part)
-        part_scope = effective_scope(part, sentence_scope)
-        for draft in drafts:
-            meta = dict(draft.meta)
-            meta.update({
-                "epistemic_scope_policy": "epistemic-scope-v1",
-                "local_modality": draft.modality,
-                "effective_modality": part_scope if part_scope != SCOPE_ASSERTED else draft.modality,
-                "strong_clause_segmented": len(parts) > 1,
-            })
-            modality = part_scope if part_scope != SCOPE_ASSERTED else draft.modality
-            combined.append(replace(
-                draft,
-                index=draft.index + offset,
-                parent_index=(draft.parent_index + offset if draft.parent_index is not None else None),
-                object_frame_index=(
-                    draft.object_frame_index + offset
-                    if draft.object_frame_index is not None
-                    else None
-                ),
-                modality=modality,
-                discourse_mode=(
-                    part_scope if part_scope != SCOPE_ASSERTED else draft.discourse_mode
-                ),
-                meta=meta,
-            ))
-        offset += len(drafts)
+    segmented = len(sentence_parts) > 1
+    for sentence_part in sentence_parts:
+        sentence_scope = classify_scope(sentence_part)
+        parts = split_strong_clauses(sentence_part) or [sentence_part]
+        segmented = segmented or len(parts) > 1
+        for part in parts:
+            drafts = _LEGACY_DECOMPOSE_SENTENCE(part)
+            part_scope = effective_scope(part, sentence_scope)
+            for draft in drafts:
+                meta = dict(draft.meta)
+                meta.update({
+                    "epistemic_scope_policy": "epistemic-scope-v1",
+                    "local_modality": draft.modality,
+                    "effective_modality": part_scope if part_scope != SCOPE_ASSERTED else draft.modality,
+                    "strong_clause_segmented": segmented,
+                    "sentence_local_decomposition": True,
+                })
+                modality = part_scope if part_scope != SCOPE_ASSERTED else draft.modality
+                combined.append(replace(
+                    draft,
+                    index=draft.index + offset,
+                    parent_index=(draft.parent_index + offset if draft.parent_index is not None else None),
+                    object_frame_index=(
+                        draft.object_frame_index + offset
+                        if draft.object_frame_index is not None
+                        else None
+                    ),
+                    modality=modality,
+                    discourse_mode=(
+                        part_scope if part_scope != SCOPE_ASSERTED else draft.discourse_mode
+                    ),
+                    meta=meta,
+                ))
+            offset += len(drafts)
     return combined
 
 
