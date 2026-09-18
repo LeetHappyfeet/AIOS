@@ -108,7 +108,7 @@ async def test_large_projection_is_batched_and_promoted() -> None:
     assert len(inserts) > 1
     assert max(len(sparql.encode("utf-8")) for sparql in inserts) < 3 * 1024 * 1024
     assert any(
-        "COPY SILENT GRAPH <urn:test:live:staging:7> TO GRAPH <urn:test:live>" in sparql
+        "MOVE SILENT GRAPH <urn:test:live:staging:7> TO GRAPH <urn:test:live>" in sparql
         for _, sparql in fuseki.calls
     )
 
@@ -128,7 +128,7 @@ async def test_failed_batch_never_replaces_live_graph() -> None:
             target_version=8,
         )
 
-    assert not any("COPY SILENT GRAPH" in sparql for _, sparql in fuseki.calls)
+    assert not any("MOVE SILENT GRAPH" in sparql for _, sparql in fuseki.calls)
     assert fuseki.calls[-1][1] == "CLEAR SILENT GRAPH <urn:test:live:staging:8>"
 
 
@@ -176,3 +176,110 @@ async def test_hot_scope_does_not_rebuild_before_quiet_period(monkeypatch) -> No
         "reason": "debouncing",
     }
     assert fuseki.calls == []
+
+
+class DeltaDb:
+    def __init__(self, *, changes, edge=None):
+        self.changes = changes
+        self.edge = edge
+
+    async def fetch(self, sql, *args):
+        if "FROM aios.semantic_rdf_change" in sql:
+            return self.changes
+        raise AssertionError(sql)
+
+    async def fetchrow(self, sql, *args):
+        if "FROM aios.semantic_topology_edge" in sql:
+            return self.edge
+        if "FROM aios.semantic_topology_node" in sql:
+            return None
+        if "FROM aios.semantic_anchor_edge" in sql:
+            return None
+        raise AssertionError(sql)
+
+
+@pytest.mark.asyncio
+async def test_delta_projection_retracts_deleted_edge() -> None:
+    edge_id = UUID(int=101)
+    parent_id = UUID(int=102)
+    child_id = UUID(int=103)
+    db = DeltaDb(
+        changes=[
+            {
+                "change_id": 11,
+                "object_kind": "edge",
+                "object_id": edge_id,
+                "operation": "delete",
+                "old_state": {
+                    "parent_node_id": str(parent_id),
+                    "child_node_id": str(child_id),
+                    "edge_type": "supports_belief_atom",
+                },
+            }
+        ]
+    )
+    fuseki = FakeFuseki()
+    decision = SimpleNamespace(scope_key="world:test:observed", scope_kind="world")
+
+    dataset, graph, changed = await projection._project_scope_rdf_delta(
+        db,
+        fuseki,
+        decision=decision,
+        from_change_id=10,
+        target_change_id=11,
+    )
+
+    assert (dataset, graph, changed) == ("world", "urn:test:live", 1)
+    sparql = fuseki.calls[0][1]
+    assert f"urn:aios:topology-edge:{edge_id}" in sparql
+    assert "supports_belief_atom" in sparql
+    assert not any(call.startswith("INSERT DATA") for _, call in fuseki.calls)
+
+
+@pytest.mark.asyncio
+async def test_delta_projection_replaces_current_edge() -> None:
+    edge_id = UUID(int=201)
+    parent_id = UUID(int=202)
+    child_id = UUID(int=203)
+    edge = {
+        "edge_id": edge_id,
+        "parent_node_id": parent_id,
+        "child_node_id": child_id,
+        "edge_type": "topic",
+        "inference_source": "semantic",
+        "inference_status": "accepted",
+        "inference_confidence": 0.9,
+        "edge_meta": {},
+    }
+    db = DeltaDb(
+        changes=[
+            {
+                "change_id": 21,
+                "object_kind": "edge",
+                "object_id": edge_id,
+                "operation": "upsert",
+                "old_state": {
+                    "parent_node_id": str(parent_id),
+                    "child_node_id": str(child_id),
+                    "edge_type": "topic",
+                },
+            }
+        ],
+        edge=edge,
+    )
+    fuseki = FakeFuseki()
+    decision = SimpleNamespace(scope_key="world:test:observed", scope_kind="world")
+
+    _, _, changed = await projection._project_scope_rdf_delta(
+        db,
+        fuseki,
+        decision=decision,
+        from_change_id=20,
+        target_change_id=21,
+    )
+
+    assert changed == 1
+    assert len(fuseki.calls) == 2
+    assert fuseki.calls[0][1].startswith("DELETE WHERE")
+    assert fuseki.calls[1][1].startswith("INSERT DATA")
+    assert f"urn:aios:topology-edge:{edge_id}" in fuseki.calls[1][1]
