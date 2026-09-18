@@ -14,6 +14,8 @@ _REAL_PROJECT_SCOPE_RDF: Optional[Callable[..., Awaitable[tuple[str, str]]]] = N
 _TOPOLOGY_MODULE: Any = None
 
 RDF_UPDATE_TARGET_BYTES = 2 * 1024 * 1024
+RDF_DELTA_TARGET_BYTES = 512 * 1024
+RDF_DELTA_TARGET_OBJECTS = 128
 RDF_DB_PAGE_SIZE = 2000
 RDF_PROJECTION_QUIET_SECONDS = 3.0
 RDF_PROJECTION_PRIORITY = 200
@@ -253,48 +255,122 @@ def _delete_change_sparql(graph: str, scope_iri: str, change: Any) -> str:
     return "; ".join(statements)
 
 
-async def _current_change_triples(
+async def _fetch_current_delta_rows(
     db: Database,
     *,
-    scope_iri: str,
-    change: Any,
-) -> list[str]:
-    kind = str(change["object_kind"])
-    object_id = change["object_id"]
-    if kind == "node":
-        row = await db.fetchrow(
+    object_ids: dict[str, set[Any]],
+) -> dict[tuple[str, Any], Any]:
+    """Bulk-read the final PostgreSQL representation of changed topology objects."""
+
+    current: dict[tuple[str, Any], Any] = {}
+    node_ids = list(object_ids["node"])
+    edge_ids = list(object_ids["edge"])
+    anchor_ids = list(object_ids["anchor"])
+
+    if node_ids:
+        rows = await db.fetch(
             """
             SELECT topology_node_id, node_type, node_key, label
             FROM aios.semantic_topology_node
-            WHERE topology_node_id=$1
+            WHERE topology_node_id = ANY($1::uuid[])
             """,
-            object_id,
+            node_ids,
         )
-        return _node_triples(scope_iri, row) if row else []
-    if kind == "edge":
-        row = await db.fetchrow(
+        current.update((("node", row["topology_node_id"]), row) for row in rows)
+
+    if edge_ids:
+        rows = await db.fetch(
             """
             SELECT edge_id, parent_node_id, child_node_id, edge_type,
                    inference_source, inference_status, inference_confidence,
                    meta AS edge_meta
             FROM aios.semantic_topology_edge
-            WHERE edge_id=$1
+            WHERE edge_id = ANY($1::uuid[])
             """,
-            object_id,
+            edge_ids,
         )
-        return _edge_triples(scope_iri, row) if row else []
+        current.update((("edge", row["edge_id"]), row) for row in rows)
 
-    row = await db.fetchrow(
-        """
-        SELECT anchor_edge_id, source_node_id, target_node_id,
-               relationship_type, target_scope_key, confidence,
-               inference_source, inference_status
-        FROM aios.semantic_anchor_edge
-        WHERE anchor_edge_id=$1
-        """,
-        object_id,
-    )
-    return _anchor_triples(scope_iri, row) if row else []
+    if anchor_ids:
+        rows = await db.fetch(
+            """
+            SELECT anchor_edge_id, source_node_id, target_node_id,
+                   relationship_type, target_scope_key, confidence,
+                   inference_source, inference_status
+            FROM aios.semantic_anchor_edge
+            WHERE anchor_edge_id = ANY($1::uuid[])
+            """,
+            anchor_ids,
+        )
+        current.update((("anchor", row["anchor_edge_id"]), row) for row in rows)
+
+    return current
+
+
+def _current_delta_triples(
+    scope_iri: str,
+    *,
+    kind: str,
+    row: Any,
+) -> list[str]:
+    if kind == "node":
+        return _node_triples(scope_iri, row)
+    if kind == "edge":
+        return _edge_triples(scope_iri, row)
+    return _anchor_triples(scope_iri, row)
+
+
+class _RdfDeltaBatchWriter:
+    """Bound idempotent live-graph deltas by both bytes and changed objects."""
+
+    def __init__(
+        self,
+        fuseki: Any,
+        *,
+        dataset: str,
+        graph: str,
+        target_bytes: int = RDF_DELTA_TARGET_BYTES,
+        target_objects: int = RDF_DELTA_TARGET_OBJECTS,
+    ):
+        self.fuseki = fuseki
+        self.dataset = dataset
+        self.graph = graph
+        self.target_bytes = target_bytes
+        self.target_objects = target_objects
+        self._operations: list[str] = []
+        self._bytes = 0
+        self._objects = 0
+        self.batch_count = 0
+
+    def add_object(self, *, deletes: list[str], triples: list[str]) -> None:
+        operations = list(deletes)
+        if triples:
+            operations.append(
+                f"INSERT DATA {{ GRAPH <{self.graph}> {{ "
+                + " ".join(triples)
+                + " } }"
+            )
+        payload = ";\n".join(operations)
+        payload_bytes = len(payload.encode("utf-8")) + 2
+        if self._operations and (
+            self._bytes + payload_bytes > self.target_bytes
+            or self._objects >= self.target_objects
+        ):
+            self.flush()
+        self._operations.append(payload)
+        self._bytes += payload_bytes
+        self._objects += 1
+        if self._bytes >= self.target_bytes or self._objects >= self.target_objects:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._operations:
+            return
+        self.fuseki.update(self.dataset, ";\n".join(self._operations))
+        self.batch_count += 1
+        self._operations.clear()
+        self._bytes = 0
+        self._objects = 0
 
 
 async def _project_scope_rdf_delta(
@@ -305,19 +381,18 @@ async def _project_scope_rdf_delta(
     from_change_id: int,
     target_change_id: int,
 ) -> tuple[str, str, int]:
-    """Apply coalesced PostgreSQL topology mutations directly to the live graph."""
+    """Apply a bounded, replay-safe PostgreSQL mutation window to the live graph."""
 
     dataset, graph = _TOPOLOGY_MODULE._rdf_graph(decision)
     scope_iri = _scope_iri(decision.scope_key)
     changes = await db.fetch(
         """
-        SELECT DISTINCT ON (object_kind, object_id)
-               change_id, object_kind, object_id, operation, old_state
+        SELECT change_id, object_kind, object_id, operation, old_state
         FROM aios.semantic_rdf_change
         WHERE scope_key=$1
           AND change_id > $2
           AND change_id <= $3
-        ORDER BY object_kind, object_id, change_id DESC
+        ORDER BY change_id
         """,
         decision.scope_key,
         from_change_id,
@@ -327,30 +402,46 @@ async def _project_scope_rdf_delta(
     if not changes:
         return dataset, graph, 0
 
-    # Each changed object is retracted first, then its current authoritative
-    # PostgreSQL representation is inserted if the object still exists.
-    # This naturally coalesces insert/update/delete churn between checkpoints.
-    changed = 0
+    # Preserve every historical deletion coordinate in the cursor window while
+    # inserting only the final authoritative PostgreSQL representation.
+    object_ids: dict[str, set[Any]] = {"node": set(), "edge": set(), "anchor": set()}
+    deletes: dict[tuple[str, Any], list[str]] = {}
+    ordered_keys: list[tuple[str, Any]] = []
     for change in changes:
-        fuseki.update(dataset, _delete_change_sparql(graph, scope_iri, change))
-        triples = await _current_change_triples(db, scope_iri=scope_iri, change=change)
-        if triples:
-            fuseki.update(
-                dataset,
-                f"INSERT DATA {{ GRAPH <{graph}> {{ " + " ".join(triples) + " } }",
-            )
-        changed += 1
+        kind = str(change["object_kind"])
+        key = (kind, change["object_id"])
+        object_ids[kind].add(change["object_id"])
+        if key not in deletes:
+            deletes[key] = []
+            ordered_keys.append(key)
+        statement = _delete_change_sparql(graph, scope_iri, change)
+        if statement not in deletes[key]:
+            deletes[key].append(statement)
 
+    current = await _fetch_current_delta_rows(db, object_ids=object_ids)
+    writer = _RdfDeltaBatchWriter(fuseki, dataset=dataset, graph=graph)
+    for kind, object_id in ordered_keys:
+        row = current.get((kind, object_id))
+        triples = (
+            _current_delta_triples(scope_iri, kind=kind, row=row)
+            if row is not None
+            else []
+        )
+        writer.add_object(deletes=deletes[(kind, object_id)], triples=triples)
+    writer.flush()
+
+    changed = len(ordered_keys)
     logger.info(
-        "Projected RDF delta scope=%s dataset=%s changes=%s cursor=%s..%s",
+        "Projected RDF delta scope=%s dataset=%s changes=%s events=%s batches=%s cursor=%s..%s",
         decision.scope_key,
         dataset,
         changed,
+        len(changes),
+        writer.batch_count,
         from_change_id,
         target_change_id,
     )
     return dataset, graph, changed
-
 
 class _RdfBatchWriter:
     def __init__(
