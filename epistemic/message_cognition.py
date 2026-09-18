@@ -303,7 +303,7 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
     return [unit for _, _, unit in selected]
 
 
-async def _reconcile_unit(db: Database, *, instance_id: UUID, unit_id: UUID, claim_kind: str, topic_key: str, polarity: int) -> UUID | None:
+async def _reconcile_unit(db: Any, *, instance_id: UUID, unit_id: UUID, claim_kind: str, topic_key: str, polarity: int) -> UUID | None:
     if claim_kind not in {"BELIEF", "STATE", "GOAL", "RELATIONSHIP", "RULE"}:
         return None
     previous = await db.fetchrow(
