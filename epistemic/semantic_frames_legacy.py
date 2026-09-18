@@ -107,7 +107,13 @@ def _span_text(tokens: Iterable) -> Optional[str]:
 def _phrase(token) -> Optional[str]:
     if token is None:
         return None
-    tokens = [t for t in token.subtree if t.dep_ not in CLAUSE_DEPS or t.i == token.i]
+    sentence_start = token.sent.start
+    sentence_end = token.sent.end
+    tokens = [
+        t for t in token.subtree
+        if sentence_start <= t.i < sentence_end
+        and (t.dep_ not in CLAUSE_DEPS or t.i == token.i)
+    ]
     return _span_text(tokens)
 
 
@@ -119,6 +125,8 @@ def _find_subject(root):
         head = root.head
         seen: set[int] = set()
         while head is not None and head.i not in seen:
+            if head.sent.start != root.sent.start or head.sent.end != root.sent.end:
+                break
             seen.add(head.i)
             inherited = [c for c in head.children if c.dep_ in SUBJECT_DEPS]
             if inherited:
@@ -297,16 +305,35 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
         subject_token = _find_subject(root)
         object_token = _find_object(root)
         child_clause = next(
-            (c for c in root.children if c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"} and c.i in root_to_index),
+            (
+                c for c in root.children
+                if c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"}
+                and c.i in root_to_index
+                and c.sent.start == root.sent.start
+                and c.sent.end == root.sent.end
+            ),
             None,
         )
         if child_clause is None and object_token is not None:
             child_clause = next(
-                (c for c in object_token.subtree if c.i != object_token.i and c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"} and c.i in root_to_index),
+                (
+                    c for c in object_token.subtree
+                    if c.i != object_token.i
+                    and c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"}
+                    and c.i in root_to_index
+                    and c.sent.start == root.sent.start
+                    and c.sent.end == root.sent.end
+                ),
                 None,
             )
         object_frame_index = root_to_index.get(child_clause.i) if child_clause is not None else None
-        parent_index = root_to_index.get(root.head.i) if root.head.i != root.i else None
+        parent_index = (
+            root_to_index.get(root.head.i)
+            if root.head.i != root.i
+            and root.head.sent.start == root.sent.start
+            and root.head.sent.end == root.sent.end
+            else None
+        )
 
         predicate, predicate_confidence, construction = _canonical_predicate(root, object_token)
         polarity = -1 if _negated(root) else 1
