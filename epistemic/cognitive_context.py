@@ -46,6 +46,7 @@ class CognitiveKnowledgeSnapshot:
     goals: list[dict[str, Any]]
     rules: list[dict[str, Any]]
     current_events: list[dict[str, Any]]
+    recall_suppressed: dict[str, int]
     topology_retrieval: bool
     topology_partial_fallback: bool
     firewall_suppressed: dict[str, int]
@@ -544,6 +545,7 @@ class CognitiveContextService:
             goals=goals,
             rules=rules,
             current_events=list(reversed(attention.recent_newest)),
+            recall_suppressed=recall_suppressed,
             topology_retrieval=bool(topology_knowledge),
             topology_partial_fallback=bool(legacy_knowledge),
             firewall_suppressed=suppressed,
