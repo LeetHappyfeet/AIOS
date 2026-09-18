@@ -217,22 +217,42 @@ def test_event_neighbors_on_same_timeline_can_be_same_event():
             object_norm="warehouse",
             claim_kind="EVENT",
             predicate_family="action",
-            observation_id="obs-1",
-            claim_id="claim-1",
+            dag_node_id="node-1",
         ),
         b=proposition(
             topic_key="event-b",
-            predicate_norm="entered",
-            object_norm="warehouse",
+            predicate_norm="arrived_at",
+            object_norm="warehouse entrance",
             claim_kind="EVENT",
             predicate_family="action",
-            observation_id="obs-1",
-            claim_id="claim-1",
+            dag_node_id="node-1",
         ),
         conflict_type=None,
     )
     assert relation == "SAME_EVENT"
     assert confidence >= 0.8
+
+
+def test_same_dag_node_does_not_merge_different_actions():
+    relation, _, features = classify_neighbor_pair(
+        similarity=0.95,
+        a=proposition(claim_kind="EVENT", predicate_family="ACTION", predicate_norm="feel", object_norm="shego", dag_node_id="node-1"),
+        b=proposition(claim_kind="EVENT", predicate_family="ACTION", predicate_norm="put", object_norm="shego", dag_node_id="node-1"),
+        conflict_type=None,
+    )
+    assert relation != "SAME_EVENT"
+    assert features["same_dag_node"] is True
+
+
+def test_same_dag_communication_requires_same_content():
+    relation, _, features = classify_neighbor_pair(
+        similarity=0.93,
+        a=proposition(claim_kind="EVENT", predicate_family="COMMUNICATION", predicate_norm="say", object_norm="minimalist", dag_node_id="node-1"),
+        b=proposition(claim_kind="EVENT", predicate_family="COMMUNICATION", predicate_norm="say", object_norm="the leak is money", dag_node_id="node-1"),
+        conflict_type=None,
+    )
+    assert relation != "SAME_EVENT"
+    assert features["communication_content_compatible"] is False
 
 
 def test_validation_adapter_accepts_asyncpg_json_text():
