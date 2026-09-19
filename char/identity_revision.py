@@ -5,7 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.char.identity_kernel import IdentityKernelStore
+from aios_app.char.identity_kernel import IdentityKernelStore, _json_value
 
 
 async def accept_identity_candidate(
@@ -54,7 +54,7 @@ async def accept_identity_candidate(
                 """,
                 character_id, candidate["facet_type"], candidate["facet_key"],
             )
-            previous_value = existing["value"] if existing else None
+            previous_value = _json_value(existing["value"]) if existing else None
 
             if (
                 candidate["disposition"] == "accepted"
@@ -95,7 +95,7 @@ async def accept_identity_candidate(
                 character_id,
                 candidate["facet_type"],
                 candidate["facet_key"],
-                json.dumps(candidate["value"]),
+                json.dumps(_json_value(candidate["value"])),
                 candidate["stability"],
                 candidate["authority"],
                 candidate["mutability"],
@@ -143,7 +143,7 @@ async def accept_identity_candidate(
                 character_id, version, candidate["source_id"], str(candidate_id),
                 facet["facet_id"],
                 json.dumps(previous_value) if previous_value is not None else None,
-                json.dumps(candidate["value"]), actor, reason,
+                json.dumps(_json_value(candidate["value"])), actor, reason,
                 candidate["perspective"], candidate["continuity_key"],
             )
 
