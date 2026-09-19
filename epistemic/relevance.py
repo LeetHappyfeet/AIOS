@@ -39,6 +39,7 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 class CognitiveRelevanceBreakdown:
     recency: float = 0.0
     semantic: float = 0.0
+    vector_semantic: float = 0.0
     entity_proximity: float = 0.0
     goal: float = 0.0
     relationship: float = 0.0
@@ -52,7 +53,7 @@ class CognitiveRelevanceBreakdown:
     @property
     def total(self) -> float:
         return (
-            self.recency + self.semantic + self.entity_proximity + self.goal
+            self.recency + self.semantic + self.vector_semantic + self.entity_proximity + self.goal
             + self.relationship + self.emotional_salience + self.memory_salience
             + self.confidence + self.causal_proximity
             - self.branch_penalty - self.epistemic_penalty
@@ -82,6 +83,7 @@ class CognitiveRelevanceScorer:
         confidence: Optional[float] = None,
         updated_at: Optional[datetime] = None,
         causal_distance: Optional[int] = None,
+        semantic_similarity: Optional[float] = None,
     ) -> CognitiveRelevanceBreakdown:
         text_words = _words(candidate_text)
         now = datetime.now(timezone.utc)
@@ -93,7 +95,13 @@ class CognitiveRelevanceScorer:
         else:
             recency = 1.0 / (1.0 + max(0, rank))
 
-        semantic = 1.8 * _overlap(text_words, self.focus_words)
+        # Lexical and embedding relevance are independent evidence channels.
+        # A vector hit must retain the numerical evidence that caused it to be
+        # admitted; topology descendants do not inherit their seed's score.
+        semantic = 1.0 * _overlap(text_words, self.focus_words)
+        vector_semantic = 0.0
+        if semantic_similarity is not None:
+            vector_semantic = 1.8 * max(0.0, min(1.0, _as_float(semantic_similarity)))
         goal = 1.3 * _overlap(text_words, self.goal_words)
         entity_proximity = 1.4 if self.context.entity_is_active(candidate_entity_id) else 0.0
         relationship = 0.0
@@ -121,6 +129,7 @@ class CognitiveRelevanceScorer:
         return CognitiveRelevanceBreakdown(
             recency=recency,
             semantic=semantic,
+            vector_semantic=vector_semantic,
             entity_proximity=entity_proximity,
             goal=goal,
             relationship=relationship,
@@ -198,14 +207,20 @@ def select_recalled_cognition(
         kind = str(item.get("claim_kind") or "BELIEF").upper()
         instance_depth = int((item.get("topology") or {}).get("instance_depth") or item.get("instance_depth") or 0)
         continuity_penalty = min(0.9, math.log1p(max(0, instance_depth)) * 0.16)
-        context_bonus = 1.35 * semantic_overlap
+        # Context overlap is diagnostic here, not scored a second time. The
+        # cognition scorer already accounted for lexical relevance.
+        context_bonus = 0.0
         salience_bonus = 0.45 * max(0.0, min(1.0, salience))
         confidence_bonus = 0.25 * max(0.0, min(1.0, confidence))
         kind_bonus = 0.25 if kind in {"GOAL", "RULE", "RELATIONSHIP"} else 0.0
         recall_score = base + context_bonus + salience_bonus + confidence_bonus + kind_bonus
-        recall_score -= continuity_penalty + _quality_penalty(item)
+        quality_penalty = _quality_penalty(item)
+        recall_score -= continuity_penalty + quality_penalty
         relevance["recall"] = round(recall_score, 6)
         relevance["context_overlap"] = round(semantic_overlap, 6)
+        relevance["context_bonus"] = round(context_bonus, 6)
+        relevance["quality_penalty"] = round(quality_penalty, 6)
+        relevance["continuity_penalty"] = round(continuity_penalty, 6)
         item["relevance"] = relevance
         if recall_score < relevance_floor:
             suppressed["below_recall_floor"] += 1
