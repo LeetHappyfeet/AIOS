@@ -9,7 +9,7 @@ from aios_app.main_legacy import app, db
 from aios_app.ingest_api import ingest_message
 from aios_app.models import IngestIn, IngestOut
 from aios_app.char.identity_bootstrap import bootstrap_character_card
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Any
 
 
