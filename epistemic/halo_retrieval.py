@@ -71,7 +71,7 @@ class TopologyRetriever(BaseTopologyRetriever):
             self._halo_cache.pop(next(iter(self._halo_cache)))
         return result
 
-    async def _query_semantic_seed_propositions(self, context: HUDContext, *, query_text: str, cache_key: tuple[Any, ...]) -> list[str]:
+    async def _query_semantic_seed_propositions(self, context: HUDContext, *, query_text: str, cache_key: tuple[Any, ...]) -> dict[str, float]:
         try:
             domain = _ACTIVE_WORLD_DOMAIN.get()
             scope = await build_retrieval_scope(self.db, world_id=context.world_id, domain=domain)
@@ -80,28 +80,28 @@ class TopologyRetriever(BaseTopologyRetriever):
                 character_id=context.character_id, instance_ids=context.lineage_instance_ids,
                 world_stages=scope.qdrant_world_stages, min_hits=SEMANTIC_SCOPE_MIN_HITS,
             )
-            proposition_ids: list[str] = []
-            seen: set[str] = set()
-            for _, _, payload in hits:
+            proposition_scores: dict[str, float] = {}
+            for _, similarity, payload in hits:
                 proposition_id = str(payload.get("proposition_id") or "")
-                if proposition_id and proposition_id not in seen:
-                    seen.add(proposition_id)
-                    proposition_ids.append(proposition_id)
-            self._semantic_seed_cache[cache_key] = proposition_ids
+                if proposition_id:
+                    proposition_scores[proposition_id] = max(
+                        proposition_scores.get(proposition_id, 0.0), float(similarity)
+                    )
+            self._semantic_seed_cache[cache_key] = proposition_scores
             if len(self._semantic_seed_cache) > 64:
                 self._semantic_seed_cache.pop(next(iter(self._semantic_seed_cache)))
-            return proposition_ids
+            return proposition_scores
         except Exception as exc:
             logger.debug("Scoped semantic seed lookup unavailable; using topology/lexical fallback: %s", exc)
-            self._semantic_seed_cache[cache_key] = []
-            return []
+            self._semantic_seed_cache[cache_key] = {}
+            return {}
         finally:
             self._semantic_seed_deferred.discard(cache_key)
 
-    async def _semantic_seed_propositions(self, context: HUDContext, *, focus_text: str, goals: Iterable[Any]) -> list[str]:
+    async def _semantic_seed_propositions(self, context: HUDContext, *, focus_text: str, goals: Iterable[Any]) -> dict[str, float]:
         query_text = " ".join(part for part in (focus_text, " ".join(str(goal) for goal in goals)) if part).strip()
         if not query_text:
-            return []
+            return {}
         domain = _ACTIVE_WORLD_DOMAIN.get()
         lineage = tuple(str(value) for value in context.lineage_instance_ids)
         cache_key = (str(context.character_id), str(context.world_id), domain, query_text, lineage)
@@ -109,7 +109,7 @@ class TopologyRetriever(BaseTopologyRetriever):
         if cached is not None:
             return cached
         if cache_key in self._semantic_seed_deferred:
-            return []
+            return {}
         try:
             return await asyncio.wait_for(
                 self._semantic_seed_flights.run(cache_key, lambda: self._query_semantic_seed_propositions(context, query_text=query_text, cache_key=cache_key)),
@@ -118,7 +118,7 @@ class TopologyRetriever(BaseTopologyRetriever):
         except asyncio.TimeoutError:
             self._semantic_seed_deferred.add(cache_key)
             logger.debug("HUD scoped semantic seed exceeded %.0f ms budget; using lexical/topology fallback", SEMANTIC_SEED_WAIT_SECONDS * 1000.0)
-            return []
+            return {}
 
     async def retrieve_character_knowledge(
         self, context: HUDContext, scorer: HUDRelevanceScorer, *, mode: str,
