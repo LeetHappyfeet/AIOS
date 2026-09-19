@@ -568,6 +568,7 @@ class CognitiveContextService:
                 ck.confidence,
                 ck.acquisition_mode,
                 ck.source_entity_id,
+                ck.first_acquired_at,
                 ck.updated_at,
                 ck.base_confidence,
                 ck.attention_weight,
@@ -654,7 +655,7 @@ class CognitiveContextService:
                 candidate_entity_id=item.get("source_entity_id"),
                 epistemic_status=item.get("epistemic_status"),
                 confidence=item.get("effective_confidence") or item.get("confidence"),
-                updated_at=item.get("updated_at"),
+                updated_at=item.get("first_acquired_at") or item.get("updated_at"),
             )
             kind = str(item.get("claim_kind") or "BELIEF").upper()
             item["tier"] = self._knowledge_tier(kind, score.total)
