@@ -124,7 +124,7 @@ async def stage_identity_source(
                     json.dumps(item.get("value"), ensure_ascii=False),
                     stability, str(item.get("authority") or authority), mutability,
                     perspective, item.get("continuity_key", continuity_key),
-                    item.get("source_field"), item.get("source_fragment"),
+                    item.get("source_field") or "", item.get("source_fragment"),
                     json.dumps(item.get("meta") or {}),
                 )
                 candidate_ids.append(str(row["candidate_id"]))
