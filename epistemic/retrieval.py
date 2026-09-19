@@ -11,6 +11,7 @@ from typing import Any, Iterable, Optional
 from aios_app.db import Database
 from aios_app.hud.context import HUDContext
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
+from aios_app.epistemic.event_projection import project_semantic_event
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.semantic_index.query import SemanticQueryService
 
@@ -448,7 +449,7 @@ class TopologyRetriever:
         items: list[dict[str, Any]],
         event_by_proposition: dict[Any, dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Collapse retrieved descriptions of one occurrence into one memory."""
+        """Promote member propositions into first-class canonical event memories."""
         passthrough: list[dict[str, Any]] = []
         grouped: dict[Any, list[dict[str, Any]]] = {}
         for item in items:
@@ -459,8 +460,12 @@ class TopologyRetriever:
             grouped.setdefault(event["semantic_event_id"], []).append(item)
 
         for event_id, members in grouped.items():
-            # Prefer the strongest retrieval hit; on ties retain the richer
-            # canonical description rather than an underspecified paraphrase.
+            event = dict(event_by_proposition[members[0]["proposition_id"]])
+            event["semantic_event_id"] = event_id
+            projection = project_semantic_event(event, members)
+
+            # The event, not a member proposition, is the recall candidate. Keep
+            # the strongest member only as a compatibility/provenance carrier.
             representative = max(
                 members,
                 key=lambda item: (
@@ -469,26 +474,36 @@ class TopologyRetriever:
                     str(item.get("proposition_id") or ""),
                 ),
             )
-            event = event_by_proposition[representative["proposition_id"]]
+            candidate = dict(representative)
+            candidate["text"] = projection["text"] or representative.get("text") or ""
+            candidate["semantic_event_id"] = event_id
+            candidate["semantic_event_confidence"] = projection["confidence"]
+            candidate["semantic_event_members"] = projection["member_proposition_ids"]
+            candidate["semantic_event_dag_node_id"] = projection["dag_node_id"]
+            candidate["event_projection"] = projection
+            candidate["retrieval_reason"] = "canonical_semantic_event"
+
             member_relevance = [dict(member.get("relevance") or {}) for member in members]
-            direct_vectors = [float(r["vector_similarity"]) for r in member_relevance if r.get("vector_similarity") is not None]
-            if direct_vectors:
-                representative["relevance"]["vector_similarity"] = max(direct_vectors)
-                representative["relevance"]["vector_semantic"] = 1.8 * max(0.0, min(1.0, max(direct_vectors)))
-            representative["relevance"]["event_member_count"] = len(members)
-            representative["relevance"]["event_confidence"] = float(event.get("event_confidence") or 0.0)
-            representative["relevance"]["total"] = round(
-                max(float(r.get("total") or 0.0) for r in member_relevance)
-                + 0.20 * max(0.0, min(1.0, float(event.get("event_confidence") or 0.0)))
-                + 0.08 * math.log1p(max(0, len(members) - 1)),
+            best_total = max(float(r.get("total") or 0.0) for r in member_relevance)
+            best_vector = projection.get("best_vector_similarity")
+            relevance = dict(candidate.get("relevance") or {})
+            if best_vector is not None:
+                relevance["vector_similarity"] = best_vector
+                relevance["vector_semantic"] = 1.8 * max(0.0, min(1.0, float(best_vector)))
+            relevance["event_member_count"] = len(members)
+            relevance["event_confidence"] = projection["confidence"]
+            # Member count is deliberately logarithmic and tightly bounded:
+            # extraction verbosity must not make an event important by itself.
+            support_bonus = min(0.16, 0.06 * math.log1p(max(0, len(members) - 1)))
+            relevance["event_support_bonus"] = round(support_bonus, 6)
+            relevance["total"] = round(
+                best_total
+                + 0.20 * max(0.0, min(1.0, projection["confidence"]))
+                + support_bonus,
                 6,
             )
-            representative["semantic_event_id"] = event_id
-            representative["semantic_event_confidence"] = event["event_confidence"]
-            representative["semantic_event_members"] = event["member_proposition_ids"]
-            representative["semantic_event_dag_node_id"] = event["dag_node_id"]
-            representative["retrieval_reason"] = "canonical_semantic_event"
-            passthrough.append(representative)
+            candidate["relevance"] = relevance
+            passthrough.append(candidate)
         return passthrough
 
     async def _anchor_context(
