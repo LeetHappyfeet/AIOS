@@ -149,7 +149,10 @@ class TopologyRetriever(BaseTopologyRetriever):
                 claim_kinds=policy.claim_kinds if policy else (), limit=effective_limit,
             )
         except Exception as exc:
-            logger.debug("Public world retrieval unavailable; preserving /char result: %s", exc)
+            logger.warning(
+                "Public world retrieval failed mode=%s domain=%s; preserving /char result",
+                mode, domain, exc_info=True,
+            )
 
         merged: list[dict[str, Any]] = []
         seen_propositions: set[str] = set()
@@ -177,7 +180,7 @@ class TopologyRetriever(BaseTopologyRetriever):
 
         merged.sort(key=lambda item: (-_score(item), 0 if item.get("retrieval_scope") == "character" else 1))
         result = merged[:effective_limit]
-        logger.debug(
+        logger.info(
             "Federated halo mode=%s domain=%s nodes=%s char=%d world=%d merged=%d",
             mode, domain, halo_node_ids, len(char_result), len(world_result), len(result),
         )
