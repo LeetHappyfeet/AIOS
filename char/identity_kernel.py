@@ -50,6 +50,12 @@ def _render(identity: dict[str, Any], facets: list[dict[str, Any]]) -> tuple[dic
         "species": identity.get("species"),
         "gender": identity.get("gender"),
         "age_descriptor": identity.get("age_descriptor"),
+        "visual_summary": identity.get("visual_summary"),
+        "primary_role": identity.get("primary_role"),
+        "archetype": identity.get("archetype"),
+        "default_tone": identity.get("default_tone"),
+        "speech_style": identity.get("speech_style"),
+        "moral_constraints": identity.get("moral_constraints"),
     }
     groups: dict[str, list[dict[str, Any]]] = {}
     for facet in facets:
@@ -74,6 +80,21 @@ def _render(identity: dict[str, Any], facets: list[dict[str, Any]]) -> tuple[dic
             facts.append(f"{label}: {core[key]}")
     if facts:
         lines.extend(facts)
+
+    # Preserve old authored identity fields during migration to facets. They
+    # remain identity input, not runtime state, and can be retired after import
+    # tooling has materialized equivalent facets for existing characters.
+    legacy = []
+    for key, label in (
+        ("visual_summary", "Appearance"), ("primary_role", "Role"),
+        ("archetype", "Archetype"), ("default_tone", "Baseline tone"),
+        ("speech_style", "Speech style"), ("moral_constraints", "Constraints"),
+    ):
+        text = _text_value(core.get(key))
+        if text:
+            legacy.append(f"{label}: {text}")
+    if legacy:
+        lines.append("AUTHORED BASELINE: " + " | ".join(legacy))
 
     for facet_type in sorted(groups, key=lambda k: (_FACET_ORDER.get(k, 70), k)):
         values = groups[facet_type]
