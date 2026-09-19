@@ -11,7 +11,7 @@ from aios_app.models import IngestIn, IngestOut
 from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
 from aios_app.char.identity_sources import stage_identity_source, identity_snapshot
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Any
 
 
@@ -104,7 +104,7 @@ class IdentitySourceCandidateIn(BaseModel):
     continuity_key: str | None = None
     source_field: str | None = None
     source_fragment: str | None = None
-    meta: dict[str, Any] = {}
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class IdentitySourceStageIn(BaseModel):
