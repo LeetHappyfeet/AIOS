@@ -141,6 +141,25 @@ async def bootstrap_character_card(
     accepted = []
     if auto_accept_authored:
         for candidate_id in candidate_ids:
+            if not replace_authored_facets:
+                candidate = await db.fetchrow(
+                    """
+                    SELECT facet_type, facet_key
+                    FROM aios.character_identity_candidate
+                    WHERE candidate_id=$1::uuid
+                    """,
+                    candidate_id,
+                )
+                existing = await db.fetchrow(
+                    """
+                    SELECT 1
+                    FROM aios.character_identity_facet
+                    WHERE character_id=$1 AND facet_type=$2 AND facet_key=$3 AND status='active'
+                    """,
+                    character_id, candidate["facet_type"], candidate["facet_key"],
+                )
+                if existing:
+                    continue
             result = await accept_identity_candidate(
                 db,
                 candidate_id,
