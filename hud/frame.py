@@ -6,6 +6,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
@@ -92,6 +93,7 @@ class HUDAssembler:
         self.db = db
         self.context_resolver = HUDContextResolver(db)
         self.cognition = CognitiveContextService(db)
+        self.identity_kernels = IdentityKernelStore(db)
         self.budget = budget or HUDBudget()
         self.plugin_manager = plugin_manager or PluginManager()
 
@@ -392,17 +394,22 @@ class HUDAssembler:
         return dict(row)
 
     async def _identity(self, context: HUDContext) -> dict[str, Any]:
-        row = await self.db.fetchrow(
-            """
-            SELECT character_id, display_name, canonical_name, species, gender,
-                   visual_summary, primary_role, archetype, default_tone,
-                   speech_style, moral_constraints, meta
-            FROM aios.character_identity
-            WHERE character_id=$1
-            """,
-            context.character_id,
-        )
-        identity = dict(row) if row else {"character_id": context.character_id}
+        # Identity is resolved upstream as a character-scoped, versioned kernel.
+        # HUD presentation must not decide which authored traits constitute self.
+        kernel = await self.identity_kernels.get(context.character_id)
+        if kernel is None:
+            identity = {"character_id": context.character_id}
+        else:
+            core = dict(kernel.kernel_json.get("core") or {})
+            identity = {
+                **core,
+                "identity_version": kernel.identity_version,
+                "identity_compiler_version": kernel.compiler_version,
+                "identity_kernel": kernel.kernel_text,
+                "identity_facets": kernel.kernel_json.get("facets") or {},
+            }
+        # Kept as a separate named payload for compatibility. It is cognitive
+        # configuration, not part of the compiled identity kernel.
         identity["epistemic_profile"] = await get_profile(
             self.db, character_id=context.character_id
         )
