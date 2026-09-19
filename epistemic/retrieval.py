@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ class RetrievalPolicy:
 
 
 POLICIES = {
-    "memory": RetrievalPolicy("memory", ("MEMORY", "EVENT"), 3, 60, True),
+    "memory": RetrievalPolicy("memory", ("MEMORY",), 3, 60, True),
     "belief": RetrievalPolicy(
         "belief", ("BELIEF", "TRAIT", "STATE", "CONCEPT"), 2, 60, False
     ),
@@ -157,6 +158,7 @@ belief_owned AS (
         ck.source_entity_id,
         ck.first_node_id,
         ck.last_node_id,
+        ck.first_acquired_at,
         ck.updated_at,
         ck.base_confidence,
         ck.attention_weight,
@@ -198,6 +200,7 @@ episodic_owned AS (
         cpk.source_entity_id,
         cpk.first_node_id,
         cpk.last_node_id,
+        cpk.first_acquired_at,
         cpk.updated_at,
         cpk.base_confidence,
         cpk.attention_weight,
@@ -245,6 +248,7 @@ classified AS (
         ctx.predicate_family,
         ctx.world_id AS source_world_id,
         ctx.dag_node_id AS source_node_id,
+        ctx.event_time AS occurrence_time,
         tp.topology_depth,
         tp.topology_cost,
         tp.topology_significance
@@ -253,9 +257,10 @@ classified AS (
     JOIN aios.proposition p ON p.proposition_id=o.proposition_id
     LEFT JOIN LATERAL (
         SELECT ccr.claim_kind, ccr.predicate_family,
-               ccr.world_id, ccr.dag_node_id
+               ccr.world_id, ccr.dag_node_id, dn.event_time
         FROM aios.observation obs
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
+        LEFT JOIN aios.dag_node dn ON dn.node_id=ccr.dag_node_id
         WHERE obs.proposition_id=p.proposition_id
           AND (
               ccr.character_instance_id IS NULL
@@ -306,7 +311,7 @@ class TopologyRetriever:
     def __init__(self, db: Database):
         self.db = db
         self.semantic = SemanticQueryService()
-        self._semantic_seed_cache: dict[tuple[str, str, tuple[str, ...]], list[str]] = {}
+        self._semantic_seed_cache: dict[tuple[str, str, tuple[str, ...]], dict[str, float]] = {}
         self._semantic_seed_flights: AsyncSingleFlight[
             tuple[str, str, tuple[str, ...]], list[str]
         ] = AsyncSingleFlight()
@@ -318,7 +323,7 @@ class TopologyRetriever:
         *,
         query_text: str,
         cache_key: tuple[str, str, tuple[str, ...]],
-    ) -> list[str]:
+    ) -> dict[str, float]:
         started = time.perf_counter()
         try:
             hits = await asyncio.to_thread(
@@ -327,23 +332,23 @@ class TopologyRetriever:
                 character_id=context.character_id,
                 instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
             )
-            proposition_ids: list[str] = []
-            seen: set[str] = set()
-            for _, _, payload in hits:
+            proposition_scores: dict[str, float] = {}
+            for _, similarity, payload in hits:
                 proposition_id = str(payload.get("proposition_id") or "")
-                if proposition_id and proposition_id not in seen:
-                    seen.add(proposition_id)
-                    proposition_ids.append(proposition_id)
-            self._semantic_seed_cache[cache_key] = proposition_ids
+                if proposition_id:
+                    proposition_scores[proposition_id] = max(
+                        proposition_scores.get(proposition_id, 0.0), float(similarity)
+                    )
+            self._semantic_seed_cache[cache_key] = proposition_scores
             if len(self._semantic_seed_cache) > 64:
                 self._semantic_seed_cache.pop(next(iter(self._semantic_seed_cache)))
-            return proposition_ids
+            return proposition_scores
         except Exception as exc:
             logger.debug(
                 "Semantic seed lookup unavailable; using topology/lexical fallback: %s", exc
             )
-            self._semantic_seed_cache[cache_key] = []
-            return []
+            self._semantic_seed_cache[cache_key] = {}
+            return {}
         finally:
             self._semantic_seed_deferred.discard(cache_key)
             elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -358,21 +363,21 @@ class TopologyRetriever:
         *,
         focus_text: str,
         goals: Iterable[Any],
-    ) -> list[str]:
+    ) -> dict[str, float]:
         query_text = " ".join(
             part
             for part in (focus_text, " ".join(str(goal) for goal in goals))
             if part
         ).strip()
         if not query_text:
-            return []
+            return {}
         lineage = tuple(str(value) for value in (context.cognitive_instance_ids or context.lineage_instance_ids))
         cache_key = (str(context.character_id), query_text, lineage)
         cached = self._semantic_seed_cache.get(cache_key)
         if cached is not None:
             return cached
         if cache_key in self._semantic_seed_deferred:
-            return []
+            return {}
         try:
             return await asyncio.wait_for(
                 self._semantic_seed_flights.run(
@@ -389,7 +394,7 @@ class TopologyRetriever:
                 "HUD semantic seed exceeded %.0f ms budget; using lexical/topology fallback",
                 SEMANTIC_SEED_WAIT_SECONDS * 1000.0,
             )
-            return []
+            return {}
 
     async def _canonical_event_memberships(
         self, proposition_ids: list[Any]
@@ -465,6 +470,19 @@ class TopologyRetriever:
                 ),
             )
             event = event_by_proposition[representative["proposition_id"]]
+            member_relevance = [dict(member.get("relevance") or {}) for member in members]
+            direct_vectors = [float(r["vector_similarity"]) for r in member_relevance if r.get("vector_similarity") is not None]
+            if direct_vectors:
+                representative["relevance"]["vector_similarity"] = max(direct_vectors)
+                representative["relevance"]["vector_semantic"] = 1.8 * max(0.0, min(1.0, max(direct_vectors)))
+            representative["relevance"]["event_member_count"] = len(members)
+            representative["relevance"]["event_confidence"] = float(event.get("event_confidence") or 0.0)
+            representative["relevance"]["total"] = round(
+                max(float(r.get("total") or 0.0) for r in member_relevance)
+                + 0.20 * max(0.0, min(1.0, float(event.get("event_confidence") or 0.0)))
+                + 0.08 * math.log1p(max(0, len(members) - 1)),
+                6,
+            )
             representative["semantic_event_id"] = event_id
             representative["semantic_event_confidence"] = event["event_confidence"]
             representative["semantic_event_members"] = event["member_proposition_ids"]
@@ -608,7 +626,7 @@ class TopologyRetriever:
         terms = _focus_terms(focus_text, " ".join(str(goal) for goal in goals))
 
         semantic_started = time.perf_counter()
-        semantic_seed_ids = await self._semantic_seed_propositions(
+        semantic_seed_scores = await self._semantic_seed_propositions(
             context, focus_text=focus_text, goals=goals
         )
         semantic_ms = (time.perf_counter() - semantic_started) * 1000.0
@@ -622,7 +640,7 @@ class TopologyRetriever:
                 lineage_keys=lineage_keys,
                 instance_id=str(context.instance_id),
                 terms=terms,
-                semantic_seed_ids=semantic_seed_ids,
+                semantic_seed_ids=list(semantic_seed_scores),
                 hops=hops,
                 policy=policy,
                 row_limit=row_limit,
@@ -642,7 +660,7 @@ class TopologyRetriever:
                     lineage_keys=lineage_keys,
                     instance_id=str(context.instance_id),
                     terms=terms,
-                    semantic_seed_ids=semantic_seed_ids,
+                    semantic_seed_ids=list(semantic_seed_scores),
                     hops=0,
                     policy=policy,
                     row_limit=row_limit,
@@ -690,8 +708,13 @@ class TopologyRetriever:
                 candidate_entity_id=item.get("source_entity_id"),
                 epistemic_status=item.get("epistemic_status"),
                 confidence=item.get("effective_confidence") or item.get("confidence"),
-                updated_at=item.get("updated_at"),
+                updated_at=(
+                    item.get("occurrence_time")
+                    if str(item.get("claim_kind") or "").upper() in {"EVENT", "MEMORY"}
+                    else item.get("first_acquired_at") or item.get("updated_at")
+                ),
                 causal_distance=item.get("topology_depth"),
+                semantic_similarity=semantic_seed_scores.get(str(item.get("proposition_id"))),
             )
             topology_bonus = (
                 0.45 / (1.0 + float(item.get("topology_cost") or 0.0))
@@ -707,6 +730,12 @@ class TopologyRetriever:
                 "fallback": topology_fallback,
             }
             item["relevance"] = score.as_dict()
+            item["relevance"]["vector_similarity"] = semantic_seed_scores.get(str(item.get("proposition_id")))
+            item["relevance"]["recency_source"] = (
+                "occurrence_time" if item.get("occurrence_time") is not None
+                else "first_acquired_at" if item.get("first_acquired_at") is not None
+                else "updated_at"
+            )
             item["relevance"]["topology"] = round(topology_bonus, 6)
             item["relevance"]["total"] = round(
                 float(item["relevance"]["total"]) + topology_bonus, 6
