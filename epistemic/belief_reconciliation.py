@@ -66,23 +66,22 @@ async def reconcile_character_belief_atom(
 ) -> None:
     """Force reconciliation for one character-instance semantic atom."""
 
-    # Reconciliation mutates both per-instance belief rows and shared
-    # character topology. Serialize the shared scope before entering the SQL
-    # materializer so activation and background reconciliation cannot acquire
-    # those rows in opposite orders.
+    # The SQL wrapper takes a transaction-scoped advisory lock on the
+    # character belief topology before invoking the materializer. All Python
+    # reconciliation entry points therefore share one deterministic lock
+    # boundary, including activation and background reconciliation.
     for attempt in range(DEADLOCK_RETRY_ATTEMPTS):
         try:
             await db.execute(
-                """
-                SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0));
-                SELECT aios.reconcile_character_belief_atom($2,$3)
-                """,
-                f"belief-character:{instance_id}",
+                "SELECT aios.reconcile_character_belief_atom_serialized($1,$2)",
                 instance_id,
                 atom_id,
             )
             return
         except asyncpg.exceptions.DeadlockDetectedError:
+            # The advisory lock prevents new AIOS reconciliation cycles, but a
+            # transaction already inside the old path during deploy can still
+            # collide once. Retrying is recovery, not the concurrency model.
             if attempt + 1 >= DEADLOCK_RETRY_ATTEMPTS:
                 raise
 
