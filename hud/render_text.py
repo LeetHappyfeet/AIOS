@@ -84,6 +84,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("Physical: " + ", ".join(f"{k}={v}" for k, v in physical.items()))
     if emotional:
         lines.append("Emotion: " + ", ".join(f"{k}={v}" for k, v in emotional.items()))
+    identity_kernel = identity.get("identity_kernel")
+    if identity_kernel:
+        lines.append("\n" + str(identity_kernel))
     for section in frame.get("plugin_sections") or []:
         title = str(section.get("title") or section.get("key") or "PLUGIN")
         fields = section.get("fields") or []
