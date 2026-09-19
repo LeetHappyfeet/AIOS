@@ -4,12 +4,15 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+import asyncpg
+
 from aios_app.db import Database
 
 
 RESOLVER_VERSION = "character-belief-v1"
 DEFAULT_ACCEPT_SUPPORT = 0.60
 DEFAULT_DECISION_MARGIN = 0.15
+DEADLOCK_RETRY_ATTEMPTS = 4
 
 
 @dataclass(frozen=True)
@@ -63,11 +66,25 @@ async def reconcile_character_belief_atom(
 ) -> None:
     """Force reconciliation for one character-instance semantic atom."""
 
-    await db.execute(
-        "SELECT aios.reconcile_character_belief_atom($1,$2)",
-        instance_id,
-        atom_id,
-    )
+    # Reconciliation mutates both per-instance belief rows and shared
+    # character topology. Serialize the shared scope before entering the SQL
+    # materializer so activation and background reconciliation cannot acquire
+    # those rows in opposite orders.
+    for attempt in range(DEADLOCK_RETRY_ATTEMPTS):
+        try:
+            await db.execute(
+                """
+                SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0));
+                SELECT aios.reconcile_character_belief_atom($2,$3)
+                """,
+                f"belief-character:{instance_id}",
+                instance_id,
+                atom_id,
+            )
+            return
+        except asyncpg.exceptions.DeadlockDetectedError:
+            if attempt + 1 >= DEADLOCK_RETRY_ATTEMPTS:
+                raise
 
 
 async def reconcile_instance_beliefs(
