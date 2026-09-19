@@ -57,31 +57,54 @@ class WorldPropositionRetriever:
 
         rows = await self.db.fetch(
             """
-            SELECT DISTINCT ON (p.proposition_id)
-                p.proposition_id, p.topic_key, p.canonical_text,
-                p.subject_norm, p.predicate_norm, p.object_norm,
-                p.polarity, p.modality,
-                ccr.claim_kind, ccr.predicate_family,
-                ccr.world_id AS source_world_id,
-                ccr.dag_node_id AS source_node_id
-            FROM aios.proposition p
-            JOIN aios.observation obs ON obs.proposition_id=p.proposition_id
-            JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
-            LEFT JOIN aios.claim_candidate cc ON cc.claim_id=obs.claim_id
-            LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
-            LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
-            LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
-            LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-            WHERE p.proposition_id = ANY($1::uuid[])
-              AND ccr.world_id = ANY($2::uuid[])
-              AND ccr.character_instance_id IS NULL
-              AND (ie.event_id IS NULL OR ie.superseded_at IS NULL)
-              AND (cardinality($3::text[]) = 0 OR ccr.claim_kind = ANY($3::text[]))
-            ORDER BY p.proposition_id, ccr.resolved_at DESC
+            WITH eligible_observations AS (
+                SELECT
+                    p.proposition_id, p.topic_key, p.canonical_text,
+                    p.subject_norm, p.predicate_norm, p.object_norm,
+                    p.polarity, p.modality,
+                    obs.claim_id AS evidence_claim_id,
+                    ccr.claim_kind, ccr.predicate_family,
+                    ccr.world_id AS source_world_id,
+                    ccr.dag_node_id AS source_node_id,
+                    ccr.resolved_at,
+                    dn.event_time AS occurrence_time
+                FROM aios.proposition p
+                JOIN aios.observation obs ON obs.proposition_id=p.proposition_id
+                JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
+                LEFT JOIN aios.claim_candidate cc ON cc.claim_id=obs.claim_id
+                LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+                LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+                WHERE p.proposition_id = ANY($1::uuid[])
+                  AND ccr.world_id = ANY($2::uuid[])
+                  AND ccr.character_instance_id IS NULL
+                  AND (ie.event_id IS NULL OR ie.superseded_at IS NULL)
+                  AND (cardinality($3::text[]) = 0 OR ccr.claim_kind = ANY($3::text[]))
+            )
+            SELECT DISTINCT ON (proposition_id)
+                proposition_id, topic_key, canonical_text,
+                subject_norm, predicate_norm, object_norm,
+                polarity, modality,
+                evidence_claim_id,
+                claim_kind, predicate_family,
+                source_world_id, source_node_id,
+                occurrence_time
+            FROM eligible_observations
+            ORDER BY
+                proposition_id,
+                -- Keep the selected world observation internally coherent:
+                -- claim kind, predicate family, world and node all come from
+                -- the same claim occurrence. Prefer the current world over an
+                -- ancestor when the proposition exists in both.
+                (source_world_id = $4::uuid) DESC,
+                resolved_at DESC,
+                evidence_claim_id DESC
             """,
             ids,
             list(scope.all_world_ids),
             list(claim_kinds),
+            context.world_id,
         )
 
         rank_by_id = {pid: rank for rank, pid in enumerate(ids)}
@@ -90,6 +113,12 @@ class WorldPropositionRetriever:
         for row in rows:
             item = dict(row)
             item["text"] = item.pop("canonical_text")
+            # World cognition is occurrence-scoped even when proposition text
+            # is shared by several claims. Preserve the claim and retrieval
+            # route so downstream cognition never has to infer kind from the
+            # proposition alone.
+            item["retrieval_mode"] = domain
+            item["world_evidence_claim_id"] = item.get("evidence_claim_id")
             rank = rank_by_id.get(str(item["proposition_id"]), len(ids))
             score = scorer.score(
                 item,
