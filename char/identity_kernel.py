@@ -8,6 +8,15 @@ from aios_app.db import Database
 
 COMPILER_VERSION = "identity-kernel-v1"
 
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
 _FACET_ORDER = {
     "identity": 0,
     "appearance": 10,
@@ -62,7 +71,7 @@ def _render(identity: dict[str, Any], facets: list[dict[str, Any]]) -> tuple[dic
         groups.setdefault(str(facet["facet_type"]), []).append(
             {
                 "key": facet["facet_key"],
-                "value": facet["value"],
+                "value": _json_value(facet["value"]),
                 "stability": facet["stability"],
                 "authority": facet["authority"],
             }
@@ -144,7 +153,7 @@ class IdentityKernelStore:
                 identity_version=version,
                 compiler_version=COMPILER_VERSION,
                 kernel_text=row["kernel_text"],
-                kernel_json=dict(row["kernel_json"] or {}),
+                kernel_json=_json_value(row["kernel_json"]) or {},
             )
             self._cache[key] = kernel
             return kernel
