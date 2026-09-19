@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS aios.character_identity_candidate (
     perspective text NOT NULL DEFAULT 'self'
         CHECK (perspective IN ('self','biographical','public_reputation','secret','unknown')),
     continuity_key text,
-    source_field text,
+    source_field text NOT NULL DEFAULT '',
     source_fragment text,
     disposition text NOT NULL DEFAULT 'proposed'
         CHECK (disposition IN ('proposed','accepted','rejected','superseded')),
