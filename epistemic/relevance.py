@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 from dataclasses import asdict, dataclass
@@ -10,6 +11,7 @@ from uuid import UUID
 from aios_app.hud.context import HUDContext
 
 
+logger = logging.getLogger("aios.epistemic.relevance")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
 _LOW_INFORMATION_SUBJECTS = {
     "it", "this", "that", "which", "who", "what", "something", "anything",
@@ -191,6 +193,7 @@ def select_recalled_cognition(
     immediate = [item for item in by_id.values() if item.get("cognitive_commit")]
     established = [item for item in by_id.values() if not item.get("cognitive_commit")]
     scored: list[tuple[float, dict[str, Any], set[str]]] = []
+    diagnostic: list[tuple[float, dict[str, Any], str]] = []
     suppressed = {"below_recall_floor": 0, "redundant_recall": 0, "recall_cap": 0}
 
     for item in established:
@@ -224,8 +227,10 @@ def select_recalled_cognition(
         item["relevance"] = relevance
         if recall_score < relevance_floor:
             suppressed["below_recall_floor"] += 1
+            diagnostic.append((recall_score, item, "below_recall_floor"))
             continue
         scored.append((recall_score, item, tokens))
+        diagnostic.append((recall_score, item, "candidate"))
 
     scored.sort(key=lambda entry: entry[0], reverse=True)
     selected: list[dict[str, Any]] = []
@@ -241,4 +246,29 @@ def select_recalled_cognition(
         selected_tokens.append(tokens)
 
     immediate.sort(key=lambda item: float(item.get("relevance", {}).get("total", 0.0)), reverse=True)
+    if logger.isEnabledFor(logging.DEBUG):
+        selected_ids = {str(item.get("proposition_id") or item.get("text")) for item in selected}
+        for rank, (score, item, status) in enumerate(
+            sorted(diagnostic, key=lambda entry: entry[0], reverse=True)[:20], start=1
+        ):
+            relevance = item.get("relevance") or {}
+            key = str(item.get("proposition_id") or item.get("text"))
+            logger.debug(
+                "Recall candidate rank=%d id=%s kind=%s selected=%s status=%s "
+                "vector_similarity=%s vector_semantic=%.4f lexical=%.4f recency=%.4f "
+                "salience=%.4f confidence=%.4f topology=%.4f context_overlap=%.4f "
+                "quality_penalty=%.4f continuity_penalty=%.4f recall=%.4f text=%r",
+                rank, key, item.get("claim_kind"), key in selected_ids, status,
+                relevance.get("vector_similarity"),
+                _as_float(relevance.get("vector_semantic")),
+                _as_float(relevance.get("semantic")),
+                _as_float(relevance.get("recency")),
+                max(_as_float(item.get("salience_weight")), _as_float(item.get("attention_weight"))),
+                _as_float(item.get("effective_confidence"), _as_float(item.get("confidence"))),
+                _as_float(relevance.get("topology")),
+                _as_float(relevance.get("context_overlap")),
+                _as_float(relevance.get("quality_penalty")),
+                _as_float(relevance.get("continuity_penalty")),
+                score, str(item.get("text") or "")[:240],
+            )
     return immediate + selected, suppressed
