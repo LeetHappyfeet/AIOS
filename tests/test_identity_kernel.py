@@ -1,5 +1,5 @@
 from aios_app.char.identity_bootstrap import _card_data, _facet_candidates
-from aios_app.char.identity_kernel import _render
+from aios_app.char.identity_kernel import _render, _json_value
 
 
 def test_character_card_bootstrap_routes_only_identity_fields():
@@ -72,3 +72,10 @@ def test_card_candidates_default_to_self_authored_identity():
     assert len(facets) == 2
     assert all(item["source_field"] != "scenario" for item in facets)
     assert {item["facet_type"] for item in facets} == {"appearance", "personality"}
+
+
+def test_identity_json_values_decode_from_asyncpg_text():
+    assert _json_value('"reserved"') == "reserved"
+    assert _json_value('["reserved","pragmatic"]') == ["reserved", "pragmatic"]
+    assert _json_value('{"value":true}') == {"value": True}
+    assert _json_value("plain prose") == "plain prose"
