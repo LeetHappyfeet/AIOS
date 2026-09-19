@@ -10,6 +10,7 @@ from aios_app.ingest_api import ingest_message
 from aios_app.models import IngestIn, IngestOut
 from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
+from aios_app.char.identity_sources import stage_identity_source, identity_snapshot
 from pydantic import BaseModel
 from typing import Any
 
@@ -90,3 +91,52 @@ async def reject_character_identity_candidate(
         raise LookupError("identity candidate does not belong to character")
     await reject_identity_candidate(db, candidate_id, reason=req.reason)
     return {"character_id": character_id, "candidate_id": candidate_id, "disposition": "rejected"}
+
+
+class IdentitySourceCandidateIn(BaseModel):
+    facet_type: str
+    facet_key: str
+    value: Any
+    stability: str = "core"
+    authority: str | None = None
+    mutability: str = "explicit"
+    perspective: str = "unknown"
+    continuity_key: str | None = None
+    source_field: str | None = None
+    source_fragment: str | None = None
+    meta: dict[str, Any] = {}
+
+
+class IdentitySourceStageIn(BaseModel):
+    source_type: str
+    payload: dict[str, Any]
+    candidates: list[IdentitySourceCandidateIn]
+    source_name: str | None = None
+    source_format: str | None = None
+    authority: str = "reference"
+    continuity_key: str | None = None
+    meta: dict[str, Any] = {}
+
+
+@app.post("/character/{character_id}/identity/source")
+async def stage_character_identity_source(
+    character_id: str,
+    req: IdentitySourceStageIn,
+) -> dict[str, Any]:
+    return await stage_identity_source(
+        db,
+        character_id=character_id,
+        source_type=req.source_type,
+        payload=req.payload,
+        candidates=[item.model_dump() for item in req.candidates],
+        source_name=req.source_name,
+        source_format=req.source_format,
+        authority=req.authority,
+        continuity_key=req.continuity_key,
+        meta=req.meta,
+    )
+
+
+@app.get("/character/{character_id}/identity")
+async def get_character_identity(character_id: str) -> dict[str, Any]:
+    return await identity_snapshot(db, character_id)
