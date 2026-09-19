@@ -40,6 +40,8 @@ def test_same_event_requires_timeline_and_world_consistency():
             "polarity": 1,
             "topic_key": "door/open",
             "claim_kind": "EVENT",
+            "observation_id": "obs-1",
+            "claim_id": "claim-1",
             "timeline_id": "t1",
             "world_id": "w1",
         },
@@ -70,6 +72,8 @@ def test_same_event_can_survive_when_independent_event_evidence_agrees():
             "polarity": 1,
             "topic_key": "door/open",
             "claim_kind": "EVENT",
+            "observation_id": "obs-1",
+            "claim_id": "claim-1",
             "timeline_id": "t1",
             "world_id": "w1",
         },
@@ -80,6 +84,8 @@ def test_same_event_can_survive_when_independent_event_evidence_agrees():
             "polarity": 1,
             "topic_key": "door/open",
             "claim_kind": "EVENT",
+            "observation_id": "obs-1",
+            "claim_id": "claim-1",
             "timeline_id": "t1",
             "world_id": "w1",
         },
@@ -117,3 +123,164 @@ def test_explicit_conflict_can_defeat_similarity_equivalence():
     )
     assert relation == "CONTRADICTS"
     assert features["adversarial_verification"]["winner_key"] == "CONTRADICTS"
+
+
+def test_same_event_confidence_cannot_invert_weak_event_classification():
+    relation, confidence, features = validate_neighbor_relation(
+        similarity=0.99,
+        a={
+            "subject_norm": "alex",
+            "predicate_norm": "get",
+            "object_norm": "access",
+            "polarity": 1,
+            "topic_key": "access/get",
+            "claim_kind": "EVENT",
+            "semantic_confidence": 0.66,
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        b={
+            "subject_norm": "alex",
+            "predicate_norm": "get",
+            "object_norm": "permission",
+            "polarity": 1,
+            "topic_key": "access/get",
+            "claim_kind": "EVENT",
+            "semantic_confidence": 0.90,
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        conflict_type=None,
+    )
+    assert relation == "SAME_EVENT"
+    assert confidence <= 0.66
+    assert features["event_semantic_confidence"] == 0.66
+
+
+def test_missing_semantic_confidence_preserves_legacy_relation_scoring():
+    relation, confidence, features = validate_neighbor_relation(
+        similarity=0.91,
+        a={
+            "subject_norm": "renamon",
+            "predicate_norm": "open",
+            "object_norm": "door",
+            "polarity": 1,
+            "topic_key": "door/open",
+            "claim_kind": "EVENT",
+            "observation_id": "obs-1",
+            "claim_id": "claim-1",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        b={
+            "subject_norm": "renamon",
+            "predicate_norm": "swing open",
+            "object_norm": "door",
+            "polarity": 1,
+            "topic_key": "door/open",
+            "claim_kind": "EVENT",
+            "observation_id": "obs-1",
+            "claim_id": "claim-1",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        conflict_type=None,
+    )
+    assert relation == "SAME_EVENT"
+    assert confidence > 0.66
+    assert features["event_semantic_confidence"] is None
+
+
+def test_same_event_rejects_role_reversal_even_with_extreme_similarity():
+    relation, _, features = validate_neighbor_relation(
+        similarity=0.99,
+        a={
+            "subject_norm": "shego",
+            "predicate_norm": "pull",
+            "object_norm": "alex",
+            "polarity": 1,
+            "claim_kind": "EVENT",
+            "observation_id": "obs-1",
+            "claim_id": "claim-1",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        b={
+            "subject_norm": "alex",
+            "predicate_norm": "pull",
+            "object_norm": "shego",
+            "polarity": 1,
+            "claim_kind": "EVENT",
+            "observation_id": "obs-1",
+            "claim_id": "claim-1",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        conflict_type=None,
+    )
+    assert relation != "SAME_EVENT"
+    assert features["role_reversal"] is True
+
+
+def test_repeated_identical_action_needs_occurrence_context():
+    relation, _, features = validate_neighbor_relation(
+        similarity=0.99,
+        a={
+            "subject_norm": "alex",
+            "predicate_norm": "open",
+            "object_norm": "door",
+            "polarity": 1,
+            "claim_kind": "EVENT",
+            "observation_id": "obs-morning",
+            "claim_id": "claim-morning",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        b={
+            "subject_norm": "alex",
+            "predicate_norm": "open",
+            "object_norm": "door",
+            "polarity": 1,
+            "claim_kind": "EVENT",
+            "observation_id": "obs-evening",
+            "claim_id": "claim-evening",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        conflict_type=None,
+    )
+    assert relation != "SAME_EVENT"
+    assert features["occurrence_context"] is False
+
+
+def test_same_timeline_and_similarity_are_not_event_identity_evidence():
+    relation, _, features = validate_neighbor_relation(
+        similarity=0.98,
+        a={
+            "subject_norm": "alex",
+            "predicate_norm": "ask",
+            "object_norm": "shego",
+            "polarity": 1,
+            "claim_kind": "EVENT",
+            "observation_id": "obs-1",
+            "claim_id": "claim-1",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        b={
+            "subject_norm": "alex",
+            "predicate_norm": "tell",
+            "object_norm": "van",
+            "polarity": 1,
+            "claim_kind": "EVENT",
+            "observation_id": "obs-2",
+            "claim_id": "claim-2",
+            "timeline_id": "t1",
+            "world_id": "w1",
+        },
+        conflict_type=None,
+    )
+    assert relation != "SAME_EVENT"
+    matrix = features["adversarial_verification"]["matrix"]["SAME_EVENT"]
+    assert matrix["timeline"] == 0
+    assert matrix["world"] == 0

@@ -75,26 +75,14 @@ async def reconcile_instance_beliefs(
     *,
     instance_id: UUID,
 ) -> int:
-    """Reconcile every semantic atom visible through an instance's lineage."""
+    """Reconcile every semantic atom visible through an instance's cognitive continuity scope."""
 
     rows = await db.fetch(
         """
-        WITH RECURSIVE lineage AS (
-            SELECT ci.instance_id, ci.parent_instance_id
-            FROM aios.character_instance ci
-            WHERE ci.instance_id=$1
-
-            UNION ALL
-
-            SELECT parent.instance_id, parent.parent_instance_id
-            FROM lineage
-            JOIN aios.character_instance parent
-              ON parent.instance_id=lineage.parent_instance_id
-        )
         SELECT DISTINCT p.atom_id
-        FROM lineage
+        FROM aios.cognitive_evidence_instances($1::uuid) eligible
         JOIN aios.character_proposition_knowledge cpk
-          ON cpk.instance_id=lineage.instance_id
+          ON cpk.instance_id=eligible.instance_id
         JOIN aios.proposition p
           ON p.proposition_id=cpk.proposition_id
         WHERE p.atom_id IS NOT NULL

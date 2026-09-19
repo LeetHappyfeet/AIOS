@@ -35,13 +35,17 @@ def test_pair_source_id_is_order_independent():
     )
 
 
+def test_same_event_is_not_a_pairwise_topology_edge():
+    assert "SAME_EVENT" not in PAIR_EDGE_TYPES
+    assert "semantic_same_event" not in PAIR_EDGE_TYPES.values()
+
+
 def test_only_structural_neighbor_relations_have_promotion_edges():
     assert PAIR_EDGE_TYPES == {
         "EQUIVALENT": "semantic_equivalent",
         "REFINES": "semantic_refinement",
         "CONTRADICTS": "semantic_contradicts",
         "SAME_TOPIC": "semantic_same_topic",
-        "SAME_EVENT": "semantic_same_event",
     }
 
 

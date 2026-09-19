@@ -107,7 +107,28 @@ def _span_text(tokens: Iterable) -> Optional[str]:
 def _phrase(token) -> Optional[str]:
     if token is None:
         return None
-    tokens = [t for t in token.subtree if t.dep_ not in CLAUSE_DEPS or t.i == token.i]
+
+    # Build the phrase by walking outward from its head instead of filtering a
+    # flattened subtree. Filtering only the clause-root token leaves that
+    # clause's descendants behind ("flame that itself into something...").
+    # Pruning the whole branch keeps nominal arguments local to their head.
+    sentence_start = token.sent.start
+    sentence_end = token.sent.end
+    tokens = []
+    stack = [token]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if current.i in seen:
+            continue
+        seen.add(current.i)
+        if not (sentence_start <= current.i < sentence_end):
+            continue
+        tokens.append(current)
+        for child in current.children:
+            if child.dep_ in CLAUSE_DEPS:
+                continue
+            stack.append(child)
     return _span_text(tokens)
 
 
@@ -119,6 +140,8 @@ def _find_subject(root):
         head = root.head
         seen: set[int] = set()
         while head is not None and head.i not in seen:
+            if head.sent.start != root.sent.start or head.sent.end != root.sent.end:
+                break
             seen.add(head.i)
             inherited = [c for c in head.children if c.dep_ in SUBJECT_DEPS]
             if inherited:
@@ -296,17 +319,44 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
     for idx, root in enumerate(roots):
         subject_token = _find_subject(root)
         object_token = _find_object(root)
+        # parent_index preserves general syntactic clause topology. An
+        # object-frame link is narrower: it means the child proposition actually
+        # occupies the predicate's semantic content/object slot. Do not turn
+        # causal, temporal, relative, or other modifiers into proposition
+        # objects merely because spaCy represents them as subordinate clauses.
+        predicate_lemma = root.lemma_.lower()
+        proposition_taking = predicate_lemma in PROPOSITION_PREDICATES
         child_clause = next(
-            (c for c in root.children if c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"} and c.i in root_to_index),
+            (
+                c for c in root.children
+                if c.dep_ in {"ccomp", "xcomp"}
+                and c.i in root_to_index
+                and c.sent.start == root.sent.start
+                and c.sent.end == root.sent.end
+                and proposition_taking
+            ),
             None,
         )
-        if child_clause is None and object_token is not None:
+        if child_clause is None and object_token is not None and proposition_taking:
             child_clause = next(
-                (c for c in object_token.subtree if c.i != object_token.i and c.dep_ in {"ccomp", "xcomp", "advcl", "relcl", "acl"} and c.i in root_to_index),
+                (
+                    c for c in object_token.subtree
+                    if c.i != object_token.i
+                    and c.dep_ in {"ccomp", "xcomp"}
+                    and c.i in root_to_index
+                    and c.sent.start == root.sent.start
+                    and c.sent.end == root.sent.end
+                ),
                 None,
             )
         object_frame_index = root_to_index.get(child_clause.i) if child_clause is not None else None
-        parent_index = root_to_index.get(root.head.i) if root.head.i != root.i else None
+        parent_index = (
+            root_to_index.get(root.head.i)
+            if root.head.i != root.i
+            and root.head.sent.start == root.sent.start
+            and root.head.sent.end == root.sent.end
+            else None
+        )
 
         predicate, predicate_confidence, construction = _canonical_predicate(root, object_token)
         polarity = -1 if _negated(root) else 1
@@ -326,7 +376,10 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
         if passive_reporting:
             subject = None
 
-        object_text = None if object_frame_index is not None else _phrase(object_token)
+        # Preserve an explicit lexical object even when the predicate also has
+        # proposition-valued content. The normalizer must never lose a concrete
+        # object merely because another clause is structurally attached.
+        object_text = _phrase(object_token)
         named_entities = [
             {"text": ent.text, "label": ent.label_}
             for ent in doc.ents
@@ -366,6 +419,8 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
                 "named_entities": named_entities,
                 "inside_direct_quote": _inside_quote(root, quote_spans),
                 "addressee_text": _find_addressee(root) if predicate in REPORTING_PREDICATES else None,
+                "clause_relation": root.dep_.lower() if root.dep_ != "ROOT" else None,
+                "semantic_object_clause": child_clause.dep_.lower() if child_clause is not None else None,
             },
         ))
 
@@ -445,6 +500,33 @@ async def _recent_antecedents(db: Database, claim_id: UUID, limit: int = 5) -> l
         claim_id, DECOMPOSER_VERSION, limit * 3,
     )
     return [dict(row) for row in rows]
+
+
+def _draft_antecedent_candidates(drafts: list[FrameDraft], before_index: int) -> list[dict]:
+    """Return current-claim candidates nearest-first for local coreference."""
+    candidates: list[dict] = []
+    for draft in reversed([item for item in drafts if item.index < before_index]):
+        named_entities = draft.meta.get("named_entities", [])
+        subject_kind = _guess_kind(
+            draft.subject,
+            named_entities,
+            predicate=draft.predicate_canonical,
+            object_text=draft.object_text,
+        )
+        object_kind = _guess_kind(draft.object_text, named_entities)
+        if draft.subject:
+            candidates.append({
+                "subject_text": draft.subject,
+                "subject_kind_guess": subject_kind,
+                "subject_entity_key": None,
+            })
+        if draft.object_text:
+            candidates.append({
+                "subject_text": draft.object_text,
+                "subject_kind_guess": object_kind,
+                "subject_entity_key": None,
+            })
+    return candidates
 
 
 def _choose_antecedent(value: Optional[str], candidates: list[dict]) -> tuple[Optional[str], Optional[str], float]:
@@ -622,8 +704,24 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
 
     for draft in drafts:
         frame_id = inserted[draft.index]
-        subject_resolved, subject_key, subject_ref_conf = _choose_antecedent(draft.subject, antecedents)
-        object_resolved, object_key, object_ref_conf = _choose_antecedent(draft.object_text, antecedents)
+        # Resolve ordinary third-person/neutral pronouns against the current
+        # claim before consulting persisted discourse. This prevents a nearby
+        # "it" from jumping backward to an unrelated older quote or entity.
+        local_antecedents = _draft_antecedent_candidates(drafts, draft.index)
+        subject_resolved, subject_key, subject_ref_conf = _choose_antecedent(
+            draft.subject, local_antecedents
+        )
+        if _norm(subject_resolved) == _norm(draft.subject) and subject_ref_conf <= 0.20:
+            subject_resolved, subject_key, subject_ref_conf = _choose_antecedent(
+                draft.subject, antecedents
+            )
+        object_resolved, object_key, object_ref_conf = _choose_antecedent(
+            draft.object_text, local_antecedents
+        )
+        if _norm(object_resolved) == _norm(draft.object_text) and object_ref_conf <= 0.20:
+            object_resolved, object_key, object_ref_conf = _choose_antecedent(
+                draft.object_text, antecedents
+            )
         perspective_holder, _, perspective_holder_conf = _choose_antecedent(draft.meta.get("perspective_holder_text"), antecedents)
         perspective_addressee, _, perspective_addressee_conf = _choose_antecedent(draft.meta.get("perspective_addressee_text"), antecedents)
         perspective_kind = draft.meta.get("perspective_kind")

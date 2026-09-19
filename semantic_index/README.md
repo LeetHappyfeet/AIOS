@@ -110,7 +110,7 @@ High-confidence pairwise relations may become derived topology edges:
 - `semantic_same_topic`
 - `semantic_same_event`
 
-High-confidence cluster classifications materialize `SEMANTIC_CLUSTER` nodes
+Accepted `SAME_EVENT` relations resolve into canonical `semantic_event` records and EVENT topology nodes with `semantic_event_evidence` membership edges; they are not materialized as proposition-to-proposition identity edges.\n\nHigh-confidence cluster classifications materialize `SEMANTIC_CLUSTER` nodes
 inside each scope that contains at least two members of that cluster. Cluster
 boundaries then become derived semantic edges such as `state_transition`,
 `temporal_transition`, `topic_boundary`, `narrative_boundary`, and

@@ -41,7 +41,43 @@ async def analyze_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
     for row in rows:
         proposition_id = row["proposition_id"]
         try:
-            vector = store.vector(str(proposition_id))
+            try:
+                vector = store.vector(str(proposition_id))
+            except KeyError:
+                # PostgreSQL receipts can outlive Qdrant points (for example
+                # after a collection reset or an interrupted external repair).
+                # Retire the stale receipt and any structure receipt so the
+                # normal vector-index cycle can recreate the point. A single
+                # missing advisory vector must never terminate Semantic Index.
+                logger.warning(
+                    "Missing Qdrant proposition vector %s; invalidating stale index state for repair",
+                    proposition_id,
+                )
+                await db.execute(
+                    """
+                    DELETE FROM aios.semantic_vector_index_state
+                    WHERE object_type='proposition'
+                      AND object_key=$1
+                      AND qdrant_collection=$2
+                      AND embedding_model=$3
+                      AND embedding_version=$4
+                    """,
+                    str(proposition_id),
+                    cfg.proposition_collection,
+                    cfg.embedding_model,
+                    cfg.embedding_version,
+                )
+                await db.execute(
+                    """
+                    DELETE FROM aios.semantic_structure_state
+                    WHERE proposition_id=$1
+                      AND embedding_version=$2
+                    """,
+                    proposition_id,
+                    cfg.embedding_version,
+                )
+                continue
+
             hits = store.search(vector, top_k=cfg.neighbor_k + 1)
             for _, score, payload in hits:
                 other = payload.get("proposition_id")
@@ -65,7 +101,12 @@ async def analyze_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
                     a, b, float(score), cfg.embedding_version,
                 )
                 written += 1
-        finally:
+        except Exception:
+            # Only successful neighbor analysis earns a structure receipt.
+            # Unexpected failures remain visible and retryable rather than
+            # being falsely marked complete.
+            raise
+        else:
             await db.execute(
                 """
                 INSERT INTO aios.semantic_structure_state (

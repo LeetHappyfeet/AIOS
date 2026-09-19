@@ -54,3 +54,74 @@ def test_xcomp_subject_inheritance_does_not_loop():
     assert frames
     assert any(f.predicate_canonical == "stop" for f in frames)
     assert any(f.predicate_canonical == "hurt" for f in frames)
+
+
+
+def test_modifier_clauses_are_not_semantic_object_frames():
+    frames = decompose_sentence(
+        "Alex almost got flagged because Alex waved at the drone."
+    )
+    flagged = next(f for f in frames if f.predicate_canonical == "flag")
+    waved = next(f for f in frames if f.predicate_canonical == "wave")
+    assert waved.parent_index == flagged.index
+    assert flagged.object_frame_index is None
+
+
+def test_relative_clause_is_not_semantic_object_frame():
+    frames = decompose_sentence(
+        "A green flame that stretched itself across the screen flickered."
+    )
+    flicker = next(f for f in frames if f.predicate_canonical == "flicker")
+    stretch = next(f for f in frames if f.predicate_canonical == "stretch")
+    assert stretch.frame_role == "relcl"
+    assert flicker.object_frame_index is None
+
+
+def test_explicit_object_survives_unrelated_child_clause():
+    frames = decompose_sentence(
+        "You ate a granola bar because you missed dinner."
+    )
+    ate = next(f for f in frames if f.predicate_canonical == "eat")
+    assert ate.object_text is not None
+    assert "granola bar" in ate.object_text.lower()
+    assert ate.object_frame_index is None
+
+
+def test_proposition_taking_predicate_keeps_nested_content():
+    frames = decompose_sentence("Shego believes Alex stole the laptop.")
+    belief = next(f for f in frames if f.predicate_canonical == "believe")
+    stole = next(f for f in frames if f.predicate_canonical == "steal")
+    assert belief.object_frame_index == stole.index
+
+
+
+def test_phrase_prunes_entire_relative_clause_branch():
+    frames = decompose_sentence(
+        "A lazy, flickering flame that stretched itself into something vaguely woman-shaped appeared."
+    )
+    appeared = next(f for f in frames if f.predicate_canonical == "appear")
+    stretch = next(f for f in frames if f.predicate_canonical == "stretch")
+    assert appeared.subject is not None
+    assert "flame" in appeared.subject.lower()
+    assert "itself" not in appeared.subject.lower()
+    assert "woman" not in appeared.subject.lower()
+    assert stretch.subject is not None
+    assert "flame" in stretch.subject.lower()
+    assert "itself" not in stretch.subject.lower()
+
+
+def test_local_antecedent_candidates_prefer_current_claim_order():
+    from aios_app.epistemic.semantic_frames_legacy import (
+        _choose_antecedent,
+        _draft_antecedent_candidates,
+    )
+
+    frames = decompose_sentence(
+        "A green ember bloomed before it resolved into a flame."
+    )
+    resolved = next(f for f in frames if f.predicate_canonical == "resolve")
+    candidates = _draft_antecedent_candidates(frames, resolved.index)
+    antecedent, _, confidence = _choose_antecedent(resolved.subject, candidates)
+    assert antecedent is not None
+    assert "ember" in antecedent.lower()
+    assert confidence > 0.20

@@ -10,7 +10,7 @@ from .relation_validator import validate_neighbor_relation
 
 logger = logging.getLogger("aios.semantic_neighbor_classifier")
 
-NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v3-scope"
+NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v5"
 
 
 def classify_neighbor_pair(
@@ -49,8 +49,12 @@ async def classify_neighbor_relations_once(
             pa.predicate_norm AS a_predicate_norm,
             pa.object_norm AS a_object_norm,
             pa.polarity AS a_polarity,
+            ca.observation_id AS a_observation_id,
+            ca.claim_id AS a_claim_id,
+            ca.dag_node_id AS a_dag_node_id,
             ca.claim_kind AS a_claim_kind,
             ca.predicate_family AS a_predicate_family,
+            ca.semantic_confidence AS a_semantic_confidence,
             ca.world_id AS a_world_id,
             ca.timeline_id AS a_timeline_id,
             ca.epistemic_scope AS a_epistemic_scope,
@@ -62,8 +66,12 @@ async def classify_neighbor_relations_once(
             pb.predicate_norm AS b_predicate_norm,
             pb.object_norm AS b_object_norm,
             pb.polarity AS b_polarity,
+            cb.observation_id AS b_observation_id,
+            cb.claim_id AS b_claim_id,
+            cb.dag_node_id AS b_dag_node_id,
             cb.claim_kind AS b_claim_kind,
             cb.predicate_family AS b_predicate_family,
+            cb.semantic_confidence AS b_semantic_confidence,
             cb.world_id AS b_world_id,
             cb.timeline_id AS b_timeline_id,
             cb.epistemic_scope AS b_epistemic_scope,
@@ -76,8 +84,16 @@ async def classify_neighbor_relations_once(
         JOIN aios.proposition pb ON pb.proposition_id=snc.neighbor_proposition_id
         LEFT JOIN LATERAL (
             SELECT
+                o.observation_id,
+                o.claim_id,
+                o.dag_node_id,
                 ccr.claim_kind,
                 ccr.predicate_family,
+                CASE
+                    WHEN (ccr.meta->>'semantic_confidence') ~ '^[0-9]+([.][0-9]+)?$'
+                    THEN (ccr.meta->>'semantic_confidence')::double precision
+                    ELSE NULL
+                END AS semantic_confidence,
                 ccr.world_id,
                 ccr.timeline_id,
                 ccr.epistemic_scope,
@@ -92,8 +108,16 @@ async def classify_neighbor_relations_once(
         ) ca ON true
         LEFT JOIN LATERAL (
             SELECT
+                o.observation_id,
+                o.claim_id,
+                o.dag_node_id,
                 ccr.claim_kind,
                 ccr.predicate_family,
+                CASE
+                    WHEN (ccr.meta->>'semantic_confidence') ~ '^[0-9]+([.][0-9]+)?$'
+                    THEN (ccr.meta->>'semantic_confidence')::double precision
+                    ELSE NULL
+                END AS semantic_confidence,
                 ccr.world_id,
                 ccr.timeline_id,
                 ccr.epistemic_scope,
@@ -142,12 +166,16 @@ async def classify_neighbor_relations_once(
     for row in rows:
         a = {
             "topic_key": row["a_topic_key"],
+            "observation_id": str(row["a_observation_id"]) if row["a_observation_id"] else None,
+            "claim_id": str(row["a_claim_id"]) if row["a_claim_id"] else None,
+            "dag_node_id": str(row["a_dag_node_id"]) if row["a_dag_node_id"] else None,
             "subject_norm": row["a_subject_norm"],
             "predicate_norm": row["a_predicate_norm"],
             "object_norm": row["a_object_norm"],
             "polarity": row["a_polarity"],
             "claim_kind": row["a_claim_kind"],
             "predicate_family": row["a_predicate_family"],
+            "semantic_confidence": row["a_semantic_confidence"],
             "world_id": str(row["a_world_id"]) if row["a_world_id"] else None,
             "timeline_id": str(row["a_timeline_id"]) if row["a_timeline_id"] else None,
             "epistemic_scope": row["a_epistemic_scope"],
@@ -161,12 +189,16 @@ async def classify_neighbor_relations_once(
         }
         b = {
             "topic_key": row["b_topic_key"],
+            "observation_id": str(row["b_observation_id"]) if row["b_observation_id"] else None,
+            "claim_id": str(row["b_claim_id"]) if row["b_claim_id"] else None,
+            "dag_node_id": str(row["b_dag_node_id"]) if row["b_dag_node_id"] else None,
             "subject_norm": row["b_subject_norm"],
             "predicate_norm": row["b_predicate_norm"],
             "object_norm": row["b_object_norm"],
             "polarity": row["b_polarity"],
             "claim_kind": row["b_claim_kind"],
             "predicate_family": row["b_predicate_family"],
+            "semantic_confidence": row["b_semantic_confidence"],
             "world_id": str(row["b_world_id"]) if row["b_world_id"] else None,
             "timeline_id": str(row["b_timeline_id"]) if row["b_timeline_id"] else None,
             "epistemic_scope": row["b_epistemic_scope"],
@@ -186,7 +218,7 @@ async def classify_neighbor_relations_once(
             conflict_type=row["conflict_type"],
         )
 
-        await db.execute(
+        inserted = await db.fetchrow(
             """
             INSERT INTO aios.semantic_neighbor_relation (
                 proposition_id, neighbor_proposition_id,
@@ -195,6 +227,7 @@ async def classify_neighbor_relations_once(
             )
             VALUES ($1,$2,$3,$4,$5,$6,'candidate',$7::jsonb,$8::jsonb)
             ON CONFLICT DO NOTHING
+            RETURNING 1 AS inserted
             """,
             row["proposition_id"],
             row["neighbor_proposition_id"],
@@ -208,7 +241,8 @@ async def classify_neighbor_relations_once(
                 "proposition_b": b,
             }),
         )
-        written += 1
+        if inserted:
+            written += 1
 
     if written:
         logger.info(
@@ -216,3 +250,4 @@ async def classify_neighbor_relations_once(
             written,
         )
     return written
+

@@ -366,14 +366,24 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
     done_rate = _format_rate(pipeline.get("done_per_s"))
     in_rate = _format_rate(pipeline.get("arrivals_per_s"))
 
-    semantic_state = str(semantic.get("state") or "WAITING")
-    semantic_stage = str(semantic.get("stage") or "waiting")
-    stage_started_at = semantic.get("stage_started_at")
-    if stage_started_at:
-        semantic_detail = f"{semantic_stage} {_format_age(time.time() - float(stage_started_at))}"
+    semantic_runtime = runtime_by_name.get("Semantic Index")
+    semantic_exited = (
+        semantic_runtime is not None
+        and semantic_runtime.process.poll() is not None
+    )
+    if semantic_exited:
+        semantic_state = "DEGRADED"
+        semantic_detail = f"exited({semantic_runtime.process.returncode})"
+        index_rate = "-"
     else:
-        semantic_detail = semantic_stage
-    index_rate = _format_rate(semantic.get("indexed_per_s"))
+        semantic_state = str(semantic.get("state") or "WAITING")
+        semantic_stage = str(semantic.get("stage") or "waiting")
+        stage_started_at = semantic.get("stage_started_at")
+        if stage_started_at:
+            semantic_detail = f"{semantic_stage} {_format_age(time.time() - float(stage_started_at))}"
+        else:
+            semantic_detail = semantic_stage
+        index_rate = _format_rate(semantic.get("indexed_per_s"))
     api_text = f"{api_ms:.0f}ms" if api_ok and api_ms is not None else "DOWN"
 
     print(
