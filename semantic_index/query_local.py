@@ -78,6 +78,47 @@ class LocalSemanticQueryService:
             any_values=any_values,
         )
 
+    def search_world_epistemic_staged(
+        self,
+        query_text: str,
+        *,
+        world_stages: Iterable[Iterable[Any]],
+        top_k: int | None = None,
+        min_hits: int = 8,
+    ) -> list[tuple[str, float, dict[str, Any]]]:
+        """Search public world assertions with one embedding and staged scope widening."""
+        if not query_text.strip():
+            return []
+        stages = [
+            tuple(str(value) for value in stage if value is not None)
+            for stage in world_stages
+        ]
+        stages = [stage for stage in stages if stage]
+        if not stages:
+            return []
+
+        vector = self.embedder.embed([query_text])[0]
+        store = _get_store(self.cfg, self.cfg.epistemic_collection)
+        candidate_k = top_k or self.cfg.hud_candidate_k
+        required = max(1, int(min_hits))
+        merged: list[tuple[str, float, dict[str, Any]]] = []
+        seen_ids: set[str] = set()
+        for world_ids in stages:
+            qfilter = self._filter(
+                must={"object_type": "world_assertion"},
+                any_values={"world_id": world_ids},
+            )
+            hits = store.search(vector, top_k=candidate_k, qdrant_filter=qfilter)
+            for hit in hits:
+                point_id = str(hit[0])
+                if point_id in seen_ids:
+                    continue
+                seen_ids.add(point_id)
+                merged.append(hit)
+            if len(merged) >= required:
+                break
+        return merged[:candidate_k]
+
     def search_epistemic_staged(
         self,
         query_text: str,
