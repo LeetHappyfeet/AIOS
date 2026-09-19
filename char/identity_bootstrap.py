@@ -6,6 +6,7 @@ from typing import Any
 
 from aios_app.db import Database
 from aios_app.char.identity_kernel import IdentityKernelStore
+from aios_app.char.identity_revision import accept_identity_candidate
 
 
 def _card_data(payload: dict[str, Any]) -> dict[str, Any]:
@@ -53,13 +54,16 @@ async def bootstrap_character_card(
     source_name: str | None = None,
     source_format: str = "character_card",
     replace_authored_facets: bool = True,
+    auto_accept_authored: bool = True,
 ) -> dict[str, Any]:
     """
     Import an external character card as authored identity source material.
 
-    Phase 1 is deliberately conservative: no LLM extraction and no inference.
-    Card prose is preserved verbatim as provenance-backed facets. Scenario and
-    first-message fields are not identity and are not imported into the kernel.
+    Import is deliberately conservative: no LLM extraction and no inference.
+    Card prose becomes provenance-backed candidates first. Authored cards may
+    auto-accept those candidates; other source types can use the same staging
+    boundary without silently rewriting identity. Scenario and first-message
+    fields are not identity and are not imported into the kernel.
     """
     card = _card_data(payload)
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -112,53 +116,39 @@ async def bootstrap_character_card(
             )
 
         candidates = _facet_candidates(card)
-        changed = False
+        candidate_ids: list[str] = []
         for item in candidates:
-            existing = await con.fetchrow(
+            row = await con.fetchrow(
                 """
-                SELECT value, source_id, authority
-                FROM aios.character_identity_facet
-                WHERE character_id=$1 AND facet_type=$2 AND facet_key=$3
-                """,
-                character_id, item["facet_type"], item["facet_key"],
-            )
-            if existing and not replace_authored_facets:
-                continue
-            value_json = json.dumps(item["value"], ensure_ascii=False)
-            if existing and existing["value"] == item["value"] and existing["source_id"] == source_id:
-                continue
-            await con.execute(
-                """
-                INSERT INTO aios.character_identity_facet (
-                    character_id, facet_type, facet_key, value, stability,
-                    authority, mutability, source_id, source_field, source_fragment, status
+                INSERT INTO aios.character_identity_candidate (
+                    character_id, source_id, facet_type, facet_key, value,
+                    stability, authority, mutability, perspective,
+                    source_field, source_fragment, disposition
                 )
-                VALUES ($1,$2,$3,$4::jsonb,$5,'authored','explicit',$6,$7,$8,'active')
-                ON CONFLICT (character_id, facet_type, facet_key) DO UPDATE
+                VALUES ($1,$2,$3,$4,$5::jsonb,$6,'authored','explicit','self',$7,$8,'proposed')
+                ON CONFLICT (source_id, facet_type, facet_key, source_field) DO UPDATE
                 SET value=EXCLUDED.value,
                     stability=EXCLUDED.stability,
-                    authority=EXCLUDED.authority,
-                    mutability=EXCLUDED.mutability,
-                    source_id=EXCLUDED.source_id,
-                    source_field=EXCLUDED.source_field,
-                    source_fragment=EXCLUDED.source_fragment,
-                    status='active',
-                    updated_at=now()
+                    source_fragment=EXCLUDED.source_fragment
+                RETURNING candidate_id, disposition
                 """,
-                character_id, item["facet_type"], item["facet_key"], value_json,
-                item["stability"], source_id, item["source_field"], item["source_fragment"],
+                character_id, source_id, item["facet_type"], item["facet_key"],
+                json.dumps(item["value"], ensure_ascii=False), item["stability"],
+                item["source_field"], item["source_fragment"],
             )
-            changed = True
+            candidate_ids.append(str(row["candidate_id"]))
 
-        if changed:
-            await con.execute(
-                """
-                UPDATE aios.character_identity
-                SET identity_version=identity_version+1, updated_at=now()
-                WHERE character_id=$1
-                """,
-                character_id,
+    accepted = []
+    if auto_accept_authored:
+        for candidate_id in candidate_ids:
+            result = await accept_identity_candidate(
+                db,
+                candidate_id,
+                actor="character_card_bootstrap",
+                reason="authored character card import",
             )
+            if result.get("changed"):
+                accepted.append(candidate_id)
 
     kernel = await IdentityKernelStore(db).compile(character_id)
     return {
@@ -166,6 +156,8 @@ async def bootstrap_character_card(
         "source_id": str(source_id),
         "source_hash": source_hash,
         "identity_version": kernel.identity_version,
-        "facet_count": len(candidates),
+        "candidate_count": len(candidate_ids),
+        "accepted_count": len(accepted),
+        "candidate_ids": candidate_ids,
         "kernel_text": kernel.kernel_text,
     }
