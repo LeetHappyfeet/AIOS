@@ -65,14 +65,15 @@ async def bootstrap_character_card(
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     source_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    async with db.transaction():
-        identity = await db.fetchrow(
+    async with db.connection() as con:
+      async with con.transaction():
+        identity = await con.fetchrow(
             "SELECT character_id, identity_version FROM aios.character_identity WHERE character_id=$1 FOR UPDATE",
             character_id,
         )
         if not identity:
             name = _clean(card.get("name")) or character_id
-            await db.execute(
+            await con.execute(
                 """
                 INSERT INTO aios.character_identity (
                     character_id, canonical_name, display_name, created_from, meta
@@ -82,7 +83,7 @@ async def bootstrap_character_card(
                 character_id, name,
             )
 
-        source = await db.fetchrow(
+        source = await con.fetchrow(
             """
             INSERT INTO aios.character_identity_source (
                 character_id, source_type, source_format, source_name,
@@ -99,7 +100,7 @@ async def bootstrap_character_card(
 
         name = _clean(card.get("name"))
         if name:
-            await db.execute(
+            await con.execute(
                 """
                 UPDATE aios.character_identity
                 SET canonical_name=COALESCE(canonical_name,$2),
@@ -113,7 +114,7 @@ async def bootstrap_character_card(
         candidates = _facet_candidates(card)
         changed = False
         for item in candidates:
-            existing = await db.fetchrow(
+            existing = await con.fetchrow(
                 """
                 SELECT value, source_id, authority
                 FROM aios.character_identity_facet
@@ -126,7 +127,7 @@ async def bootstrap_character_card(
             value_json = json.dumps(item["value"], ensure_ascii=False)
             if existing and existing["value"] == item["value"] and existing["source_id"] == source_id:
                 continue
-            await db.execute(
+            await con.execute(
                 """
                 INSERT INTO aios.character_identity_facet (
                     character_id, facet_type, facet_key, value, stability,
@@ -150,7 +151,7 @@ async def bootstrap_character_card(
             changed = True
 
         if changed:
-            await db.execute(
+            await con.execute(
                 """
                 UPDATE aios.character_identity
                 SET identity_version=identity_version+1, updated_at=now()
