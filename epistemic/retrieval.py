@@ -313,7 +313,7 @@ class TopologyRetriever:
         self.semantic = SemanticQueryService()
         self._semantic_seed_cache: dict[tuple[str, str, tuple[str, ...]], dict[str, float]] = {}
         self._semantic_seed_flights: AsyncSingleFlight[
-            tuple[str, str, tuple[str, ...]], list[str]
+            tuple[str, str, tuple[str, ...]], dict[str, float]
         ] = AsyncSingleFlight()
         self._semantic_seed_deferred: set[tuple[str, str, tuple[str, ...]]] = set()
 
@@ -709,7 +709,7 @@ class TopologyRetriever:
                 epistemic_status=item.get("epistemic_status"),
                 confidence=item.get("effective_confidence") or item.get("confidence"),
                 updated_at=(
-                    item.get("occurrence_time")
+                    (item.get("occurrence_time") or item.get("first_acquired_at") or item.get("updated_at"))
                     if str(item.get("claim_kind") or "").upper() in {"EVENT", "MEMORY"}
                     else item.get("first_acquired_at") or item.get("updated_at")
                 ),
