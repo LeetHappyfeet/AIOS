@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from aios_app.db import Database
+from aios_app.char.identity_kernel import _json_value
 
 
 ALLOWED_SOURCE_TYPES = {
@@ -189,10 +190,20 @@ async def identity_snapshot(db: Database, character_id: str) -> dict[str, Any]:
         """,
         character_id,
     )
+    def normalized(row: Any, json_fields: set[str]) -> dict[str, Any]:
+        item = dict(row)
+        for field in json_fields:
+            if field in item:
+                item[field] = _json_value(item[field])
+        return item
+
     return {
-        "identity": dict(identity),
-        "sources": [dict(row) for row in sources],
-        "facets": [dict(row) for row in facets],
-        "candidates": [dict(row) for row in candidates],
-        "revisions": [dict(row) for row in revisions],
+        "identity": normalized(identity, {"meta"}),
+        "sources": [normalized(row, {"meta"}) for row in sources],
+        "facets": [normalized(row, {"value", "meta"}) for row in facets],
+        "candidates": [normalized(row, {"value", "meta"}) for row in candidates],
+        "revisions": [
+            normalized(row, {"previous_value", "new_value", "meta"})
+            for row in revisions
+        ],
     }
