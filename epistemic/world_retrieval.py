@@ -35,10 +35,8 @@ class WorldPropositionRetriever:
             domain=domain,
         )
         hits = await asyncio.to_thread(
-            self.semantic.search_epistemic_staged,
+            self.semantic.search_world_epistemic_staged,
             query_text,
-            character_id=context.character_id,
-            instance_ids=context.lineage_instance_ids,
             world_stages=scope.qdrant_world_stages,
             min_hits=max(8, min(limit, 24)),
         )
@@ -52,7 +50,44 @@ class WorldPropositionRetriever:
                 ids.append(pid)
             if len(ids) >= max(limit * 3, 48):
                 break
+        semantic_hit_count = len(hits)
+        semantic_id_count = len(ids)
+
+        # Qdrant is an accelerator, not the authority boundary. If the public
+        # world index is cold or incomplete, fall back to bounded SQL over the
+        # already-authorized world scope instead of projecting no world memory.
         if not ids:
+            fallback_rows = await self.db.fetch(
+                """
+                SELECT DISTINCT p.proposition_id
+                FROM aios.world_proposition_assertion wa
+                JOIN aios.proposition p ON p.proposition_id=wa.proposition_id
+                JOIN aios.observation obs ON obs.proposition_id=p.proposition_id
+                JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
+                WHERE wa.world_id = ANY($1::uuid[])
+                  AND wa.epistemic_status NOT IN ('rejected','superseded')
+                  AND ccr.world_id = ANY($1::uuid[])
+                  AND ccr.character_instance_id IS NULL
+                  AND (cardinality($2::text[]) = 0 OR ccr.claim_kind = ANY($2::text[]))
+                  AND (
+                      lower(p.canonical_text) LIKE ANY($3::text[])
+                      OR lower(COALESCE(p.topic_key,'')) LIKE ANY($3::text[])
+                  )
+                ORDER BY p.proposition_id
+                LIMIT $4
+                """,
+                list(scope.all_world_ids),
+                list(claim_kinds),
+                [f"%{term}%" for term in query_text.lower().split() if len(term) >= 3][:12] or ["%"],
+                max(limit * 3, 48),
+            )
+            ids = [str(row["proposition_id"]) for row in fallback_rows]
+
+        if not ids:
+            logger.info(
+                "World retrieval empty domain=%s worlds=%d semantic_hits=%d semantic_ids=%d",
+                domain, len(scope.all_world_ids), semantic_hit_count, semantic_id_count,
+            )
             return []
 
         rows = await self.db.fetch(
@@ -117,7 +152,7 @@ class WorldPropositionRetriever:
             # is shared by several claims. Preserve the claim and retrieval
             # route so downstream cognition never has to infer kind from the
             # proposition alone.
-            item["retrieval_mode"] = domain
+            item["world_domain"] = domain
             item["world_evidence_claim_id"] = item.get("evidence_claim_id")
             rank = rank_by_id.get(str(item["proposition_id"]), len(ids))
             score = scorer.score(
@@ -147,4 +182,10 @@ class WorldPropositionRetriever:
             result.append(item)
 
         result.sort(key=lambda item: -float(item["relevance"]["total"]))
-        return result[:limit]
+        selected = result[:limit]
+        logger.info(
+            "World retrieval domain=%s worlds=%d semantic_hits=%d semantic_ids=%d sql_rows=%d selected=%d fallback=%s",
+            domain, len(scope.all_world_ids), semantic_hit_count, semantic_id_count,
+            len(rows), len(selected), semantic_id_count == 0,
+        )
+        return selected
