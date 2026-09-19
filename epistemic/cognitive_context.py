@@ -433,13 +433,21 @@ class CognitiveContextService:
             if not text:
                 continue
             confidence = float(row.get("confidence") or 0.5)
+            meta = _json_value(row.get("meta"), {})
+            semantic_owner = meta.get("semantic_owner")
+            parsed_predicate = meta.get("predicate")
+            parsed_object = meta.get("object")
+            # Preserve the fast interpreter's semantic result. The bridge used
+            # to overwrite every subject with the active character and every
+            # predicate with "message_cognition", which destroyed exactly the
+            # ownership/persistence evidence mature cognition later reasons on.
             fast_knowledge.append({
                 "proposition_id": f"cognitive:{row['unit_id']}",
                 "topic_key": row.get("topic_key"),
                 "text": text,
-                "subject_norm": context.character_id,
-                "predicate_norm": "message_cognition",
-                "object_norm": text,
+                "subject_norm": semantic_owner or "",
+                "predicate_norm": parsed_predicate or "",
+                "object_norm": parsed_object or "",
                 "polarity": row.get("polarity") or 1,
                 "modality": "asserted",
                 "claim_kind": kind,
@@ -453,8 +461,19 @@ class CognitiveContextService:
                 "updated_at": None,
                 "conflicts": [],
                 "cognitive_commit": True,
+                "cognitive_provisional": True,
+                "cognitive_persistence": meta.get("persistence"),
+                "character_owned": bool(meta.get("character_owned")),
+                "parse_reason": meta.get("parse_reason"),
                 "tier": 0 if kind in {"GOAL", "RULE"} else 1,
-                "relevance": {"total": 10.0 - rank * 0.01, "source": "message_cognitive_commit"},
+                # High enough to remain immediately available when enrichment
+                # is late, but no longer an authority score. Recall selection
+                # treats cognitive_commit as a provisional fallback channel.
+                "relevance": {
+                    "total": 2.0 + 0.45 * float(row.get("salience") or 0.5)
+                             + 0.25 * confidence - rank * 0.01,
+                    "source": "message_cognitive_commit",
+                },
             })
 
         prepared, cache_hit = await self._prepared_or_resolve(
