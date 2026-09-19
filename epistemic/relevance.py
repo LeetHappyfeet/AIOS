@@ -190,7 +190,10 @@ def select_recalled_cognition(
         ):
             by_id[key] = item
 
-    immediate = [item for item in by_id.values() if item.get("cognitive_commit")]
+    # Message cognition is a provisional low-latency bridge while the semantic
+    # pipeline catches up. Established/reconciled cognition is authoritative
+    # once available and must get the first chance to win recall.
+    provisional = [item for item in by_id.values() if item.get("cognitive_commit")]
     established = [item for item in by_id.values() if not item.get("cognitive_commit")]
     scored: list[tuple[float, dict[str, Any], set[str]]] = []
     diagnostic: list[tuple[float, dict[str, Any], str]] = []
@@ -245,7 +248,24 @@ def select_recalled_cognition(
         selected.append(item)
         selected_tokens.append(tokens)
 
-    immediate.sort(key=lambda item: float(item.get("relevance", {}).get("total", 0.0)), reverse=True)
+    # Fast message cognition fills semantic gaps only. If mature cognition has
+    # already selected an equivalent unit, the provisional interpretation has
+    # completed its job and yields to the reasoned representation.
+    provisional.sort(
+        key=lambda item: float(item.get("relevance", {}).get("total", 0.0)),
+        reverse=True,
+    )
+    selected_provisional: list[dict[str, Any]] = []
+    authoritative_tokens = list(selected_tokens)
+    for item in provisional:
+        tokens = _candidate_tokens(item)
+        if tokens and any(_overlap(tokens, prior) >= 0.72 for prior in authoritative_tokens):
+            suppressed["redundant_recall"] += 1
+            continue
+        selected_provisional.append(item)
+        if tokens:
+            authoritative_tokens.append(tokens)
+
     if logger.isEnabledFor(logging.DEBUG):
         selected_ids = {str(item.get("proposition_id") or item.get("text")) for item in selected}
         for rank, (score, item, status) in enumerate(
@@ -271,4 +291,6 @@ def select_recalled_cognition(
                 _as_float(relevance.get("continuity_penalty")),
                 score, str(item.get("text") or "")[:240],
             )
-    return immediate + selected, suppressed
+    # Authoritative cognition is ordered first so downstream token budgeting
+    # cannot let a provisional fast-path interpretation crowd it out.
+    return selected + selected_provisional, suppressed
