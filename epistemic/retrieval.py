@@ -153,6 +153,7 @@ belief_owned AS (
         ck.instance_id,
         ck.proposition_id,
         ck.atom_id,
+        NULL::uuid AS evidence_claim_id,
         ck.epistemic_status,
         ck.confidence,
         ck.acquisition_mode,
@@ -195,6 +196,7 @@ episodic_owned AS (
         cpk.instance_id,
         cpk.proposition_id,
         p.atom_id,
+        kae.claim_id AS evidence_claim_id,
         cpk.epistemic_status,
         cpk.confidence,
         cpk.acquisition_mode,
@@ -268,6 +270,12 @@ classified AS (
               OR ccr.character_instance_id = ANY($2::uuid[])
           )
         ORDER BY
+            -- A proposition can be emitted by several claims with different
+            -- semantic kinds. Prefer the claim that actually produced this
+            -- acquisition; otherwise a STATE observation can borrow an EVENT
+            -- label from another occurrence of the same proposition and leak
+            -- into ACTIVE MEMORY.
+            (obs.claim_id IS NOT DISTINCT FROM o.evidence_claim_id) DESC,
             array_position($2::uuid[], ccr.character_instance_id) NULLS LAST,
             ccr.resolved_at DESC
         LIMIT 1
@@ -700,6 +708,11 @@ class TopologyRetriever:
         for rank, row in enumerate(rows):
             item = dict(row)
             item["text"] = item.pop("canonical_text")
+            # Preserve the cognition route as provenance. Downstream section
+            # routing can assert that only memory/event retrieval contributes
+            # to ACTIVE MEMORY instead of trusting a potentially ambiguous
+            # proposition-level label.
+            item["retrieval_mode"] = mode
             anchor = anchor_by_proposition.get(item["proposition_id"])
             if anchor:
                 item["anchor"] = {
