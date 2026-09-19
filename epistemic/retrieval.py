@@ -230,7 +230,9 @@ episodic_owned AS (
       AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
     ORDER BY cpk.proposition_id,
              array_position($2::uuid[], cpk.instance_id),
-             cpk.updated_at DESC
+             cpk.updated_at DESC,
+             kae.created_at DESC,
+             kae.acquisition_id DESC
 ),
 owned AS (
     SELECT * FROM belief_owned
