@@ -60,3 +60,15 @@ def test_kernel_is_deterministic_and_keeps_legacy_baseline():
     assert "Species: Digimon" in text_a
     assert "AUTHORED BASELINE:" in text_a
     assert "Reserved and pragmatic." in text_a
+
+
+def test_card_candidates_default_to_self_authored_identity():
+    card = {
+        "description": "A yellow fox-like Digimon.",
+        "personality": "Reserved and pragmatic.",
+        "scenario": "A temporary beach scene.",
+    }
+    facets = _facet_candidates(card)
+    assert len(facets) == 2
+    assert all(item["source_field"] != "scenario" for item in facets)
+    assert {item["facet_type"] for item in facets} == {"appearance", "personality"}
