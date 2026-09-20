@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Iterable
 
 from aios_app.epistemic.world_scope import build_retrieval_scope
 from aios_app.hud.context import HUDContext
 from aios_app.hud.relevance import HUDRelevanceScorer
 from aios_app.semantic_index.query import SemanticQueryService
+
+
+logger = logging.getLogger("aios.epistemic.world_retrieval")
 
 
 class WorldPropositionRetriever:
@@ -34,12 +38,24 @@ class WorldPropositionRetriever:
             world_id=context.world_id,
             domain=domain,
         )
-        hits = await asyncio.to_thread(
-            self.semantic.search_world_epistemic_staged,
-            query_text,
-            world_stages=scope.qdrant_world_stages,
-            min_hits=max(8, min(limit, 24)),
-        )
+        # Qdrant is an accelerator, not an authority boundary. A busy or
+        # temporarily unavailable semantic query service must not suppress
+        # otherwise-authorized public world knowledge. Treat semantic lookup
+        # failures as a cache miss and continue into the bounded SQL fallback.
+        try:
+            hits = await asyncio.to_thread(
+                self.semantic.search_world_epistemic_staged,
+                query_text,
+                world_stages=scope.qdrant_world_stages,
+                min_hits=max(8, min(limit, 24)),
+            )
+        except (TimeoutError, OSError, RuntimeError) as exc:
+            logger.info(
+                "World semantic lookup unavailable domain=%s; using SQL fallback: %s",
+                domain,
+                exc,
+            )
+            hits = []
 
         ids: list[str] = []
         seen: set[str] = set()
