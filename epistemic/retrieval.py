@@ -549,7 +549,40 @@ class TopologyRetriever:
             """
             SELECT em.semantic_event_id, ep.semantic_episode_id, ep.world_id,
                    ep.timeline_id, ep.confidence AS episode_confidence,
-                   em.ordinal
+                   em.ordinal,
+                   (
+                       SELECT jsonb_agg(
+                           jsonb_build_object(
+                               'semantic_event_id', se2.semantic_event_id,
+                               'event_confidence', se2.confidence,
+                               'episode_ordinal', em2.ordinal,
+                               'members', (
+                                   SELECT jsonb_agg(
+                                       jsonb_build_object(
+                                           'proposition_id', p2.proposition_id,
+                                           'subject_norm', p2.subject_norm,
+                                           'predicate_norm', p2.predicate_norm,
+                                           'object_norm', p2.object_norm,
+                                           'text', p2.canonical_text
+                                       )
+                                       ORDER BY sem2.created_at, p2.proposition_id
+                                   )
+                                   FROM aios.semantic_event_membership sem2
+                                   JOIN aios.proposition p2
+                                     ON p2.proposition_id=sem2.proposition_id
+                                   WHERE sem2.semantic_event_id=se2.semantic_event_id
+                                     AND sem2.status='active'
+                               )
+                           )
+                           ORDER BY em2.ordinal, se2.semantic_event_id
+                       )
+                       FROM aios.semantic_episode_membership em2
+                       JOIN aios.semantic_event se2
+                         ON se2.semantic_event_id=em2.semantic_event_id
+                        AND se2.status='active'
+                       WHERE em2.semantic_episode_id=ep.semantic_episode_id
+                         AND em2.status='active'
+                   ) AS episode_events
             FROM aios.semantic_episode_membership em
             JOIN aios.semantic_episode ep
               ON ep.semantic_episode_id=em.semantic_episode_id
@@ -566,6 +599,7 @@ class TopologyRetriever:
                 "timeline_id": row["timeline_id"],
                 "episode_confidence": row["episode_confidence"],
                 "ordinal": row["ordinal"],
+                "episode_events": list(row["episode_events"] or []),
             }
             for row in rows
         }
@@ -587,16 +621,9 @@ class TopologyRetriever:
 
         for episode_id, members in grouped.items():
             episode = dict(episode_by_event[members[0]["semantic_event_id"]])
-            event_rows = []
-            for member in members:
-                projection = dict(member.get("event_projection") or {})
-                event_rows.append({
-                    "semantic_event_id": member.get("semantic_event_id"),
-                    "event_confidence": member.get("semantic_event_confidence"),
-                    "episode_ordinal": episode_by_event[member["semantic_event_id"]]["ordinal"],
-                    "members": list(projection.get("members") or []),
-                    "projected_text": member.get("text"),
-                })
+            event_rows = [
+                dict(row) for row in episode.get("episode_events") or []
+            ]
             projection = project_semantic_episode(episode, event_rows)
             representative = max(
                 members,
