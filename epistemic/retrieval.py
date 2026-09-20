@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -24,6 +25,27 @@ TOPOLOGY_SQL_TIMEOUT_SECONDS = 2.0
 TOPOLOGY_FALLBACK_TIMEOUT_SECONDS = 1.0
 MAX_FOCUS_TERMS = 12
 MAX_TOPOLOGY_SEEDS = 64
+
+
+def _json_rows(value: Any) -> list[dict[str, Any]]:
+    """Normalize asyncpg/jsonb results without assuming a codec.
+
+    Depending on the connection codec, jsonb_agg may arrive as decoded Python
+    objects or as a JSON string. Retrieval must accept both representations.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            logger.warning("Invalid JSON aggregate in episodic retrieval")
+            return []
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [dict(row) for row in value if isinstance(row, dict)]
 
 
 @dataclass(frozen=True)
@@ -467,7 +489,7 @@ class TopologyRetriever:
                 "timeline_id": row["timeline_id"],
                 "dag_node_id": row["dag_node_id"],
                 "member_proposition_ids": list(row["member_proposition_ids"] or []),
-                "member_rows": list(row["member_rows"] or []),
+                "member_rows": _json_rows(row["member_rows"]),
             }
             for row in rows
         }
