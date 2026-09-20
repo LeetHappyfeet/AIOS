@@ -34,6 +34,7 @@ from aios_app.rdf.epistemic_writer import project_normalized_observation
 from aios_app.epistemic.normalizer import normalize_claim_once
 from aios_app.epistemic.context_resolver import resolve_claim_context
 from aios_app.epistemic.narratives import assign_narratives_once
+from aios_app.epistemic.episodes import materialize_event_occurrences_once, derive_semantic_episodes_once
 from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
 from aios_app.epistemic.generated import resolve_generated_facts_once
 from aios_app.epistemic.topology import derive_claim_topology, derive_world_assertion_topology, derive_character_acquisition_topology
@@ -162,6 +163,17 @@ async def handle_derive_character_acquisition_topology(db: Database, job: Dict[s
     await derive_character_acquisition_topology(db, fuseki, acquisition_id=acquisition_id)
 
 
+async def handle_materialize_event_occurrences(db: Database, job: Dict[str, Any]) -> None:
+    claim_id = (job.get("payload") or {}).get("claim_id")
+    await materialize_event_occurrences_once(
+        db, claim_id=UUID(claim_id) if claim_id else None, limit=500
+    )
+
+
+async def handle_derive_semantic_episodes(db: Database, job: Dict[str, Any]) -> None:
+    await derive_semantic_episodes_once(db, limit=500)
+
+
 async def handle_assign_narratives(db: Database, job: Dict[str, Any]) -> None:
     await assign_narratives_once(db, limit=500)
 
@@ -240,6 +252,8 @@ JOB_HANDLERS.update(
         "derive_claim_topology": handle_derive_claim_topology,
         "derive_world_assertion_topology": handle_derive_world_assertion_topology,
         "derive_character_acquisition_topology": handle_derive_character_acquisition_topology,
+        "materialize_event_occurrences": handle_materialize_event_occurrences,
+        "derive_semantic_episodes": handle_derive_semantic_episodes,
         "assign_narratives": handle_assign_narratives,
         "project_character_knowledge": handle_project_character_knowledge,
         "resolve_generated_facts": handle_resolve_generated_facts,
