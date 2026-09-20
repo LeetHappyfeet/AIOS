@@ -621,7 +621,7 @@ class TopologyRetriever:
                 "timeline_id": row["timeline_id"],
                 "episode_confidence": row["episode_confidence"],
                 "ordinal": row["ordinal"],
-                "episode_events": list(row["episode_events"] or []),
+                "episode_events": _json_rows(row["episode_events"]),
             }
             for row in rows
         }
@@ -643,9 +643,7 @@ class TopologyRetriever:
 
         for episode_id, members in grouped.items():
             episode = dict(episode_by_event[members[0]["semantic_event_id"]])
-            event_rows = [
-                dict(row) for row in episode.get("episode_events") or []
-            ]
+            event_rows = _json_rows(episode.get("episode_events"))
             projection = project_semantic_episode(episode, event_rows)
             representative = max(
                 members,
