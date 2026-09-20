@@ -12,6 +12,7 @@ from aios_app.db import Database
 from aios_app.hud.context import HUDContext
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.event_projection import project_semantic_event
+from aios_app.epistemic.episode_projection import project_semantic_episode
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.semantic_index.query import SemanticQueryService
 
@@ -432,7 +433,23 @@ class TopologyRetriever:
                     FROM aios.semantic_event_membership m2
                     WHERE m2.semantic_event_id=sem.semantic_event_id
                       AND m2.status='active'
-                ) AS member_proposition_ids
+                ) AS member_proposition_ids,
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'proposition_id', p2.proposition_id,
+                            'subject_norm', p2.subject_norm,
+                            'predicate_norm', p2.predicate_norm,
+                            'object_norm', p2.object_norm,
+                            'text', p2.canonical_text
+                        )
+                        ORDER BY m2.created_at, p2.proposition_id
+                    )
+                    FROM aios.semantic_event_membership m2
+                    JOIN aios.proposition p2 ON p2.proposition_id=m2.proposition_id
+                    WHERE m2.semantic_event_id=sem.semantic_event_id
+                      AND m2.status='active'
+                ) AS member_rows
             FROM aios.semantic_event_membership m
             JOIN aios.semantic_event sem
               ON sem.semantic_event_id=m.semantic_event_id
@@ -450,6 +467,7 @@ class TopologyRetriever:
                 "timeline_id": row["timeline_id"],
                 "dag_node_id": row["dag_node_id"],
                 "member_proposition_ids": list(row["member_proposition_ids"] or []),
+                "member_rows": list(row["member_rows"] or []),
             }
             for row in rows
         }
@@ -472,7 +490,13 @@ class TopologyRetriever:
         for event_id, members in grouped.items():
             event = dict(event_by_proposition[members[0]["proposition_id"]])
             event["semantic_event_id"] = event_id
-            projection = project_semantic_event(event, members)
+            full_members = [dict(row) for row in event.get("member_rows") or []]
+            retrieved_by_id = {member.get("proposition_id"): member for member in members}
+            for row in full_members:
+                retrieved = retrieved_by_id.get(row.get("proposition_id"))
+                if retrieved:
+                    row["relevance"] = dict(retrieved.get("relevance") or {})
+            projection = project_semantic_event(event, full_members or members)
 
             # The event, not a member proposition, is the recall candidate. Keep
             # the strongest member only as a compatibility/provenance carrier.
@@ -511,6 +535,83 @@ class TopologyRetriever:
                 + 0.20 * max(0.0, min(1.0, projection["confidence"]))
                 + support_bonus,
                 6,
+            )
+            candidate["relevance"] = relevance
+            passthrough.append(candidate)
+        return passthrough
+
+    async def _episode_memberships(
+        self, semantic_event_ids: list[Any]
+    ) -> dict[Any, dict[str, Any]]:
+        if not semantic_event_ids:
+            return {}
+        rows = await self.db.fetch(
+            """
+            SELECT em.semantic_event_id, ep.semantic_episode_id, ep.world_id,
+                   ep.timeline_id, ep.confidence AS episode_confidence,
+                   em.ordinal
+            FROM aios.semantic_episode_membership em
+            JOIN aios.semantic_episode ep
+              ON ep.semantic_episode_id=em.semantic_episode_id
+             AND ep.status='active'
+            WHERE em.status='active'
+              AND em.semantic_event_id=ANY($1::uuid[])
+            """,
+            semantic_event_ids,
+        )
+        return {
+            row["semantic_event_id"]: {
+                "semantic_episode_id": row["semantic_episode_id"],
+                "world_id": row["world_id"],
+                "timeline_id": row["timeline_id"],
+                "episode_confidence": row["episode_confidence"],
+                "ordinal": row["ordinal"],
+            }
+            for row in rows
+        }
+
+    @staticmethod
+    def _collapse_semantic_episodes(
+        items: list[dict[str, Any]],
+        episode_by_event: dict[Any, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        passthrough: list[dict[str, Any]] = []
+        grouped: dict[Any, list[dict[str, Any]]] = {}
+        for item in items:
+            event_id = item.get("semantic_event_id")
+            episode = episode_by_event.get(event_id)
+            if not event_id or not episode:
+                passthrough.append(item)
+                continue
+            grouped.setdefault(episode["semantic_episode_id"], []).append(item)
+
+        for episode_id, members in grouped.items():
+            episode = dict(episode_by_event[members[0]["semantic_event_id"]])
+            event_rows = []
+            for member in members:
+                projection = dict(member.get("event_projection") or {})
+                event_rows.append({
+                    "semantic_event_id": member.get("semantic_event_id"),
+                    "event_confidence": member.get("semantic_event_confidence"),
+                    "episode_ordinal": episode_by_event[member["semantic_event_id"]]["ordinal"],
+                    "members": list(projection.get("members") or []),
+                })
+            projection = project_semantic_episode(episode, event_rows)
+            representative = max(
+                members,
+                key=lambda item: float((item.get("relevance") or {}).get("total") or 0.0),
+            )
+            candidate = dict(representative)
+            candidate["text"] = projection.get("text") or candidate.get("text") or ""
+            candidate["semantic_episode_id"] = episode_id
+            candidate["semantic_episode_events"] = projection.get("semantic_event_ids") or []
+            candidate["episode_projection"] = projection
+            candidate["retrieval_reason"] = "semantic_episode"
+            relevance = dict(candidate.get("relevance") or {})
+            relevance["episode_event_count"] = len(members)
+            relevance["total"] = max(
+                float((member.get("relevance") or {}).get("total") or 0.0)
+                for member in members
             )
             candidate["relevance"] = relevance
             passthrough.append(candidate)
@@ -817,6 +918,10 @@ class TopologyRetriever:
             [item["proposition_id"] for item in result]
         )
         result = self._collapse_canonical_events(result, event_by_proposition)
+        episode_by_event = await self._episode_memberships(
+            [item["semantic_event_id"] for item in result if item.get("semantic_event_id")]
+        )
+        result = self._collapse_semantic_episodes(result, episode_by_event)
         result.sort(
             key=lambda item: (
                 -item["relevance"]["total"],
