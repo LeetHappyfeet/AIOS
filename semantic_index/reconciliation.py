@@ -40,7 +40,7 @@ def _json_object(value: Any) -> dict[str, Any]:
 
 
 RECONCILER_VERSION = "semantic-reconciliation-v2"
-EVENT_RESOLVER_VERSION = "semantic-event-resolver-v1"
+EVENT_RESOLVER_VERSION = "semantic-event-resolver-v2"
 
 PAIR_EDGE_TYPES = {
     "EQUIVALENT": "semantic_equivalent",
