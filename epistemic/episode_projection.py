@@ -23,8 +23,8 @@ def project_semantic_episode(
     best_vector = None
     for row in rows:
         members = list(row.get("members") or [])
-        projection = project_semantic_event(row, members)
-        text = str(projection.get("text") or "").strip()
+        projection = project_semantic_event(row, members) if members else {}
+        text = str(row.get("projected_text") or projection.get("text") or "").strip()
         if text and text not in event_texts:
             event_texts.append(text)
         participants.extend(projection.get("participants") or [])
