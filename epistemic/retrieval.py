@@ -595,6 +595,7 @@ class TopologyRetriever:
                     "event_confidence": member.get("semantic_event_confidence"),
                     "episode_ordinal": episode_by_event[member["semantic_event_id"]]["ordinal"],
                     "members": list(projection.get("members") or []),
+                    "projected_text": member.get("text"),
                 })
             projection = project_semantic_episode(episode, event_rows)
             representative = max(
