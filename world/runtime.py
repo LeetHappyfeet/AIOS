@@ -1141,6 +1141,18 @@ class WorldRuntimeService:
             source_instance_id,
         )
 
+        # Scene working state follows the same instance fork boundary as
+        # knowledge/runtime state.  This is a one-time seed only: subsequent
+        # scene projection for the child never reads or unions sibling scenes.
+        await self.hud.scene_state.seed_fork(
+            parent_instance_id=source_instance_id,
+            child_instance_id=instance_id,
+            child_runtime_timeline_id=timeline_id,
+            child_runtime_head_node_id=None,
+            child_source_timeline_id=source.get("source_timeline_id"),
+            child_source_head_node_id=source.get("source_head_node_id"),
+        )
+
         await self._seed_fork_location(
             source=source,
             target_world_id=target["world_id"],
