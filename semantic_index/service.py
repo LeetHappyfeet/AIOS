@@ -191,6 +191,80 @@ async def index_source_sections_once(db: Database, cfg: SemanticIndexConfig) -> 
     return len(rows)
 
 
+async def index_corpus_sections_once(db: Database, cfg: SemanticIndexConfig) -> int:
+    """Index cold corpus sections for discovery without semantic ingestion."""
+    rows = await db.fetch(
+        """
+        SELECT
+            cs.section_id, cs.document_id, cs.section_order, cs.section_path,
+            cs.heading, cs.content, cs.created_at,
+            cd.source_id, cd.document_kind, cd.title, cd.author, cd.source_uri
+        FROM aios.corpus_section cs
+        JOIN aios.corpus_document cd ON cd.document_id=cs.document_id
+        WHERE length(cs.content) > 0
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.semantic_vector_index_state s
+              WHERE s.object_type='corpus_section'
+                AND s.object_key=cs.section_id::text
+                AND s.qdrant_collection=$2
+                AND s.embedding_model=$3
+                AND s.embedding_version=$4
+          )
+        ORDER BY cs.created_at, cs.section_order
+        LIMIT $1
+        """,
+        cfg.batch_size, cfg.source_collection,
+        cfg.embedding_model, cfg.embedding_version,
+    )
+    if not rows:
+        return 0
+
+    texts = [r["content"] for r in rows]
+    hashes = [stable_text_hash(t) for t in texts]
+    vectors = _get_embedder(cfg).embed(texts)
+    points: list[qm.PointStruct] = []
+    for row, vector, vector_hash in zip(rows, vectors, hashes):
+        source_domain = None
+        if row["source_uri"] and "://" in row["source_uri"]:
+            source_domain = row["source_uri"].split("://", 1)[1].split("/", 1)[0].lower()
+        # Qdrant IDs share a collection with live source sections. Namespace the
+        # cold-corpus UUID so even an accidental UUID collision cannot overwrite
+        # a live source-section point.
+        point_id = str(uuid5(NAMESPACE_URL, f"aios:corpus-section:{row['section_id']}"))
+        payload = {
+            "object_type": "corpus_section",
+            "section_id": str(row["section_id"]),
+            "document_id": str(row["document_id"]),
+            "source_id": row["source_id"],
+            "source_type": row["document_kind"],
+            "source_domain": source_domain,
+            "title": row["title"],
+            "author": row["author"],
+            "heading": row["heading"],
+            "section_path": row["section_path"],
+            "section_order": row["section_order"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "embedding_version": cfg.embedding_version,
+            "vector_hash": vector_hash,
+            "cold_corpus": True,
+        }
+        points.append(qm.PointStruct(
+            id=point_id,
+            vector=vector,
+            payload={k: v for k, v in payload.items() if v is not None},
+        ))
+
+    _get_store(cfg, cfg.source_collection).upsert(points)
+    for row, vector_hash in zip(rows, hashes):
+        await _mark_indexed(
+            db, cfg, object_type="corpus_section",
+            object_key=str(row["section_id"]),
+            collection=cfg.source_collection, vector_hash=vector_hash,
+        )
+    logger.info("Indexed %d cold corpus sections into Qdrant [%s]", len(rows), cfg.source_collection)
+    return len(rows)
+
+
 async def index_semantic_frames_once(db: Database, cfg: SemanticIndexConfig) -> int:
     rows = await db.fetch(
         """
@@ -497,6 +571,7 @@ async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -
 
 async def index_once(db: Database, cfg: SemanticIndexConfig) -> int:
     source = await index_source_sections_once(db, cfg)
+    source += await index_corpus_sections_once(db, cfg)
     frames = await index_semantic_frames_once(db, cfg)
     propositions = await index_propositions_once(db, cfg)
     epistemic = await index_epistemic_objects_once(db, cfg)
