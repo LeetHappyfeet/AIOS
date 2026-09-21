@@ -251,8 +251,11 @@ async def reconcile_stale_context_acquisitions(
                 ccr.claim_id IS NULL
              OR lower(COALESCE(ccr.epistemic_scope,'')) <> 'character'
              OR ccr.character_instance_id IS DISTINCT FROM kae.instance_id
-             OR upper(COALESCE(ccr.claim_kind,'')) NOT IN (
-                    'BELIEF','MEMORY','GOAL','RULE','STATE','TRAIT','RELATIONSHIP'
+             OR (
+                    lower(COALESCE(kae.acquisition_mode,'')) NOT IN ('read','research','taught','import')
+                    AND upper(COALESCE(ccr.claim_kind,'')) NOT IN (
+                        'BELIEF','MEMORY','GOAL','RULE','STATE','TRAIT','RELATIONSHIP'
+                    )
                 )
              OR lower(COALESCE(sf.discourse_mode,'')) IN (
                     'question','hypothetical','counterfactual','conditional','quoted_question'
