@@ -58,19 +58,41 @@ class CharacterSceneStateStore:
         evidence_node_ids: Sequence[UUID] = (),
     ) -> dict[str, Any]:
         normalized = _slot_view(scene)
+        # Parent selection follows actual DAG ancestry, never "latest scene".
+        # That distinction is what keeps swipes/alternatives and concurrent
+        # timelines from borrowing state from an abandoned or sibling branch.
         previous = await self.db.fetchrow(
             """
-            SELECT snapshot_id, scene_state
-            FROM aios.character_scene_snapshot
-            WHERE instance_id=$1
-              AND projection_version=$2
-              AND NOT (
-                    runtime_timeline_id=$3
-                AND runtime_head_node_id IS NOT DISTINCT FROM $4
-                AND source_timeline_id IS NOT DISTINCT FROM $5
-                AND source_head_node_id IS NOT DISTINCT FROM $6
+            SELECT s.snapshot_id, s.scene_state
+            FROM aios.character_scene_snapshot s
+            WHERE s.instance_id=$1
+              AND s.projection_version=$2
+              AND (
+                    (
+                        $6::uuid IS NOT NULL
+                        AND s.source_timeline_id IS NOT DISTINCT FROM $5
+                        AND s.source_head_node_id IN (
+                            SELECT de.parent_node_id
+                            FROM aios.dag_edge de
+                            WHERE de.timeline_id=$5
+                              AND de.child_node_id=$6
+                        )
+                    )
+                    OR
+                    (
+                        $4::uuid IS NOT NULL
+                        AND s.runtime_timeline_id=$3
+                        AND s.runtime_head_node_id IN (
+                            SELECT de.parent_node_id
+                            FROM aios.dag_edge de
+                            WHERE de.timeline_id=$3
+                              AND de.child_node_id=$4
+                        )
+                    )
               )
-            ORDER BY updated_at DESC, created_at DESC
+            ORDER BY
+                CASE WHEN s.source_head_node_id IS NOT NULL THEN 0 ELSE 1 END,
+                s.updated_at DESC
             LIMIT 1
             """,
             instance_id,
