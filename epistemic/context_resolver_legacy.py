@@ -469,7 +469,10 @@ async def resolve_claim_context(
             ie.source_id,
             ie.source_kind AS explicit_source_kind,
             ie.target_character_id,
-            ie.target_world_id
+            ie.target_world_id,
+            sc.instance_id AS consumption_instance_id,
+            sc.mode AS consumption_mode,
+            sc.consumption_id
         FROM aios.claim_candidate cc
         JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
         JOIN aios.document_section ds ON ds.section_id=es.section_id
@@ -477,6 +480,7 @@ async def resolve_claim_context(
         LEFT JOIN aios.timeline t ON t.timeline_id=n.timeline_id
         LEFT JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         LEFT JOIN aios.source_document sd ON sd.document_id=ds.document_id
+        LEFT JOIN aios.source_consumption sc ON sc.ingest_event_id=ie.event_id
         LEFT JOIN aios.claim_semantic_frame_projection sfp ON sfp.claim_id=cc.claim_id
         LEFT JOIN aios.claim_semantic_frame sf ON sf.frame_id=sfp.primary_frame_id
         LEFT JOIN aios.claim_semantic_frame child_sf ON child_sf.frame_id=sf.object_frame_id
@@ -532,7 +536,13 @@ async def resolve_claim_context(
         epistemic_scope = "speaker" if viewpoint_id else "source"
 
     character_instance_id = None
-    if epistemic_scope == "character":
+    if row["consumption_instance_id"] is not None:
+        # Intentional corpus consumption is an explicit epistemic operation.
+        # The source remains the source; it never becomes origin character
+        # speech and it never implies a world assertion.
+        epistemic_scope = "character"
+        character_instance_id = row["consumption_instance_id"]
+    elif epistemic_scope == "character":
         character_instance_id = await _resolve_exact_runtime_instance(
             db,
             character_id=origin_character_id,
@@ -540,7 +550,7 @@ async def resolve_claim_context(
         )
 
     source_kind = row["explicit_source_kind"] or row["source_type"] or row["ingest_source"]
-    acquisition_mode = infer_acquisition_mode(
+    acquisition_mode = row["consumption_mode"] or infer_acquisition_mode(
         source_kind=source_kind,
         speaker_role=row["speaker_role"],
         node_kind=row["node_kind"],
