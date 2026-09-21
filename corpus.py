@@ -144,8 +144,6 @@ async def consume_corpus_sections(
                 instance_id, document_id, section_id, mode, status, meta
             )
             VALUES ($1,$2,$3,$4,'pending',$5::jsonb)
-            ON CONFLICT (instance_id, section_id, mode) DO UPDATE
-            SET meta=aios.source_consumption.meta || EXCLUDED.meta
             RETURNING consumption_id, ingest_event_id, status
             """,
             instance_id, row["document_id"], section_id, mode,
