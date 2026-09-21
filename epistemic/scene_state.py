@@ -157,7 +157,7 @@ class CharacterSceneStateStore:
                 )
                 VALUES (
                     $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,1.0,$11,
-                    jsonb_build_object('projection_version',$12)
+                    jsonb_build_object('projection_version',$12::text)
                 )
                 """,
                 instance_id,
