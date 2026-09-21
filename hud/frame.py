@@ -12,6 +12,7 @@ from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
 from aios_app.hud.profile import get_profile as get_hud_profile
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
+from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
@@ -94,6 +95,7 @@ class HUDAssembler:
         self.context_resolver = HUDContextResolver(db)
         self.cognition = CognitiveContextService(db)
         self.identity_kernels = IdentityKernelStore(db)
+        self.scene_state = CharacterSceneStateStore(db)
         self.budget = budget or HUDBudget()
         self.plugin_manager = plugin_manager or PluginManager()
 
@@ -282,6 +284,50 @@ class HUDAssembler:
             section_caps["recent_events"],
             lambda x: x.get("message_text") or x.get("text") or "",
         )
+
+        # Materialize a compact, branch-safe working scene at the exact runtime
+        # and source DAG coordinates used for this HUD.  Scene ownership is the
+        # character instance; cognitive lineage is deliberately not consulted.
+        active_tasks = _json_value(raw_state.get("active_tasks"), [])
+        pending_action = str(active_tasks[0]) if active_tasks else None
+        immediate_goal = (
+            str(goal_items[0].get("text"))
+            if goal_items and goal_items[0].get("text")
+            else None
+        )
+        last_change = None
+        evidence_nodes: list[UUID] = []
+        if event_items:
+            last = event_items[0]
+            last_change = last.get("message_text") or last.get("text")
+            node_value = last.get("node_id") or last.get("source_node_id")
+            if node_value:
+                try:
+                    evidence_nodes.append(UUID(str(node_value)))
+                except (TypeError, ValueError):
+                    pass
+        if context.source_head_node_id:
+            evidence_nodes.append(context.source_head_node_id)
+        if context.head_node_id:
+            evidence_nodes.append(context.head_node_id)
+
+        working_scene = await self.scene_state.materialize(
+            instance_id=context.instance_id,
+            runtime_timeline_id=context.timeline_id,
+            runtime_head_node_id=context.head_node_id,
+            source_timeline_id=context.source_timeline_id,
+            source_head_node_id=context.source_head_node_id,
+            scene={
+                "location": scene.get("location"),
+                "present_entities": scene.get("actors") or [],
+                "relevant_objects": scene.get("objects") or [],
+                "immediate_goal": immediate_goal,
+                "pending_action": pending_action,
+                "last_significant_change": last_change,
+            },
+            evidence_node_ids=evidence_nodes,
+        )
+        scene["working_state"] = working_scene
 
         suppressed = cognitive_snapshot.firewall_suppressed
         return {
