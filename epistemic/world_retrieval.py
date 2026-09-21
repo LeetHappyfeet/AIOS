@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Iterable
 
 from aios_app.epistemic.world_scope import build_retrieval_scope
 from aios_app.hud.context import HUDContext
 from aios_app.hud.relevance import HUDRelevanceScorer
 from aios_app.semantic_index.query import SemanticQueryService
+
+
+logger = logging.getLogger("aios.epistemic.world_retrieval")
 
 
 class WorldPropositionRetriever:
@@ -34,14 +38,24 @@ class WorldPropositionRetriever:
             world_id=context.world_id,
             domain=domain,
         )
-        hits = await asyncio.to_thread(
-            self.semantic.search_epistemic_staged,
-            query_text,
-            character_id=context.character_id,
-            instance_ids=context.lineage_instance_ids,
-            world_stages=scope.qdrant_world_stages,
-            min_hits=max(8, min(limit, 24)),
-        )
+        # Qdrant is an accelerator, not an authority boundary. A busy or
+        # temporarily unavailable semantic query service must not suppress
+        # otherwise-authorized public world knowledge. Treat semantic lookup
+        # failures as a cache miss and continue into the bounded SQL fallback.
+        try:
+            hits = await asyncio.to_thread(
+                self.semantic.search_world_epistemic_staged,
+                query_text,
+                world_stages=scope.qdrant_world_stages,
+                min_hits=max(8, min(limit, 24)),
+            )
+        except (TimeoutError, OSError, RuntimeError) as exc:
+            logger.info(
+                "World semantic lookup unavailable domain=%s; using SQL fallback: %s",
+                domain,
+                exc,
+            )
+            hits = []
 
         ids: list[str] = []
         seen: set[str] = set()
@@ -52,36 +66,96 @@ class WorldPropositionRetriever:
                 ids.append(pid)
             if len(ids) >= max(limit * 3, 48):
                 break
+        semantic_hit_count = len(hits)
+        semantic_id_count = len(ids)
+
+        # Qdrant is an accelerator, not the authority boundary. If the public
+        # world index is cold or incomplete, fall back to bounded SQL over the
+        # already-authorized world scope instead of projecting no world memory.
         if not ids:
+            fallback_rows = await self.db.fetch(
+                """
+                SELECT DISTINCT p.proposition_id
+                FROM aios.world_proposition_assertion wa
+                JOIN aios.proposition p ON p.proposition_id=wa.proposition_id
+                JOIN aios.observation obs ON obs.proposition_id=p.proposition_id
+                JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
+                WHERE wa.world_id = ANY($1::uuid[])
+                  AND wa.epistemic_status NOT IN ('rejected','superseded')
+                  AND ccr.world_id = ANY($1::uuid[])
+                  AND ccr.character_instance_id IS NULL
+                  AND (cardinality($2::text[]) = 0 OR ccr.claim_kind = ANY($2::text[]))
+                  AND (
+                      lower(p.canonical_text) LIKE ANY($3::text[])
+                      OR lower(COALESCE(p.topic_key,'')) LIKE ANY($3::text[])
+                  )
+                ORDER BY p.proposition_id
+                LIMIT $4
+                """,
+                list(scope.all_world_ids),
+                list(claim_kinds),
+                [f"%{term}%" for term in query_text.lower().split() if len(term) >= 3][:12] or ["%"],
+                max(limit * 3, 48),
+            )
+            ids = [str(row["proposition_id"]) for row in fallback_rows]
+
+        if not ids:
+            logger.info(
+                "World retrieval empty domain=%s worlds=%d semantic_hits=%d semantic_ids=%d",
+                domain, len(scope.all_world_ids), semantic_hit_count, semantic_id_count,
+            )
             return []
 
         rows = await self.db.fetch(
             """
-            SELECT DISTINCT ON (p.proposition_id)
-                p.proposition_id, p.topic_key, p.canonical_text,
-                p.subject_norm, p.predicate_norm, p.object_norm,
-                p.polarity, p.modality,
-                ccr.claim_kind, ccr.predicate_family,
-                ccr.world_id AS source_world_id,
-                ccr.dag_node_id AS source_node_id
-            FROM aios.proposition p
-            JOIN aios.observation obs ON obs.proposition_id=p.proposition_id
-            JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
-            LEFT JOIN aios.claim_candidate cc ON cc.claim_id=obs.claim_id
-            LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
-            LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
-            LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
-            LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-            WHERE p.proposition_id = ANY($1::uuid[])
-              AND ccr.world_id = ANY($2::uuid[])
-              AND ccr.character_instance_id IS NULL
-              AND (ie.event_id IS NULL OR ie.superseded_at IS NULL)
-              AND (cardinality($3::text[]) = 0 OR ccr.claim_kind = ANY($3::text[]))
-            ORDER BY p.proposition_id, ccr.resolved_at DESC
+            WITH eligible_observations AS (
+                SELECT
+                    p.proposition_id, p.topic_key, p.canonical_text,
+                    p.subject_norm, p.predicate_norm, p.object_norm,
+                    p.polarity, p.modality,
+                    obs.claim_id AS evidence_claim_id,
+                    ccr.claim_kind, ccr.predicate_family,
+                    ccr.world_id AS source_world_id,
+                    ccr.dag_node_id AS source_node_id,
+                    ccr.resolved_at,
+                    dn.event_time AS occurrence_time
+                FROM aios.proposition p
+                JOIN aios.observation obs ON obs.proposition_id=p.proposition_id
+                JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
+                LEFT JOIN aios.claim_candidate cc ON cc.claim_id=obs.claim_id
+                LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+                LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+                WHERE p.proposition_id = ANY($1::uuid[])
+                  AND ccr.world_id = ANY($2::uuid[])
+                  AND ccr.character_instance_id IS NULL
+                  AND (ie.event_id IS NULL OR ie.superseded_at IS NULL)
+                  AND (cardinality($3::text[]) = 0 OR ccr.claim_kind = ANY($3::text[]))
+            )
+            SELECT DISTINCT ON (proposition_id)
+                proposition_id, topic_key, canonical_text,
+                subject_norm, predicate_norm, object_norm,
+                polarity, modality,
+                evidence_claim_id,
+                claim_kind, predicate_family,
+                source_world_id, source_node_id,
+                occurrence_time
+            FROM eligible_observations
+            ORDER BY
+                proposition_id,
+                -- Keep the selected world observation internally coherent:
+                -- claim kind, predicate family, world and node all come from
+                -- the same claim occurrence. Prefer the current world over an
+                -- ancestor when the proposition exists in both.
+                (source_world_id = $4::uuid) DESC,
+                resolved_at DESC,
+                evidence_claim_id DESC
             """,
             ids,
             list(scope.all_world_ids),
             list(claim_kinds),
+            context.world_id,
         )
 
         rank_by_id = {pid: rank for rank, pid in enumerate(ids)}
@@ -90,6 +164,12 @@ class WorldPropositionRetriever:
         for row in rows:
             item = dict(row)
             item["text"] = item.pop("canonical_text")
+            # World cognition is occurrence-scoped even when proposition text
+            # is shared by several claims. Preserve the claim and retrieval
+            # route so downstream cognition never has to infer kind from the
+            # proposition alone.
+            item["world_domain"] = domain
+            item["world_evidence_claim_id"] = item.get("evidence_claim_id")
             rank = rank_by_id.get(str(item["proposition_id"]), len(ids))
             score = scorer.score(
                 item,
@@ -118,4 +198,10 @@ class WorldPropositionRetriever:
             result.append(item)
 
         result.sort(key=lambda item: -float(item["relevance"]["total"]))
-        return result[:limit]
+        selected = result[:limit]
+        logger.info(
+            "World retrieval domain=%s worlds=%d semantic_hits=%d semantic_ids=%d sql_rows=%d selected=%d fallback=%s",
+            domain, len(scope.all_world_ids), semantic_hit_count, semantic_id_count,
+            len(rows), len(selected), semantic_id_count == 0,
+        )
+        return selected

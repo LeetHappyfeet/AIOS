@@ -28,10 +28,39 @@ def test_recall_competition_filters_low_information_unrelated_belief():
     assert suppressed["below_recall_floor"] == 1
 
 
-def test_current_message_cognition_bypasses_historical_recall_floor():
+def test_current_message_cognition_fills_gap_when_pipeline_is_late():
     current = _item("c1", "Mia just arrived", 0.1, kind="EVENT", cognitive_commit=True)
     selected, _ = select_recalled_cognition([current], focus_text="")
     assert selected == [current]
+
+
+def test_established_cognition_replaces_equivalent_fast_interpretation():
+    fast = _item(
+        "c1", "Renamon remembers the market conversation", 10.0,
+        kind="MEMORY", cognitive_commit=True,
+    )
+    mature = _item(
+        "p1", "Renamon remembers the market conversation with Alex", 2.0,
+        kind="MEMORY",
+    )
+    selected, suppressed = select_recalled_cognition(
+        [fast, mature], focus_text="market conversation Alex"
+    )
+    assert [row["proposition_id"] for row in selected] == ["p1"]
+    assert suppressed["redundant_recall"] == 1
+
+
+def test_fast_cognition_does_not_crowd_authoritative_recall_order():
+    fast = _item(
+        "c1", "The store looks closed", 10.0,
+        kind="STATE", cognitive_commit=True,
+        subject_norm="store", predicate_norm="look", object_norm="closed",
+    )
+    mature = _item("p1", "Renamon remembers Alex", 2.0, kind="MEMORY")
+    selected, _ = select_recalled_cognition(
+        [fast, mature], focus_text="Renamon Alex"
+    )
+    assert [row["proposition_id"] for row in selected] == ["p1", "c1"]
 
 
 def test_recall_competition_deduplicates_near_identical_candidates():

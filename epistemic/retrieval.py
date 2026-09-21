@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -10,6 +12,8 @@ from typing import Any, Iterable, Optional
 from aios_app.db import Database
 from aios_app.hud.context import HUDContext
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
+from aios_app.epistemic.event_projection import project_semantic_event
+from aios_app.epistemic.episode_projection import project_semantic_episode
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.semantic_index.query import SemanticQueryService
 
@@ -23,6 +27,27 @@ MAX_FOCUS_TERMS = 12
 MAX_TOPOLOGY_SEEDS = 64
 
 
+def _json_rows(value: Any) -> list[dict[str, Any]]:
+    """Normalize asyncpg/jsonb results without assuming a codec.
+
+    Depending on the connection codec, jsonb_agg may arrive as decoded Python
+    objects or as a JSON string. Retrieval must accept both representations.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            logger.warning("Invalid JSON aggregate in episodic retrieval")
+            return []
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [dict(row) for row in value if isinstance(row, dict)]
+
+
 @dataclass(frozen=True)
 class RetrievalPolicy:
     name: str
@@ -33,7 +58,7 @@ class RetrievalPolicy:
 
 
 POLICIES = {
-    "memory": RetrievalPolicy("memory", ("MEMORY", "EVENT"), 3, 60, True),
+    "memory": RetrievalPolicy("memory", ("MEMORY",), 3, 60, True),
     "belief": RetrievalPolicy(
         "belief", ("BELIEF", "TRAIT", "STATE", "CONCEPT"), 2, 60, False
     ),
@@ -151,12 +176,14 @@ belief_owned AS (
         ck.instance_id,
         ck.proposition_id,
         ck.atom_id,
+        NULL::uuid AS evidence_claim_id,
         ck.epistemic_status,
         ck.confidence,
         ck.acquisition_mode,
         ck.source_entity_id,
         ck.first_node_id,
         ck.last_node_id,
+        ck.first_acquired_at,
         ck.updated_at,
         ck.base_confidence,
         ck.attention_weight,
@@ -192,12 +219,14 @@ episodic_owned AS (
         cpk.instance_id,
         cpk.proposition_id,
         p.atom_id,
+        kae.claim_id AS evidence_claim_id,
         cpk.epistemic_status,
         cpk.confidence,
         cpk.acquisition_mode,
         cpk.source_entity_id,
         cpk.first_node_id,
         cpk.last_node_id,
+        cpk.first_acquired_at,
         cpk.updated_at,
         cpk.base_confidence,
         cpk.attention_weight,
@@ -224,7 +253,9 @@ episodic_owned AS (
       AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
     ORDER BY cpk.proposition_id,
              array_position($2::uuid[], cpk.instance_id),
-             cpk.updated_at DESC
+             cpk.updated_at DESC,
+             kae.created_at DESC,
+             kae.acquisition_id DESC
 ),
 owned AS (
     SELECT * FROM belief_owned
@@ -245,6 +276,7 @@ classified AS (
         ctx.predicate_family,
         ctx.world_id AS source_world_id,
         ctx.dag_node_id AS source_node_id,
+        ctx.event_time AS occurrence_time,
         tp.topology_depth,
         tp.topology_cost,
         tp.topology_significance
@@ -253,15 +285,22 @@ classified AS (
     JOIN aios.proposition p ON p.proposition_id=o.proposition_id
     LEFT JOIN LATERAL (
         SELECT ccr.claim_kind, ccr.predicate_family,
-               ccr.world_id, ccr.dag_node_id
+               ccr.world_id, ccr.dag_node_id, dn.event_time
         FROM aios.observation obs
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
+        LEFT JOIN aios.dag_node dn ON dn.node_id=ccr.dag_node_id
         WHERE obs.proposition_id=p.proposition_id
           AND (
               ccr.character_instance_id IS NULL
               OR ccr.character_instance_id = ANY($2::uuid[])
           )
         ORDER BY
+            -- A proposition can be emitted by several claims with different
+            -- semantic kinds. Prefer the claim that actually produced this
+            -- acquisition; otherwise a STATE observation can borrow an EVENT
+            -- label from another occurrence of the same proposition and leak
+            -- into ACTIVE MEMORY.
+            (obs.claim_id IS NOT DISTINCT FROM o.evidence_claim_id) DESC,
             array_position($2::uuid[], ccr.character_instance_id) NULLS LAST,
             ccr.resolved_at DESC
         LIMIT 1
@@ -306,9 +345,9 @@ class TopologyRetriever:
     def __init__(self, db: Database):
         self.db = db
         self.semantic = SemanticQueryService()
-        self._semantic_seed_cache: dict[tuple[str, str, tuple[str, ...]], list[str]] = {}
+        self._semantic_seed_cache: dict[tuple[str, str, tuple[str, ...]], dict[str, float]] = {}
         self._semantic_seed_flights: AsyncSingleFlight[
-            tuple[str, str, tuple[str, ...]], list[str]
+            tuple[str, str, tuple[str, ...]], dict[str, float]
         ] = AsyncSingleFlight()
         self._semantic_seed_deferred: set[tuple[str, str, tuple[str, ...]]] = set()
 
@@ -318,7 +357,7 @@ class TopologyRetriever:
         *,
         query_text: str,
         cache_key: tuple[str, str, tuple[str, ...]],
-    ) -> list[str]:
+    ) -> dict[str, float]:
         started = time.perf_counter()
         try:
             hits = await asyncio.to_thread(
@@ -327,23 +366,23 @@ class TopologyRetriever:
                 character_id=context.character_id,
                 instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
             )
-            proposition_ids: list[str] = []
-            seen: set[str] = set()
-            for _, _, payload in hits:
+            proposition_scores: dict[str, float] = {}
+            for _, similarity, payload in hits:
                 proposition_id = str(payload.get("proposition_id") or "")
-                if proposition_id and proposition_id not in seen:
-                    seen.add(proposition_id)
-                    proposition_ids.append(proposition_id)
-            self._semantic_seed_cache[cache_key] = proposition_ids
+                if proposition_id:
+                    proposition_scores[proposition_id] = max(
+                        proposition_scores.get(proposition_id, 0.0), float(similarity)
+                    )
+            self._semantic_seed_cache[cache_key] = proposition_scores
             if len(self._semantic_seed_cache) > 64:
                 self._semantic_seed_cache.pop(next(iter(self._semantic_seed_cache)))
-            return proposition_ids
+            return proposition_scores
         except Exception as exc:
             logger.debug(
                 "Semantic seed lookup unavailable; using topology/lexical fallback: %s", exc
             )
-            self._semantic_seed_cache[cache_key] = []
-            return []
+            self._semantic_seed_cache[cache_key] = {}
+            return {}
         finally:
             self._semantic_seed_deferred.discard(cache_key)
             elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -358,21 +397,21 @@ class TopologyRetriever:
         *,
         focus_text: str,
         goals: Iterable[Any],
-    ) -> list[str]:
+    ) -> dict[str, float]:
         query_text = " ".join(
             part
             for part in (focus_text, " ".join(str(goal) for goal in goals))
             if part
         ).strip()
         if not query_text:
-            return []
+            return {}
         lineage = tuple(str(value) for value in (context.cognitive_instance_ids or context.lineage_instance_ids))
         cache_key = (str(context.character_id), query_text, lineage)
         cached = self._semantic_seed_cache.get(cache_key)
         if cached is not None:
             return cached
         if cache_key in self._semantic_seed_deferred:
-            return []
+            return {}
         try:
             return await asyncio.wait_for(
                 self._semantic_seed_flights.run(
@@ -389,7 +428,7 @@ class TopologyRetriever:
                 "HUD semantic seed exceeded %.0f ms budget; using lexical/topology fallback",
                 SEMANTIC_SEED_WAIT_SECONDS * 1000.0,
             )
-            return []
+            return {}
 
     async def _canonical_event_memberships(
         self, proposition_ids: list[Any]
@@ -416,7 +455,23 @@ class TopologyRetriever:
                     FROM aios.semantic_event_membership m2
                     WHERE m2.semantic_event_id=sem.semantic_event_id
                       AND m2.status='active'
-                ) AS member_proposition_ids
+                ) AS member_proposition_ids,
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'proposition_id', p2.proposition_id,
+                            'subject_norm', p2.subject_norm,
+                            'predicate_norm', p2.predicate_norm,
+                            'object_norm', p2.object_norm,
+                            'text', p2.canonical_text
+                        )
+                        ORDER BY m2.created_at, p2.proposition_id
+                    )
+                    FROM aios.semantic_event_membership m2
+                    JOIN aios.proposition p2 ON p2.proposition_id=m2.proposition_id
+                    WHERE m2.semantic_event_id=sem.semantic_event_id
+                      AND m2.status='active'
+                ) AS member_rows
             FROM aios.semantic_event_membership m
             JOIN aios.semantic_event sem
               ON sem.semantic_event_id=m.semantic_event_id
@@ -434,6 +489,7 @@ class TopologyRetriever:
                 "timeline_id": row["timeline_id"],
                 "dag_node_id": row["dag_node_id"],
                 "member_proposition_ids": list(row["member_proposition_ids"] or []),
+                "member_rows": _json_rows(row["member_rows"]),
             }
             for row in rows
         }
@@ -443,7 +499,7 @@ class TopologyRetriever:
         items: list[dict[str, Any]],
         event_by_proposition: dict[Any, dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Collapse retrieved descriptions of one occurrence into one memory."""
+        """Promote member propositions into first-class canonical event memories."""
         passthrough: list[dict[str, Any]] = []
         grouped: dict[Any, list[dict[str, Any]]] = {}
         for item in items:
@@ -454,8 +510,18 @@ class TopologyRetriever:
             grouped.setdefault(event["semantic_event_id"], []).append(item)
 
         for event_id, members in grouped.items():
-            # Prefer the strongest retrieval hit; on ties retain the richer
-            # canonical description rather than an underspecified paraphrase.
+            event = dict(event_by_proposition[members[0]["proposition_id"]])
+            event["semantic_event_id"] = event_id
+            full_members = [dict(row) for row in event.get("member_rows") or []]
+            retrieved_by_id = {member.get("proposition_id"): member for member in members}
+            for row in full_members:
+                retrieved = retrieved_by_id.get(row.get("proposition_id"))
+                if retrieved:
+                    row["relevance"] = dict(retrieved.get("relevance") or {})
+            projection = project_semantic_event(event, full_members or members)
+
+            # The event, not a member proposition, is the recall candidate. Keep
+            # the strongest member only as a compatibility/provenance carrier.
             representative = max(
                 members,
                 key=lambda item: (
@@ -464,13 +530,139 @@ class TopologyRetriever:
                     str(item.get("proposition_id") or ""),
                 ),
             )
-            event = event_by_proposition[representative["proposition_id"]]
-            representative["semantic_event_id"] = event_id
-            representative["semantic_event_confidence"] = event["event_confidence"]
-            representative["semantic_event_members"] = event["member_proposition_ids"]
-            representative["semantic_event_dag_node_id"] = event["dag_node_id"]
-            representative["retrieval_reason"] = "canonical_semantic_event"
-            passthrough.append(representative)
+            candidate = dict(representative)
+            candidate["text"] = projection["text"] or representative.get("text") or ""
+            candidate["semantic_event_id"] = event_id
+            candidate["semantic_event_confidence"] = projection["confidence"]
+            candidate["semantic_event_members"] = projection["member_proposition_ids"]
+            candidate["semantic_event_dag_node_id"] = projection["dag_node_id"]
+            candidate["event_projection"] = projection
+            candidate["retrieval_reason"] = "canonical_semantic_event"
+
+            member_relevance = [dict(member.get("relevance") or {}) for member in members]
+            best_total = max(float(r.get("total") or 0.0) for r in member_relevance)
+            best_vector = projection.get("best_vector_similarity")
+            relevance = dict(candidate.get("relevance") or {})
+            if best_vector is not None:
+                relevance["vector_similarity"] = best_vector
+                relevance["vector_semantic"] = 1.8 * max(0.0, min(1.0, float(best_vector)))
+            relevance["event_member_count"] = len(members)
+            relevance["event_confidence"] = projection["confidence"]
+            # Member count is deliberately logarithmic and tightly bounded:
+            # extraction verbosity must not make an event important by itself.
+            support_bonus = min(0.16, 0.06 * math.log1p(max(0, len(members) - 1)))
+            relevance["event_support_bonus"] = round(support_bonus, 6)
+            relevance["total"] = round(
+                best_total
+                + 0.20 * max(0.0, min(1.0, projection["confidence"]))
+                + support_bonus,
+                6,
+            )
+            candidate["relevance"] = relevance
+            passthrough.append(candidate)
+        return passthrough
+
+    async def _episode_memberships(
+        self, semantic_event_ids: list[Any]
+    ) -> dict[Any, dict[str, Any]]:
+        if not semantic_event_ids:
+            return {}
+        rows = await self.db.fetch(
+            """
+            SELECT em.semantic_event_id, ep.semantic_episode_id, ep.world_id,
+                   ep.timeline_id, ep.confidence AS episode_confidence,
+                   em.ordinal,
+                   (
+                       SELECT jsonb_agg(
+                           jsonb_build_object(
+                               'semantic_event_id', se2.semantic_event_id,
+                               'event_confidence', se2.confidence,
+                               'episode_ordinal', em2.ordinal,
+                               'members', (
+                                   SELECT jsonb_agg(
+                                       jsonb_build_object(
+                                           'proposition_id', p2.proposition_id,
+                                           'subject_norm', p2.subject_norm,
+                                           'predicate_norm', p2.predicate_norm,
+                                           'object_norm', p2.object_norm,
+                                           'text', p2.canonical_text
+                                       )
+                                       ORDER BY sem2.created_at, p2.proposition_id
+                                   )
+                                   FROM aios.semantic_event_membership sem2
+                                   JOIN aios.proposition p2
+                                     ON p2.proposition_id=sem2.proposition_id
+                                   WHERE sem2.semantic_event_id=se2.semantic_event_id
+                                     AND sem2.status='active'
+                               )
+                           )
+                           ORDER BY em2.ordinal, se2.semantic_event_id
+                       )
+                       FROM aios.semantic_episode_membership em2
+                       JOIN aios.semantic_event se2
+                         ON se2.semantic_event_id=em2.semantic_event_id
+                        AND se2.status='active'
+                       WHERE em2.semantic_episode_id=ep.semantic_episode_id
+                         AND em2.status='active'
+                   ) AS episode_events
+            FROM aios.semantic_episode_membership em
+            JOIN aios.semantic_episode ep
+              ON ep.semantic_episode_id=em.semantic_episode_id
+             AND ep.status='active'
+            WHERE em.status='active'
+              AND em.semantic_event_id=ANY($1::uuid[])
+            """,
+            semantic_event_ids,
+        )
+        return {
+            row["semantic_event_id"]: {
+                "semantic_episode_id": row["semantic_episode_id"],
+                "world_id": row["world_id"],
+                "timeline_id": row["timeline_id"],
+                "episode_confidence": row["episode_confidence"],
+                "ordinal": row["ordinal"],
+                "episode_events": _json_rows(row["episode_events"]),
+            }
+            for row in rows
+        }
+
+    @staticmethod
+    def _collapse_semantic_episodes(
+        items: list[dict[str, Any]],
+        episode_by_event: dict[Any, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        passthrough: list[dict[str, Any]] = []
+        grouped: dict[Any, list[dict[str, Any]]] = {}
+        for item in items:
+            event_id = item.get("semantic_event_id")
+            episode = episode_by_event.get(event_id)
+            if not event_id or not episode:
+                passthrough.append(item)
+                continue
+            grouped.setdefault(episode["semantic_episode_id"], []).append(item)
+
+        for episode_id, members in grouped.items():
+            episode = dict(episode_by_event[members[0]["semantic_event_id"]])
+            event_rows = _json_rows(episode.get("episode_events"))
+            projection = project_semantic_episode(episode, event_rows)
+            representative = max(
+                members,
+                key=lambda item: float((item.get("relevance") or {}).get("total") or 0.0),
+            )
+            candidate = dict(representative)
+            candidate["text"] = projection.get("text") or candidate.get("text") or ""
+            candidate["semantic_episode_id"] = episode_id
+            candidate["semantic_episode_events"] = projection.get("semantic_event_ids") or []
+            candidate["episode_projection"] = projection
+            candidate["retrieval_reason"] = "semantic_episode"
+            relevance = dict(candidate.get("relevance") or {})
+            relevance["episode_event_count"] = len(members)
+            relevance["total"] = max(
+                float((member.get("relevance") or {}).get("total") or 0.0)
+                for member in members
+            )
+            candidate["relevance"] = relevance
+            passthrough.append(candidate)
         return passthrough
 
     async def _anchor_context(
@@ -608,7 +800,7 @@ class TopologyRetriever:
         terms = _focus_terms(focus_text, " ".join(str(goal) for goal in goals))
 
         semantic_started = time.perf_counter()
-        semantic_seed_ids = await self._semantic_seed_propositions(
+        semantic_seed_scores = await self._semantic_seed_propositions(
             context, focus_text=focus_text, goals=goals
         )
         semantic_ms = (time.perf_counter() - semantic_started) * 1000.0
@@ -622,7 +814,7 @@ class TopologyRetriever:
                 lineage_keys=lineage_keys,
                 instance_id=str(context.instance_id),
                 terms=terms,
-                semantic_seed_ids=semantic_seed_ids,
+                semantic_seed_ids=list(semantic_seed_scores),
                 hops=hops,
                 policy=policy,
                 row_limit=row_limit,
@@ -642,7 +834,7 @@ class TopologyRetriever:
                     lineage_keys=lineage_keys,
                     instance_id=str(context.instance_id),
                     terms=terms,
-                    semantic_seed_ids=semantic_seed_ids,
+                    semantic_seed_ids=list(semantic_seed_scores),
                     hops=0,
                     policy=policy,
                     row_limit=row_limit,
@@ -667,6 +859,11 @@ class TopologyRetriever:
         for rank, row in enumerate(rows):
             item = dict(row)
             item["text"] = item.pop("canonical_text")
+            # Preserve the cognition route as provenance. Downstream section
+            # routing can assert that only memory/event retrieval contributes
+            # to ACTIVE MEMORY instead of trusting a potentially ambiguous
+            # proposition-level label.
+            item["retrieval_mode"] = mode
             anchor = anchor_by_proposition.get(item["proposition_id"])
             if anchor:
                 item["anchor"] = {
@@ -690,8 +887,13 @@ class TopologyRetriever:
                 candidate_entity_id=item.get("source_entity_id"),
                 epistemic_status=item.get("epistemic_status"),
                 confidence=item.get("effective_confidence") or item.get("confidence"),
-                updated_at=item.get("updated_at"),
+                updated_at=(
+                    (item.get("occurrence_time") or item.get("first_acquired_at") or item.get("updated_at"))
+                    if str(item.get("claim_kind") or "").upper() in {"EVENT", "MEMORY"}
+                    else item.get("first_acquired_at") or item.get("updated_at")
+                ),
                 causal_distance=item.get("topology_depth"),
+                semantic_similarity=semantic_seed_scores.get(str(item.get("proposition_id"))),
             )
             topology_bonus = (
                 0.45 / (1.0 + float(item.get("topology_cost") or 0.0))
@@ -707,6 +909,12 @@ class TopologyRetriever:
                 "fallback": topology_fallback,
             }
             item["relevance"] = score.as_dict()
+            item["relevance"]["vector_similarity"] = semantic_seed_scores.get(str(item.get("proposition_id")))
+            item["relevance"]["recency_source"] = (
+                "occurrence_time" if item.get("occurrence_time") is not None
+                else "first_acquired_at" if item.get("first_acquired_at") is not None
+                else "updated_at"
+            )
             item["relevance"]["topology"] = round(topology_bonus, 6)
             item["relevance"]["total"] = round(
                 float(item["relevance"]["total"]) + topology_bonus, 6
@@ -758,6 +966,10 @@ class TopologyRetriever:
             [item["proposition_id"] for item in result]
         )
         result = self._collapse_canonical_events(result, event_by_proposition)
+        episode_by_event = await self._episode_memberships(
+            [item["semantic_event_id"] for item in result if item.get("semantic_event_id")]
+        )
+        result = self._collapse_semantic_episodes(result, episode_by_event)
         result.sort(
             key=lambda item: (
                 -item["relevance"]["total"],

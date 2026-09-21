@@ -29,6 +29,7 @@ class CharacterIdentity:
     Think: driver's license / passport.
     """
     character_id: str
+    identity_version: int
     canonical_name: Optional[str]
     display_name: Optional[str]
     canon: Optional[str]
@@ -51,6 +52,7 @@ class CharacterIdentity:
     meta: dict
     created_at: datetime
     updated_at: Optional[datetime]
+    created_from: Optional[str]
 
 
 # ============================================================
@@ -242,6 +244,7 @@ class IdentityStore:
     def _row_to_identity(row) -> CharacterIdentity:
         return CharacterIdentity(
             character_id=row["character_id"],
+            identity_version=int(row.get("identity_version") or 1),
             canonical_name=row.get("canonical_name"),
             display_name=row.get("display_name"),
             canon=row.get("canon"),
@@ -264,4 +267,5 @@ class IdentityStore:
             meta=row["meta"] or {},
             created_at=row["created_at"],
             updated_at=row.get("updated_at"),
+            created_from=row.get("created_from"),
         )

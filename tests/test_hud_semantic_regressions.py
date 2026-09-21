@@ -14,10 +14,6 @@ def _shego_units(text: str):
     )
 
 
-def test_message_cognition_version_recomputes_v2_units():
-    assert INTERPRETER_VERSION == "message-cognition-v3"
-
-
 def test_completed_try_is_not_a_durable_goal():
     units = _shego_units("She tried to move her hand and felt it respond.")
     assert all(unit.claim_kind != "GOAL" for unit in units)

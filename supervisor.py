@@ -124,6 +124,23 @@ STAGES: List[Stage] = [
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='normalize_proposition' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=cc.claim_id::text)
         ORDER BY cc.created_at LIMIT $1
     """, claim_id_payload, 35, 96, True),
+    Stage("materialize_event_occurrences", "materialize_event_occurrences", """
+        SELECT DISTINCT o.claim_id
+        FROM aios.observation o
+        JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
+        WHERE upper(COALESCE(ccr.claim_kind,''))='EVENT'
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.semantic_event_membership sem
+              WHERE sem.observation_id=o.observation_id AND sem.status='active'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.pipeline_job pj
+              WHERE pj.job_type='materialize_event_occurrences'
+                AND pj.status IN ('queued','running')
+                AND pj.payload->>'claim_id'=o.claim_id::text
+          )
+        ORDER BY o.claim_id LIMIT $1
+    """, claim_id_payload, 38, 96, True),
     Stage("project_character_knowledge", "project_character_knowledge", """
         SELECT 1 WHERE EXISTS (SELECT 1 FROM aios.knowledge_acquisition_event kae LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id WHERE kae.processed_at IS NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL))
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='project_character_knowledge' AND pj.status IN ('queued','running')) LIMIT $1
@@ -178,6 +195,23 @@ STAGES: List[Stage] = [
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
         ORDER BY o.observed_at LIMIT $1
     """), claim_id_payload, 90, 64),
+    Stage("derive_semantic_episodes", "derive_semantic_episodes", """
+        SELECT 1
+        WHERE EXISTS (
+            SELECT 1 FROM aios.semantic_event se
+            WHERE se.status='active' AND se.dag_node_id IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM aios.semantic_episode_membership em
+                  WHERE em.semantic_event_id=se.semantic_event_id AND em.status='active'
+              )
+        )
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.pipeline_job pj
+              WHERE pj.job_type='derive_semantic_episodes'
+                AND pj.status IN ('queued','running')
+          )
+        LIMIT $1
+    """, empty_payload, 92, 1),
     Stage("assign_narratives", "assign_narratives", """
         SELECT 1 WHERE EXISTS (SELECT 1 FROM aios.observation o WHERE NOT EXISTS(SELECT 1 FROM aios.narrative_membership nm WHERE nm.observation_id=o.observation_id))
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='assign_narratives' AND pj.status IN ('queued','running')) LIMIT $1

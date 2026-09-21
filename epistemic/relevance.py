@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 from dataclasses import asdict, dataclass
@@ -10,6 +11,7 @@ from uuid import UUID
 from aios_app.hud.context import HUDContext
 
 
+logger = logging.getLogger("aios.epistemic.relevance")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
 _LOW_INFORMATION_SUBJECTS = {
     "it", "this", "that", "which", "who", "what", "something", "anything",
@@ -39,6 +41,7 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 class CognitiveRelevanceBreakdown:
     recency: float = 0.0
     semantic: float = 0.0
+    vector_semantic: float = 0.0
     entity_proximity: float = 0.0
     goal: float = 0.0
     relationship: float = 0.0
@@ -52,7 +55,7 @@ class CognitiveRelevanceBreakdown:
     @property
     def total(self) -> float:
         return (
-            self.recency + self.semantic + self.entity_proximity + self.goal
+            self.recency + self.semantic + self.vector_semantic + self.entity_proximity + self.goal
             + self.relationship + self.emotional_salience + self.memory_salience
             + self.confidence + self.causal_proximity
             - self.branch_penalty - self.epistemic_penalty
@@ -82,6 +85,7 @@ class CognitiveRelevanceScorer:
         confidence: Optional[float] = None,
         updated_at: Optional[datetime] = None,
         causal_distance: Optional[int] = None,
+        semantic_similarity: Optional[float] = None,
     ) -> CognitiveRelevanceBreakdown:
         text_words = _words(candidate_text)
         now = datetime.now(timezone.utc)
@@ -93,7 +97,13 @@ class CognitiveRelevanceScorer:
         else:
             recency = 1.0 / (1.0 + max(0, rank))
 
-        semantic = 1.8 * _overlap(text_words, self.focus_words)
+        # Lexical and embedding relevance are independent evidence channels.
+        # A vector hit must retain the numerical evidence that caused it to be
+        # admitted; topology descendants do not inherit their seed's score.
+        semantic = 1.0 * _overlap(text_words, self.focus_words)
+        vector_semantic = 0.0
+        if semantic_similarity is not None:
+            vector_semantic = 1.8 * max(0.0, min(1.0, _as_float(semantic_similarity)))
         goal = 1.3 * _overlap(text_words, self.goal_words)
         entity_proximity = 1.4 if self.context.entity_is_active(candidate_entity_id) else 0.0
         relationship = 0.0
@@ -121,6 +131,7 @@ class CognitiveRelevanceScorer:
         return CognitiveRelevanceBreakdown(
             recency=recency,
             semantic=semantic,
+            vector_semantic=vector_semantic,
             entity_proximity=entity_proximity,
             goal=goal,
             relationship=relationship,
@@ -179,9 +190,13 @@ def select_recalled_cognition(
         ):
             by_id[key] = item
 
-    immediate = [item for item in by_id.values() if item.get("cognitive_commit")]
+    # Message cognition is a provisional low-latency bridge while the semantic
+    # pipeline catches up. Established/reconciled cognition is authoritative
+    # once available and must get the first chance to win recall.
+    provisional = [item for item in by_id.values() if item.get("cognitive_commit")]
     established = [item for item in by_id.values() if not item.get("cognitive_commit")]
     scored: list[tuple[float, dict[str, Any], set[str]]] = []
+    diagnostic: list[tuple[float, dict[str, Any], str]] = []
     suppressed = {"below_recall_floor": 0, "redundant_recall": 0, "recall_cap": 0}
 
     for item in established:
@@ -198,19 +213,27 @@ def select_recalled_cognition(
         kind = str(item.get("claim_kind") or "BELIEF").upper()
         instance_depth = int((item.get("topology") or {}).get("instance_depth") or item.get("instance_depth") or 0)
         continuity_penalty = min(0.9, math.log1p(max(0, instance_depth)) * 0.16)
-        context_bonus = 1.35 * semantic_overlap
+        # Context overlap is diagnostic here, not scored a second time. The
+        # cognition scorer already accounted for lexical relevance.
+        context_bonus = 0.0
         salience_bonus = 0.45 * max(0.0, min(1.0, salience))
         confidence_bonus = 0.25 * max(0.0, min(1.0, confidence))
         kind_bonus = 0.25 if kind in {"GOAL", "RULE", "RELATIONSHIP"} else 0.0
         recall_score = base + context_bonus + salience_bonus + confidence_bonus + kind_bonus
-        recall_score -= continuity_penalty + _quality_penalty(item)
+        quality_penalty = _quality_penalty(item)
+        recall_score -= continuity_penalty + quality_penalty
         relevance["recall"] = round(recall_score, 6)
         relevance["context_overlap"] = round(semantic_overlap, 6)
+        relevance["context_bonus"] = round(context_bonus, 6)
+        relevance["quality_penalty"] = round(quality_penalty, 6)
+        relevance["continuity_penalty"] = round(continuity_penalty, 6)
         item["relevance"] = relevance
         if recall_score < relevance_floor:
             suppressed["below_recall_floor"] += 1
+            diagnostic.append((recall_score, item, "below_recall_floor"))
             continue
         scored.append((recall_score, item, tokens))
+        diagnostic.append((recall_score, item, "candidate"))
 
     scored.sort(key=lambda entry: entry[0], reverse=True)
     selected: list[dict[str, Any]] = []
@@ -225,5 +248,49 @@ def select_recalled_cognition(
         selected.append(item)
         selected_tokens.append(tokens)
 
-    immediate.sort(key=lambda item: float(item.get("relevance", {}).get("total", 0.0)), reverse=True)
-    return immediate + selected, suppressed
+    # Fast message cognition fills semantic gaps only. If mature cognition has
+    # already selected an equivalent unit, the provisional interpretation has
+    # completed its job and yields to the reasoned representation.
+    provisional.sort(
+        key=lambda item: float(item.get("relevance", {}).get("total", 0.0)),
+        reverse=True,
+    )
+    selected_provisional: list[dict[str, Any]] = []
+    authoritative_tokens = list(selected_tokens)
+    for item in provisional:
+        tokens = _candidate_tokens(item)
+        if tokens and any(_overlap(tokens, prior) >= 0.72 for prior in authoritative_tokens):
+            suppressed["redundant_recall"] += 1
+            continue
+        selected_provisional.append(item)
+        if tokens:
+            authoritative_tokens.append(tokens)
+
+    if logger.isEnabledFor(logging.DEBUG):
+        selected_ids = {str(item.get("proposition_id") or item.get("text")) for item in selected}
+        for rank, (score, item, status) in enumerate(
+            sorted(diagnostic, key=lambda entry: entry[0], reverse=True)[:20], start=1
+        ):
+            relevance = item.get("relevance") or {}
+            key = str(item.get("proposition_id") or item.get("text"))
+            logger.debug(
+                "Recall candidate rank=%d id=%s kind=%s selected=%s status=%s "
+                "vector_similarity=%s vector_semantic=%.4f lexical=%.4f recency=%.4f "
+                "salience=%.4f confidence=%.4f topology=%.4f context_overlap=%.4f "
+                "quality_penalty=%.4f continuity_penalty=%.4f recall=%.4f text=%r",
+                rank, key, item.get("claim_kind"), key in selected_ids, status,
+                relevance.get("vector_similarity"),
+                _as_float(relevance.get("vector_semantic")),
+                _as_float(relevance.get("semantic")),
+                _as_float(relevance.get("recency")),
+                max(_as_float(item.get("salience_weight")), _as_float(item.get("attention_weight"))),
+                _as_float(item.get("effective_confidence"), _as_float(item.get("confidence"))),
+                _as_float(relevance.get("topology")),
+                _as_float(relevance.get("context_overlap")),
+                _as_float(relevance.get("quality_penalty")),
+                _as_float(relevance.get("continuity_penalty")),
+                score, str(item.get("text") or "")[:240],
+            )
+    # Authoritative cognition is ordered first so downstream token budgeting
+    # cannot let a provisional fast-path interpretation crowd it out.
+    return selected + selected_provisional, suppressed

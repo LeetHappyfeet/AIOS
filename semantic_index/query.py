@@ -90,6 +90,32 @@ class SemanticQueryService:
             payload["world_ids"] = [str(value) for value in world_ids if value is not None]
         return self._request(payload)
 
+    def search_world_epistemic_staged(
+        self,
+        query_text: str,
+        *,
+        world_stages: Iterable[Iterable[Any]],
+        top_k: int | None = None,
+        min_hits: int = 8,
+    ) -> list[tuple[str, float, dict[str, Any]]]:
+        """Search public world assertions across ordered world scopes."""
+        if not query_text.strip():
+            return []
+        stages = [
+            [str(value) for value in stage if value is not None]
+            for stage in world_stages
+        ]
+        stages = [stage for stage in stages if stage]
+        if not stages:
+            return []
+        return self._request({
+            "op": "search_world_epistemic_staged",
+            "query_text": query_text,
+            "world_stages": stages,
+            "top_k": top_k,
+            "min_hits": max(1, int(min_hits)),
+        })
+
     def search_epistemic_staged(
         self,
         query_text: str,

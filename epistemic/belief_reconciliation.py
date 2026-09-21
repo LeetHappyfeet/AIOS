@@ -4,12 +4,15 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+import asyncpg
+
 from aios_app.db import Database
 
 
 RESOLVER_VERSION = "character-belief-v1"
 DEFAULT_ACCEPT_SUPPORT = 0.60
 DEFAULT_DECISION_MARGIN = 0.15
+DEADLOCK_RETRY_ATTEMPTS = 4
 
 
 @dataclass(frozen=True)
@@ -63,11 +66,24 @@ async def reconcile_character_belief_atom(
 ) -> None:
     """Force reconciliation for one character-instance semantic atom."""
 
-    await db.execute(
-        "SELECT aios.reconcile_character_belief_atom($1,$2)",
-        instance_id,
-        atom_id,
-    )
+    # The SQL wrapper takes a transaction-scoped advisory lock on the
+    # character belief topology before invoking the materializer. All Python
+    # reconciliation entry points therefore share one deterministic lock
+    # boundary, including activation and background reconciliation.
+    for attempt in range(DEADLOCK_RETRY_ATTEMPTS):
+        try:
+            await db.execute(
+                "SELECT aios.reconcile_character_belief_atom_serialized($1,$2)",
+                instance_id,
+                atom_id,
+            )
+            return
+        except asyncpg.exceptions.DeadlockDetectedError:
+            # The advisory lock prevents new AIOS reconciliation cycles, but a
+            # transaction already inside the old path during deploy can still
+            # collide once. Retrying is recovery, not the concurrency model.
+            if attempt + 1 >= DEADLOCK_RETRY_ATTEMPTS:
+                raise
 
 
 async def reconcile_instance_beliefs(

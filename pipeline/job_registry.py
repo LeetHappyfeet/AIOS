@@ -51,6 +51,8 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "rdf_liminal_promote": JobSpec(ResourceClass.RDF, "section_id", True, isolate_blocking=True, requires_rdf_slot=True),
     "rdf_liminal_classify": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
     "project_world_topology": JobSpec(ResourceClass.RDF, "world_id", True, isolate_blocking=True, requires_rdf_slot=True),
+    "materialize_event_occurrences": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
+    "derive_semantic_episodes": JobSpec(ResourceClass.SEMANTIC, "global", True),
     "assign_narratives": JobSpec(ResourceClass.GLOBAL, "global", True),
 }
 
@@ -72,6 +74,7 @@ def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) 
         "resolve_claim_context",
         "normalize_proposition",
         "project_character_knowledge",
+        "materialize_event_occurrences",
     }:
         return SchedulingLane.LIVE
     if (
@@ -79,6 +82,8 @@ def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) 
         and payload.get("semantic_backfill") == "proposition_leaves_20260909"
     ):
         return SchedulingLane.BACKGROUND
+    if job_type == "derive_semantic_episodes":
+        return SchedulingLane.STRUCTURAL
     if job_type in {
         "derive_claim_topology",
         "derive_character_acquisition_topology",

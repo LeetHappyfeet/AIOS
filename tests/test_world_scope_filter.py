@@ -81,3 +81,25 @@ def test_empty_world_stage_never_widens_to_unfiltered_semantic_search(monkeypatc
         instance_ids=[],
         world_stages=[],
     ) == []
+
+
+def test_world_semantic_client_uses_public_world_operation(monkeypatch):
+    service = SemanticQueryService.__new__(SemanticQueryService)
+    captured = {}
+
+    def fake_request(payload):
+        captured.update(payload)
+        return []
+
+    service._request = fake_request
+    service.search_world_epistemic_staged(
+        "geology",
+        world_stages=[["local"], ["parent"]],
+        min_hits=6,
+    )
+
+    assert captured["op"] == "search_world_epistemic_staged"
+    assert captured["world_stages"] == [["local"], ["parent"]]
+    assert captured["min_hits"] == 6
+    assert "character_id" not in captured
+    assert "instance_ids" not in captured

@@ -40,7 +40,7 @@ def _json_object(value: Any) -> dict[str, Any]:
 
 
 RECONCILER_VERSION = "semantic-reconciliation-v2"
-EVENT_RESOLVER_VERSION = "semantic-event-resolver-v1"
+EVENT_RESOLVER_VERSION = "semantic-event-resolver-v2"
 
 PAIR_EDGE_TYPES = {
     "EQUIVALENT": "semantic_equivalent",
@@ -214,6 +214,19 @@ async def _safe_reproject_scope(
         return None
 
 
+async def _semantic_events_for_proposition(db: Database, proposition_id: UUID) -> list[UUID]:
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT semantic_event_id
+        FROM aios.semantic_event_membership
+        WHERE proposition_id=$1 AND status='active'
+        ORDER BY semantic_event_id
+        """,
+        proposition_id,
+    )
+    return [row["semantic_event_id"] for row in rows]
+
+
 async def _semantic_event_for_proposition(db: Database, proposition_id: UUID) -> UUID | None:
     row = await db.fetchrow(
         """
@@ -289,9 +302,18 @@ async def _resolve_semantic_event_pair(
     world_id: UUID | None,
     evidence: dict[str, Any],
 ) -> tuple[UUID | None, str]:
-    """Resolve accepted SAME_EVENT evidence without assuming transitive identity."""
-    event_a = await _semantic_event_for_proposition(db, proposition_a)
-    event_b = await _semantic_event_for_proposition(db, proposition_b)
+    """Resolve accepted SAME_EVENT evidence without assuming transitive identity.
+
+    Proposition-level SAME_EVENT evidence cannot choose between repeated
+    occurrences of the same proposition. When either side has multiple active
+    occurrences, preserve the evidence but refuse to guess an occurrence.
+    """
+    events_a = await _semantic_events_for_proposition(db, proposition_a)
+    events_b = await _semantic_events_for_proposition(db, proposition_b)
+    if len(events_a) > 1 or len(events_b) > 1:
+        return None, "ambiguous_occurrence_evidence"
+    event_a = events_a[0] if events_a else None
+    event_b = events_b[0] if events_b else None
 
     if event_a is not None and event_b is not None:
         if event_a == event_b:
