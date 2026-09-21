@@ -236,6 +236,22 @@ class LongDocumentIn(BaseModel):
     source_name: str = "long_document"
 
 
+class CorpusDocumentIn(BaseModel):
+    text: str
+    source_id: str = Field(min_length=1)
+    source_kind: str = "document"
+    title: Optional[str] = None
+    author: Optional[str] = None
+    source_uri: Optional[str] = None
+    language: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CorpusConsumeIn(BaseModel):
+    section_ids: List[UUID]
+    mode: Literal["read", "research", "taught", "import"] = "read"
+
+
 class CharacterEpistemicProfileIn(BaseModel):
     skepticism: float = 0.5
     curiosity: float = 0.5
