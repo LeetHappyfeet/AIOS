@@ -62,13 +62,15 @@ def _context_acquisition_eligible_values(
     claim_kind: Optional[str],
     raw_text: Optional[str],
     discourse_mode: Optional[str],
+    acquisition_mode: Optional[str] = None,
 ) -> bool:
     """Return whether resolved context is eligible for settled /char knowledge."""
     if (epistemic_scope or "").lower() != "character":
         return False
     if character_instance_id is None or str(character_instance_id) != str(instance_id):
         return False
-    if (claim_kind or "").upper() not in _CONTEXT_KNOWLEDGE_KINDS:
+    intentional = (acquisition_mode or "").lower() in {"read", "research", "taught", "import"}
+    if not intentional and (claim_kind or "").upper() not in _CONTEXT_KNOWLEDGE_KINDS:
         return False
     if (discourse_mode or "").lower() in _NONASSERTIVE_DISCOURSE:
         return False
@@ -113,6 +115,7 @@ async def _context_acquisition_eligible(db: Database, row) -> bool:
         claim_kind=context["claim_kind"],
         raw_text=context["raw_text"],
         discourse_mode=context["discourse_mode"],
+        acquisition_mode=row["acquisition_mode"],
     )
 
 
