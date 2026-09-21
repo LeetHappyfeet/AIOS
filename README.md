@@ -1,134 +1,224 @@
 ![AIOS](Banner.png)
 
-**AIOS is a persistent memory runtime for AI agents.**
+# AIOS
 
-AIOS gives long-running agents continuity beyond a single prompt or conversation. It remembers events, maintains changing world state, tracks what individual characters know and believe, and retrieves the information that matters for the current moment.
+**Persistent memory and world state for AI agents.**
 
-Unlike a simple retrieval system, AIOS treats memory as something that evolves. New information can reinforce existing memories, contradict them, update them, or belong only to a particular character, timeline, or world.
+AIOS gives long-running AI characters and agents continuity beyond a single prompt or chat. It remembers events, tracks changing world state, maintains what individual characters know and believe, preserves durable character identity, and retrieves the context that matters for the current moment.
 
-The result is a focused **HUD** that gives an AI the context it needs without stuffing its prompt with the entire history.
+Instead of treating memory as a pile of old text, AIOS maintains persistent state and produces a focused **HUD** for the active agent.
 
-**Want to try it first?** Open the [AIOS Google Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing) for a guided demo without setting up a full local installation.
+**Want to try it without installing anything?**
+Open the [AIOS Google Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing).
 
 > **Status:** AIOS is experimental and under active development.
 >
 > **License:** AIOS is source-available proprietary software for personal use by natural persons. See the [AIOS Personal Use License 1.0](LICENSE).
 
-## What AIOS Does
-
-AIOS is intended for persistent assistants, role-playing characters, agents, and other applications where remembering similar text is not enough.
-
-It keeps track of what happened, when it happened, where information came from, what belongs to the shared world, and what individual characters know, remember, or believe. It can preserve different perspectives and conflicting information instead of forcing everything into a single version of events.
-
-AIOS is more than a retrieval system. It builds persistent memory around agents and characters, keeping track of events, knowledge, beliefs, relationships, world state, and changing information over time. Retrieval is one part of that larger runtime.
-
-The HUD turns this persistent state into focused context for the active agent. The larger memory remains available without requiring an entire history to be placed into every prompt.
-
-## What's Changed
-
-This release substantially expands AIOS as a persistent memory runtime.
-
-- **Memory consolidation.** AIOS can turn many overlapping observations into stronger, more useful memories while retaining the underlying evidence. This reduces repetitive retrieval without throwing away the details that produced a memory.
-- **Better handling of disagreement.** Conflicting memories, observations, and beliefs can remain distinct instead of being flattened into one answer. Corrections and changing information can be reconciled with what came before.
-- **World-aware memory.** Information is associated more carefully with the world and timeline where it belongs, reducing leakage between unrelated contexts and improving continuity across sessions that share a world.
-- **Character perspective.** Shared facts can coexist with what individual characters personally know, believe, remember, or experienced. Characters can participate in a common world while retaining their own histories and perspectives.
-- **Faster live conversations.** Immediate conversational memory can become available without waiting for every deeper background analysis task to finish. Live conversation work is prioritized while heavier memory processing continues asynchronously.
-- **Smarter retrieval.** AIOS can prepare likely-needed context ahead of a HUD request and retrieve from a more consolidated memory representation rather than simply surfacing large numbers of similar observations.
-- **More efficient processing.** Text analysis can be reused across multiple parts of the memory system, reducing duplicated work while preserving the richer processing used for long-term memory.
-- **More reliable ingest and replay behavior.** Current, historical, replayed, and superseded information are handled more deliberately so old work is less likely to be mistaken for the active state of a conversation.
-- **Deterministic state remains separate.** Information that must be exact, such as locations, counters, status effects, and game or simulation state, has a separate foundation from semantic memory.
-- **Stronger validation and installation.** Fresh-database setup, migrations, runtime readiness, memory behavior, retrieval, world state, and character knowledge have broader automated coverage, while first-time setup remains script-driven.
-
-AIOS is a persistent memory runtime designed to maintain what happened, what each agent knows, what the world contains, and how all of those things change over time.
-
-## First-Time Installation
+## Run AIOS
 
 AIOS currently requires:
 
-- Python 3.10 or newer
-- Docker with Docker Compose v2
-- Git
+* Python 3.10 or newer
+* Docker with Docker Compose v2
+* Git
 
-Clone the repository and run the setup script:
+For the current development branch:
 
 ```bash
-git clone https://github.com/LeetHappyfeet/AIOS.git
+git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git
 cd AIOS
 bash setup.sh
 ```
 
-The repository can be cloned under a different directory name if desired.
+The setup script:
 
-The setup script handles the rest of the first-time installation. It starts PostgreSQL, Qdrant, and Fuseki, prepares the Python virtual environment, installs Python dependencies and the required language model, initializes the database, applies current migrations, and verifies that the installation is ready to run.
+* starts PostgreSQL, Qdrant, and Apache Jena Fuseki;
+* creates the Python virtual environment;
+* installs AIOS dependencies and the required spaCy model;
+* loads the AIOS ontology;
+* initializes the PostgreSQL database;
+* applies current migrations;
+* verifies the installation.
 
-When setup finishes successfully, start AIOS with:
+When setup completes, start AIOS with:
 
 ```bash
 bash run.sh
 ```
 
-A healthy startup should eventually report:
+A healthy startup ends with:
 
 ```text
-AIOS READY
-Required services: 4/4 ready
+✅ AIOS READY
+   Required services: 4/4 ready
 ```
 
-## Open the Gradio Interface
-
-Once AIOS is running, point your browser to:
+Open the web interface at:
 
 ```text
 http://127.0.0.1:7860
 ```
 
-Port **7860** is the Gradio web interface. If you are opening AIOS from another computer or phone on the same network, replace `127.0.0.1` with the IP address of the machine running AIOS, for example:
-
-```text
-http://192.168.1.50:7860
-```
-
-The AIOS API runs separately on port **8000**:
+The API is available at:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Most users who simply want to inspect and use AIOS should start with the Gradio interface on port 7860. Client integrations use the API on port 8000.
-
-## Running AIOS Later
-
-After the first installation, return to the repository and run:
+Verify the API with:
 
 ```bash
-bash run.sh
+curl http://127.0.0.1:8000/healthz
 ```
 
-`run.sh` starts the required Docker services if necessary and launches AIOS using the environment created during setup.
+Expected response:
+
+```json
+{"ok":true}
+```
 
 Press `Ctrl+C` to stop the native AIOS processes.
 
-To also stop PostgreSQL, Qdrant, and Fuseki without deleting their stored data:
+To also stop PostgreSQL, Qdrant, and Fuseki:
 
 ```bash
 bash stop.sh
 ```
 
-AIOS data is stored in persistent Docker volumes. Do not use `docker compose down -v` unless you intentionally want to delete that data.
+Stored AIOS data remains in persistent Docker volumes. Do not use `docker compose down -v` unless you intentionally want to erase those databases.
 
-Optional infrastructure settings are available in `.env.example`.
+Optional infrastructure settings are documented in `.env.example`.
+
+See [docs/installation.md](docs/installation.md) for installation details and troubleshooting.
+
+## What Does AIOS Remember?
+
+AIOS separates several kinds of persistent state that ordinary retrieval systems tend to mix together.
+
+**Identity** describes who a character is. It is durable, versioned, provenance-backed, and deliberately difficult for ordinary conversation to rewrite.
+
+**Experience** records what happened. AIOS can represent individual event occurrences and combine related events into episodes without throwing away the original evidence.
+
+**Knowledge and belief** represent what a particular character knows, remembers, or currently accepts. Two characters can therefore inhabit the same world without automatically sharing the same information.
+
+**World state** represents shared information and concrete runtime state independently of private character cognition.
+
+**The HUD** selects the useful portion of all of this state for the active agent at the current point in the world and timeline.
+
+## Why Not Just RAG?
+
+Traditional RAG usually asks:
+
+```text
+What stored text is similar to this prompt?
+```
+
+AIOS also needs to ask:
+
+```text
+What happened?
+Was this the same event or a different occurrence?
+Which world did it happen in?
+What does this character know?
+What does this character believe?
+What belongs to public world knowledge?
+Who is this character supposed to be?
+What is relevant right now?
+```
+
+Vector search is useful inside AIOS, but similarity does not decide truth, chronology, identity, world ownership, or character knowledge.
+
+A simplified view is:
+
+```text
+observations
+     ↓
+events / knowledge / world state
+     ↓
+character-specific memory and belief
+     ↓
+relevant recall
+     ↓
+HUD
+     ↓
+LLM or human
+```
+
+The larger memory remains persistent even though only a small portion is placed into the active prompt.
+
+## Character Identity
+
+AIOS now maintains character identity separately from ordinary memory.
+
+Character cards and other reference sources can provide identity material, but imported material passes through a provenance-backed identity layer rather than becoming runtime memory.
+
+Accepted identity is compiled into a deterministic **Identity Kernel** shared by instances of the same character.
+
+This prevents a remembered conversation, temporary mood, contradictory source, or stray observation from silently redefining who the character is.
+
+See [docs/identity_kernel.md](docs/identity_kernel.md) for the identity architecture.
 
 ## Client Integration
 
-AIOS exposes an API for creating sessions, activating characters, ingesting new information, and retrieving the current HUD for generation.
+The normal live-agent flow is:
 
-The [MemoryVaultIngest SillyTavern extension](https://github.com/LeetHappyfeet/extension-MemoryVaultIngest) is one client that integrates AIOS with a live role-playing environment.
+```text
+POST /session
+        ↓
+POST /character/{character_id}/activate
+        ↓
+POST /ingest
+        ↓
+POST /instance/{instance_id}/hud
+        ↓
+structured frame + rendered HUD context
+```
 
-Additional technical documentation is available in the `docs/` directory for developers who want to work on AIOS itself or build integrations.
+The HUD is the primary generation-facing boundary. Clients do not need to understand the underlying PostgreSQL schema, RDF graphs, semantic topology, or retrieval system.
+
+The [MemoryVaultIngest SillyTavern extension](https://github.com/LeetHappyfeet/extension-MemoryVaultIngest) is one example of a live AIOS client.
+
+AIOS also exposes APIs for world state, character knowledge, documents, epistemic search, identity management, and runtime actions.
+
+## Architecture
+
+AIOS currently uses:
+
+**PostgreSQL** for durable memory, provenance, timelines, character/world state, cognition, belief state, events, episodes, and pipeline state.
+
+**Apache Jena Fuseki** for RDF semantic representations of world and character knowledge.
+
+**Qdrant** for semantic candidate discovery and retrieval acceleration.
+
+**AIOS runtime services** for ingestion, semantic processing, cognition, retrieval, character/world runtime, and HUD assembly.
+
+The storage systems have different responsibilities. Vector similarity is never treated as the sole authority over memory or truth.
+
+For the deeper architecture, see the documentation instead of the root README:
+
+* [Architecture](docs/architecture.md)
+* [Installation](docs/installation.md)
+* [Character Identity Kernel](docs/identity_kernel.md)
+* [Belief Reconciliation](docs/belief_reconciliation.md)
+* [Causal Integrity](docs/causal_integrity.md)
+* [Semantic Index](semantic_index/README.md)
+* [Plugin System](plugins/README.md)
+* [RDF Ontology](rdf/ontology/readme.md)
+
+## Development
+
+AIOS is under active development and its internal schema and APIs may still change.
+
+The current development work is focused on making persistent memory behave less like search and more like an evolving cognitive/runtime system: preserving event identity, episodic continuity, character perspective, durable identity, public world knowledge, and reliable recall over long-running sessions.
+
+Issues and regression reports are welcome, especially when accompanied by the AIOS logs and the source interaction that produced the problem.
 
 ## License
 
-AIOS is licensed under the **AIOS Personal Use License 1.0**. Personal use, study, experimentation, and private modification by natural persons are permitted. Commercial, organizational, institutional, hosted, and service-provider use requires a separate written license.
+AIOS is licensed under the **AIOS Personal Use License 1.0**.
+
+Personal use, study, experimentation, and private modification by natural persons are permitted. Commercial, organizational, institutional, hosted, and service-provider use requires a separate written license.
 
 Earlier versions distributed under the Apache License 2.0 remain governed by the license applicable to those versions.
 
