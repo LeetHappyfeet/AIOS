@@ -7,10 +7,11 @@ DAG, runtime-cursor, HUD-dirty, and downstream pipeline side effects.
 
 from aios_app.main_legacy import app, db
 from aios_app.ingest_api import ingest_message
-from aios_app.models import IngestIn, IngestOut
+from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn
 from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
 from aios_app.char.identity_sources import stage_identity_source, identity_snapshot
+from aios_app.corpus import import_corpus_document, consume_corpus_sections
 from pydantic import BaseModel, Field
 from typing import Any
 
@@ -140,3 +141,31 @@ async def stage_character_identity_source(
 @app.get("/character/{character_id}/identity")
 async def get_character_identity(character_id: str) -> dict[str, Any]:
     return await identity_snapshot(db, character_id)
+
+
+@app.post("/corpus/document")
+async def add_corpus_document(req: CorpusDocumentIn) -> dict[str, Any]:
+    """Store cold searchable literature without semantic ingestion."""
+    return await import_corpus_document(
+        db,
+        text=req.text,
+        source_id=req.source_id,
+        source_kind=req.source_kind,
+        title=req.title,
+        author=req.author,
+        source_uri=req.source_uri,
+        language=req.language,
+        meta=req.meta,
+    )
+
+
+@app.post("/instance/{instance_id}/corpus/consume")
+async def consume_corpus(instance_id: str, req: CorpusConsumeIn) -> dict[str, Any]:
+    """Intentionally cross cold corpus sections into this actor's knowledge path."""
+    from uuid import UUID
+    return await consume_corpus_sections(
+        db,
+        instance_id=UUID(instance_id),
+        section_ids=req.section_ids,
+        mode=req.mode,
+    )
