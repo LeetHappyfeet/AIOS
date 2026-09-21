@@ -104,6 +104,17 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("\nPRESENT OBJECTS:")
         for obj in objects:
             lines.append(f"- {_name(obj)}")
+    working_scene = scene.get("working_state") or {}
+    scene_lines = []
+    if working_scene.get("immediate_goal"):
+        scene_lines.append(f"Immediate goal: {working_scene['immediate_goal']}")
+    if working_scene.get("pending_action"):
+        scene_lines.append(f"Pending action: {working_scene['pending_action']}")
+    if working_scene.get("last_significant_change"):
+        scene_lines.append(f"Last change: {working_scene['last_significant_change']}")
+    if scene_lines:
+        lines.append("\nCURRENT SCENE:")
+        lines.extend(f"- {value}" for value in scene_lines)
     relationships = frame.get("relationships") or []
     if relationships:
         lines.append("\nRELATIONSHIPS:")
