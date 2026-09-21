@@ -51,8 +51,7 @@ CREATE TABLE IF NOT EXISTS aios.source_consumption (
     requested_at timestamptz NOT NULL DEFAULT now(),
     consumed_at timestamptz,
     error text,
-    meta jsonb NOT NULL DEFAULT '{}'::jsonb,
-    UNIQUE (instance_id, section_id, mode)
+    meta jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_source_consumption_instance
