@@ -247,6 +247,20 @@ class CorpusDocumentIn(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
+class CorpusSourceProfileIn(BaseModel):
+    profile_key: str = Field(min_length=1)
+    collection_key: str = Field(min_length=1)
+    scope_key: str = Field(min_length=1)
+    display_name: Optional[str] = None
+    source_id: Optional[str] = None
+    domain_pattern: Optional[str] = None
+    epistemic_namespace: str = "reference"
+    identity_binding: Literal["external", "world", "character"] = "external"
+    priority: int = 0
+    meta: Dict[str, Any] = Field(default_factory=dict)
+    reclassify_existing: bool = True
+
+
 class CorpusConsumeIn(BaseModel):
     section_ids: List[UUID]
     mode: Literal["read", "research", "taught", "import"] = "read"
