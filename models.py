@@ -254,11 +254,17 @@ class CorpusSourceProfileIn(BaseModel):
     display_name: Optional[str] = None
     source_id: Optional[str] = None
     domain_pattern: Optional[str] = None
+    path_prefix: Optional[str] = None
+    knowledge_domain: Optional[str] = None
     epistemic_namespace: str = "reference"
     identity_binding: Literal["external", "world", "character"] = "external"
     priority: int = 0
     meta: Dict[str, Any] = Field(default_factory=dict)
     reclassify_existing: bool = True
+
+
+class CharacterKnowledgeDomainsIn(BaseModel):
+    knowledge_domains: List[str] = Field(default_factory=list)
 
 
 class CorpusConsumeIn(BaseModel):
