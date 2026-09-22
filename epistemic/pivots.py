@@ -7,6 +7,7 @@ from typing import Optional
 FIRST_PERSON_SUBJECTS = {"i", "me", "myself"}
 SECOND_PERSON_SUBJECTS = {"you", "yourself"}
 CHARACTER_IDENTITY_RULESET = "character-id-v1"
+CORPUS_REFERENCE_RULESET = "corpus-reference-v1"
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,25 @@ def resolve_subject_pivot(
     never rewritten merely because the chain has a character owner. The owner
     controls epistemic/RDF scope, not proposition subject identity.
     """
+    # Cold corpus/reference material describes an external namespace. A named
+    # subject that happens to equal the active character ID (for example a
+    # "Renamon" wiki page read by char:Renamon) must remain a source entity,
+    # never an autobiographical pivot. First/second person are likewise left
+    # unresolved because the document author, not the reader, owns them.
+    if ruleset_id == CORPUS_REFERENCE_RULESET:
+        clean_subject = _norm(subject)
+        return PivotResolution(
+            subject=clean_subject,
+            pivot_type=None,
+            epistemic_scope="source",
+            character_id=_norm(character_id),
+            viewpoint_id=None,
+            memory_owner_id=None,
+            recipient_id=_norm(recipient_id),
+            ruleset_id=ruleset_id,
+            resolved=False,
+        )
+
     clean_subject = _norm(subject)
     key = clean_subject.lower() if clean_subject else None
     character = _norm(character_id)
