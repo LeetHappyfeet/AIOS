@@ -49,15 +49,25 @@ async def ensure_participant(
 
 async def bind_available_instance(db: Database, *, participant_id: UUID) -> UUID | None:
     """Bind a participant to an existing runtime; never create a heavyweight runtime."""
+    # PostgreSQL does not make the UPDATE target alias visible inside a
+    # FROM/LATERAL item at this query level. Use a correlated scalar subquery,
+    # which is explicitly allowed to read the target row's old values.
     row = await db.execute_returning_row(
         """UPDATE aios.conversation_participant cp SET
-             character_instance_id=chosen.instance_id,updated_at=now()
-           FROM LATERAL (
-             SELECT ci.instance_id FROM aios.character_instance ci
-             WHERE ci.character_id=cp.character_id
-             ORDER BY ci.created_at DESC LIMIT 1
-           ) chosen
-           WHERE cp.participant_id=$1 AND cp.character_id IS NOT NULL
+             character_instance_id=(
+               SELECT ci.instance_id
+               FROM aios.character_instance ci
+               WHERE ci.character_id=cp.character_id
+               ORDER BY ci.created_at DESC
+               LIMIT 1
+             ),
+             updated_at=now()
+           WHERE cp.participant_id=$1
+             AND cp.character_id IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM aios.character_instance ci
+               WHERE ci.character_id=cp.character_id
+             )
            RETURNING cp.character_instance_id""",
         participant_id,
     )
