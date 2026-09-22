@@ -197,3 +197,16 @@ def test_page_policy_accepts_substantive_reference_content():
         html="<html><title>Renamon</title><article>reference content</article></html>",
     )
     assert decision.accept
+
+
+def test_page_policy_does_not_reject_valid_fandom_page_for_embedded_cloudflare_markup():
+    decision = evaluate_page(
+        metadata={"title": "Ron Stoppable"},
+        body={"text": "Ron Stoppable is a main character in Kim Possible. " * 20},
+        html=(
+            "<html><title>Ron Stoppable</title>"
+            "<script src='/cdn-cgi/challenge-platform/x/cf-chl-widget.js'></script>"
+            "<article>substantive character reference content</article></html>"
+        ),
+    )
+    assert decision.accept
