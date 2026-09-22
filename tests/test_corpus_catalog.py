@@ -47,3 +47,26 @@ def test_catalog_path_matching_is_prefix_bounded():
 
 def test_catalog_path_is_optional():
     assert _path_matches("https://example.org/anything", None)
+
+
+def test_source_profile_access_class_defaults_restricted():
+    from aios_app.models import CorpusSourceProfileIn
+    profile = CorpusSourceProfileIn(
+        profile_key="private-reference",
+        collection_key="private-reference",
+        scope_key="private.reference",
+        domain_pattern="example.org",
+    )
+    assert profile.access_class == "restricted"
+
+
+def test_source_profile_can_declare_public_reference():
+    from aios_app.models import CorpusSourceProfileIn
+    profile = CorpusSourceProfileIn(
+        profile_key="public-reference",
+        collection_key="public-reference",
+        scope_key="reference.public",
+        domain_pattern="reference.example.org",
+        access_class="public",
+    )
+    assert profile.access_class == "public"
