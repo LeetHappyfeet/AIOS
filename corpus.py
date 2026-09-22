@@ -109,8 +109,16 @@ async def import_corpus_document(
 
     content_hash = _sha256(text)
     existing = await db.fetchrow(
-        "SELECT document_id, epistemic_namespace, identity_binding FROM aios.corpus_document WHERE content_hash=$1",
-        content_hash,
+        """
+        SELECT document_id, epistemic_namespace, identity_binding
+        FROM aios.corpus_document
+        WHERE content_hash=$1
+          AND source_id IS NOT DISTINCT FROM $2
+          AND source_uri IS NOT DISTINCT FROM $3
+        ORDER BY created_at
+        LIMIT 1
+        """,
+        content_hash, source_id, source_uri,
     )
     if existing:
         assigned = await _assign_document_scopes(
