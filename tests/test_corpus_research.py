@@ -5,6 +5,8 @@ from aios_app.epistemic.research import (
     CorpusResearchResult,
     KnowledgeDemandResolver,
     CorpusLearningPolicy,
+    SemanticKnowledgeCoverageService,
+    SemanticCorpusReinforcementService,
     research_terms,
 )
 
@@ -125,3 +127,33 @@ def test_learning_decision_tracks_reinforcement_field():
     )
     assert decision.reinforcement == 0.5
     assert not decision.eligible
+
+
+def test_semantic_coverage_prefers_structured_roles_over_incidental_text():
+    resolver = SemanticKnowledgeCoverageService()
+    demand = resolver.resolve(
+        "hematite oxidize",
+        knowledge=[{
+            "subject_norm": "hematite",
+            "predicate_norm": "be",
+            "object_norm": "iron oxide",
+            "topic_key": "mineralogy",
+            "text": "Hematite is an iron oxide mineral that can be discussed with oxidation.",
+            "effective_confidence": 0.9,
+        }],
+        threshold=0.60,
+    )
+    assert "hematite" not in demand.missing_terms
+    assert "oxidize" in demand.missing_terms
+
+
+def test_semantic_reinforcement_terms_use_proposition_roles():
+    terms = SemanticCorpusReinforcementService._knowledge_terms([{
+        "subject_norm": "hematite",
+        "predicate_norm": "cause",
+        "object_norm": "red coloration",
+        "topic_key": "geology",
+        "text": "ignored presentation wording",
+    }])
+    assert {"hematite", "cause", "red", "coloration", "geology"} <= terms
+    assert "ignored" not in terms
