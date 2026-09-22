@@ -113,3 +113,34 @@ def clean_html(html: str) -> dict:
         "paragraph_count": len([line for line in lines if len(line) > 80]),
         "approx_tokens": int(len(clean_text) / 4),
     }
+
+
+def extract_structured_source_metadata(html: str, url: str) -> dict:
+    """Extract repository-native classification metadata without prose inference."""
+    host = (urlparse(url).hostname or "").lower()
+    if host not in {"archiveofourown.org", "www.archiveofourown.org"}:
+        return {}
+
+    soup = BeautifulSoup(html, "lxml")
+
+    def tags(selector: str) -> list[str]:
+        values: list[str] = []
+        seen: set[str] = set()
+        for node in soup.select(selector):
+            value = node.get_text(" ", strip=True)
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+        return values
+
+    # AO3 exposes these as explicit work metadata/tag fields. Keep their raw
+    # labels so the corpus adapter can classify deterministically and retain
+    # provenance; do not inspect story prose for identity or fandom.
+    return {
+        "ao3": {
+            "fandoms": tags("dd.fandom.tags a.tag"),
+            "characters": tags("dd.character.tags a.tag"),
+            "relationships": tags("dd.relationship.tags a.tag"),
+            "tags": tags("dd.freeform.tags a.tag"),
+        }
+    }
