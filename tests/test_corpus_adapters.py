@@ -61,3 +61,15 @@ def test_ao3_html_extractor_reads_native_work_tags():
     assert data["ao3"]["fandoms"] == ["Digimon - All Media Types"]
     assert data["ao3"]["characters"] == ["Renamon (Digimon)"]
     assert "Shego" not in repr(data)
+
+
+def test_facet_route_normalization_is_stable():
+    from aios_app.corpus_routing import normalize_facet_value
+    assert normalize_facet_value("  Digimon   - All Media Types ") == "digimon - all media types"
+
+
+def test_only_fandom_facets_are_trusted_for_document_routing():
+    from aios_app.corpus_routing import CorpusFacetRouter
+    assert "fandom" in CorpusFacetRouter.ROUTABLE_FACET_TYPES
+    assert "character" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
+    assert "tag" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
