@@ -73,3 +73,21 @@ def test_only_fandom_facets_are_trusted_for_document_routing():
     assert "fandom" in CorpusFacetRouter.ROUTABLE_FACET_TYPES
     assert "character" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
     assert "tag" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
+
+
+def test_document_route_supports_multiple_fandom_domains():
+    from aios_app.corpus_routing import CorpusDocumentRoute, CorpusFacetRoute
+    routes = (
+        CorpusFacetRoute("fandom", "digimon - all media types", "fiction.digimon",
+                         "fiction.digimon.fanwork", "fanwork.digimon", "domain", 100, {}),
+        CorpusFacetRoute("fandom", "kim possible", "fiction.kim-possible",
+                         "fiction.kim-possible.fanwork", "fanwork.kim-possible", "domain", 100, {}),
+    )
+    route = CorpusDocumentRoute(
+        scopes=tuple(r.scope_key for r in routes),
+        knowledge_domains=tuple(r.knowledge_domain for r in routes),
+        epistemic_namespace="fanwork.crossover",
+        matched_routes=routes,
+    )
+    assert route.knowledge_domains == ("fiction.digimon", "fiction.kim-possible")
+    assert route.epistemic_namespace == "fanwork.crossover"
