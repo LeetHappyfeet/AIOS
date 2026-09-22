@@ -15,6 +15,47 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _corpus_scopes(scopes: Iterable[str] | None, meta: dict | None) -> tuple[str, ...]:
+    requested = list(scopes or ())
+    if not requested and isinstance(meta, dict):
+        raw = meta.get("corpus_scopes")
+        if isinstance(raw, str):
+            requested = [raw]
+        elif isinstance(raw, (list, tuple)):
+            requested = [str(value) for value in raw]
+    normalized = tuple(dict.fromkeys(str(value).strip() for value in requested if str(value).strip()))
+    return normalized or ("general",)
+
+
+async def _assign_document_scopes(
+    db: Database,
+    *,
+    document_id: UUID,
+    scopes: Iterable[str],
+) -> tuple[str, ...]:
+    assigned: list[str] = []
+    for scope_key in scopes:
+        await db.execute(
+            """
+            INSERT INTO aios.corpus_scope (scope_key, display_name)
+            VALUES ($1,$1)
+            ON CONFLICT (scope_key) DO NOTHING
+            """,
+            scope_key,
+        )
+        await db.execute(
+            """
+            INSERT INTO aios.corpus_document_scope (document_id, scope_key)
+            VALUES ($1,$2)
+            ON CONFLICT DO NOTHING
+            """,
+            document_id,
+            scope_key,
+        )
+        assigned.append(scope_key)
+    return tuple(assigned)
+
+
 async def import_corpus_document(
     db: Database,
     *,
@@ -26,11 +67,13 @@ async def import_corpus_document(
     source_uri: str | None = None,
     language: str | None = None,
     meta: dict | None = None,
+    scopes: Iterable[str] | None = None,
 ) -> dict:
     """Store a document as cold searchable material with no semantic side effects."""
     if not text.strip():
         raise ValueError("corpus document text is empty")
 
+    document_scopes = _corpus_scopes(scopes, meta)
     source_req = ExternalObservationIn(
         source_id=source_id,
         source_kind=source_kind,
@@ -47,6 +90,9 @@ async def import_corpus_document(
         content_hash,
     )
     if existing:
+        assigned = await _assign_document_scopes(
+            db, document_id=existing["document_id"], scopes=document_scopes
+        )
         count = await db.fetchrow(
             "SELECT count(*) AS n FROM aios.corpus_section WHERE document_id=$1",
             existing["document_id"],
@@ -55,6 +101,7 @@ async def import_corpus_document(
             "document_id": existing["document_id"],
             "section_count": int(count["n"]),
             "deduplicated": True,
+            "scopes": list(assigned),
         }
 
     document = await db.execute_returning_row(
@@ -70,6 +117,9 @@ async def import_corpus_document(
         content_hash, json.dumps(meta or {}),
     )
     document_id = document["document_id"]
+    assigned = await _assign_document_scopes(
+        db, document_id=document_id, scopes=document_scopes
+    )
 
     units = split_long_document(text)
     heading: str | None = None
@@ -102,6 +152,7 @@ async def import_corpus_document(
         "document_id": document_id,
         "section_count": section_order,
         "deduplicated": False,
+        "scopes": list(assigned),
     }
 
 
