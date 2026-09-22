@@ -159,6 +159,19 @@ class CharacterSceneStateStore:
                     $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,1.0,$11,
                     jsonb_build_object('projection_version',$12::text)
                 )
+                ON CONFLICT (snapshot_id, slot_key) DO UPDATE
+                SET instance_id=EXCLUDED.instance_id,
+                    runtime_timeline_id=EXCLUDED.runtime_timeline_id,
+                    runtime_node_id=EXCLUDED.runtime_node_id,
+                    source_timeline_id=EXCLUDED.source_timeline_id,
+                    source_node_id=EXCLUDED.source_node_id,
+                    before_value=EXCLUDED.before_value,
+                    after_value=EXCLUDED.after_value,
+                    persistence=EXCLUDED.persistence,
+                    confidence=EXCLUDED.confidence,
+                    evidence_node_id=EXCLUDED.evidence_node_id,
+                    status='active',
+                    meta=EXCLUDED.meta
                 """,
                 instance_id,
                 snapshot_id,
