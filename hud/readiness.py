@@ -205,9 +205,7 @@ async def source_node_retrieval_ready(
         node_id,
         INTERPRETER_VERSION,
     )
-    if not row:
-        return False
-    return await _character_projection_clean(db, instance_id=instance_id)
+    return bool(row)
 
 
 async def source_node_topology_ready(
