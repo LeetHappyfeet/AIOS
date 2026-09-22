@@ -1,3 +1,4 @@
+from aios_app.epistemic.cognitive_context import CognitiveAttentionInputs, automatic_corpus_research_allowed
 from uuid import UUID
 
 from aios_app.epistemic.research import (
@@ -157,3 +158,33 @@ def test_semantic_reinforcement_terms_use_proposition_roles():
     }])
     assert {"hematite", "cause", "red", "coloration", "geology"} <= terms
     assert "ignored" not in terms
+
+
+def _corpus_attention(*, speaker_id: str, speaker_role: str) -> CognitiveAttentionInputs:
+    return CognitiveAttentionInputs(
+        recent_newest=[{
+            "speaker_id": speaker_id,
+            "speaker_role": speaker_role,
+            "message_text": "What was Renamon originally going to be named?",
+        }],
+        visible_source_node_ids=frozenset(),
+        focus_text="What was Renamon originally going to be named?",
+        plugin_focus_text="",
+        retrieval_focus_text="What was Renamon originally going to be named?",
+        goals=[],
+    )
+
+
+def test_automatic_corpus_research_allows_external_character_focus():
+    attention = _corpus_attention(speaker_id="Alex_", speaker_role="character")
+    assert automatic_corpus_research_allowed(attention, character_id="Renamon")
+
+
+def test_automatic_corpus_research_rejects_character_own_output():
+    attention = _corpus_attention(speaker_id="Renamon", speaker_role="character")
+    assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
+
+
+def test_automatic_corpus_research_rejects_assistant_output():
+    attention = _corpus_attention(speaker_id="Renamon", speaker_role="assistant")
+    assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
