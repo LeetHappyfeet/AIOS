@@ -8,6 +8,11 @@ from uuid import UUID
 
 from aios_app.dag import add_node_and_edge, get_or_create_timeline
 from aios_app.db import Database
+from aios_app.world.conversation import (
+    bind_available_instance,
+    ensure_participant,
+    record_message_participation,
+)
 
 from .config import ACCUMULATOR_ID, SOURCE_KIND
 from .parser import ParsedChatLog, ParsedMessage, parse_sillytavern_jsonl
@@ -55,6 +60,37 @@ class SillyTavernChatIngestor:
             source_id=source_id,
         )
 
+        # Discover the full participant set before projecting any message.
+        # SillyTavern group/public logs can contain more actors than the header pair.
+        participant_types: dict[str, str] = {
+            parsed.user_name: "user",
+            parsed.character_name: "character",
+        }
+        for message in parsed.messages:
+            if message.speaker_type != "system":
+                participant_types.setdefault(message.speaker_id, message.speaker_type)
+
+        participant_ids: dict[str, UUID] = {}
+        for actor_id, actor_type in participant_types.items():
+            participant_id = await ensure_participant(
+                self.db,
+                timeline_id=timeline_id,
+                source_actor_id=actor_id,
+                actor_type=actor_type,
+                controller_type="human" if actor_type == "user" else "agent",
+                controller_ref=actor_id if actor_type == "user" else f"character:{actor_id}",
+                participant_role=(
+                    "primary" if actor_id == parsed.character_name else "participant"
+                ),
+                meta={
+                    "source_id": source_id,
+                    "source_kind": SOURCE_KIND,
+                    "adapter": "sillytavern",
+                },
+            )
+            participant_ids[actor_id] = participant_id
+            await bind_available_instance(self.db, participant_id=participant_id)
+
         imported = 0
         parent_node_id = None
         for message in parsed.messages:
@@ -88,6 +124,18 @@ class SillyTavernChatIngestor:
                 parent_node_id=parent_node_id,
                 edge_type="next",
             )
+            # In a normal chat turn every active participant is an audience
+            # member unless explicitly represented as speaker/addressee. This is
+            # a projection over one canonical DAG node, not duplicated history.
+            addressees = [recipient_id] if recipient_id else []
+            await record_message_participation(
+                self.db,
+                timeline_id=timeline_id,
+                node_id=node_id,
+                speaker_id=message.speaker_id,
+                addressee_ids=addressees,
+                audience_ids=participant_ids.keys(),
+            )
             parent_node_id = node_id
             imported += 1
 
@@ -106,6 +154,7 @@ class SillyTavernChatIngestor:
             "character_name": parsed.character_name,
             "user_name": parsed.user_name,
             "messages": imported,
+            "participants": len(participant_ids),
         }
 
     async def _ensure_source_identity(
