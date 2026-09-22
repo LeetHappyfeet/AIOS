@@ -19,6 +19,8 @@ class CrawlTask:
     speaker_id: Optional[str] = None
     target_character_id: Optional[str] = None
     target_world_id: Optional[str] = None
+    ingest_mode: str = "corpus"
+    consumption_mode: str = "read"
     crawl_mode: str = "page"
     max_depth: int = 0
     max_pages: int = 1
