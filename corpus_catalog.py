@@ -298,9 +298,12 @@ class CorpusAccessReconciler:
         if not domain_keys:
             return {"character_id": character_id, "knowledge_domains": [], "granted_scopes": []}
         rows = await self.db.fetch(
-            """SELECT DISTINCT scope_key
-               FROM aios.corpus_source_profile
-               WHERE enabled=TRUE AND knowledge_domain = ANY($1::text[])""",
+            """SELECT DISTINCT csp.scope_key
+               FROM aios.corpus_source_profile csp
+               JOIN aios.corpus_scope cs ON cs.scope_key=csp.scope_key
+               WHERE csp.enabled=TRUE
+                 AND cs.access_class='domain'
+                 AND csp.knowledge_domain = ANY($1::text[])""",
             domain_keys,
         )
         scopes = sorted({row["scope_key"] for row in rows})
