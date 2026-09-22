@@ -109,3 +109,19 @@ def test_corpus_learning_scope_value_uses_default_without_profile_match():
     assert CorpusLearningPolicy._scope_value(
         {"history": 0.8}, ("science.geology",), 0.5
     ) == 0.5
+
+
+def test_learning_decision_tracks_reinforcement_field():
+    from aios_app.epistemic.research import CorpusLearningDecision
+
+    decision = CorpusLearningDecision(
+        section_id=UUID("00000000-0000-0000-0000-000000000005"),
+        eligible=False,
+        score=0.51,
+        threshold=0.72,
+        exposure_count=2,
+        reinforcement=0.5,
+        reason="reference_only",
+    )
+    assert decision.reinforcement == 0.5
+    assert not decision.eligible
