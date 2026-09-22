@@ -133,6 +133,27 @@ def cognitive_rejection_reason(
     return None
 
 
+def automatic_corpus_research_allowed(
+    attention: CognitiveAttentionInputs,
+    *,
+    character_id: str,
+) -> bool:
+    """Allow automatic lookup only when the current focus came from outside the character."""
+    focus_row = next(
+        (row for row in attention.recent_newest if row.get("message_text")),
+        None,
+    )
+    if not focus_row:
+        return False
+    speaker_id = str(focus_row.get("speaker_id") or "").strip()
+    speaker_role = str(focus_row.get("speaker_role") or "").strip().lower()
+    if speaker_id and speaker_id == str(character_id):
+        return False
+    if speaker_role == "assistant":
+        return False
+    return True
+
+
 def admit_cognitive_candidates(
     items: Iterable[dict[str, Any]],
     *,
@@ -597,7 +618,11 @@ class CognitiveContextService:
             )
         corpus_references: list[dict[str, Any]] = []
         corpus_result = None
-        if corpus_demand.needed:
+        allow_automatic_corpus = automatic_corpus_research_allowed(
+            attention,
+            character_id=context.character_id,
+        )
+        if corpus_demand.needed and allow_automatic_corpus:
             # Search the missing concepts rather than replaying the entire turn.
             # This keeps dialogue/scaffolding words out of the FTS query.
             corpus_query = " OR ".join(corpus_demand.missing_terms)
@@ -616,36 +641,37 @@ class CognitiveContextService:
                     context.instance_id,
                 )
 
-        # Repeated focus is stronger evidence of attention than a one-turn lookup.
-        # Reinforce older references first, then evaluate only the current search
-        # for acquisition. This prevents the current HUD hit from teaching itself.
-        try:
-            current_research_id = (
-                corpus_result.research_id if corpus_result is not None else None
-            )
-            await self.corpus_reinforcement.reinforce_from_focus(
-                instance_id=context.instance_id,
-                focus_text=attention.retrieval_focus_text,
-                current_research_id=current_research_id,
-            )
-            await self.semantic_corpus_reinforcement.reinforce_from_knowledge(
-                instance_id=context.instance_id,
-                knowledge=structured_knowledge,
-                current_research_id=current_research_id,
-            )
-            if corpus_result is not None and corpus_result.hits:
-                await self.corpus_learning.evaluate_and_acquire(
-                    instance_id=context.instance_id,
-                    research_id=corpus_result.research_id,
-                    section_ids=[hit.section_id for hit in corpus_result.hits],
+        # Repeated external focus is stronger evidence of attention than a
+        # one-turn lookup. Character-generated output must not recursively
+        # reinforce or teach from corpus references either.
+        if allow_automatic_corpus:
+            try:
+                current_research_id = (
+                    corpus_result.research_id if corpus_result is not None else None
                 )
-        except Exception:
-            # Learning is subordinate to cognition exactly like corpus search.
-            # Failed acquisition must not make the HUD unavailable.
-            logger.exception(
-                "Corpus learning evaluation failed instance=%s",
-                context.instance_id,
-            )
+                await self.corpus_reinforcement.reinforce_from_focus(
+                    instance_id=context.instance_id,
+                    focus_text=attention.retrieval_focus_text,
+                    current_research_id=current_research_id,
+                )
+                await self.semantic_corpus_reinforcement.reinforce_from_knowledge(
+                    instance_id=context.instance_id,
+                    knowledge=structured_knowledge,
+                    current_research_id=current_research_id,
+                )
+                if corpus_result is not None and corpus_result.hits:
+                    await self.corpus_learning.evaluate_and_acquire(
+                        instance_id=context.instance_id,
+                        research_id=corpus_result.research_id,
+                        section_ids=[hit.section_id for hit in corpus_result.hits],
+                    )
+            except Exception:
+                # Learning is subordinate to cognition exactly like corpus search.
+                # Failed acquisition must not make the HUD unavailable.
+                logger.exception(
+                    "Corpus learning evaluation failed instance=%s",
+                    context.instance_id,
+                )
 
         corpus_demand_meta = {
             "needed": corpus_demand.needed,
@@ -653,6 +679,7 @@ class CognitiveContextService:
             "missing_terms": list(corpus_demand.missing_terms),
             "coverage": corpus_demand.coverage,
             "reason": corpus_demand.reason,
+            "automatic_lookup_allowed": allow_automatic_corpus,
         }
 
         anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
