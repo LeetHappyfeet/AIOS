@@ -157,6 +157,14 @@ class CorpusSearchService:
                 )
                 OR EXISTS (
                     SELECT 1
+                    FROM aios.corpus_document_domain cdd
+                    JOIN aios.character_knowledge_domain ckd
+                      ON ckd.character_id=$1
+                     AND ckd.enabled
+                     AND ckd.knowledge_domain=cdd.knowledge_domain
+                )
+                OR EXISTS (
+                    SELECT 1
                     FROM aios.corpus_source_profile csp
                     JOIN aios.corpus_scope scope_def
                       ON scope_def.scope_key=csp.scope_key
@@ -192,12 +200,11 @@ class CorpusSearchService:
                    ts_rank_cd(cs.search_vector, q.query)
                    + CASE WHEN EXISTS (
                        SELECT 1
-                       FROM aios.corpus_document_collection dcol
-                       JOIN aios.corpus_source_profile csp ON csp.profile_id=dcol.profile_id
+                       FROM aios.corpus_document_domain cdd
                        JOIN aios.character_knowledge_domain ckd
                          ON ckd.character_id=$1 AND ckd.enabled
-                        AND ckd.knowledge_domain=csp.knowledge_domain
-                       WHERE dcol.document_id=cs.document_id
+                        AND ckd.knowledge_domain=cdd.knowledge_domain
+                       WHERE cdd.document_id=cs.document_id
                    ) THEN 0.15 ELSE 0.0 END
                    + CASE WHEN EXISTS (
                        SELECT 1 FROM aios.corpus_document_facet facet
@@ -222,6 +229,15 @@ class CorpusSearchService:
                         ON scope_def.scope_key=public_scope.scope_key
                        AND scope_def.access_class='public'
                       WHERE public_scope.document_id=cs.document_id
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM aios.corpus_document_domain cdd
+                      JOIN aios.character_knowledge_domain ckd
+                        ON ckd.character_id=$1
+                       AND ckd.enabled
+                       AND ckd.knowledge_domain=cdd.knowledge_domain
+                      WHERE cdd.document_id=cs.document_id
                   )
                   OR EXISTS (
                       SELECT 1
@@ -390,6 +406,17 @@ class CharacterResearchService:
                         JOIN aios.corpus_scope scope_def
                           ON scope_def.scope_key=ds.scope_key
                          AND scope_def.access_class='public'
+                        WHERE cs.section_id=$1
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM aios.corpus_section cs
+                        JOIN aios.corpus_document_domain cdd
+                          ON cdd.document_id=cs.document_id
+                        JOIN aios.character_knowledge_domain ckd
+                          ON ckd.character_id=$2
+                         AND ckd.enabled
+                         AND ckd.knowledge_domain=cdd.knowledge_domain
                         WHERE cs.section_id=$1
                     )
                     OR EXISTS (
