@@ -20,6 +20,22 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    """Normalize json/jsonb driver values without assuming asyncpg decoded them."""
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            return {}
+        return dict(decoded) if isinstance(decoded, Mapping) else {}
+    return {}
+
 def _slot_view(scene: Mapping[str, Any]) -> dict[str, Any]:
     """Stable top-level slots whose changes are useful to audit."""
     return {
@@ -103,7 +119,7 @@ class CharacterSceneStateStore:
             source_head_node_id,
         )
         parent_snapshot_id = previous["snapshot_id"] if previous else None
-        before = dict(previous["scene_state"] or {}) if previous else {}
+        before = _json_object(previous["scene_state"]) if previous else {}
 
         row = await self.db.execute_returning_row(
             """
@@ -229,6 +245,6 @@ class CharacterSceneStateStore:
             runtime_head_node_id=child_runtime_head_node_id,
             source_timeline_id=child_source_timeline_id,
             source_head_node_id=child_source_head_node_id,
-            scene=dict(parent["scene_state"] or {}),
+            scene=_json_object(parent["scene_state"]),
             evidence_node_ids=tuple(parent["evidence_node_ids"] or ()),
         )
