@@ -51,8 +51,9 @@ def _json_object(value: Any) -> dict[str, Any]:
             return {}
         return dict(decoded) if isinstance(decoded, dict) else {}
     try:
-        return dict(value)
-    except (TypeError, ValueError):
+        decoded = json.loads(str(value))
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
         return {}
 
 
@@ -174,7 +175,7 @@ async def _access_rows(character_id: str) -> list[list[Any]]:
         character_id,
     )
     return [
-        [row["scope_key"], "allow" if row["allowed"] else "deny", json.dumps(dict(row["meta"] or {}))]
+        [row["scope_key"], "allow" if row["allowed"] else "deny", json.dumps(_json_object(row["meta"]))]
         for row in rows
     ]
 
