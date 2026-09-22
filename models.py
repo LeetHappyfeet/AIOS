@@ -256,6 +256,7 @@ class CorpusSourceProfileIn(BaseModel):
     domain_pattern: Optional[str] = None
     path_prefix: Optional[str] = None
     knowledge_domain: Optional[str] = None
+    access_class: Literal["public", "domain", "restricted"] = "restricted"
     epistemic_namespace: str = "reference"
     identity_binding: Literal["external", "world", "character"] = "external"
     priority: int = 0
