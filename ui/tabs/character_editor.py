@@ -240,7 +240,7 @@ async def _scene_state(character_id: str) -> dict:
         "projection_version": row["projection_version"],
         "updated_at": str(row["updated_at"]),
         "evidence_node_ids": [str(v) for v in (row["evidence_node_ids"] or [])],
-        "scene_state": dict(row["scene_state"] or {}),
+        "scene_state": _json_object(row["scene_state"]),
     }
 
 
