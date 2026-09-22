@@ -41,3 +41,23 @@ def test_generic_adapter_records_repository_without_claiming_subject():
     values = {(facet.facet_type, facet.facet_value) for facet in result.facets}
     assert values == {("repository", "example.org")}
     assert result.epistemic_namespace is None
+
+
+def test_ao3_html_extractor_reads_native_work_tags():
+    from aios_app.accumulator.web.extractor import extract_structured_source_metadata
+
+    html = """
+    <dl class="work meta group">
+      <dd class="fandom tags"><a class="tag">Digimon - All Media Types</a></dd>
+      <dd class="character tags"><a class="tag">Renamon (Digimon)</a></dd>
+      <dd class="relationship tags"><a class="tag">Renamon &amp; Rika Nonaka</a></dd>
+      <dd class="freeform tags"><a class="tag">Adventure</a></dd>
+    </dl>
+    <div id="chapters">Shego appears in prose but is not tagged.</div>
+    """
+    data = extract_structured_source_metadata(
+        html, "https://archiveofourown.org/works/123"
+    )
+    assert data["ao3"]["fandoms"] == ["Digimon - All Media Types"]
+    assert data["ao3"]["characters"] == ["Renamon (Digimon)"]
+    assert "Shego" not in repr(data)
