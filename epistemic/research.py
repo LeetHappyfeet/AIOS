@@ -178,12 +178,10 @@ class CorpusSearchService:
             )
             SELECT cs.section_id, cs.document_id, cd.title, cs.heading,
                    ts_rank_cd(cs.search_vector, q.query) AS score,
-                   ts_headline(
-                       'english',
-                       cs.content,
-                       q.query,
-                       'MaxWords=55, MinWords=18, ShortWord=3, HighlightAll=false'
-                   ) AS excerpt,
+                   CASE
+                       WHEN length(cs.content) <= 1800 THEN cs.content
+                       ELSE left(cs.content, 1800)
+                   END AS excerpt,
                    array_agg(DISTINCT cds.scope_key ORDER BY cds.scope_key) AS scopes
             FROM aios.corpus_section cs
             JOIN aios.corpus_document cd ON cd.document_id=cs.document_id
