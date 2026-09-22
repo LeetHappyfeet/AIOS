@@ -23,8 +23,9 @@ CHALLENGE_TITLES = {
     "checking your browser", "security check",
 }
 CHALLENGE_MARKERS = (
-    "cf-chl-", "cloudflare ray id", "enable javascript and cookies to continue",
-    "checking if the site connection is secure", "verify you are human",
+    "enable javascript and cookies to continue",
+    "checking if the site connection is secure",
+    "verify you are human",
 )
 
 
@@ -90,7 +91,13 @@ def evaluate_page(*, metadata: dict, body: dict, html: str) -> AdmissionDecision
     # pages (notably Fandom/Cloudflare). Only classify a challenge when the
     # rendered document itself presents challenge evidence to the reader.
     challenge_title = title in CHALLENGE_TITLES
-    challenge_body = any(marker in lower_text for marker in CHALLENGE_MARKERS)
+    # Body markers are only meaningful when the extracted page is itself a
+    # small interstitial. Large Fandom articles can contain challenge/security
+    # boilerplate in visible footer or platform text.
+    challenge_body = (
+        len(text) < 1500
+        and any(marker in lower_text for marker in CHALLENGE_MARKERS)
+    )
     if challenge_title or challenge_body:
         return AdmissionDecision(False, "challenge_page")
 
