@@ -3,6 +3,11 @@ from pathlib import Path
 from aios_app.accumulator.ingest.jsonl_ingestor import JSONLDAGIngestor
 from aios_app.accumulator.web.extractor import extract_links, extract_page_metadata
 from aios_app.accumulator.web.queue import CrawlQueue, CrawlTask
+from aios_app.accumulator.web.crawl_policy import (
+    evaluate_page,
+    evaluate_url,
+    normalize_url,
+)
 
 
 def test_crawl_task_defaults_to_single_page_and_source_identity():
@@ -151,3 +156,44 @@ def test_v2_web_record_preserves_explicit_corpus_consumption_intent():
     assert context["target_character_id"] == "Renamon"
     assert context["ingest_mode"] == "consume"
     assert context["consumption_mode"] == "read"
+
+
+def test_crawl_policy_rejects_fandom_non_content_namespaces():
+    rejected = [
+        "https://digimon.fandom.com/wiki/Special:AllPages",
+        "https://digimon.fandom.com/wiki/Category:Characters",
+        "https://digimon.fandom.com/wiki/Talk:Digimon_Wiki",
+        "https://digimon.fandom.com/wiki/Forum:Index",
+        "https://digimon.fandom.com/wiki/Fan:Main_Page",
+        "https://digimon.fandom.com/wiki/Renamon?veaction=edit",
+    ]
+    for url in rejected:
+        assert not evaluate_url(url).accept
+
+    assert evaluate_url("https://digimon.fandom.com/wiki/Renamon").accept
+    assert evaluate_url("https://digimon.fandom.com/wiki/Digital_World").accept
+
+
+def test_crawl_policy_normalizes_tracking_and_fragments():
+    assert normalize_url(
+        "https://Example.com/wiki/Renamon?utm_source=test#History"
+    ) == "https://example.com/wiki/Renamon"
+
+
+def test_page_policy_rejects_cloudflare_challenge():
+    decision = evaluate_page(
+        metadata={"title": "Just a moment..."},
+        body={"text": "Checking your browser before accessing the site. " * 5},
+        html="<html><title>Just a moment...</title><div id='cf-chl-widget'>wait</div></html>",
+    )
+    assert not decision.accept
+    assert decision.reason == "challenge_page"
+
+
+def test_page_policy_accepts_substantive_reference_content():
+    decision = evaluate_page(
+        metadata={"title": "Renamon"},
+        body={"text": "Renamon is a Digimon character. " * 20},
+        html="<html><title>Renamon</title><article>reference content</article></html>",
+    )
+    assert decision.accept
