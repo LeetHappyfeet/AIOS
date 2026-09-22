@@ -7,11 +7,12 @@ DAG, runtime-cursor, HUD-dirty, and downstream pipeline side effects.
 
 from aios_app.main_legacy import app, db
 from aios_app.ingest_api import ingest_message
-from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn
+from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn
 from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
 from aios_app.char.identity_sources import stage_identity_source, identity_snapshot
 from aios_app.corpus import import_corpus_document, consume_corpus_sections
+from aios_app.corpus_catalog import CorpusCatalogService
 from pydantic import BaseModel, Field
 from typing import Any
 
@@ -157,6 +158,42 @@ async def add_corpus_document(req: CorpusDocumentIn) -> dict[str, Any]:
         language=req.language,
         meta=req.meta,
     )
+
+
+@app.post("/corpus/source-profile")
+async def upsert_corpus_source_profile(req: CorpusSourceProfileIn) -> dict[str, Any]:
+    """Create/update one trusted source route and optionally reclassify old documents."""
+    catalog = CorpusCatalogService(db)
+    profile = await catalog.ensure_profile(
+        profile_key=req.profile_key,
+        collection_key=req.collection_key,
+        scope_key=req.scope_key,
+        display_name=req.display_name,
+        source_id=req.source_id,
+        domain_pattern=req.domain_pattern,
+        epistemic_namespace=req.epistemic_namespace,
+        identity_binding=req.identity_binding,
+        priority=req.priority,
+        meta=req.meta,
+    )
+    result: dict[str, Any] = {"profile": profile}
+    if req.reclassify_existing:
+        result["reclassification"] = await catalog.reclassify_profile(req.profile_key)
+    return result
+
+
+@app.get("/corpus/source-profiles")
+async def list_corpus_source_profiles() -> dict[str, Any]:
+    rows = await db.fetch(
+        """
+        SELECT profile_id, profile_key, source_id, domain_pattern, collection_key,
+               scope_key, epistemic_namespace, identity_binding, priority,
+               enabled, meta, created_at, updated_at
+        FROM aios.corpus_source_profile
+        ORDER BY priority DESC, profile_key
+        """
+    )
+    return {"profiles": [dict(row) for row in rows]}
 
 
 @app.post("/instance/{instance_id}/corpus/consume")
