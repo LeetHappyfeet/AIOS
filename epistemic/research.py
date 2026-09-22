@@ -8,6 +8,7 @@ from uuid import UUID
 
 from aios_app.corpus import consume_corpus_sections
 from aios_app.db import Database
+from aios_app.epistemic.weights import get_profile
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,}")
@@ -367,3 +368,218 @@ class CharacterResearchService:
             section_ids=section_ids,
             mode=mode,
         )
+
+
+@dataclass(frozen=True)
+class CorpusLearningDecision:
+    section_id: UUID
+    eligible: bool
+    score: float
+    threshold: float
+    exposure_count: int
+    reason: str
+
+
+class CorpusLearningPolicy:
+    """Deterministic exposure-to-learning policy.
+
+    This score estimates whether the character attended to material enough for
+    durable acquisition. It is intentionally separate from proposition truth or
+    confidence, which remain the responsibility of the epistemic pipeline.
+    """
+
+    def __init__(self, db: Database, *, threshold: float = 0.72):
+        self.db = db
+        self.threshold = max(0.0, min(float(threshold), 1.0))
+
+    @staticmethod
+    def _profile_map(value: object) -> dict:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+        return dict(value or {})
+
+    @staticmethod
+    def _scope_value(mapping: Mapping[str, object], scopes: Sequence[str], default: float) -> float:
+        values: list[float] = []
+        for scope in scopes:
+            parts = scope.split(".")
+            candidates = [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
+            for candidate in reversed(candidates):
+                if candidate in mapping:
+                    try:
+                        values.append(float(mapping[candidate]))
+                    except (TypeError, ValueError):
+                        pass
+                    break
+        return max(values, default=default)
+
+    async def evaluate(
+        self,
+        *,
+        instance_id: UUID,
+        research_id: UUID,
+        section_id: UUID,
+    ) -> CorpusLearningDecision:
+        row = await self.db.fetchrow(
+            """
+            SELECT cre.character_id, cce.rank, cce.score AS retrieval_score,
+                   cce.exposed_at,
+                   COALESCE(array_agg(DISTINCT cds.scope_key)
+                            FILTER (WHERE cds.scope_key IS NOT NULL), '{}') AS scopes,
+                   (
+                       SELECT count(*)
+                       FROM aios.character_corpus_exposure prior
+                       JOIN aios.character_research_event prior_event
+                         ON prior_event.research_id=prior.research_id
+                       WHERE prior_event.character_id=cre.character_id
+                         AND prior.section_id=cce.section_id
+                         AND prior.exposed_at <= cce.exposed_at
+                   ) AS exposure_count
+            FROM aios.character_corpus_exposure cce
+            JOIN aios.character_research_event cre ON cre.research_id=cce.research_id
+            JOIN aios.corpus_section cs ON cs.section_id=cce.section_id
+            LEFT JOIN aios.corpus_document_scope cds ON cds.document_id=cs.document_id
+            WHERE cce.research_id=$1 AND cce.section_id=$2
+              AND cre.instance_id=$3
+            GROUP BY cre.character_id, cce.rank, cce.score, cce.exposed_at, cce.section_id
+            """,
+            research_id,
+            section_id,
+            instance_id,
+        )
+        if not row:
+            raise ValueError("corpus exposure not found for research event and instance")
+
+        profile = await get_profile(self.db, character_id=str(row["character_id"]))
+        curiosity = max(0.0, min(float(profile.get("curiosity", 0.5)), 1.0))
+        retention = max(0.0, min(float(profile.get("retention", 0.7)), 1.0))
+        novelty = max(0.0, min(float(profile.get("novelty_seeking", 0.5)), 1.0))
+        interest_map = self._profile_map(profile.get("topic_interest"))
+        expertise_map = self._profile_map(profile.get("domain_expertise"))
+        scopes = tuple(row["scopes"] or ())
+        interest = self._scope_value(interest_map, scopes, 0.5)
+        expertise = self._scope_value(expertise_map, scopes, 0.5)
+
+        # PostgreSQL FTS rank is not normalized. Treat any useful returned hit
+        # as baseline relevance and let rank/repetition/profile determine learning.
+        retrieval = max(0.0, min(float(row["retrieval_score"] or 0.0) * 4.0, 1.0))
+        rank_factor = 1.0 / max(1, int(row["rank"] or 1))
+        exposure_count = int(row["exposure_count"] or 1)
+        repetition = min(1.0, exposure_count / 3.0)
+
+        score = (
+            0.25 * retrieval
+            + 0.15 * rank_factor
+            + 0.18 * repetition
+            + 0.14 * curiosity
+            + 0.14 * retention
+            + 0.07 * max(0.0, min(interest, 1.0))
+            + 0.05 * max(0.0, min(expertise, 1.0))
+            + 0.02 * novelty
+        )
+        score = max(0.0, min(score, 1.0))
+        eligible = score >= self.threshold
+        reason = "learning_threshold_met" if eligible else "reference_only"
+        return CorpusLearningDecision(
+            section_id=section_id,
+            eligible=eligible,
+            score=score,
+            threshold=self.threshold,
+            exposure_count=exposure_count,
+            reason=reason,
+        )
+
+
+class CorpusLearningService:
+    """Evaluate exposed corpus evidence and selectively cross it into /char."""
+
+    def __init__(self, db: Database):
+        self.db = db
+        self.policy = CorpusLearningPolicy(db)
+        self.research = CharacterResearchService(db)
+
+    async def evaluate_and_acquire(
+        self,
+        *,
+        instance_id: UUID,
+        research_id: UUID,
+        section_ids: Sequence[UUID],
+    ) -> dict:
+        decisions: list[CorpusLearningDecision] = []
+        eligible: list[UUID] = []
+        for section_id in section_ids:
+            decision = await self.policy.evaluate(
+                instance_id=instance_id,
+                research_id=research_id,
+                section_id=section_id,
+            )
+            decisions.append(decision)
+            status = "eligible" if decision.eligible else "reference"
+            await self.db.execute(
+                """
+                UPDATE aios.character_corpus_exposure
+                SET acquisition_status=$4,
+                    acquisition_score=$5,
+                    acquisition_reason=$6,
+                    evaluated_at=now()
+                WHERE research_id=$1 AND section_id=$2
+                  AND EXISTS (
+                      SELECT 1 FROM aios.character_research_event cre
+                      WHERE cre.research_id=$1 AND cre.instance_id=$3
+                  )
+                """,
+                research_id,
+                section_id,
+                instance_id,
+                status,
+                decision.score,
+                decision.reason,
+            )
+            if decision.eligible:
+                eligible.append(section_id)
+
+        consumption_by_section: dict[UUID, UUID] = {}
+        if eligible:
+            result = await self.research.acquire(
+                instance_id=instance_id,
+                section_ids=eligible,
+                mode="research",
+            )
+            for section_id, consumption_id in zip(eligible, result["consumption_ids"]):
+                consumption_by_section[section_id] = consumption_id
+                await self.db.execute(
+                    """
+                    UPDATE aios.character_corpus_exposure
+                    SET acquisition_status='acquired',
+                        consumption_id=$3,
+                        evaluated_at=now()
+                    WHERE research_id=$1 AND section_id=$2
+                    """,
+                    research_id,
+                    section_id,
+                    consumption_id,
+                )
+
+        return {
+            "instance_id": instance_id,
+            "research_id": research_id,
+            "decisions": [
+                {
+                    "section_id": decision.section_id,
+                    "eligible": decision.eligible,
+                    "score": decision.score,
+                    "threshold": decision.threshold,
+                    "exposure_count": decision.exposure_count,
+                    "reason": decision.reason,
+                    "consumption_id": consumption_by_section.get(decision.section_id),
+                }
+                for decision in decisions
+            ],
+            "acquired_count": len(consumption_by_section),
+        }
