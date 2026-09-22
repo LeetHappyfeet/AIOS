@@ -117,6 +117,10 @@ class WebAccumulator:
                 "character_id": task.target_character_id,
                 "world_id": task.target_world_id,
             },
+            "ingestion": {
+                "mode": task.ingest_mode,
+                "consumption_mode": task.consumption_mode,
+            },
             "crawl": {
                 "task_id": task.task_id,
                 "mode": task.crawl_mode,
@@ -150,6 +154,8 @@ class WebAccumulator:
                 "body_extracted": body.get("extracted", False),
                 "target_character_is_hint": task.target_character_id is not None,
                 "target_world_is_hint": task.target_world_id is not None,
+                "cold_corpus": task.ingest_mode in {"corpus", "consume"},
+                "intentional_consumption": task.ingest_mode == "consume",
             },
             "raw": {
                 "html_sha256": hashlib.sha256(html.encode("utf-8")).hexdigest(),
