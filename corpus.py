@@ -178,12 +178,22 @@ async def import_corpus_document(
     units = split_long_document(text)
     heading: str | None = None
     section_order = 0
+    seen_section_hashes: set[str] = set()
     for unit in units:
         if unit.unit_type == "section":
             heading = unit.title
             continue
-        if not unit.content.strip():
+        content = unit.content.strip()
+        if not content:
             continue
+        content_hash = _sha256(content)
+        # A source page may repeat identical blocks (navigation, quotes, or
+        # splitter overlap). The schema deliberately keeps one copy of a
+        # section per document, so collapse duplicates before insertion rather
+        # than relying on the uniqueness constraint to abort the import.
+        if content_hash in seen_section_hashes:
+            continue
+        seen_section_hashes.add(content_hash)
         await db.execute(
             """
             INSERT INTO aios.corpus_section (
@@ -196,8 +206,8 @@ async def import_corpus_document(
             section_order,
             unit.path,
             heading,
-            unit.content,
-            _sha256(unit.content),
+            content,
+            content_hash,
             json.dumps({"start_char": unit.start_char, "end_char": unit.end_char}),
         )
         section_order += 1
