@@ -153,7 +153,19 @@ class CorpusSearchService:
             SELECT (
                 EXISTS (
                     SELECT 1 FROM aios.corpus_scope
-                    WHERE access_class IN ('public','domain')
+                    WHERE access_class='public'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM aios.corpus_source_profile csp
+                    JOIN aios.corpus_scope scope_def
+                      ON scope_def.scope_key=csp.scope_key
+                     AND scope_def.access_class='domain'
+                    JOIN aios.character_knowledge_domain ckd
+                      ON ckd.character_id=$1
+                     AND ckd.enabled
+                     AND ckd.knowledge_domain=csp.knowledge_domain
+                    WHERE csp.enabled
                 )
                 OR EXISTS (
                     SELECT 1 FROM aios.character_corpus_access
@@ -208,8 +220,23 @@ class CorpusSearchService:
                       FROM aios.corpus_document_scope public_scope
                       JOIN aios.corpus_scope scope_def
                         ON scope_def.scope_key=public_scope.scope_key
-                       AND scope_def.access_class IN ('public','domain')
+                       AND scope_def.access_class='public'
                       WHERE public_scope.document_id=cs.document_id
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM aios.corpus_document_collection domain_collection
+                      JOIN aios.corpus_source_profile domain_profile
+                        ON domain_profile.profile_id=domain_collection.profile_id
+                       AND domain_profile.enabled
+                      JOIN aios.corpus_scope domain_scope
+                        ON domain_scope.scope_key=domain_profile.scope_key
+                       AND domain_scope.access_class='domain'
+                      JOIN aios.character_knowledge_domain ckd
+                        ON ckd.character_id=$1
+                       AND ckd.enabled
+                       AND ckd.knowledge_domain=domain_profile.knowledge_domain
+                      WHERE domain_collection.document_id=cs.document_id
                   )
                   OR EXISTS (
                       SELECT 1
@@ -362,7 +389,24 @@ class CharacterResearchService:
                         JOIN aios.corpus_document_scope ds ON ds.document_id=cs.document_id
                         JOIN aios.corpus_scope scope_def
                           ON scope_def.scope_key=ds.scope_key
-                         AND scope_def.access_class IN ('public','domain')
+                         AND scope_def.access_class='public'
+                        WHERE cs.section_id=$1
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM aios.corpus_section cs
+                        JOIN aios.corpus_document_collection domain_collection
+                          ON domain_collection.document_id=cs.document_id
+                        JOIN aios.corpus_source_profile domain_profile
+                          ON domain_profile.profile_id=domain_collection.profile_id
+                         AND domain_profile.enabled
+                        JOIN aios.corpus_scope domain_scope
+                          ON domain_scope.scope_key=domain_profile.scope_key
+                         AND domain_scope.access_class='domain'
+                        JOIN aios.character_knowledge_domain ckd
+                          ON ckd.character_id=$2
+                         AND ckd.enabled
+                         AND ckd.knowledge_domain=domain_profile.knowledge_domain
                         WHERE cs.section_id=$1
                     )
                     OR EXISTS (
