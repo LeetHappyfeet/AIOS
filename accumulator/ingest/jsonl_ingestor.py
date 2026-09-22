@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from aios_app.db import Database
 from aios_app.dag import add_node_and_edge, get_or_create_timeline
 from aios_app.corpus import import_corpus_document, consume_corpus_sections
+from aios_app.corpus_catalog import CorpusCatalogService
 
 logger = logging.getLogger("accumulator.ingest.jsonl")
 
@@ -173,13 +174,16 @@ class JSONLDAGIngestor:
 
         if context["ingest_mode"] in {"corpus", "consume"}:
             document = record.get("document") or {}
+            catalog = CorpusCatalogService(self.db)
+            route = await catalog.resolve(source_id=context["source_id"], source_uri=url)
             corpus = await import_corpus_document(
                 self.db, text=content, source_id=context["source_id"],
                 source_kind=context["source_kind"],
                 title=document.get("title") or record.get("content", {}).get("title"),
                 author=document.get("author"), source_uri=url,
                 language=record.get("content", {}).get("lang"),
-                meta={"accumulator_id": record.get("accumulator_id"), "schema_version": record.get("schema_version"), "retrieved_at": record.get("retrieved_at"), "crawl": record.get("crawl") or {}, "web_document": document},
+                meta={"accumulator_id": record.get("accumulator_id"), "schema_version": record.get("schema_version"), "retrieved_at": record.get("retrieved_at"), "crawl": record.get("crawl") or {}, "web_document": document, "catalog": {"profile_key": route.profile_key, "matched_by": route.matched_by, "collection_key": route.collection_key}},
+                catalog_route=route,
             )
             if context["ingest_mode"] == "consume":
                 target_character_id = context["target_character_id"]
