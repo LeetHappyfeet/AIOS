@@ -132,7 +132,9 @@ class CorpusCatalogService:
         scope_key = scope_key.strip()
         if not profile_key or not collection_key or not scope_key:
             raise ValueError("profile_key, collection_key and scope_key are required")
-        domain_pattern = (domain_pattern or "").lower().strip().rstrip(".") or None\n        path_prefix = (path_prefix or "").strip() or None\n        knowledge_domain = (knowledge_domain or "").strip() or None
+        domain_pattern = (domain_pattern or "").lower().strip().rstrip(".") or None
+        path_prefix = (path_prefix or "").strip() or None
+        knowledge_domain = (knowledge_domain or "").strip() or None
 
         await self.db.execute(
             """
