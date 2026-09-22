@@ -148,6 +148,19 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"- [{status}{suffix}]{_knowledge_annotation(item)} {item.get('text', '')}")
             for conflict in item.get("conflicts") or []:
                 lines.append(f"  ! conflicts with: {conflict.get('text', '')}")
+    corpus_references = frame.get("corpus_references") or []
+    if corpus_references:
+        lines.append("\nCORPUS REFERENCES (LOOKED UP; NOT MEMORY OR BELIEF):")
+        for item in corpus_references:
+            source_bits = [
+                str(value)
+                for value in (item.get("title"), item.get("heading"))
+                if value
+            ]
+            source = " / ".join(source_bits)
+            prefix = f"[{source}] " if source else ""
+            lines.append(f"- {prefix}{item.get('text', '')}")
+
     goals = frame.get("goals") or []
     if goals:
         lines.append("\nGOALS:")
