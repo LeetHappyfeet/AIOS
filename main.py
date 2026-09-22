@@ -7,12 +7,12 @@ DAG, runtime-cursor, HUD-dirty, and downstream pipeline side effects.
 
 from aios_app.main_legacy import app, db
 from aios_app.ingest_api import ingest_message
-from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn
+from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn, CharacterKnowledgeDomainsIn
 from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
 from aios_app.char.identity_sources import stage_identity_source, identity_snapshot
 from aios_app.corpus import import_corpus_document, consume_corpus_sections
-from aios_app.corpus_catalog import CorpusCatalogService
+from aios_app.corpus_catalog import CorpusCatalogService, CorpusAccessReconciler
 from pydantic import BaseModel, Field
 from typing import Any
 
@@ -171,6 +171,8 @@ async def upsert_corpus_source_profile(req: CorpusSourceProfileIn) -> dict[str, 
         display_name=req.display_name,
         source_id=req.source_id,
         domain_pattern=req.domain_pattern,
+        path_prefix=req.path_prefix,
+        knowledge_domain=req.knowledge_domain,
         epistemic_namespace=req.epistemic_namespace,
         identity_binding=req.identity_binding,
         priority=req.priority,
@@ -179,6 +181,8 @@ async def upsert_corpus_source_profile(req: CorpusSourceProfileIn) -> dict[str, 
     result: dict[str, Any] = {"profile": profile}
     if req.reclassify_existing:
         result["reclassification"] = await catalog.reclassify_profile(req.profile_key)
+    if req.knowledge_domain:
+        result["access_reconciliation"] = await CorpusAccessReconciler(db).reconcile_domain(req.knowledge_domain)
     return result
 
 
@@ -186,14 +190,24 @@ async def upsert_corpus_source_profile(req: CorpusSourceProfileIn) -> dict[str, 
 async def list_corpus_source_profiles() -> dict[str, Any]:
     rows = await db.fetch(
         """
-        SELECT profile_id, profile_key, source_id, domain_pattern, collection_key,
-               scope_key, epistemic_namespace, identity_binding, priority,
+        SELECT profile_id, profile_key, source_id, domain_pattern, path_prefix, knowledge_domain,
+               collection_key, scope_key, epistemic_namespace, identity_binding, priority,
                enabled, meta, created_at, updated_at
         FROM aios.corpus_source_profile
         ORDER BY priority DESC, profile_key
         """
     )
     return {"profiles": [dict(row) for row in rows]}
+
+
+@app.put("/character/{character_id}/corpus/knowledge-domains")
+async def set_character_corpus_knowledge_domains(character_id: str, req: CharacterKnowledgeDomainsIn) -> dict[str, Any]:
+    return await CorpusAccessReconciler(db).set_character_domains(character_id, req.knowledge_domains)
+
+
+@app.post("/character/{character_id}/corpus/reconcile-access")
+async def reconcile_character_corpus_access(character_id: str) -> dict[str, Any]:
+    return await CorpusAccessReconciler(db).reconcile_character(character_id)
 
 
 @app.post("/instance/{instance_id}/corpus/consume")
