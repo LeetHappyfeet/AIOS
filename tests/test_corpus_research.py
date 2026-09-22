@@ -4,6 +4,7 @@ from aios_app.epistemic.research import (
     CorpusResearchHit,
     CorpusResearchResult,
     KnowledgeDemandResolver,
+    CorpusLearningPolicy,
     research_terms,
 )
 
@@ -92,3 +93,19 @@ def test_hud_renderer_separates_corpus_reference_from_belief():
     assert "Iron can oxidize." in rendered
     assert "CORPUS REFERENCES (LOOKED UP; NOT MEMORY OR BELIEF):" in rendered
     assert "[Mineralogy / Hematite] Hematite is an iron oxide mineral." in rendered
+
+
+def test_corpus_learning_scope_value_prefers_most_specific_scope():
+    mapping = {
+        "science": 0.4,
+        "science.geology": 0.9,
+    }
+    assert CorpusLearningPolicy._scope_value(
+        mapping, ("science.geology.mineralogy",), 0.5
+    ) == 0.9
+
+
+def test_corpus_learning_scope_value_uses_default_without_profile_match():
+    assert CorpusLearningPolicy._scope_value(
+        {"history": 0.8}, ("science.geology",), 0.5
+    ) == 0.5
