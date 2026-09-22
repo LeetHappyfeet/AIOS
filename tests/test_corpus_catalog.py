@@ -30,3 +30,9 @@ def test_explicit_catalog_route_keeps_acl_and_collection_separate():
     assert route.collection_key != route.scope_key
     assert route.scope_key == "fiction.digimon"
     assert route.identity_binding == "external"
+
+
+def test_corpus_crawl_defaults_to_same_domain():
+    from aios_app.accumulator.web.queue import CrawlTask
+    task = CrawlTask(url="https://example.org/wiki/A", source_id="example.org", crawl_mode="site")
+    assert task.same_domain_only is True
