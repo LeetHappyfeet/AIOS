@@ -10,6 +10,7 @@ from aios_app.documents.long_document import split_long_document
 from aios_app.external_observation import ensure_source_identity, persist_external_observation
 from aios_app.models import ExternalObservationIn
 from aios_app.corpus_catalog import CorpusCatalogService, CorpusRoute
+from aios_app.corpus_adapters import CorpusFacet
 
 
 def _sha256(text: str) -> str:
@@ -72,6 +73,7 @@ async def import_corpus_document(
     epistemic_namespace: str | None = None,
     identity_binding: str = "external",
     catalog_route: CorpusRoute | None = None,
+    facets: Iterable[CorpusFacet] | None = None,
 ) -> dict:
     """Store a document as cold searchable material with no semantic side effects."""
     if not text.strip():
@@ -128,6 +130,21 @@ async def import_corpus_document(
             "SELECT count(*) AS n FROM aios.corpus_section WHERE document_id=$1",
             existing["document_id"],
         )
+        for facet in facets or ():
+            facet_type = str(facet.facet_type).strip().lower()
+            facet_value = str(facet.facet_value).strip()
+            if facet_type and facet_value:
+                await db.execute(
+                    """INSERT INTO aios.corpus_document_facet
+                           (document_id, facet_type, facet_value, source, confidence, meta)
+                       VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+                       ON CONFLICT (document_id, facet_type, facet_value) DO UPDATE
+                       SET source=EXCLUDED.source,
+                           confidence=GREATEST(aios.corpus_document_facet.confidence, EXCLUDED.confidence),
+                           meta=aios.corpus_document_facet.meta || EXCLUDED.meta""",
+                    existing["document_id"], facet_type, facet_value, facet.source,
+                    max(0.0, min(float(facet.confidence), 1.0)), json.dumps(facet.meta or {}),
+                )
         if route:
             if route.classified:
                 await db.execute(
@@ -174,6 +191,23 @@ async def import_corpus_document(
     )
     if route:
         await CorpusCatalogService(db).assign_document(document_id=document_id, route=route)
+
+    for facet in facets or ():
+        facet_type = str(facet.facet_type).strip().lower()
+        facet_value = str(facet.facet_value).strip()
+        if not facet_type or not facet_value:
+            continue
+        await db.execute(
+            """INSERT INTO aios.corpus_document_facet
+                   (document_id, facet_type, facet_value, source, confidence, meta)
+               VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+               ON CONFLICT (document_id, facet_type, facet_value) DO UPDATE
+               SET source=EXCLUDED.source,
+                   confidence=GREATEST(aios.corpus_document_facet.confidence, EXCLUDED.confidence),
+                   meta=aios.corpus_document_facet.meta || EXCLUDED.meta""",
+            document_id, facet_type, facet_value, facet.source,
+            max(0.0, min(float(facet.confidence), 1.0)), json.dumps(facet.meta or {}),
+        )
 
     units = split_long_document(text)
     heading: str | None = None
