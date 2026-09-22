@@ -610,6 +610,7 @@ class CorpusReinforcementService:
         focus_text: str,
         current_research_id: UUID | None = None,
         lookback: int = 24,
+        signal_kind: str = "focus_overlap",
     ) -> list[dict]:
         focus_terms = set(research_terms(focus_text, limit=32))
         if not focus_terms:
@@ -665,13 +666,14 @@ class CorpusReinforcementService:
                     character_id, instance_id, section_id, research_id,
                     signal_kind, strength, meta
                 )
-                VALUES ($1,$2,$3,$4,'focus_overlap',$5,$6::jsonb)
+                VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
                 ON CONFLICT DO NOTHING
                 """,
                 character_id,
                 instance_id,
                 section_id,
                 current_research_id,
+                signal_kind,
                 strength,
                 json.dumps({"overlap_terms": sorted(overlap)}),
             )
@@ -681,3 +683,89 @@ class CorpusReinforcementService:
                 "overlap_terms": sorted(overlap),
             })
         return reinforced
+
+
+class SemanticKnowledgeCoverageService:
+    """Deterministic proposition-aware character knowledge coverage."""
+
+    @staticmethod
+    def _field_terms(item: Mapping[str, object]) -> dict[str, set[str]]:
+        return {
+            "subject": set(research_terms(str(item.get("subject_norm") or ""), limit=32)),
+            "predicate": set(research_terms(str(item.get("predicate_norm") or ""), limit=32)),
+            "object": set(research_terms(str(item.get("object_norm") or ""), limit=64)),
+            "topic": set(research_terms(str(item.get("topic_key") or ""), limit=32)),
+            "text": set(research_terms(str(item.get("text") or ""), limit=128)),
+        }
+
+    def resolve(
+        self,
+        focus_text: str,
+        *,
+        knowledge: Iterable[Mapping[str, object]],
+        minimum_terms: int = 2,
+        threshold: float = 0.60,
+    ) -> KnowledgeDemand:
+        terms = research_terms(focus_text)
+        if len(terms) < max(1, int(minimum_terms)):
+            return KnowledgeDemand(False, terms, (), 1.0, "insufficient_terms")
+
+        best: dict[str, float] = {term: 0.0 for term in terms}
+        for item in knowledge:
+            fields = self._field_terms(item)
+            confidence = item.get("effective_confidence", item.get("confidence", 0.5))
+            try:
+                confidence_factor = max(0.25, min(float(confidence), 1.0))
+            except (TypeError, ValueError):
+                confidence_factor = 0.5
+            for term in terms:
+                weight = 0.0
+                if term in fields["subject"] or term in fields["object"]:
+                    weight = 1.0
+                elif term in fields["predicate"] or term in fields["topic"]:
+                    weight = 0.85
+                elif term in fields["text"]:
+                    weight = 0.45
+                best[term] = max(best[term], weight * confidence_factor)
+
+        coverage = sum(best.values()) / len(terms)
+        missing = tuple(term for term in terms if best[term] < 0.45)
+        needed = bool(missing) and coverage < max(0.0, min(float(threshold), 1.0))
+        return KnowledgeDemand(
+            needed=needed,
+            terms=terms,
+            missing_terms=missing,
+            coverage=coverage,
+            reason="semantic_knowledge_gap" if needed else "semantic_coverage_sufficient",
+        )
+
+
+class SemanticCorpusReinforcementService(CorpusReinforcementService):
+    """Reinforce old corpus exposure from structured current propositions."""
+
+    @staticmethod
+    def _knowledge_terms(knowledge: Iterable[Mapping[str, object]]) -> set[str]:
+        terms: set[str] = set()
+        for item in knowledge:
+            for key in ("subject_norm", "predicate_norm", "object_norm", "topic_key"):
+                terms.update(research_terms(str(item.get(key) or ""), limit=64))
+        return terms
+
+    async def reinforce_from_knowledge(
+        self,
+        *,
+        instance_id: UUID,
+        knowledge: Iterable[Mapping[str, object]],
+        current_research_id: UUID | None = None,
+        lookback: int = 24,
+    ) -> list[dict]:
+        semantic_terms = self._knowledge_terms(knowledge)
+        if not semantic_terms:
+            return []
+        return await self.reinforce_from_focus(
+            instance_id=instance_id,
+            focus_text=" ".join(sorted(semantic_terms)),
+            current_research_id=current_research_id,
+            lookback=lookback,
+            signal_kind="semantic_overlap",
+        )
