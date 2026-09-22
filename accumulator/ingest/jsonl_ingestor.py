@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from aios_app.db import Database
 from aios_app.dag import add_node_and_edge, get_or_create_timeline
+from aios_app.corpus import import_corpus_document, consume_corpus_sections
 
 logger = logging.getLogger("accumulator.ingest.jsonl")
 
@@ -63,6 +64,8 @@ class JSONLDAGIngestor:
             "speaker_id": speaker_id,
             "target_character_id": target.get("character_id"),
             "target_world_id": target.get("world_id"),
+            "ingest_mode": (record.get("ingestion") or {}).get("mode") or "semantic",
+            "consumption_mode": (record.get("ingestion") or {}).get("consumption_mode") or "read",
         }
 
     async def _ensure_source_identity(self, context: dict, url: str) -> None:
@@ -167,6 +170,32 @@ class JSONLDAGIngestor:
 
         context = self._source_context(record)
         await self._ensure_source_identity(context, url)
+
+        if context["ingest_mode"] in {"corpus", "consume"}:
+            document = record.get("document") or {}
+            corpus = await import_corpus_document(
+                self.db, text=content, source_id=context["source_id"],
+                source_kind=context["source_kind"],
+                title=document.get("title") or record.get("content", {}).get("title"),
+                author=document.get("author"), source_uri=url,
+                language=record.get("content", {}).get("lang"),
+                meta={"accumulator_id": record.get("accumulator_id"), "schema_version": record.get("schema_version"), "retrieved_at": record.get("retrieved_at"), "crawl": record.get("crawl") or {}, "web_document": document},
+            )
+            if context["ingest_mode"] == "consume":
+                target_character_id = context["target_character_id"]
+                if not target_character_id:
+                    raise RuntimeError("web consume mode requires target_character_id")
+                instance = await self.db.fetchrow(
+                    "SELECT instance_id FROM aios.character_instance WHERE character_id=$1 AND active=TRUE ORDER BY created_at DESC LIMIT 1",
+                    target_character_id,
+                )
+                if not instance:
+                    raise RuntimeError(f"web consume target {target_character_id!r} has no active character instance")
+                sections = await self.db.fetch("SELECT section_id FROM aios.corpus_section WHERE document_id=$1 ORDER BY section_order", corpus["document_id"])
+                await consume_corpus_sections(self.db, instance_id=instance["instance_id"], section_ids=[row["section_id"] for row in sections], mode=context["consumption_mode"])
+            logger.info("Stored web document %s in cold corpus mode=%s source=%s sections=%s", corpus["document_id"], context["ingest_mode"], context["source_id"], corpus["section_count"])
+            return
+
         document_id = await self._source_document(record, paragraphs)
 
         target_world_id = self._uuid_or_none(context["target_world_id"])
