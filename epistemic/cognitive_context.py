@@ -13,6 +13,7 @@ from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.epistemic.message_cognition import current_message_cognition
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer, select_recalled_cognition
+from aios_app.epistemic.research import CharacterResearchService, KnowledgeDemandResolver
 from aios_app.epistemic.retrieval_policy import (
     CognitiveRetrievalPolicy,
     DEFAULT_COGNITIVE_RETRIEVAL_POLICY,
@@ -46,6 +47,8 @@ class CognitiveKnowledgeSnapshot:
     goals: list[dict[str, Any]]
     rules: list[dict[str, Any]]
     current_events: list[dict[str, Any]]
+    corpus_references: list[dict[str, Any]]
+    corpus_demand: dict[str, Any] | None
     recall_suppressed: dict[str, int]
     topology_retrieval: bool
     topology_partial_fallback: bool
@@ -148,6 +151,11 @@ class CognitiveContextService:
     def __init__(self, db: Database, *, retrieval_policy: CognitiveRetrievalPolicy | None = None):
         self.db = db
         self.retriever = TopologyRetriever(db)
+        self.research = CharacterResearchService(db)
+        self.knowledge_demand = KnowledgeDemandResolver(
+            minimum_terms=2,
+            coverage_threshold=0.60,
+        )
         self.retrieval_policy = retrieval_policy or DEFAULT_COGNITIVE_RETRIEVAL_POLICY
         self._prepared_retrieval: dict[tuple[Any, ...], PreparedRetrievalSnapshot] = {}
         self._prepared_retrieval_flights: AsyncSingleFlight[
@@ -547,6 +555,46 @@ class CognitiveContextService:
             else:
                 beliefs.append(item)
 
+        # Corpus research is a deterministic reference channel, not durable
+        # character knowledge. Only established/recalled cognition is used to
+        # judge coverage; corpus hits are never merged into knowledge/beliefs.
+        known_texts = [
+            str(item.get("text") or "")
+            for item in knowledge
+            if item.get("text")
+        ]
+        corpus_demand = self.knowledge_demand.resolve(
+            attention.retrieval_focus_text,
+            known_texts=known_texts,
+        )
+        corpus_references: list[dict[str, Any]] = []
+        if corpus_demand.needed:
+            # Search the missing concepts rather than replaying the entire turn.
+            # This keeps dialogue/scaffolding words out of the FTS query.
+            corpus_query = " ".join(corpus_demand.missing_terms)
+            try:
+                corpus_result = await self.research.search(
+                    instance_id=context.instance_id,
+                    query=corpus_query,
+                    limit=5,
+                )
+                corpus_references = corpus_result.reference_context()
+            except Exception:
+                # Corpus lookup is supplementary. A missing migration, unavailable
+                # corpus, or search failure must never block normal cognition.
+                logger.exception(
+                    "Corpus reference lookup failed instance=%s",
+                    context.instance_id,
+                )
+
+        corpus_demand_meta = {
+            "needed": corpus_demand.needed,
+            "terms": list(corpus_demand.terms),
+            "missing_terms": list(corpus_demand.missing_terms),
+            "coverage": corpus_demand.coverage,
+            "reason": corpus_demand.reason,
+        }
+
         anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
         visible_world_context_count = sum(
             len(item.get("world_context") or [])
@@ -567,6 +615,8 @@ class CognitiveContextService:
             # scoring treats index/distance 0 as the current event; reversing here
             # made the oldest visible source event look causally closest.
             current_events=list(attention.recent_newest),
+            corpus_references=corpus_references,
+            corpus_demand=corpus_demand_meta,
             recall_suppressed=recall_suppressed,
             topology_retrieval=bool(topology_knowledge),
             topology_partial_fallback=bool(legacy_knowledge),
