@@ -17,6 +17,8 @@ from aios_app.epistemic.research import (
     CharacterResearchService,
     CorpusLearningService,
     CorpusReinforcementService,
+    SemanticCorpusReinforcementService,
+    SemanticKnowledgeCoverageService,
     KnowledgeDemandResolver,
 )
 from aios_app.epistemic.retrieval_policy import (
@@ -159,6 +161,8 @@ class CognitiveContextService:
         self.research = CharacterResearchService(db)
         self.corpus_learning = CorpusLearningService(db)
         self.corpus_reinforcement = CorpusReinforcementService(db)
+        self.semantic_corpus_reinforcement = SemanticCorpusReinforcementService(db)
+        self.semantic_knowledge_coverage = SemanticKnowledgeCoverageService()
         self.knowledge_demand = KnowledgeDemandResolver(
             minimum_terms=2,
             coverage_threshold=0.60,
@@ -565,15 +569,32 @@ class CognitiveContextService:
         # Corpus research is a deterministic reference channel, not durable
         # character knowledge. Only established/recalled cognition is used to
         # judge coverage; corpus hits are never merged into knowledge/beliefs.
-        known_texts = [
-            str(item.get("text") or "")
-            for item in knowledge
-            if item.get("text")
+        # Prefer proposition structure over raw text when deciding whether
+        # established /char cognition covers the current information need.
+        # The lexical resolver remains as a conservative fallback for old or
+        # provisional cognition that has not acquired semantic roles yet.
+        structured_knowledge = [
+            item for item in knowledge
+            if item.get("subject_norm") or item.get("predicate_norm")
+               or item.get("object_norm") or item.get("topic_key")
         ]
-        corpus_demand = self.knowledge_demand.resolve(
-            attention.retrieval_focus_text,
-            known_texts=known_texts,
-        )
+        if structured_knowledge:
+            corpus_demand = self.semantic_knowledge_coverage.resolve(
+                attention.retrieval_focus_text,
+                knowledge=structured_knowledge,
+                minimum_terms=2,
+                threshold=0.60,
+            )
+        else:
+            known_texts = [
+                str(item.get("text") or "")
+                for item in knowledge
+                if item.get("text")
+            ]
+            corpus_demand = self.knowledge_demand.resolve(
+                attention.retrieval_focus_text,
+                known_texts=known_texts,
+            )
         corpus_references: list[dict[str, Any]] = []
         corpus_result = None
         if corpus_demand.needed:
@@ -599,12 +620,18 @@ class CognitiveContextService:
         # Reinforce older references first, then evaluate only the current search
         # for acquisition. This prevents the current HUD hit from teaching itself.
         try:
+            current_research_id = (
+                corpus_result.research_id if corpus_result is not None else None
+            )
             await self.corpus_reinforcement.reinforce_from_focus(
                 instance_id=context.instance_id,
                 focus_text=attention.retrieval_focus_text,
-                current_research_id=(
-                    corpus_result.research_id if corpus_result is not None else None
-                ),
+                current_research_id=current_research_id,
+            )
+            await self.semantic_corpus_reinforcement.reinforce_from_knowledge(
+                instance_id=context.instance_id,
+                knowledge=structured_knowledge,
+                current_research_id=current_research_id,
             )
             if corpus_result is not None and corpus_result.hits:
                 await self.corpus_learning.evaluate_and_acquire(
