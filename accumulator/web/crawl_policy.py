@@ -84,9 +84,14 @@ def evaluate_url(url: str, *, seed: bool = False) -> AdmissionDecision:
 def evaluate_page(*, metadata: dict, body: dict, html: str) -> AdmissionDecision:
     title = str(metadata.get("title") or "").strip().lower().rstrip(".")
     text = str(body.get("text") or "").strip()
-    lower_html = html.lower()
+    lower_text = text.lower()
 
-    if title in CHALLENGE_TITLES or any(marker in lower_html for marker in CHALLENGE_MARKERS):
+    # Challenge infrastructure can be present in the HTML of perfectly valid
+    # pages (notably Fandom/Cloudflare). Only classify a challenge when the
+    # rendered document itself presents challenge evidence to the reader.
+    challenge_title = title in CHALLENGE_TITLES
+    challenge_body = any(marker in lower_text for marker in CHALLENGE_MARKERS)
+    if challenge_title or challenge_body:
         return AdmissionDecision(False, "challenge_page")
 
     if not text:
