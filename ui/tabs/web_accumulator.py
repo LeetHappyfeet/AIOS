@@ -36,6 +36,8 @@ def _submit(
     speaker_id: str,
     target_character_id: str,
     target_world_id: str,
+    ingest_mode: str,
+    consumption_mode: str,
     crawl_mode: str,
     max_depth: float,
     max_pages: float,
@@ -56,14 +58,20 @@ def _submit(
             return "Target world must be a world UUID or left blank.", _status_rows()
 
     mode = "site" if crawl_mode == "Site crawl" else "page"
+    ingest_value = {"Store in corpus": "corpus", "Store and read as target": "consume", "Legacy semantic ingestion": "semantic"}.get(ingest_mode, "corpus")
+    target_character = _clean_optional(target_character_id)
+    if ingest_value == "consume" and not target_character:
+        return "Store and read requires a target character ID.", _status_rows()
     task = CrawlTask(
         url=url,
         source_id=source_id,
         source_kind=(source_kind or "website").strip(),
         source_name=_clean_optional(source_name),
         speaker_id=_clean_optional(speaker_id),
-        target_character_id=_clean_optional(target_character_id),
+        target_character_id=target_character,
         target_world_id=target_world,
+        ingest_mode=ingest_value,
+        consumption_mode=(consumption_mode or "read").strip().lower(),
         crawl_mode=mode,
         max_depth=int(max_depth or 0) if mode == "site" else 0,
         max_pages=int(max_pages or 1) if mode == "site" else 1,
@@ -101,9 +109,7 @@ def render():
             """
 ### Web Accumulator
 
-Fetch web material as **source observations**. A source or speaker is not a
-character, and optional target character/world fields are routing hints only.
-All scraped text enters the liminal DAG before downstream epistemic decisions.
+Fetch web material into the **cold searchable corpus** by default. Storing a page does not make any character know it and does not assert it as world truth. Use **Store and read as target** only when the selected character should explicitly acquire the page.
 """
         )
 
@@ -176,6 +182,20 @@ All scraped text enters the liminal DAG before downstream epistemic decisions.
                     info="Who asserts the page content when known. This is not character ownership.",
                 )
 
+        with gr.Row():
+            ingest_mode = gr.Radio(
+                ["Store in corpus", "Store and read as target", "Legacy semantic ingestion"],
+                value="Store in corpus",
+                label="Ingestion behavior",
+                info="Corpus storage is cold/searchable only. Read creates explicit character acquisition.",
+            )
+            consumption_mode = gr.Dropdown(
+                choices=["read", "research", "taught", "import"],
+                value="read",
+                label="Acquisition mode",
+                info="Used only with Store and read as target.",
+            )
+
         with gr.Accordion("Optional enrichment / world routing hints", open=False):
             gr.Markdown(
                 "These fields do not assign the scrape to a character and do not assert it as world truth."
@@ -222,6 +242,8 @@ All scraped text enters the liminal DAG before downstream epistemic decisions.
                 speaker_id,
                 target_character_id,
                 target_world_id,
+                ingest_mode,
+                consumption_mode,
                 crawl_mode,
                 max_depth,
                 max_pages,
