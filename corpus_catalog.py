@@ -30,6 +30,16 @@ def _host(uri: str | None) -> str:
     return (urlparse(value).hostname or "").lower().rstrip(".")
 
 
+def _path_matches(uri: str | None, prefix: str | None) -> bool:
+    if not prefix:
+        return True
+    if not uri:
+        return False
+    path = urlparse(uri if "://" in uri else f"https://{uri}").path or "/"
+    normalized = "/" + prefix.strip().lstrip("/")
+    return path == normalized or path.startswith(normalized.rstrip("/") + "/")
+
+
 def _domain_matches(host: str, pattern: str | None) -> bool:
     pattern = (pattern or "").lower().strip().rstrip(".")
     if not host or not pattern:
@@ -118,7 +128,7 @@ class CorpusCatalogService:
         scope_key = scope_key.strip()
         if not profile_key or not collection_key or not scope_key:
             raise ValueError("profile_key, collection_key and scope_key are required")
-        domain_pattern = (domain_pattern or "").lower().strip().rstrip(".") or None
+        domain_pattern = (domain_pattern or "").lower().strip().rstrip(".") or None\n        path_prefix = (path_prefix or "").strip() or None\n        knowledge_domain = (knowledge_domain or "").strip() or None
 
         await self.db.execute(
             """
@@ -145,7 +155,7 @@ class CorpusCatalogService:
                 profile_key, source_id, domain_pattern, collection_key, scope_key,
                 epistemic_namespace, identity_binding, priority, meta
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
             ON CONFLICT (profile_key) DO UPDATE
             SET source_id=EXCLUDED.source_id,
                 domain_pattern=EXCLUDED.domain_pattern,
@@ -251,3 +261,70 @@ class CorpusCatalogService:
             )
             await self.assign_document(document_id=document_id, route=route)
         return {"profile_key": profile_key, "reclassified_documents": len(matched)}
+
+
+class CorpusAccessReconciler:
+    """Materialize hard corpus ACLs from authored character/domain eligibility."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def reconcile_character(self, character_id: str) -> dict:
+        domains = await self.db.fetch(
+            """SELECT knowledge_domain FROM aios.character_knowledge_domain
+               WHERE character_id=$1 AND enabled=TRUE""",
+            character_id,
+        )
+        domain_keys = [row["knowledge_domain"] for row in domains]
+        if not domain_keys:
+            return {"character_id": character_id, "knowledge_domains": [], "granted_scopes": []}
+        rows = await self.db.fetch(
+            """SELECT DISTINCT scope_key
+               FROM aios.corpus_source_profile
+               WHERE enabled=TRUE AND knowledge_domain = ANY($1::text[])""",
+            domain_keys,
+        )
+        scopes = sorted({row["scope_key"] for row in rows})
+        for scope_key in scopes:
+            await self.db.execute(
+                """INSERT INTO aios.character_corpus_access
+                       (character_id, scope_key, allowed, meta)
+                   VALUES ($1,$2,TRUE,$3::jsonb)
+                   ON CONFLICT (character_id, scope_key) DO UPDATE
+                   SET allowed=TRUE,
+                       meta=aios.character_corpus_access.meta || EXCLUDED.meta,
+                       updated_at=now()""",
+                character_id, scope_key,
+                json.dumps({"derived_from": "knowledge_domain", "knowledge_domains": domain_keys}),
+            )
+        return {"character_id": character_id, "knowledge_domains": domain_keys, "granted_scopes": scopes}
+
+    async def reconcile_domain(self, knowledge_domain: str) -> dict:
+        rows = await self.db.fetch(
+            """SELECT character_id FROM aios.character_knowledge_domain
+               WHERE knowledge_domain=$1 AND enabled=TRUE""",
+            knowledge_domain,
+        )
+        results = []
+        for row in rows:
+            results.append(await self.reconcile_character(row["character_id"]))
+        return {"knowledge_domain": knowledge_domain, "characters": results}
+
+    async def set_character_domains(self, character_id: str, domains: list[str]) -> dict:
+        normalized = sorted({str(value).strip() for value in domains if str(value).strip()})
+        await self.db.execute(
+            """UPDATE aios.character_knowledge_domain
+               SET enabled=FALSE, updated_at=now()
+               WHERE character_id=$1""",
+            character_id,
+        )
+        for domain in normalized:
+            await self.db.execute(
+                """INSERT INTO aios.character_knowledge_domain
+                       (character_id, knowledge_domain, enabled, meta)
+                   VALUES ($1,$2,TRUE,$3::jsonb)
+                   ON CONFLICT (character_id, knowledge_domain) DO UPDATE
+                   SET enabled=TRUE, updated_at=now()""",
+                character_id, domain, json.dumps({"assigned_by": "character_configuration"}),
+            )
+        return await self.reconcile_character(character_id)
