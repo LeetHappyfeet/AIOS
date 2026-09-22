@@ -76,8 +76,17 @@ CREATE TABLE IF NOT EXISTS aios.character_corpus_exposure (
     score double precision NOT NULL,
     exposed_at timestamptz NOT NULL DEFAULT now(),
     meta jsonb NOT NULL DEFAULT '{}'::jsonb,
+    acquisition_status text NOT NULL DEFAULT 'reference'
+        CHECK (acquisition_status IN ('reference','eligible','acquired','rejected')),
+    acquisition_score double precision,
+    acquisition_reason text,
+    consumption_id uuid REFERENCES aios.source_consumption(consumption_id) ON DELETE SET NULL,
+    evaluated_at timestamptz,
     PRIMARY KEY (research_id, section_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_character_corpus_exposure_learning
+    ON aios.character_corpus_exposure (acquisition_status, exposed_at DESC);
 
 COMMENT ON TABLE aios.character_corpus_access IS
 'Hard character-level corpus ACL. No grant means no corpus search access. Parent grants include descendant dotted scopes; matching denies override allows.';
