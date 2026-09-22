@@ -118,6 +118,7 @@ class CorpusCatalogService:
         domain_pattern: str | None = None,
         path_prefix: str | None = None,
         knowledge_domain: str | None = None,
+        access_class: str = "restricted",
         epistemic_namespace: str = "reference",
         identity_binding: str = "external",
         priority: int = 0,
@@ -125,6 +126,10 @@ class CorpusCatalogService:
     ) -> dict:
         if not source_id and not domain_pattern:
             raise ValueError("source profile requires source_id or domain_pattern")
+        if access_class not in {"public", "domain", "restricted"}:
+            raise ValueError(f"unsupported corpus access_class {access_class!r}")
+        if access_class == "domain" and not knowledge_domain:
+            raise ValueError("domain corpus profile requires knowledge_domain")
         if identity_binding not in {"external", "world", "character"}:
             raise ValueError(f"unsupported corpus identity_binding {identity_binding!r}")
         profile_key = profile_key.strip()
@@ -149,12 +154,15 @@ class CorpusCatalogService:
         )
         await self.db.execute(
             """
-            INSERT INTO aios.corpus_scope (scope_key, display_name)
-            VALUES ($1,$2)
-            ON CONFLICT (scope_key) DO NOTHING
+            INSERT INTO aios.corpus_scope (scope_key, display_name, access_class)
+            VALUES ($1,$2,$3)
+            ON CONFLICT (scope_key) DO UPDATE
+            SET display_name=COALESCE(EXCLUDED.display_name, aios.corpus_scope.display_name),
+                access_class=EXCLUDED.access_class
             """,
-            scope_key, display_name or scope_key,
+            scope_key, display_name or scope_key, access_class,
         )
+
         row = await self.db.execute_returning_row(
             """
             INSERT INTO aios.corpus_source_profile (
