@@ -67,6 +67,7 @@ class JSONLDAGIngestor:
             "target_world_id": target.get("world_id"),
             "ingest_mode": (record.get("ingestion") or {}).get("mode") or "semantic",
             "consumption_mode": (record.get("ingestion") or {}).get("consumption_mode") or "read",
+            "corpus_profile_key": (record.get("ingestion") or {}).get("corpus_profile_key"),
         }
 
     async def _ensure_source_identity(self, context: dict, url: str) -> None:
@@ -176,6 +177,28 @@ class JSONLDAGIngestor:
             document = record.get("document") or {}
             catalog = CorpusCatalogService(self.db)
             route = await catalog.resolve(source_id=context["source_id"], source_uri=url)
+            if context.get("corpus_profile_key"):
+                profile = await self.db.fetchrow(
+                    """SELECT profile_id, profile_key, collection_key, scope_key,
+                              epistemic_namespace, identity_binding
+                       FROM aios.corpus_source_profile
+                       WHERE profile_key=$1 AND enabled=TRUE""",
+                    context["corpus_profile_key"],
+                )
+                if not profile:
+                    raise RuntimeError(
+                        f"unknown enabled corpus profile {context['corpus_profile_key']!r}"
+                    )
+                from aios_app.corpus_catalog import CorpusRoute
+                route = CorpusRoute(
+                    collection_key=profile["collection_key"],
+                    scope_key=profile["scope_key"],
+                    epistemic_namespace=profile["epistemic_namespace"],
+                    identity_binding=profile["identity_binding"],
+                    profile_id=profile["profile_id"],
+                    profile_key=profile["profile_key"],
+                    matched_by="crawl_task",
+                )
             corpus = await import_corpus_document(
                 self.db, text=content, source_id=context["source_id"],
                 source_kind=context["source_kind"],
