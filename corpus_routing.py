@@ -12,6 +12,21 @@ from aios_app.db import Database
 _WS_RE = re.compile(r"\s+")
 
 
+def _json_object(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    try:
+        return dict(value or {})
+    except (TypeError, ValueError):
+        return {}
+
+
 def normalize_facet_value(value: str) -> str:
     """Canonical key used by both adapters and route rules."""
     return _WS_RE.sub(" ", str(value).strip().casefold())
@@ -82,7 +97,7 @@ class CorpusFacetRouter:
                 epistemic_namespace=str(row["epistemic_namespace"]),
                 access_class=str(row["access_class"]),
                 priority=int(row["priority"] or 0),
-                meta=dict(row["meta"] or {}),
+                meta=_json_object(row["meta"]),
             ))
 
         scopes = tuple(dict.fromkeys(route.scope_key for route in matched))
@@ -168,7 +183,7 @@ class CorpusFacetRouter:
                     facet_value=str(row["facet_value"]),
                     source=str(row["source"] or "adapter"),
                     confidence=float(row["confidence"] or 1.0),
-                    meta=dict(row["meta"] or {}),
+                    meta=_json_object(row["meta"]),
                 )
                 for row in rows
             ),
