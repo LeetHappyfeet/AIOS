@@ -283,7 +283,7 @@ class CorpusCatalogService:
 
 
 class CorpusAccessReconciler:
-    """Materialize hard corpus ACLs from authored character/domain eligibility."""
+    """Maintain character domain affinity without turning it into authorization."""
 
     def __init__(self, db: Database):
         self.db = db
@@ -294,39 +294,29 @@ class CorpusAccessReconciler:
                WHERE character_id=$1 AND enabled=TRUE""",
             character_id,
         )
-        domain_keys = [row["knowledge_domain"] for row in domains]
-        # Rebuild only grants owned by domain reconciliation; explicit ACL rows survive.
+        domain_keys = sorted({row["knowledge_domain"] for row in domains})
+        # Older revisions materialized domain membership as ACL grants. Remove
+        # only those derived rows; explicit allow/deny security rules survive.
         await self.db.execute(
             """DELETE FROM aios.character_corpus_access
                WHERE character_id=$1
                  AND meta->>'derived_from'='knowledge_domain'""",
             character_id,
         )
-        if not domain_keys:
-            return {"character_id": character_id, "knowledge_domains": [], "granted_scopes": []}
         rows = await self.db.fetch(
             """SELECT DISTINCT csp.scope_key
                FROM aios.corpus_source_profile csp
-               JOIN aios.corpus_scope cs ON cs.scope_key=csp.scope_key
                WHERE csp.enabled=TRUE
-                 AND cs.access_class='domain'
                  AND csp.knowledge_domain = ANY($1::text[])""",
             domain_keys,
-        )
-        scopes = sorted({row["scope_key"] for row in rows})
-        for scope_key in scopes:
-            await self.db.execute(
-                """INSERT INTO aios.character_corpus_access
-                       (character_id, scope_key, allowed, meta)
-                   VALUES ($1,$2,TRUE,$3::jsonb)
-                   ON CONFLICT (character_id, scope_key) DO UPDATE
-                   SET allowed=TRUE,
-                       meta=aios.character_corpus_access.meta || EXCLUDED.meta,
-                       updated_at=now()""",
-                character_id, scope_key,
-                json.dumps({"derived_from": "knowledge_domain", "knowledge_domains": domain_keys}),
-            )
-        return {"character_id": character_id, "knowledge_domains": domain_keys, "granted_scopes": scopes}
+        ) if domain_keys else []
+        affinity_scopes = sorted({row["scope_key"] for row in rows})
+        return {
+            "character_id": character_id,
+            "knowledge_domains": domain_keys,
+            "affinity_scopes": affinity_scopes,
+            "granted_scopes": [],
+        }
 
     async def reconcile_domain(self, knowledge_domain: str) -> dict:
         rows = await self.db.fetch(
