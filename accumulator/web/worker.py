@@ -45,6 +45,30 @@ class AccumulatorWorker:
             try:
                 result = self.acc.accumulate_task(task, on_progress=progress)
                 state = "completed" if result["pages_written"] > 0 else "failed"
+                failures = result.get("failures") or []
+                if failures:
+                    first = failures[0]
+                    detail = first.get("detail") or {}
+                    attempts = detail.get("fetch_attempts") or []
+                    attempt_text = "; ".join(
+                        (
+                            f"{attempt.get('method')}: "
+                            f"{attempt.get('error_type') or 'failed'}"
+                            f"{' HTTP ' + str(attempt.get('status_code')) if attempt.get('status_code') else ''}"
+                            f"{' - ' + str(attempt.get('error')) if attempt.get('error') else ''}"
+                        )
+                        for attempt in attempts
+                    )
+                    failure_text = (
+                        f" First failure: {first.get('reason')} at {first.get('url')}."
+                    )
+                    if attempt_text:
+                        failure_text += f" Attempts: {attempt_text}."
+                    elif detail:
+                        failure_text += f" Detail: {detail}."
+                else:
+                    failure_text = ""
+
                 self.queue.update(
                     task.task_id,
                     state=state,
@@ -54,8 +78,10 @@ class AccumulatorWorker:
                     pages_failed=result["pages_failed"],
                     message=(
                         f"Visited {result['pages_visited']} page(s); "
-                        f"wrote {result['pages_written']} observation record(s)"
-                    ),
+                        f"wrote {result['pages_written']} observation record(s); "
+                        f"{result['pages_failed']} failed."
+                        f"{failure_text}"
+                    )[:1000],
                 )
             except Exception as exc:
                 self.queue.update(
