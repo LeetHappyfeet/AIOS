@@ -31,27 +31,8 @@ class WebAccumulator:
         self._robots: dict[str, RobotFileParser] = {}
 
     def _fetch(self, url: str) -> tuple[dict | None, str | None, list[dict]]:
-        """Fetch with Selenium first, preserving diagnostics for every attempt."""
+        """Fetch with requests first, falling back to Selenium when needed."""
         attempts: list[dict] = []
-        try:
-            fetched = self.selenium.fetch(url)
-            attempts.append({"method": "selenium", "ok": True})
-            return fetched, "selenium", attempts
-        except TimeoutException as exc:
-            attempts.append({
-                "method": "selenium",
-                "ok": False,
-                "error_type": type(exc).__name__,
-                "error": str(exc) or "page load timed out",
-            })
-        except Exception as exc:
-            attempts.append({
-                "method": "selenium",
-                "ok": False,
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            })
-
         try:
             fetched = self.requests.fetch(url)
             attempts.append({
@@ -74,7 +55,27 @@ class WebAccumulator:
                     if response is not None else None
                 ),
             })
-            return None, None, attempts
+
+        try:
+            fetched = self.selenium.fetch(url)
+            attempts.append({"method": "selenium", "ok": True})
+            return fetched, "selenium", attempts
+        except TimeoutException as exc:
+            attempts.append({
+                "method": "selenium",
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc) or "page load timed out",
+            })
+        except Exception as exc:
+            attempts.append({
+                "method": "selenium",
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            })
+
+        return None, None, attempts
 
     @staticmethod
     def _failure_detail(reason: str, *, url: str, **details) -> dict:
