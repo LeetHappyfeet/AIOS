@@ -1,0 +1,66 @@
+from uuid import UUID
+
+from aios_app.epistemic.research import (
+    CorpusResearchHit,
+    CorpusResearchResult,
+    KnowledgeDemandResolver,
+    research_terms,
+)
+
+
+def test_research_terms_are_deterministic_and_drop_function_words():
+    assert research_terms("How does hematite form in the red rocks?") == (
+        "does",
+        "hematite",
+        "form",
+        "red",
+        "rocks",
+    )
+
+
+def test_knowledge_demand_detects_missing_concepts():
+    resolver = KnowledgeDemandResolver(coverage_threshold=0.60)
+    demand = resolver.resolve(
+        "hematite iron oxide formation",
+        known_texts=["iron oxide is familiar"],
+    )
+    assert demand.needed
+    assert "hematite" in demand.missing_terms
+    assert "formation" in demand.missing_terms
+
+
+def test_knowledge_demand_stays_closed_when_coverage_is_sufficient():
+    resolver = KnowledgeDemandResolver(coverage_threshold=0.60)
+    demand = resolver.resolve(
+        "hematite iron oxide",
+        known_texts=["hematite is an iron oxide mineral"],
+    )
+    assert not demand.needed
+    assert demand.coverage == 1.0
+
+
+def test_reference_context_is_explicitly_non_durable():
+    research_id = UUID("00000000-0000-0000-0000-000000000001")
+    instance_id = UUID("00000000-0000-0000-0000-000000000002")
+    hit = CorpusResearchHit(
+        section_id=UUID("00000000-0000-0000-0000-000000000003"),
+        document_id=UUID("00000000-0000-0000-0000-000000000004"),
+        score=0.75,
+        title="Mineralogy",
+        heading="Hematite",
+        excerpt="Hematite is an iron oxide mineral.",
+        scopes=("science.geology",),
+    )
+    result = CorpusResearchResult(
+        research_id=research_id,
+        instance_id=instance_id,
+        character_id="Renamon",
+        query="hematite",
+        terms=("hematite",),
+        hits=(hit,),
+        status="searched",
+    )
+    rendered = result.reference_context()
+    assert rendered[0]["kind"] == "corpus_reference"
+    assert rendered[0]["durable_knowledge"] is False
+    assert rendered[0]["section_id"] == str(hit.section_id)
