@@ -125,6 +125,22 @@ class WebAccumulator:
 
         html = fetched["html"]
         final_url = fetched.get("final_url") or url
+
+        # Never silently admit a redirect outside the crawl boundary.
+        if task.same_domain_only:
+            seed_host = urlparse(task.url).netloc.lower()
+            final_host = urlparse(final_url).netloc.lower()
+            if final_host != seed_host:
+                return self._failure_detail(
+                    "redirect_off_domain",
+                    url=final_url,
+                    requested_url=url,
+                    seed_host=seed_host,
+                    final_host=final_host,
+                    fetch_method=fetch_method,
+                    fetch_attempts=fetch_attempts,
+                )
+
         body = extract_body(html)
         if not body["extracted"]:
             fallback = clean_html(html)
@@ -155,6 +171,10 @@ class WebAccumulator:
                 fetch_method=fetch_method,
                 status_code=fetched.get("status_code"),
                 content_type=fetched.get("content_type"),
+                fetch_attempts=fetch_attempts,
+                title=metadata.get("title"),
+                text_chars=len(body.get("text") or ""),
+                text_preview=(body.get("text") or "")[:500],
             )
 
         content_sha = body.get("text_sha256") or hashlib.sha256(
