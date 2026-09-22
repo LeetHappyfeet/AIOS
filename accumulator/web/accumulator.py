@@ -246,6 +246,17 @@ class WebAccumulator:
                     pages_failed=failed,
                 )
 
+            # Source-bound crawls never fetch an off-domain frontier entry.
+            # This also protects recovered legacy tasks whose queue already escaped.
+            if task.same_domain_only and urlparse(url).netloc.lower() != seed_host:
+                failed += 1
+                failures.append({
+                    "url": url,
+                    "reason": "off_domain_blocked",
+                    "detail": {"seed_host": seed_host},
+                })
+                continue
+
             result = self.accumulate_page(
                 url,
                 task=task,
