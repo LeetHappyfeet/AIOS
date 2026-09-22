@@ -64,3 +64,31 @@ def test_reference_context_is_explicitly_non_durable():
     assert rendered[0]["kind"] == "corpus_reference"
     assert rendered[0]["durable_knowledge"] is False
     assert rendered[0]["section_id"] == str(hit.section_id)
+
+
+def test_hud_renderer_separates_corpus_reference_from_belief():
+    from aios_app.hud.render_text import render_hud_text
+
+    frame = {
+        "identity": {"display_name": "Renamon"},
+        "presence": {
+            "world_key": "char:Renamon",
+            "instance_id": "00000000-0000-0000-0000-000000000002",
+            "state_version": 1,
+        },
+        "state": {},
+        "scene": {},
+        "beliefs": [{"text": "Iron can oxidize.", "epistemic_status": "known"}],
+        "corpus_references": [{
+            "title": "Mineralogy",
+            "heading": "Hematite",
+            "text": "Hematite is an iron oxide mineral.",
+            "durable_knowledge": False,
+        }],
+        "actions": [],
+    }
+    rendered = render_hud_text(frame)
+    assert "KNOWLEDGE / BELIEFS:" in rendered
+    assert "Iron can oxidize." in rendered
+    assert "CORPUS REFERENCES (LOOKED UP; NOT MEMORY OR BELIEF):" in rendered
+    assert "[Mineralogy / Hematite] Hematite is an iron oxide mineral." in rendered
