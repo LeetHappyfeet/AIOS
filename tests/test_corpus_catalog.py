@@ -1,4 +1,4 @@
-from aios_app.corpus_catalog import CorpusCatalogService, CorpusRoute, _domain_matches
+from aios_app.corpus_catalog import CorpusCatalogService, CorpusRoute, _domain_matches, _path_matches
 
 
 def test_catalog_domain_matching_is_host_bounded():
@@ -36,3 +36,14 @@ def test_corpus_crawl_defaults_to_same_domain():
     from aios_app.accumulator.web.queue import CrawlTask
     task = CrawlTask(url="https://example.org/wiki/A", source_id="example.org", crawl_mode="site")
     assert task.same_domain_only is True
+
+
+def test_catalog_path_matching_is_prefix_bounded():
+    assert _path_matches("https://example.org/wiki/Shego", "/wiki")
+    assert _path_matches("https://example.org/wiki/Shego/History", "/wiki")
+    assert not _path_matches("https://example.org/post/get-to-know-shego", "/wiki")
+    assert not _path_matches("https://example.org/wikievil/Shego", "/wiki")
+
+
+def test_catalog_path_is_optional():
+    assert _path_matches("https://example.org/anything", None)
