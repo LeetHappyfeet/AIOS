@@ -67,11 +67,19 @@ async def advance_matching_runtime_source_cursor(
                 raise RuntimeError(
                     "source cursor coordinate is invalid: live source timeline is not liminal"
                 )
-            if source["character_id"] != character_id:
-                raise RuntimeError("source cursor character identity mismatch")
+            participant = await con.fetchrow(
+                """SELECT 1 FROM aios.conversation_participant
+                   WHERE timeline_id=$1 AND character_id=$2 AND active
+                   LIMIT 1""",
+                source_timeline_id, character_id,
+            )
+            # Legacy timelines retain their original single-character contract;
+            # participant-aware timelines authorize any bound participant.
+            if source["character_id"] != character_id and not participant:
+                raise RuntimeError("source cursor character is not a conversation participant")
             if source["session_id"] != session_id:
                 raise RuntimeError("source cursor session identity mismatch")
-            if source["user_name"] != user_name:
+            if source["user_name"] != user_name and not participant:
                 raise RuntimeError("source cursor user identity mismatch")
             if source["scope_key"] != scope_key:
                 raise RuntimeError("source cursor scope identity mismatch")
