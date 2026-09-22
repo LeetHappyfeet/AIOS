@@ -114,6 +114,8 @@ class CorpusCatalogService:
         display_name: str | None = None,
         source_id: str | None = None,
         domain_pattern: str | None = None,
+        path_prefix: str | None = None,
+        knowledge_domain: str | None = None,
         epistemic_namespace: str = "reference",
         identity_binding: str = "external",
         priority: int = 0,
@@ -152,13 +154,15 @@ class CorpusCatalogService:
         row = await self.db.execute_returning_row(
             """
             INSERT INTO aios.corpus_source_profile (
-                profile_key, source_id, domain_pattern, collection_key, scope_key,
-                epistemic_namespace, identity_binding, priority, meta
+                profile_key, source_id, domain_pattern, path_prefix, knowledge_domain,
+                collection_key, scope_key, epistemic_namespace, identity_binding, priority, meta
             )
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
             ON CONFLICT (profile_key) DO UPDATE
             SET source_id=EXCLUDED.source_id,
                 domain_pattern=EXCLUDED.domain_pattern,
+                path_prefix=EXCLUDED.path_prefix,
+                knowledge_domain=EXCLUDED.knowledge_domain,
                 collection_key=EXCLUDED.collection_key,
                 scope_key=EXCLUDED.scope_key,
                 epistemic_namespace=EXCLUDED.epistemic_namespace,
@@ -168,10 +172,11 @@ class CorpusCatalogService:
                 enabled=TRUE,
                 updated_at=now()
             RETURNING profile_id, profile_key, collection_key, scope_key,
-                      epistemic_namespace, identity_binding
+                      knowledge_domain, path_prefix, epistemic_namespace, identity_binding
             """,
-            profile_key, source_id, domain_pattern, collection_key, scope_key,
-            epistemic_namespace, identity_binding, int(priority), json.dumps(meta or {}),
+            profile_key, source_id, domain_pattern, path_prefix, knowledge_domain,
+            collection_key, scope_key, epistemic_namespace, identity_binding,
+            int(priority), json.dumps(meta or {}),
         )
         return dict(row)
 
@@ -197,8 +202,8 @@ class CorpusCatalogService:
     async def reclassify_profile(self, profile_key: str) -> dict:
         profile = await self.db.fetchrow(
             """
-            SELECT profile_id, profile_key, source_id, domain_pattern, collection_key,
-                   scope_key, epistemic_namespace, identity_binding
+            SELECT profile_id, profile_key, source_id, domain_pattern, path_prefix, knowledge_domain,
+                   collection_key, scope_key, epistemic_namespace, identity_binding
             FROM aios.corpus_source_profile
             WHERE profile_key=$1 AND enabled=TRUE
             """,
@@ -220,6 +225,8 @@ class CorpusCatalogService:
             if profile["source_id"] and row["source_id"] != profile["source_id"]:
                 continue
             if profile["domain_pattern"] and not _domain_matches(_host(row["source_uri"]), profile["domain_pattern"]):
+                continue
+            if not _path_matches(row["source_uri"], profile["path_prefix"]):
                 continue
             matched.append(row["document_id"])
 
