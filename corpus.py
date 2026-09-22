@@ -9,6 +9,7 @@ from aios_app.db import Database
 from aios_app.documents.long_document import split_long_document
 from aios_app.external_observation import ensure_source_identity, persist_external_observation
 from aios_app.models import ExternalObservationIn
+from aios_app.corpus_catalog import CorpusCatalogService, CorpusRoute
 
 
 def _sha256(text: str) -> str:
@@ -70,14 +71,30 @@ async def import_corpus_document(
     scopes: Iterable[str] | None = None,
     epistemic_namespace: str | None = None,
     identity_binding: str = "external",
+    catalog_route: CorpusRoute | None = None,
 ) -> dict:
     """Store a document as cold searchable material with no semantic side effects."""
     if not text.strip():
         raise ValueError("corpus document text is empty")
 
-    document_scopes = _corpus_scopes(scopes, meta)
-    namespace = str(epistemic_namespace or (meta or {}).get("epistemic_namespace") or "reference").strip() or "reference"
-    binding = str((meta or {}).get("identity_binding") or identity_binding).strip().lower()
+    route = catalog_route
+    if route is None and scopes is None and not (isinstance(meta, dict) and meta.get("corpus_scopes")):
+        route = await CorpusCatalogService(db).resolve(source_id=source_id, source_uri=source_uri)
+    document_scopes = _corpus_scopes(
+        scopes if scopes is not None else ((route.scope_key,) if route else None),
+        meta,
+    )
+    namespace = str(
+        epistemic_namespace
+        or (meta or {}).get("epistemic_namespace")
+        or (route.epistemic_namespace if route else None)
+        or "reference"
+    ).strip() or "reference"
+    binding = str(
+        (meta or {}).get("identity_binding")
+        or (route.identity_binding if route else None)
+        or identity_binding
+    ).strip().lower()
     if binding not in {"external", "world", "character"}:
         raise ValueError(f"unsupported corpus identity_binding {binding!r}")
     source_req = ExternalObservationIn(
@@ -103,6 +120,10 @@ async def import_corpus_document(
             "SELECT count(*) AS n FROM aios.corpus_section WHERE document_id=$1",
             existing["document_id"],
         )
+        if route:
+            await CorpusCatalogService(db).assign_document(
+                document_id=existing["document_id"], route=route
+            )
         return {
             "document_id": existing["document_id"],
             "section_count": int(count["n"]),
@@ -128,6 +149,8 @@ async def import_corpus_document(
     assigned = await _assign_document_scopes(
         db, document_id=document_id, scopes=document_scopes
     )
+    if route:
+        await CorpusCatalogService(db).assign_document(document_id=document_id, route=route)
 
     units = split_long_document(text)
     heading: str | None = None
@@ -163,6 +186,8 @@ async def import_corpus_document(
         "scopes": list(assigned),
         "epistemic_namespace": namespace,
         "identity_binding": binding,
+        "collection": route.collection_key if route else None,
+        "catalog_profile": route.profile_key if route else None,
     }
 
 
