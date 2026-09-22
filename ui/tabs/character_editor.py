@@ -388,20 +388,20 @@ def render():
                 )
                 source_trust = gr.Dataframe(
                     headers=["source / source_key", "trust"], datatype=["str","number"],
-                    row_count=(2, "dynamic"), col_count=(2, "fixed"), label="Source trust",
+                    row_count=(2, "dynamic"), col_count=(2, "fixed"), type="array", label="Source trust",
                 )
                 topic_interest = gr.Dataframe(
                     headers=["topic / scope", "interest"], datatype=["str","number"],
-                    row_count=(2, "dynamic"), col_count=(2, "fixed"), label="Topic interest",
+                    row_count=(2, "dynamic"), col_count=(2, "fixed"), type="array", label="Topic interest",
                 )
                 domain_expertise = gr.Dataframe(
                     headers=["domain / concept", "expertise"], datatype=["str","number"],
-                    row_count=(2, "dynamic"), col_count=(2, "fixed"), label="Domain expertise",
+                    row_count=(2, "dynamic"), col_count=(2, "fixed"), type="array", label="Domain expertise",
                 )
                 with gr.Accordion("Advanced trait weights", open=False):
                     trait_weights = gr.Dataframe(
                         headers=["trait", "weight"], datatype=["str","number"],
-                        row_count=(1, "dynamic"), col_count=(2, "fixed"), label="Trait weights",
+                        row_count=(1, "dynamic"), col_count=(2, "fixed"), type="array", label="Trait weights",
                     )
                 save_epistemics = gr.Button("Save epistemic profile")
 
