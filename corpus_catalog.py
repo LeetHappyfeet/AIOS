@@ -295,6 +295,13 @@ class CorpusAccessReconciler:
             character_id,
         )
         domain_keys = [row["knowledge_domain"] for row in domains]
+        # Rebuild only grants owned by domain reconciliation; explicit ACL rows survive.
+        await self.db.execute(
+            """DELETE FROM aios.character_corpus_access
+               WHERE character_id=$1
+                 AND meta->>'derived_from'='knowledge_domain'""",
+            character_id,
+        )
         if not domain_keys:
             return {"character_id": character_id, "knowledge_domains": [], "granted_scopes": []}
         rows = await self.db.fetch(
