@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 import hashlib
-import traceback
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -30,27 +29,61 @@ class WebAccumulator:
         self.writer = JSONLWriter(OUTPUT_DIR)
         self._robots: dict[str, RobotFileParser] = {}
 
-    def _fetch(self, url: str) -> tuple[dict, str] | tuple[None, None]:
-        fetched = None
-        fetch_method = None
-
+    def _fetch(self, url: str) -> tuple[dict | None, str | None, list[dict]]:
+        """Fetch with Selenium first, preserving diagnostics for every attempt."""
+        attempts: list[dict] = []
         try:
             fetched = self.selenium.fetch(url)
-            fetch_method = "selenium"
-        except TimeoutException:
-            pass
-        except Exception:
-            traceback.print_exc()
+            attempts.append({"method": "selenium", "ok": True})
+            return fetched, "selenium", attempts
+        except TimeoutException as exc:
+            attempts.append({
+                "method": "selenium",
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc) or "page load timed out",
+            })
+        except Exception as exc:
+            attempts.append({
+                "method": "selenium",
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            })
 
-        if fetched is None:
-            try:
-                fetched = self.requests.fetch(url)
-                fetch_method = "requests"
-            except Exception:
-                traceback.print_exc()
-                return None, None
+        try:
+            fetched = self.requests.fetch(url)
+            attempts.append({
+                "method": "requests",
+                "ok": True,
+                "status_code": fetched.get("status_code"),
+                "content_type": fetched.get("content_type"),
+            })
+            return fetched, "requests", attempts
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            attempts.append({
+                "method": "requests",
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "status_code": getattr(response, "status_code", None),
+                "content_type": (
+                    response.headers.get("content-type")
+                    if response is not None else None
+                ),
+            })
+            return None, None, attempts
 
-        return fetched, fetch_method
+    @staticmethod
+    def _failure_detail(reason: str, *, url: str, **details) -> dict:
+        return {
+            "ok": False,
+            "url": url,
+            "reason": reason,
+            "detail": details,
+            "links": [],
+        }
 
     def _robots_allowed(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -80,11 +113,13 @@ class WebAccumulator:
         depth: int = 0,
     ) -> dict:
         if task.respect_robots and not self._robots_allowed(url):
-            return {"ok": False, "url": url, "reason": "robots_denied", "links": []}
+            return self._failure_detail("robots_denied", url=url)
 
-        fetched, fetch_method = self._fetch(url)
+        fetched, fetch_method, fetch_attempts = self._fetch(url)
         if fetched is None:
-            return {"ok": False, "url": url, "reason": "fetch_failed", "links": []}
+            return self._failure_detail(
+                "fetch_failed", url=url, fetch_attempts=fetch_attempts
+            )
 
         html = fetched["html"]
         final_url = fetched.get("final_url") or url
@@ -95,7 +130,14 @@ class WebAccumulator:
             body = fallback
 
         if not body.get("text"):
-            return {"ok": False, "url": final_url, "reason": "empty_content", "links": []}
+            return self._failure_detail(
+                "empty_content",
+                url=final_url,
+                fetch_method=fetch_method,
+                status_code=fetched.get("status_code"),
+                content_type=fetched.get("content_type"),
+                html_bytes=len(html.encode("utf-8")),
+            )
 
         metadata = extract_page_metadata(html, final_url)
         content_sha = body.get("text_sha256") or hashlib.sha256(
@@ -187,6 +229,7 @@ class WebAccumulator:
         visited: set[str] = set()
         written = 0
         failed = 0
+        failures: list[dict] = []
 
         while frontier and len(visited) < max_pages:
             url, parent_url, depth = frontier.popleft()
@@ -212,6 +255,11 @@ class WebAccumulator:
                 written += 1
             else:
                 failed += 1
+                failures.append({
+                    "url": result.get("url") or url,
+                    "reason": result.get("reason") or "unknown",
+                    "detail": result.get("detail") or {},
+                })
 
             if (
                 task.crawl_mode != "site"
@@ -244,6 +292,7 @@ class WebAccumulator:
             "pages_visited": len(visited),
             "pages_written": written,
             "pages_failed": failed,
+            "failures": failures,
         }
 
     def shutdown(self):
