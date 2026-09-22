@@ -140,7 +140,7 @@ async def mark_matching_runtime_dirty(
         )
 
 
-async def _character_projection_clean(
+async def character_projection_clean(
     db: Database,
     *,
     instance_id: UUID,
