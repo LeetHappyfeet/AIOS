@@ -68,12 +68,18 @@ async def import_corpus_document(
     language: str | None = None,
     meta: dict | None = None,
     scopes: Iterable[str] | None = None,
+    epistemic_namespace: str | None = None,
+    identity_binding: str = "external",
 ) -> dict:
     """Store a document as cold searchable material with no semantic side effects."""
     if not text.strip():
         raise ValueError("corpus document text is empty")
 
     document_scopes = _corpus_scopes(scopes, meta)
+    namespace = str(epistemic_namespace or (meta or {}).get("epistemic_namespace") or "reference").strip() or "reference"
+    binding = str((meta or {}).get("identity_binding") or identity_binding).strip().lower()
+    if binding not in {"external", "world", "character"}:
+        raise ValueError(f"unsupported corpus identity_binding {binding!r}")
     source_req = ExternalObservationIn(
         source_id=source_id,
         source_kind=source_kind,
@@ -86,7 +92,7 @@ async def import_corpus_document(
 
     content_hash = _sha256(text)
     existing = await db.fetchrow(
-        "SELECT document_id FROM aios.corpus_document WHERE content_hash=$1",
+        "SELECT document_id, epistemic_namespace, identity_binding FROM aios.corpus_document WHERE content_hash=$1",
         content_hash,
     )
     if existing:
@@ -102,19 +108,21 @@ async def import_corpus_document(
             "section_count": int(count["n"]),
             "deduplicated": True,
             "scopes": list(assigned),
+            "epistemic_namespace": existing["epistemic_namespace"],
+            "identity_binding": existing["identity_binding"],
         }
 
     document = await db.execute_returning_row(
         """
         INSERT INTO aios.corpus_document (
             source_id, document_kind, title, author, source_uri, language,
-            content_hash, meta
+            content_hash, meta, epistemic_namespace, identity_binding
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)
         RETURNING document_id
         """,
         source_id, source_kind, title, author, source_uri, language,
-        content_hash, json.dumps(meta or {}),
+        content_hash, json.dumps(meta or {}), namespace, binding,
     )
     document_id = document["document_id"]
     assigned = await _assign_document_scopes(
@@ -153,6 +161,8 @@ async def import_corpus_document(
         "section_count": section_order,
         "deduplicated": False,
         "scopes": list(assigned),
+        "epistemic_namespace": namespace,
+        "identity_binding": binding,
     }
 
 
@@ -179,7 +189,8 @@ async def consume_corpus_sections(
         row = await db.fetchrow(
             """
             SELECT cs.section_id, cs.document_id, cs.content, cs.heading,
-                   cd.source_id, cd.document_kind, cd.title, cd.source_uri
+                   cd.source_id, cd.document_kind, cd.title, cd.source_uri,
+                   cd.epistemic_namespace, cd.identity_binding
             FROM aios.corpus_section cs
             JOIN aios.corpus_document cd ON cd.document_id=cs.document_id
             WHERE cs.section_id=$1
@@ -198,7 +209,12 @@ async def consume_corpus_sections(
             RETURNING consumption_id, ingest_event_id, status
             """,
             instance_id, row["document_id"], section_id, mode,
-            json.dumps({"title": row["title"], "heading": row["heading"]}),
+            json.dumps({
+                "title": row["title"],
+                "heading": row["heading"],
+                "epistemic_namespace": row["epistemic_namespace"],
+                "identity_binding": row["identity_binding"],
+            }),
         )
         if receipt["ingest_event_id"] is not None and receipt["status"] == "ingested":
             consumed.append(receipt["consumption_id"])
@@ -222,6 +238,9 @@ async def consume_corpus_sections(
                         "acquisition_mode": mode,
                         "target_instance_id": str(instance_id),
                         "intentional_consumption": True,
+                        "epistemic_namespace": row["epistemic_namespace"],
+                        "identity_binding": row["identity_binding"],
+                        "corpus_reference_identity": row["identity_binding"] == "external",
                     },
                     dedupe_key=f"corpus-consume::{receipt['consumption_id']}",
                     scope_key=f"corpus:{row['document_id']}:instance:{instance_id}",
