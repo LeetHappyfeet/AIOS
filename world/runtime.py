@@ -660,6 +660,11 @@ class WorldRuntimeService:
             and coordinates_stable
             and after.get("source_head_node_id") == target_node_id
         )
+        readiness_after = await readiness_state(self.db, instance_id=instance_id)
+        topology_current = (
+            target_node_id is None
+            or readiness_after.get("enrichment_ready_node_id") == target_node_id
+        )
         frame.setdefault("hud", {})
         frame["hud"]["generation_ready"] = generation_ready
         frame["hud"]["freshness"] = {
@@ -671,7 +676,7 @@ class WorldRuntimeService:
                 if semantic_current and target_node_id else None,
             "source_current": after.get("source_head_node_id") == target_node_id,
             "runtime_current": coordinates_stable,
-            "topology_current": semantic_current,
+            "topology_current": topology_current,
         }
         frame["hud"]["cache"] = "rebuilt"
 
