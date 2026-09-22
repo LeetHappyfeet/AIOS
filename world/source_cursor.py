@@ -171,3 +171,43 @@ async def advance_matching_runtime_source_cursor(
                 advanced.append(row["instance_id"])
 
             return advanced
+
+
+async def advance_conversation_runtime_source_cursors(
+    db: Database, *, source_timeline_id: UUID, source_head_node_id: UUID,
+    source_head_event_id: int,
+) -> list[UUID]:
+    """Advance every bound perceiver on a shared conversation timeline."""
+    rows = await db.fetch(
+        """SELECT DISTINCT cp.character_instance_id AS instance_id
+           FROM aios.conversation_participant cp
+           JOIN aios.message_participant mp ON mp.participant_id=cp.participant_id
+           JOIN aios.dag_node dn ON dn.node_id=mp.node_id
+           WHERE cp.timeline_id=$1 AND mp.node_id=$2 AND mp.perceived
+             AND cp.active AND cp.character_instance_id IS NOT NULL
+             AND dn.event_id=$3""",
+        source_timeline_id, source_head_node_id, source_head_event_id,
+    )
+    advanced: list[UUID] = []
+    for row in rows:
+        instance_id = row["instance_id"]
+        current = await db.fetchrow(
+            """SELECT rs.source_timeline_id, head.event_id
+               FROM aios.character_runtime_state rs
+               LEFT JOIN aios.dag_node head ON head.node_id=rs.source_head_node_id
+               WHERE rs.instance_id=$1""", instance_id,
+        )
+        if not current:
+            continue
+        if current["source_timeline_id"] not in (None, source_timeline_id):
+            continue
+        if current["event_id"] is not None and int(current["event_id"]) > int(source_head_event_id):
+            continue
+        await db.execute(
+            """UPDATE aios.character_runtime_state
+               SET source_timeline_id=$2,source_head_node_id=$3,updated_at=now()
+               WHERE instance_id=$1""",
+            instance_id, source_timeline_id, source_head_node_id,
+        )
+        advanced.append(instance_id)
+    return advanced
