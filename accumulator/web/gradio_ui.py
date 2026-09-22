@@ -14,16 +14,18 @@ worker = AccumulatorWorker(queue)
 worker.start()
 
 
-def submit_url(url: str, source_id: str, crawl_site: bool):
+def submit_url(url: str, source_id: str, corpus_profile_key: str, crawl_site: bool):
     url = (url or "").strip()
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return "A complete http:// or https:// URL is required."
 
     source_id = (source_id or "").strip() or parsed.netloc.lower()
+    corpus_profile_key = (corpus_profile_key or "").strip() or None
     task = CrawlTask(
         url=url,
         source_id=source_id,
+        corpus_profile_key=corpus_profile_key,
         crawl_mode="site" if crawl_site else "page",
         max_depth=2 if crawl_site else 0,
         max_pages=50 if crawl_site else 1,
@@ -40,13 +42,14 @@ with gr.Blocks() as demo:
 
     url_input = gr.Textbox(label="URL")
     source_id = gr.Textbox(label="Source ID", placeholder="Defaults to hostname")
+    corpus_profile_key = gr.Textbox(label="Corpus profile (optional)", placeholder="Auto-routes by source/domain when blank")
     crawl_site = gr.Checkbox(label="Bounded same-domain crawl", value=False)
     status = gr.Textbox(label="Status")
 
     submit = gr.Button("Start accumulation")
     submit.click(
         fn=submit_url,
-        inputs=[url_input, source_id, crawl_site],
+        inputs=[url_input, source_id, corpus_profile_key, crawl_site],
         outputs=status,
     )
 
