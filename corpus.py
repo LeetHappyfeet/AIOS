@@ -121,6 +121,21 @@ async def import_corpus_document(
             existing["document_id"],
         )
         if route:
+            if route.classified:
+                await db.execute(
+                    "DELETE FROM aios.corpus_document_scope WHERE document_id=$1 AND scope_key='unclassified'",
+                    existing["document_id"],
+                )
+                await db.execute(
+                    "DELETE FROM aios.corpus_document_collection WHERE document_id=$1 AND collection_key='inbox'",
+                    existing["document_id"],
+                )
+                await db.execute(
+                    """UPDATE aios.corpus_document
+                       SET epistemic_namespace=$2, identity_binding=$3
+                       WHERE document_id=$1""",
+                    existing["document_id"], namespace, binding,
+                )
             await CorpusCatalogService(db).assign_document(
                 document_id=existing["document_id"], route=route
             )
