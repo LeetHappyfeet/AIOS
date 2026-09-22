@@ -80,8 +80,8 @@ def _submit(
     )
     task_id = queue.add(task)
     return (
-        f"Queued {task_id}. Source={source_id}; mode={mode}; "
-        "content will enter liminal provenance before any character/world use.",
+        f"Queued {task_id}. Source={source_id}; crawl={mode}; ingestion={ingest_value}. "
+        + ("Selected content will be explicitly consumed by the target character." if ingest_value == "consume" else "Accumulated content does not imply character knowledge."),
         _status_rows(),
     )
 
