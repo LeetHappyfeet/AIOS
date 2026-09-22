@@ -563,7 +563,10 @@ class CognitiveContextService:
             beliefs=beliefs,
             goals=goals,
             rules=rules,
-            current_events=list(reversed(attention.recent_newest)),
+            # Preserve the attention-layer newest-first invariant. HUD relevance
+            # scoring treats index/distance 0 as the current event; reversing here
+            # made the oldest visible source event look causally closest.
+            current_events=list(attention.recent_newest),
             recall_suppressed=recall_suppressed,
             topology_retrieval=bool(topology_knowledge),
             topology_partial_fallback=bool(legacy_knowledge),
