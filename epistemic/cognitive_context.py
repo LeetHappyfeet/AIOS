@@ -13,7 +13,12 @@ from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.epistemic.message_cognition import current_message_cognition
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer, select_recalled_cognition
-from aios_app.epistemic.research import CharacterResearchService, KnowledgeDemandResolver
+from aios_app.epistemic.research import (
+    CharacterResearchService,
+    CorpusLearningService,
+    CorpusReinforcementService,
+    KnowledgeDemandResolver,
+)
 from aios_app.epistemic.retrieval_policy import (
     CognitiveRetrievalPolicy,
     DEFAULT_COGNITIVE_RETRIEVAL_POLICY,
@@ -152,6 +157,8 @@ class CognitiveContextService:
         self.db = db
         self.retriever = TopologyRetriever(db)
         self.research = CharacterResearchService(db)
+        self.corpus_learning = CorpusLearningService(db)
+        self.corpus_reinforcement = CorpusReinforcementService(db)
         self.knowledge_demand = KnowledgeDemandResolver(
             minimum_terms=2,
             coverage_threshold=0.60,
@@ -568,6 +575,7 @@ class CognitiveContextService:
             known_texts=known_texts,
         )
         corpus_references: list[dict[str, Any]] = []
+        corpus_result = None
         if corpus_demand.needed:
             # Search the missing concepts rather than replaying the entire turn.
             # This keeps dialogue/scaffolding words out of the FTS query.
@@ -586,6 +594,31 @@ class CognitiveContextService:
                     "Corpus reference lookup failed instance=%s",
                     context.instance_id,
                 )
+
+        # Repeated focus is stronger evidence of attention than a one-turn lookup.
+        # Reinforce older references first, then evaluate only the current search
+        # for acquisition. This prevents the current HUD hit from teaching itself.
+        try:
+            await self.corpus_reinforcement.reinforce_from_focus(
+                instance_id=context.instance_id,
+                focus_text=attention.retrieval_focus_text,
+                current_research_id=(
+                    corpus_result.research_id if corpus_result is not None else None
+                ),
+            )
+            if corpus_result is not None and corpus_result.hits:
+                await self.corpus_learning.evaluate_and_acquire(
+                    instance_id=context.instance_id,
+                    research_id=corpus_result.research_id,
+                    section_ids=[hit.section_id for hit in corpus_result.hits],
+                )
+        except Exception:
+            # Learning is subordinate to cognition exactly like corpus search.
+            # Failed acquisition must not make the HUD unavailable.
+            logger.exception(
+                "Corpus learning evaluation failed instance=%s",
+                context.instance_id,
+            )
 
         corpus_demand_meta = {
             "needed": corpus_demand.needed,
