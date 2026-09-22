@@ -150,9 +150,15 @@ class CorpusSearchService:
 
         access = await self.db.fetchrow(
             """
-            SELECT EXISTS (
-                SELECT 1 FROM aios.character_corpus_access
-                WHERE character_id=$1 AND allowed
+            SELECT (
+                EXISTS (
+                    SELECT 1 FROM aios.corpus_scope
+                    WHERE access_class='public'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM aios.character_corpus_access
+                    WHERE character_id=$1 AND allowed
+                )
             ) AS has_access
             """,
             character_id,
@@ -184,20 +190,30 @@ class CorpusSearchService:
             JOIN aios.corpus_document_scope cds ON cds.document_id=cs.document_id
             CROSS JOIN q
             WHERE cs.search_vector @@ q.query
-              AND EXISTS (
-                  SELECT 1
-                  FROM aios.corpus_document_scope allowed_scope
-                  JOIN aios.character_corpus_access grant_row
-                    ON grant_row.character_id=$1
-                   AND grant_row.allowed
-                   AND (
-                        allowed_scope.scope_key=grant_row.scope_key
-                        OR left(
-                            allowed_scope.scope_key,
-                            length(grant_row.scope_key) + 1
-                        )=grant_row.scope_key || '.'
-                   )
-                  WHERE allowed_scope.document_id=cs.document_id
+              AND (
+                  EXISTS (
+                      SELECT 1
+                      FROM aios.corpus_document_scope public_scope
+                      JOIN aios.corpus_scope scope_def
+                        ON scope_def.scope_key=public_scope.scope_key
+                       AND scope_def.access_class='public'
+                      WHERE public_scope.document_id=cs.document_id
+                  )
+                  OR EXISTS (
+                      SELECT 1
+                      FROM aios.corpus_document_scope allowed_scope
+                      JOIN aios.character_corpus_access grant_row
+                        ON grant_row.character_id=$1
+                       AND grant_row.allowed
+                       AND (
+                            allowed_scope.scope_key=grant_row.scope_key
+                            OR left(
+                                allowed_scope.scope_key,
+                                length(grant_row.scope_key) + 1
+                            )=grant_row.scope_key || '.'
+                       )
+                      WHERE allowed_scope.document_id=cs.document_id
+                  )
               )
               AND NOT EXISTS (
                   SELECT 1
@@ -326,19 +342,30 @@ class CharacterResearchService:
         for section_id in section_ids:
             allowed = await self.db.fetchrow(
                 """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM aios.corpus_section cs
-                    JOIN aios.corpus_document_scope ds ON ds.document_id=cs.document_id
-                    JOIN aios.character_corpus_access grant_row
-                      ON grant_row.character_id=$2
-                     AND grant_row.allowed
-                     AND (
-                          ds.scope_key=grant_row.scope_key
-                          OR left(ds.scope_key, length(grant_row.scope_key) + 1)
-                             = grant_row.scope_key || '.'
-                     )
-                    WHERE cs.section_id=$1
+                SELECT (
+                    EXISTS (
+                        SELECT 1
+                        FROM aios.corpus_section cs
+                        JOIN aios.corpus_document_scope ds ON ds.document_id=cs.document_id
+                        JOIN aios.corpus_scope scope_def
+                          ON scope_def.scope_key=ds.scope_key
+                         AND scope_def.access_class='public'
+                        WHERE cs.section_id=$1
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM aios.corpus_section cs
+                        JOIN aios.corpus_document_scope ds ON ds.document_id=cs.document_id
+                        JOIN aios.character_corpus_access grant_row
+                          ON grant_row.character_id=$2
+                         AND grant_row.allowed
+                         AND (
+                              ds.scope_key=grant_row.scope_key
+                              OR left(ds.scope_key, length(grant_row.scope_key) + 1)
+                                 = grant_row.scope_key || '.'
+                         )
+                        WHERE cs.section_id=$1
+                    )
                 ) AND NOT EXISTS (
                     SELECT 1
                     FROM aios.corpus_section cs
