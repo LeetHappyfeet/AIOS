@@ -73,7 +73,7 @@ class CorpusCatalogService:
         host = _host(source_uri)
         rows = await self.db.fetch(
             """
-            SELECT profile_id, profile_key, source_id, domain_pattern,
+            SELECT profile_id, profile_key, source_id, domain_pattern, path_prefix, knowledge_domain,
                    collection_key, scope_key, epistemic_namespace,
                    identity_binding, priority
             FROM aios.corpus_source_profile
@@ -88,6 +88,8 @@ class CorpusCatalogService:
             exact_source = bool(source_id and row["source_id"] == source_id)
             domain = _domain_matches(host, row["domain_pattern"])
             if not exact_source and not domain:
+                continue
+            if not _path_matches(source_uri, row["path_prefix"]):
                 continue
             # Source identity is more specific than domain at equal priority.
             specificity = 2 if exact_source else 1
