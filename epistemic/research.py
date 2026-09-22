@@ -377,6 +377,7 @@ class CorpusLearningDecision:
     score: float
     threshold: float
     exposure_count: int
+    reinforcement: float
     reason: str
 
 
@@ -440,7 +441,14 @@ class CorpusLearningPolicy:
                        WHERE prior_event.character_id=cre.character_id
                          AND prior.section_id=cce.section_id
                          AND prior.exposed_at <= cce.exposed_at
-                   ) AS exposure_count
+                   ) AS exposure_count,
+                   COALESCE((
+                       SELECT sum(r.strength)
+                       FROM aios.character_corpus_reinforcement r
+                       WHERE r.character_id=cre.character_id
+                         AND r.section_id=cce.section_id
+                         AND r.created_at <= cce.exposed_at
+                   ), 0.0) AS reinforcement
             FROM aios.character_corpus_exposure cce
             JOIN aios.character_research_event cre ON cre.research_id=cce.research_id
             JOIN aios.corpus_section cs ON cs.section_id=cce.section_id
@@ -472,14 +480,16 @@ class CorpusLearningPolicy:
         rank_factor = 1.0 / max(1, int(row["rank"] or 1))
         exposure_count = int(row["exposure_count"] or 1)
         repetition = min(1.0, exposure_count / 3.0)
+        reinforcement = min(1.0, float(row["reinforcement"] or 0.0) / 2.0)
 
         score = (
-            0.25 * retrieval
-            + 0.15 * rank_factor
-            + 0.18 * repetition
-            + 0.14 * curiosity
-            + 0.14 * retention
-            + 0.07 * max(0.0, min(interest, 1.0))
+            0.20 * retrieval
+            + 0.10 * rank_factor
+            + 0.15 * repetition
+            + 0.18 * reinforcement
+            + 0.12 * curiosity
+            + 0.12 * retention
+            + 0.06 * max(0.0, min(interest, 1.0))
             + 0.05 * max(0.0, min(expertise, 1.0))
             + 0.02 * novelty
         )
@@ -492,6 +502,7 @@ class CorpusLearningPolicy:
             score=score,
             threshold=self.threshold,
             exposure_count=exposure_count,
+            reinforcement=reinforcement,
             reason=reason,
         )
 
@@ -576,6 +587,7 @@ class CorpusLearningService:
                     "score": decision.score,
                     "threshold": decision.threshold,
                     "exposure_count": decision.exposure_count,
+                    "reinforcement": decision.reinforcement,
                     "reason": decision.reason,
                     "consumption_id": consumption_by_section.get(decision.section_id),
                 }
@@ -583,3 +595,89 @@ class CorpusLearningService:
             ],
             "acquired_count": len(consumption_by_section),
         }
+
+
+class CorpusReinforcementService:
+    """Record deterministic attention signals for previously exposed sections."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def reinforce_from_focus(
+        self,
+        *,
+        instance_id: UUID,
+        focus_text: str,
+        current_research_id: UUID | None = None,
+        lookback: int = 24,
+    ) -> list[dict]:
+        focus_terms = set(research_terms(focus_text, limit=32))
+        if not focus_terms:
+            return []
+
+        instance = await self.db.fetchrow(
+            "SELECT character_id FROM aios.character_instance WHERE instance_id=$1",
+            instance_id,
+        )
+        if not instance:
+            raise ValueError(f"unknown character instance {instance_id}")
+        character_id = str(instance["character_id"])
+
+        rows = await self.db.fetch(
+            """
+            SELECT cce.section_id, cre.research_id, cs.heading, cs.content
+            FROM aios.character_corpus_exposure cce
+            JOIN aios.character_research_event cre ON cre.research_id=cce.research_id
+            JOIN aios.corpus_section cs ON cs.section_id=cce.section_id
+            WHERE cre.character_id=$1
+              AND ($2::uuid IS NULL OR cre.research_id <> $2)
+              AND cce.acquisition_status <> 'acquired'
+            ORDER BY cce.exposed_at DESC
+            LIMIT $3
+            """,
+            character_id,
+            current_research_id,
+            max(1, min(int(lookback), 100)),
+        )
+
+        reinforced: list[dict] = []
+        seen_sections: set[UUID] = set()
+        for row in rows:
+            section_id = row["section_id"]
+            if section_id in seen_sections:
+                continue
+            seen_sections.add(section_id)
+            section_terms = set(
+                research_terms(
+                    f"{row['heading'] or ''} {row['content'] or ''}",
+                    limit=256,
+                )
+            )
+            overlap = focus_terms & section_terms
+            if not overlap:
+                continue
+            strength = min(1.0, len(overlap) / max(2, min(len(focus_terms), 6)))
+            if strength < 0.25:
+                continue
+            await self.db.execute(
+                """
+                INSERT INTO aios.character_corpus_reinforcement (
+                    character_id, instance_id, section_id, research_id,
+                    signal_kind, strength, meta
+                )
+                VALUES ($1,$2,$3,$4,'focus_overlap',$5,$6::jsonb)
+                ON CONFLICT DO NOTHING
+                """,
+                character_id,
+                instance_id,
+                section_id,
+                current_research_id,
+                strength,
+                json.dumps({"overlap_terms": sorted(overlap)}),
+            )
+            reinforced.append({
+                "section_id": section_id,
+                "strength": strength,
+                "overlap_terms": sorted(overlap),
+            })
+        return reinforced
