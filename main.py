@@ -192,8 +192,8 @@ async def list_corpus_source_profiles() -> dict[str, Any]:
     rows = await db.fetch(
         """
         SELECT csp.profile_id, csp.profile_key, csp.source_id, csp.domain_pattern, csp.path_prefix, csp.knowledge_domain,
-               csp.collection_key, csp.scope_key, cs.access_class, csp.epistemic_namespace, identity_binding, priority,
-               enabled, meta, created_at, updated_at
+               csp.collection_key, csp.scope_key, cs.access_class, csp.epistemic_namespace, csp.identity_binding, csp.priority,
+               csp.enabled, csp.meta, csp.created_at, csp.updated_at
         FROM aios.corpus_source_profile csp
         JOIN aios.corpus_scope cs ON cs.scope_key=csp.scope_key
         ORDER BY csp.priority DESC, csp.profile_key
