@@ -297,8 +297,11 @@ class HUDAssembler:
         )
         last_change = None
         evidence_nodes: list[UUID] = []
-        if event_items:
-            last = event_items[0]
+        # RECENT EVENTS is relevance-ranked for rendering, so its first item is
+        # not guaranteed to be the newest source event. Scene chronology must
+        # follow the source-DAG/current-event ordering instead.
+        if cognitive_snapshot.current_events:
+            last = cognitive_snapshot.current_events[0]
             last_change = last.get("message_text") or last.get("text")
             node_value = last.get("node_id") or last.get("source_node_id")
             if node_value:
