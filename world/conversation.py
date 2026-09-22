@@ -5,6 +5,7 @@ from typing import Iterable
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.world.topology import ensure_character_root_world
 
 
 async def resolve_character_identity(db: Database, source_actor_id: str) -> str | None:
@@ -104,3 +105,53 @@ async def perceiving_instances(db: Database, *, node_id: UUID) -> list[UUID]:
              AND cp.character_instance_id IS NOT NULL""", node_id
     )
     return [r["instance_id"] for r in rows]
+
+
+async def ensure_source_character_identity(
+    db: Database, *, source_actor_id: str, source_namespace: str,
+    display_name: str | None = None, human_controlled: bool = False,
+) -> str:
+    """Create a source-qualified cognitive identity when an adapter is authoritative."""
+    existing = await resolve_character_identity(db, source_actor_id)
+    if existing:
+        return existing
+    safe_namespace = source_namespace.strip().lower().replace(" ", "-")
+    character_id = f"{safe_namespace}:{source_actor_id}"
+    await db.execute(
+        """INSERT INTO aios.character_identity(
+             character_id,canonical_name,display_name,entity_type,meta)
+           VALUES($1,$2,$3,'character',$4::jsonb)
+           ON CONFLICT (character_id) DO NOTHING""",
+        character_id, display_name or source_actor_id, display_name or source_actor_id,
+        json.dumps({
+            "source_created": True,
+            "source_namespace": safe_namespace,
+            "controller_type": "human" if human_controlled else "agent",
+        }),
+    )
+    return character_id
+
+
+async def ensure_cognitive_instance(
+    db: Database, *, character_id: str, source_namespace: str,
+) -> UUID:
+    """Create a lightweight persistent cognition target without activating a HUD runtime."""
+    existing = await db.fetchrow(
+        """SELECT instance_id FROM aios.character_instance
+           WHERE character_id=$1 AND meta->>'conversation_identity_namespace'=$2
+           ORDER BY created_at LIMIT 1""",
+        character_id, source_namespace,
+    )
+    if existing:
+        return existing["instance_id"]
+    world_id = await ensure_character_root_world(db, character_id=character_id)
+    row = await db.execute_returning_row(
+        """INSERT INTO aios.character_instance(character_id,world_id,current_world_id,meta)
+           VALUES($1,$2,$2,$3::jsonb) RETURNING instance_id""",
+        character_id, world_id,
+        json.dumps({
+            "conversation_identity_namespace": source_namespace,
+            "lightweight_cognitive_instance": True,
+        }),
+    )
+    return row["instance_id"]
