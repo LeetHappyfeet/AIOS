@@ -13,6 +13,7 @@ from aios_app.dag import add_node_and_edge, get_or_create_timeline
 from aios_app.corpus import import_corpus_document, consume_corpus_sections
 from aios_app.corpus_catalog import CorpusCatalogService
 from aios_app.corpus_adapters import classify_corpus_document
+from aios_app.corpus_routing import CorpusFacetRouter
 
 logger = logging.getLogger("accumulator.ingest.jsonl")
 
@@ -207,6 +208,8 @@ class JSONLDAGIngestor:
             classification = classify_corpus_document(
                 source_uri=url, metadata=adapter_metadata
             )
+            facet_router = CorpusFacetRouter(self.db)
+            document_route = await facet_router.resolve(classification)
             corpus = await import_corpus_document(
                 self.db, text=content, source_id=context["source_id"],
                 source_kind=context["source_kind"],
@@ -215,8 +218,12 @@ class JSONLDAGIngestor:
                 language=record.get("content", {}).get("lang"),
                 meta={"accumulator_id": record.get("accumulator_id"), "schema_version": record.get("schema_version"), "retrieved_at": record.get("retrieved_at"), "crawl": record.get("crawl") or {}, "web_document": document, "catalog": {"profile_key": route.profile_key, "matched_by": route.matched_by, "collection_key": route.collection_key}},
                 catalog_route=route,
-                epistemic_namespace=classification.epistemic_namespace or route.epistemic_namespace,
+                epistemic_namespace=document_route.epistemic_namespace or classification.epistemic_namespace or route.epistemic_namespace,
                 facets=classification.facets,
+            )
+            await facet_router.apply(
+                document_id=corpus["document_id"],
+                route=document_route,
             )
             if context["ingest_mode"] == "consume":
                 target_character_id = context["target_character_id"]
