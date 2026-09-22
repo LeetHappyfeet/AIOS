@@ -153,7 +153,7 @@ class CorpusSearchService:
             SELECT (
                 EXISTS (
                     SELECT 1 FROM aios.corpus_scope
-                    WHERE access_class='public'
+                    WHERE access_class IN ('public','domain')
                 )
                 OR EXISTS (
                     SELECT 1 FROM aios.character_corpus_access
@@ -177,7 +177,21 @@ class CorpusSearchService:
                 SELECT websearch_to_tsquery('english', $2) AS query
             )
             SELECT cs.section_id, cs.document_id, cd.title, cs.heading,
-                   ts_rank_cd(cs.search_vector, q.query) AS score,
+                   ts_rank_cd(cs.search_vector, q.query)
+                   + CASE WHEN EXISTS (
+                       SELECT 1
+                       FROM aios.corpus_document_collection dcol
+                       JOIN aios.corpus_source_profile csp ON csp.profile_id=dcol.profile_id
+                       JOIN aios.character_knowledge_domain ckd
+                         ON ckd.character_id=$1 AND ckd.enabled
+                        AND ckd.knowledge_domain=csp.knowledge_domain
+                       WHERE dcol.document_id=cs.document_id
+                   ) THEN 0.15 ELSE 0.0 END
+                   + CASE WHEN EXISTS (
+                       SELECT 1 FROM aios.corpus_document_facet facet
+                       WHERE facet.document_id=cs.document_id
+                         AND lower(facet.facet_value) = ANY($4::text[])
+                   ) THEN 0.08 ELSE 0.0 END AS score,
                    CASE
                        WHEN length(cs.content) <= 1800 THEN cs.content
                        ELSE left(cs.content, 1800)
@@ -194,7 +208,7 @@ class CorpusSearchService:
                       FROM aios.corpus_document_scope public_scope
                       JOIN aios.corpus_scope scope_def
                         ON scope_def.scope_key=public_scope.scope_key
-                       AND scope_def.access_class='public'
+                       AND scope_def.access_class IN ('public','domain')
                       WHERE public_scope.document_id=cs.document_id
                   )
                   OR EXISTS (
@@ -236,6 +250,7 @@ class CorpusSearchService:
             character_id,
             query,
             bounded_limit,
+            list(terms),
         )
 
         hits = tuple(
@@ -347,7 +362,7 @@ class CharacterResearchService:
                         JOIN aios.corpus_document_scope ds ON ds.document_id=cs.document_id
                         JOIN aios.corpus_scope scope_def
                           ON scope_def.scope_key=ds.scope_key
-                         AND scope_def.access_class='public'
+                         AND scope_def.access_class IN ('public','domain')
                         WHERE cs.section_id=$1
                     )
                     OR EXISTS (
