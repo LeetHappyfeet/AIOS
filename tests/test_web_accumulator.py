@@ -15,6 +15,8 @@ def test_crawl_task_defaults_to_single_page_and_source_identity():
     assert task.source_id == "example.com"
     assert task.target_character_id is None
     assert task.target_world_id is None
+    assert task.ingest_mode == "corpus"
+    assert task.consumption_mode == "read"
 
 
 def test_queue_tracks_status_without_losing_provenance():
@@ -130,3 +132,22 @@ def test_queue_recovers_pending_tasks(tmp_path):
     popped = recovered.pop()
     assert popped is not None
     assert popped.task_id == task_id
+
+
+def test_v2_web_record_defaults_legacy_records_to_semantic_ingestion():
+    ingestor = JSONLDAGIngestor(None, Path("."))
+    context = ingestor._source_context({"url": "https://example.com/story"})
+    assert context["ingest_mode"] == "semantic"
+    assert context["consumption_mode"] == "read"
+
+
+def test_v2_web_record_preserves_explicit_corpus_consumption_intent():
+    ingestor = JSONLDAGIngestor(None, Path("."))
+    context = ingestor._source_context({
+        "url": "https://example.com/story",
+        "target": {"character_id": "Renamon"},
+        "ingestion": {"mode": "consume", "consumption_mode": "read"},
+    })
+    assert context["target_character_id"] == "Renamon"
+    assert context["ingest_mode"] == "consume"
+    assert context["consumption_mode"] == "read"
