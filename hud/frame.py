@@ -32,6 +32,7 @@ class HUDBudget:
             "goals": 140,
             "rules": 140,
             "recent_events": 220,
+            "corpus_references": 260,
         }
     )
 
@@ -161,6 +162,9 @@ class HUDAssembler:
             "goals": hud_profile.goals_budget,
             "rules": hud_profile.rules_budget,
             "recent_events": max(32, int(hud_profile.token_budget * 0.14)),
+            # Corpus is supplementary reference material and receives a hard,
+            # deliberately small share of the generation context.
+            "corpus_references": max(64, int(hud_profile.token_budget * 0.16)),
         }
         resolved_total = hud_profile.token_budget
         if token_budget is not None and token_budget > 0:
@@ -285,6 +289,14 @@ class HUDAssembler:
             lambda x: x.get("message_text") or x.get("text") or "",
         )
 
+        corpus_references = _trim_to_budget(
+            cognitive_snapshot.corpus_references,
+            section_caps["corpus_references"],
+            lambda x: (
+                f"{x.get('title') or ''} {x.get('heading') or ''} {x.get('text') or ''}"
+            ),
+        )
+
         # Materialize a compact, branch-safe working scene at the exact runtime
         # and source DAG coordinates used for this HUD.  Scene ownership is the
         # character instance; cognitive lineage is deliberately not consulted.
@@ -378,6 +390,7 @@ class HUDAssembler:
             "goals": goal_items,
             "rules": rule_items,
             "recent_events": event_items,
+            "corpus_references": corpus_references,
             "plugins": plugin_snapshot.get("plugins") or {},
             "plugin_sections": plugin_snapshot.get("sections") or [],
             "actions": [
@@ -425,6 +438,11 @@ class HUDAssembler:
                     "selected": len(knowledge),
                     "suppressed_by_reason": cognitive_snapshot.recall_suppressed,
                     "stage": "cognition",
+                },
+                "corpus_research": {
+                    "reference_count": len(corpus_references),
+                    "demand": cognitive_snapshot.corpus_demand,
+                    "durable_knowledge": False,
                 },
                 "focus_text": attention.focus_text,
                 "plugin_focus_text": attention.plugin_focus_text,
