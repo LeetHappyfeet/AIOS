@@ -264,6 +264,17 @@ class CorpusSourceProfileIn(BaseModel):
     reclassify_existing: bool = True
 
 
+class CorpusFacetRouteIn(BaseModel):
+    facet_type: str = Field(min_length=1)
+    facet_value: str = Field(min_length=1)
+    knowledge_domain: str = Field(min_length=1)
+    scope_key: str = Field(min_length=1)
+    epistemic_namespace: str = Field(min_length=1)
+    access_class: Literal["domain", "restricted"] = "domain"
+    priority: int = 0
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
 class CharacterKnowledgeDomainsIn(BaseModel):
     knowledge_domains: List[str] = Field(default_factory=list)
 
