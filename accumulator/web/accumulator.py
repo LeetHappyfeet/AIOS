@@ -14,6 +14,7 @@ from .requests_fetcher import RequestsFetcher
 from .extractor import clean_html, extract_links, extract_page_metadata
 from .body_extractor import extract_body
 from .queue import CrawlTask
+from .crawl_policy import evaluate_page, evaluate_url, normalize_url
 from .writer import JSONLWriter
 
 
@@ -140,6 +141,21 @@ class WebAccumulator:
             )
 
         metadata = extract_page_metadata(html, final_url)
+        page_decision = evaluate_page(
+            metadata=metadata,
+            body=body,
+            html=html,
+        )
+        if not page_decision.accept:
+            return self._failure_detail(
+                "page_rejected",
+                url=final_url,
+                rejection=page_decision.reason,
+                fetch_method=fetch_method,
+                status_code=fetched.get("status_code"),
+                content_type=fetched.get("content_type"),
+            )
+
         content_sha = body.get("text_sha256") or hashlib.sha256(
             body["text"].encode("utf-8")
         ).hexdigest()
@@ -224,9 +240,10 @@ class WebAccumulator:
             max_pages = 1
             max_depth = 0
 
-        seed_host = urlparse(task.url).netloc.lower()
-        frontier = deque([(task.url, None, 0)])
-        queued = {task.url}
+        seed_url = normalize_url(task.url)
+        seed_host = urlparse(seed_url).netloc.lower()
+        frontier = deque([(seed_url, None, 0)])
+        queued = {seed_url}
         visited: set[str] = set()
         written = 0
         failed = 0
@@ -257,6 +274,16 @@ class WebAccumulator:
                 })
                 continue
 
+            url_decision = evaluate_url(url, seed=(depth == 0))
+            if not url_decision.accept:
+                failed += 1
+                failures.append({
+                    "url": url,
+                    "reason": "url_rejected",
+                    "detail": {"rejection": url_decision.reason},
+                })
+                continue
+
             result = self.accumulate_page(
                 url,
                 task=task,
@@ -281,9 +308,13 @@ class WebAccumulator:
                 continue
 
             for link in result.get("links", []):
+                link = normalize_url(link)
                 if link in queued or link in visited:
                     continue
                 if task.same_domain_only and urlparse(link).netloc.lower() != seed_host:
+                    continue
+                link_decision = evaluate_url(link)
+                if not link_decision.accept:
                     continue
                 queued.add(link)
                 frontier.append((link, result["url"], depth + 1))
