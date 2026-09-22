@@ -162,6 +162,7 @@ class WebAccumulator:
             "ingestion": {
                 "mode": task.ingest_mode,
                 "consumption_mode": task.consumption_mode,
+                "corpus_profile_key": task.corpus_profile_key,
             },
             "crawl": {
                 "task_id": task.task_id,
