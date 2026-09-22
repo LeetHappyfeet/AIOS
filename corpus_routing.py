@@ -147,6 +147,71 @@ class CorpusFacetRouter:
             )
 
 
+    async def reconcile_document(self, *, document_id) -> CorpusDocumentRoute:
+        rows = await self.db.fetch(
+            """SELECT facet_type, facet_value, source, confidence, meta
+               FROM aios.corpus_document_facet
+               WHERE document_id=$1
+               ORDER BY facet_type, facet_value""",
+            document_id,
+        )
+        doc = await self.db.fetchrow(
+            "SELECT epistemic_namespace FROM aios.corpus_document WHERE document_id=$1",
+            document_id,
+        )
+        if not doc:
+            raise ValueError(f"unknown corpus document {document_id}")
+        classification = CorpusClassification(
+            facets=tuple(
+                CorpusFacet(
+                    facet_type=str(row["facet_type"]),
+                    facet_value=str(row["facet_value"]),
+                    source=str(row["source"] or "adapter"),
+                    confidence=float(row["confidence"] or 1.0),
+                    meta=dict(row["meta"] or {}),
+                )
+                for row in rows
+            ),
+            epistemic_namespace=str(doc["epistemic_namespace"] or "reference"),
+        )
+        route = await self.resolve(classification)
+
+        # Recompute all facet-derived routing from the document's complete
+        # current facet set. Manual/source-profile scopes are left untouched.
+        await self.db.execute(
+            """DELETE FROM aios.corpus_document_domain
+               WHERE document_id=$1 AND source='facet_route'""",
+            document_id,
+        )
+        await self.db.execute(
+            """DELETE FROM aios.corpus_document_scope cds
+               WHERE cds.document_id=$1
+                 AND EXISTS (
+                     SELECT 1 FROM aios.corpus_facet_route cfr
+                     WHERE cfr.scope_key=cds.scope_key
+                 )""",
+            document_id,
+        )
+        await self.apply(document_id=document_id, route=route)
+        return route
+
+    async def reconcile_matching_documents(
+        self, *, facet_type: str, facet_value: str
+    ) -> int:
+        rows = await self.db.fetch(
+            """SELECT DISTINCT document_id
+               FROM aios.corpus_document_facet
+               WHERE lower(facet_type)=lower($1)
+                 AND lower(regexp_replace(trim(facet_value), '\\s+', ' ', 'g'))=$2
+               ORDER BY document_id""",
+            facet_type,
+            normalize_facet_value(facet_value),
+        )
+        for row in rows:
+            await self.reconcile_document(document_id=row["document_id"])
+        return len(rows)
+
+
 async def ensure_facet_route(
     db: Database,
     *,
@@ -183,4 +248,11 @@ async def ensure_facet_route(
         facet_type, facet_value, knowledge_domain, scope_key,
         epistemic_namespace, access_class, int(priority), json.dumps(meta or {}),
     )
-    return dict(row)
+    result = dict(row)
+    result["documents_reclassified"] = await CorpusFacetRouter(
+        db
+    ).reconcile_matching_documents(
+        facet_type=facet_type,
+        facet_value=facet_value,
+    )
+    return result
