@@ -210,3 +210,17 @@ def test_page_policy_does_not_reject_valid_fandom_page_for_embedded_cloudflare_m
         ),
     )
     assert decision.accept
+
+
+def test_page_policy_ignores_challenge_boilerplate_in_large_article_body():
+    text = (
+        ("Kim Possible is the title character of the series. " * 80)
+        + " Enable JavaScript and cookies to continue. "
+        + ("The article continues with character and episode information. " * 40)
+    )
+    decision = evaluate_page(
+        metadata={"title": "Kim Possible Wiki"},
+        body={"text": text},
+        html="<html><title>Kim Possible Wiki</title><article>content</article></html>",
+    )
+    assert decision.accept
