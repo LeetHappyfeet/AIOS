@@ -11,7 +11,7 @@ from selenium.common.exceptions import TimeoutException
 from .config import ACCUMULATOR_ID, DEFAULT_USER_AGENT, OUTPUT_DIR
 from .fetcher import SeleniumFetcher
 from .requests_fetcher import RequestsFetcher
-from .extractor import clean_html, extract_links, extract_page_metadata
+from .extractor import clean_html, extract_links, extract_page_metadata, extract_structured_source_metadata
 from .body_extractor import extract_body
 from .queue import CrawlTask
 from .crawl_policy import evaluate_page, evaluate_url, normalize_url
@@ -158,6 +158,7 @@ class WebAccumulator:
             )
 
         metadata = extract_page_metadata(html, final_url)
+        structured_metadata = extract_structured_source_metadata(html, final_url)
         page_decision = evaluate_page(
             metadata=metadata,
             body=body,
@@ -220,6 +221,7 @@ class WebAccumulator:
                 "content_type": fetched.get("content_type"),
             },
             "document": metadata,
+            "structured_metadata": structured_metadata,
             "content": {
                 "lang": "en",
                 "title": metadata.get("title"),
