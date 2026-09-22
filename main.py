@@ -7,12 +7,13 @@ DAG, runtime-cursor, HUD-dirty, and downstream pipeline side effects.
 
 from aios_app.main_legacy import app, db
 from aios_app.ingest_api import ingest_message
-from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn, CharacterKnowledgeDomainsIn
+from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn, CorpusFacetRouteIn, CharacterKnowledgeDomainsIn
 from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
 from aios_app.char.identity_sources import stage_identity_source, identity_snapshot
 from aios_app.corpus import import_corpus_document, consume_corpus_sections
 from aios_app.corpus_catalog import CorpusCatalogService, CorpusAccessReconciler
+from aios_app.corpus_routing import ensure_facet_route
 from pydantic import BaseModel, Field
 from typing import Any
 
@@ -200,6 +201,33 @@ async def list_corpus_source_profiles() -> dict[str, Any]:
         """
     )
     return {"profiles": [dict(row) for row in rows]}
+
+
+@app.post("/corpus/facet-route")
+async def upsert_corpus_facet_route(req: CorpusFacetRouteIn) -> dict[str, Any]:
+    """Register one trusted structured-facet to document-domain route."""
+    return await ensure_facet_route(
+        db,
+        facet_type=req.facet_type,
+        facet_value=req.facet_value,
+        knowledge_domain=req.knowledge_domain,
+        scope_key=req.scope_key,
+        epistemic_namespace=req.epistemic_namespace,
+        access_class=req.access_class,
+        priority=req.priority,
+        meta=req.meta,
+    )
+
+
+@app.get("/corpus/facet-routes")
+async def list_corpus_facet_routes() -> dict[str, Any]:
+    rows = await db.fetch(
+        """SELECT facet_type, facet_value, knowledge_domain, scope_key,
+                  epistemic_namespace, access_class, priority, enabled, meta
+           FROM aios.corpus_facet_route
+           ORDER BY priority DESC, facet_type, facet_value, knowledge_domain"""
+    )
+    return {"routes": [dict(row) for row in rows]}
 
 
 @app.put("/character/{character_id}/corpus/knowledge-domains")
