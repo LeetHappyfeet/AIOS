@@ -571,7 +571,7 @@ class CognitiveContextService:
         if corpus_demand.needed:
             # Search the missing concepts rather than replaying the entire turn.
             # This keeps dialogue/scaffolding words out of the FTS query.
-            corpus_query = " ".join(corpus_demand.missing_terms)
+            corpus_query = " OR ".join(corpus_demand.missing_terms)
             try:
                 corpus_result = await self.research.search(
                     instance_id=context.instance_id,
