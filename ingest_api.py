@@ -15,6 +15,11 @@ from aios_app.ingest_identity import (
     should_short_circuit_replay,
 )
 from aios_app.models import IngestIn, IngestOut
+from aios_app.world.conversation import (
+    bind_available_instance,
+    ensure_participant,
+    record_message_participation,
+)
 
 
 async def _runtime_source_head(db, req: IngestIn, timeline_id):
@@ -237,6 +242,34 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                 payload["supersedes_event_id"] = int(prior["event_id"])
                 payload["source_branch_mode"] = "replacement"
 
+        # Establish all known actors as participants before the node is
+        # projected. This keeps live API ingestion on the same multi-party
+        # contract as imported chat logs.
+        actor_specs: dict[str, tuple[str, str]] = {}
+        if req.character_id:
+            actor_specs[req.character_id] = ("character", "agent")
+        if req.user_name:
+            actor_specs.setdefault(req.user_name, ("user", "human"))
+        if req.speaker_id:
+            actor_specs[req.speaker_id] = (
+                req.speaker_type or "character",
+                "human" if req.speaker_type == "user" else "agent",
+            )
+        if req.recipient_id:
+            actor_specs.setdefault(req.recipient_id, ("character", "agent"))
+        for actor_id, (actor_type, controller_type) in actor_specs.items():
+            participant_id = await ensure_participant(
+                db,
+                timeline_id=timeline_id,
+                source_actor_id=actor_id,
+                actor_type=actor_type,
+                controller_type=controller_type,
+                controller_ref=actor_id if controller_type == "human" else f"character:{actor_id}",
+                participant_role="primary" if actor_id == req.character_id else "participant",
+                meta={"source": client_source, "live_ingest": True},
+            )
+            await bind_available_instance(db, participant_id=participant_id)
+
         node_id, _ = await add_node_and_edge(
             db,
             timeline_id=timeline_id,
@@ -251,6 +284,15 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             viewpoint_id=resolved_viewpoint_id,
             parent_node_id=replacement_parent_node_id,
             edge_type="alternative" if replacement_parent_node_id else "next",
+        )
+
+        await record_message_participation(
+            db,
+            timeline_id=timeline_id,
+            node_id=node_id,
+            speaker_id=req.speaker_id,
+            addressee_ids=[req.recipient_id] if req.recipient_id else [],
+            audience_ids=actor_specs.keys(),
         )
 
         # A source cursor may move backwards only when the request is actually
