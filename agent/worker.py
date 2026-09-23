@@ -12,6 +12,7 @@ from aios_app.inference import InferenceBroker, InferenceRequest
 from .actions import ActionDispatcher, default_action_registry
 from .lifecycle import CharacterAgencyStore
 from .runtime import AgentRuntimeStore
+from .deterministic import DEFAULT_DETERMINISTIC_TASKS, DeterministicTaskRegistry
 
 
 PROFILE_BY_WORKER = {
@@ -24,7 +25,7 @@ PROFILE_BY_WORKER = {
 
 
 class CharacterWorker:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, deterministic: DeterministicTaskRegistry | None = None):
         self.db = db
         self.agency = CharacterAgencyStore(db)
         self.runtime = AgentRuntimeStore(db)
@@ -32,6 +33,7 @@ class CharacterWorker:
         self.dispatcher = ActionDispatcher(db, self.registry)
         self.broker = InferenceBroker(db)
         self.hud = HUDAssembler(db)
+        self.deterministic = deterministic or DEFAULT_DETERMINISTIC_TASKS
 
     async def _first_person_prompt(
         self, *, instance_id: UUID, worker_class: str, objective: str,
@@ -78,6 +80,48 @@ class CharacterWorker:
             raise ValueError(f"Task {task_id} is not runnable from {task.status}")
 
         worker_class = task.task_type
+        deterministic_spec = self.deterministic.get(worker_class)
+        use_deterministic = (
+            task.execution_mode == "deterministic"
+            or (task.execution_mode == "auto" and deterministic_spec is not None)
+        )
+        if task.execution_mode == "deterministic" and deterministic_spec is None:
+            await self.agency.transition_task(
+                task_id, "failed",
+                error=f"No deterministic implementation registered for {worker_class}",
+            )
+            raise ValueError(
+                f"No deterministic implementation registered for {worker_class}"
+            )
+        if use_deterministic and deterministic_spec is not None:
+            await self.runtime.ensure(task.instance_id)
+            await self.db.execute(
+                """
+                UPDATE aios.character_agent_runtime
+                SET state='acting', active_task_id=$2,
+                    last_activity_at=now(), updated_at=now()
+                WHERE instance_id=$1
+                """,
+                task.instance_id, task.task_id,
+            )
+            try:
+                result = dict(await deterministic_spec.handler(
+                    task.instance_id,
+                    {
+                        "objective": task.objective,
+                        "retrieval_focus": task.retrieval_focus,
+                        "task_id": str(task.task_id),
+                    },
+                ))
+                result["execution_mode"] = "deterministic"
+                await self.agency.transition_task(task_id, "succeeded", result=result)
+                await self.runtime.finish_semantic_turn(task.instance_id, semantic=False)
+                return result
+            except Exception as exc:
+                await self.agency.transition_task(task_id, "failed", error=str(exc)[:2000])
+                await self.runtime.finish_semantic_turn(task.instance_id, semantic=False)
+                raise
+
         profile = task.hud_profile_name or PROFILE_BY_WORKER.get(
             worker_class, "agent.executive"
         )
@@ -91,6 +135,7 @@ class CharacterWorker:
             task.instance_id, task.task_id,
         )
         try:
+            await self.runtime.assert_inference_budget(task.instance_id, task.task_id)
             prompt, state_version = await self._first_person_prompt(
                 instance_id=task.instance_id, worker_class=worker_class,
                 objective=task.retrieval_focus or task.objective,
@@ -113,6 +158,7 @@ class CharacterWorker:
             )
 
             action_results = []
+            await self.runtime.assert_action_budget(task.instance_id, task.task_id, len(inference.response.actions))
             for index, proposal in enumerate(inference.response.actions):
                 spec = self.registry.get(proposal.type)
                 if not spec:
@@ -154,15 +200,7 @@ class CharacterWorker:
                 "actions": action_results,
             }
             await self.agency.transition_task(task_id, "succeeded", result=result)
-            await self.db.execute(
-                """
-                UPDATE aios.character_agent_runtime
-                SET state='ready', active_task_id=NULL, active_action_id=NULL,
-                    last_activity_at=now(), updated_at=now()
-                WHERE instance_id=$1
-                """,
-                task.instance_id,
-            )
+            await self.runtime.finish_semantic_turn(task.instance_id, semantic=True)
             return result
         except Exception as exc:
             await self.agency.transition_task(task_id, "failed", error=str(exc)[:2000])
