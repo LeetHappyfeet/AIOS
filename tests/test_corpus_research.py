@@ -200,3 +200,60 @@ def test_only_trusted_structured_fandom_identifiers_route_domains():
     assert "fandom" in CorpusFacetRouter.ROUTABLE_FACET_TYPES
     assert "character" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
     assert "tag" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
+
+
+def test_structured_metadata_adapter_routes_catalog_subjects_without_prose():
+    from aios_app.corpus_adapters import classify_corpus_document
+    result = classify_corpus_document(
+        source_uri="file:///library/cardiology.epub",
+        metadata={
+            "catalog": {
+                "subjects": ["Cardiology", "Medicine"],
+                "source_type": "book",
+            },
+            "text": "This prose must not be classified.",
+        },
+    )
+    values = {(f.facet_type, f.facet_value) for f in result.facets}
+    assert ("subject", "cardiology") in values
+    assert ("subject", "medicine") in values
+    assert ("source_type", "book") in values
+    assert all("prose" not in value for _, value in values)
+
+
+def test_structured_character_domain_identifiers_ignore_card_prose():
+    from aios_app.char.domain_resolution import structured_character_identifiers
+    card = {
+        "description": "A Jedi from Star Wars who studies medicine.",
+        "personality": "Mentions My Little Pony constantly.",
+        "metadata": {"franchise": "Star Wars"},
+    }
+    values = structured_character_identifiers(card)
+    assert values == ({
+        "identifier_type": "franchise",
+        "identifier_value": "star wars",
+        "relationship": "native",
+        "source_field": "metadata.franchise",
+    },)
+
+
+def test_structured_character_domain_identifiers_support_crossover_metadata():
+    from aios_app.char.domain_resolution import structured_character_identifiers
+    card = {
+        "source_metadata": {
+            "fandoms": ["Digimon", "Kim Possible"],
+            "relationship": "crossover",
+        }
+    }
+    values = structured_character_identifiers(card)
+    assert {(v["identifier_type"], v["identifier_value"], v["relationship"]) for v in values} == {
+        ("fandom", "digimon", "crossover"),
+        ("fandom", "kim possible", "crossover"),
+    }
+
+
+def test_domain_router_accepts_real_and_fictional_structured_identifier_types():
+    from aios_app.corpus_routing import CorpusFacetRouter
+    assert {"fandom", "franchise", "universe", "subject", "domain"} <= CorpusFacetRouter.ROUTABLE_FACET_TYPES
+    assert "character" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
+    assert "tag" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
