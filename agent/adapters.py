@@ -5,43 +5,27 @@ from uuid import UUID
 
 from aios_app.db import Database
 from .actions import ActionRegistry, ActionSpec
-from .gateway import ExternalGateway
 
 
 def register_external_actions(db: Database, registry: ActionRegistry) -> None:
-    gateway = ExternalGateway(db)
-
     async def n8n_workflow(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
-        integration_key = str(args.get("integration_key") or "n8n")
-        # action_id is injected by a future delivery worker; handler records intent only.
-        return {
-            "delivery_required": True,
-            "integration_key": integration_key,
-            "workflow": str(args["workflow"]),
-            "input": dict(args.get("input") or {}),
-        }
+        return {"external_delivery": {
+            "integration_key": str(args.get("integration_key") or "n8n"),
+            "payload": {"kind": "n8n_workflow", "workflow": str(args["workflow"]),
+                        "input": dict(args.get("input") or {})},
+        }}
 
     async def email_draft(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
-        return {
-            "draft": {
-                "to": str(args["to"]),
-                "subject": str(args.get("subject") or ""),
-                "body": str(args["body"]),
-                "thread_id": args.get("thread_id"),
-            }
-        }
+        return {"draft": {"to": str(args["to"]), "subject": str(args.get("subject") or ""),
+                          "body": str(args["body"]), "thread_id": args.get("thread_id")}}
 
     async def email_send(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
-        return {
-            "delivery_required": True,
+        return {"external_delivery": {
             "integration_key": str(args.get("integration_key") or "email"),
-            "message": {
-                "to": str(args["to"]),
-                "subject": str(args.get("subject") or ""),
-                "body": str(args["body"]),
-                "thread_id": args.get("thread_id"),
-            },
-        }
+            "payload": {"kind": "email_send", "message": {
+                "to": str(args["to"]), "subject": str(args.get("subject") or ""),
+                "body": str(args["body"]), "thread_id": args.get("thread_id")}},
+        }}
 
     registry.register(ActionSpec(
         "n8n.run_workflow",
@@ -73,10 +57,7 @@ def register_interagent_actions(db: Database, registry: ActionRegistry) -> None:
 
     async def send_message(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         target = UUID(str(args["target_instance_id"]))
-        row = await db.fetchrow(
-            "SELECT instance_id FROM aios.character_instance WHERE instance_id=$1",
-            target,
-        )
+        row = await db.fetchrow("SELECT instance_id FROM aios.character_instance WHERE instance_id=$1", target)
         if not row:
             raise LookupError("target character instance does not exist")
         wake_id = await runtime.wake(
