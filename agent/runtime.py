@@ -89,6 +89,69 @@ class AgentRuntimeStore:
             wake_id,
         )
 
+
+    async def assert_inference_budget(self, instance_id: UUID, task_id: UUID) -> None:
+        row = await self.db.fetchrow(
+            """SELECT ar.max_semantic_wake_chain, ar.semantic_wake_chain,
+                      ar.max_inference_per_task, ar.cooldown_until,
+                      (SELECT count(*) FROM aios.inference_request ir WHERE ir.task_id=$2) AS inference_count
+               FROM aios.character_agent_runtime ar WHERE ar.instance_id=$1""",
+            instance_id, task_id,
+        )
+        if not row:
+            raise RuntimeError("agent runtime missing")
+        if row["cooldown_until"] is not None and row["cooldown_until"] > datetime.now(timezone.utc):
+            raise RuntimeError("agent inference cooldown is active")
+        if int(row["semantic_wake_chain"]) >= int(row["max_semantic_wake_chain"]):
+            raise RuntimeError("maximum semantic wake chain reached")
+        if int(row["inference_count"]) >= int(row["max_inference_per_task"]):
+            raise RuntimeError("maximum inference calls for task reached")
+
+    async def assert_action_budget(self, instance_id: UUID, task_id: UUID, proposed_count: int) -> None:
+        row = await self.db.fetchrow(
+            """SELECT ar.max_actions_per_task,
+                      (SELECT count(*) FROM aios.character_action ca WHERE ca.task_id=$2) AS action_count
+               FROM aios.character_agent_runtime ar WHERE ar.instance_id=$1""",
+            instance_id, task_id,
+        )
+        if not row:
+            raise RuntimeError("agent runtime missing")
+        if int(row["action_count"]) + int(proposed_count) > int(row["max_actions_per_task"]):
+            raise RuntimeError("maximum actions for task reached")
+
+    async def finish_semantic_turn(self, instance_id: UUID, *, semantic: bool) -> None:
+        await self.db.execute(
+            """UPDATE aios.character_agent_runtime
+               SET state=CASE WHEN EXISTS (
+                       SELECT 1 FROM aios.character_wake_event w
+                       WHERE w.instance_id=$1 AND w.status='pending' AND w.available_at <= now()
+                   ) THEN 'ready' ELSE 'dormant' END,
+                   active_task_id=NULL, active_action_id=NULL,
+                   semantic_wake_chain=CASE WHEN $2 THEN semantic_wake_chain + 1 ELSE 0 END,
+                   cooldown_until=CASE WHEN $2 AND cooldown_seconds > 0
+                       THEN now() + (cooldown_seconds * interval '1 second') ELSE NULL END,
+                   last_activity_at=now(), updated_at=now()
+               WHERE instance_id=$1""",
+            instance_id, semantic,
+        )
+
+    async def set_autonomy_policy(
+        self, instance_id: UUID, *, max_semantic_wake_chain: int | None = None,
+        max_inference_per_task: int | None = None, max_actions_per_task: int | None = None,
+        cooldown_seconds: int | None = None,
+    ) -> None:
+        await self.ensure(instance_id)
+        await self.db.execute(
+            """UPDATE aios.character_agent_runtime SET
+                   max_semantic_wake_chain=COALESCE($2,max_semantic_wake_chain),
+                   max_inference_per_task=COALESCE($3,max_inference_per_task),
+                   max_actions_per_task=COALESCE($4,max_actions_per_task),
+                   cooldown_seconds=COALESCE($5,cooldown_seconds), updated_at=now()
+               WHERE instance_id=$1""",
+            instance_id, max_semantic_wake_chain, max_inference_per_task,
+            max_actions_per_task, cooldown_seconds,
+        )
+
     async def configure_heartbeat(
         self, instance_id: UUID, *, enabled: bool, interval_seconds: int = 300
     ) -> None:
