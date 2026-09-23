@@ -158,29 +158,81 @@ class CharacterDomainResolver:
 async def reconcile_character_domain_candidates(
     db: Database, *, identifier_type: str, identifier_value: str
 ) -> int:
-    """Mark matching staged affiliations resolvable after a registry update.
+    """Retroactively project newly registered structured affiliations.
 
-    Identity remains revision-controlled: this function inventories newly
-    resolvable rows but does not silently mutate an already-running character.
-    Re-import/bootstrap of the authored source performs the normal acceptance.
+    Authored character sources use the same authority they had at bootstrap:
+    the resolved domain is staged as an identity candidate and accepted through
+    the normal revision path. Reference sources remain proposed only.
     """
+    from aios_app.char.identity_revision import accept_identity_candidate
+
+    identifier_type = identifier_type.strip().lower()
     value = normalize_facet_value(identifier_value)
     domain_rows = await db.fetch(
-        """SELECT kd.domain_id
+        """SELECT kd.domain_id, kd.domain_key
            FROM aios.knowledge_domain_identifier kdi
            JOIN aios.knowledge_domain kd ON kd.domain_id=kdi.domain_id AND kd.enabled
-           WHERE kdi.identifier_type=$1 AND kdi.identifier_value=$2""",
-        identifier_type.strip().lower(), value,
+           WHERE kdi.identifier_type=$1 AND kdi.identifier_value=$2
+           ORDER BY kdi.confidence DESC, kd.domain_key""",
+        identifier_type, value,
     )
     if len(domain_rows) != 1:
         return 0
-    result = await db.execute(
-        """UPDATE aios.character_domain_candidate
-           SET resolved_domain_id=$3, meta=meta || jsonb_build_object('now_resolvable',true)
-           WHERE identifier_type=$1 AND identifier_value=$2 AND status='unresolved'""",
-        identifier_type.strip().lower(), value, domain_rows[0]["domain_id"],
+
+    domain = domain_rows[0]
+    candidates = await db.fetch(
+        """SELECT cdc.candidate_id, cdc.character_id, cdc.source_id,
+                  cdc.relationship, cdc.source_field, cis.authority
+           FROM aios.character_domain_candidate cdc
+           LEFT JOIN aios.character_identity_source cis ON cis.source_id=cdc.source_id
+           WHERE cdc.identifier_type=$1 AND cdc.identifier_value=$2
+             AND cdc.status='unresolved'
+           ORDER BY cdc.created_at""",
+        identifier_type, value,
     )
-    try:
-        return int(result.rsplit(" ", 1)[-1])
-    except (ValueError, AttributeError):
-        return 0
+    reconciled = 0
+    for staged in candidates:
+        identity_candidate = await db.execute_returning_row(
+            """INSERT INTO aios.character_identity_candidate (
+                   character_id, source_id, facet_type, facet_key, value,
+                   stability, authority, mutability, perspective,
+                   source_field, source_fragment, disposition, meta
+               )
+               VALUES ($1,$2,'domain',$3,$4::jsonb,'structural',$5,
+                       'explicit','self',$6,$7,'proposed',$8::jsonb)
+               ON CONFLICT (source_id, facet_type, facet_key, source_field) DO UPDATE
+               SET value=EXCLUDED.value,
+                   source_fragment=EXCLUDED.source_fragment,
+                   meta=aios.character_identity_candidate.meta || EXCLUDED.meta
+               RETURNING candidate_id""",
+            staged["character_id"], staged["source_id"], domain["domain_key"],
+            json.dumps({
+                "domain": str(domain["domain_key"]),
+                "relationship": str(staged["relationship"]),
+            }),
+            str(staged["authority"] or "reference"),
+            staged["source_field"] or "",
+            f"{identifier_type}:{value}",
+            json.dumps({
+                "resolved_from_identifier_type": identifier_type,
+                "resolved_from_identifier_value": value,
+                "retroactive_domain_resolution": True,
+            }),
+        )
+        await db.execute(
+            """UPDATE aios.character_domain_candidate
+               SET status='resolved', resolved_domain_id=$2, resolved_at=now(),
+                   meta=meta || jsonb_build_object('projected_identity_candidate',$3::text)
+               WHERE candidate_id=$1""",
+            staged["candidate_id"], domain["domain_id"],
+            str(identity_candidate["candidate_id"]),
+        )
+        if str(staged["authority"] or "") == "authored":
+            await accept_identity_candidate(
+                db,
+                identity_candidate["candidate_id"],
+                actor="domain_registry_reconciliation",
+                reason="trusted structured character domain identifier resolved",
+            )
+        reconciled += 1
+    return reconciled
