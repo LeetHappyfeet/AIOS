@@ -76,12 +76,21 @@ class CorpusFacetRouter:
             return CorpusDocumentRoute((), (), classification.epistemic_namespace, ())
 
         rows = await self.db.fetch(
-            """SELECT facet_type, facet_value, knowledge_domain, scope_key,
-                      epistemic_namespace, access_class, priority, meta
-               FROM aios.corpus_facet_route
-               WHERE enabled=TRUE
-                 AND facet_type = ANY($1::text[])
-               ORDER BY priority DESC, knowledge_domain, scope_key""",
+            """SELECT kdi.identifier_type AS facet_type,
+                      kdi.identifier_value AS facet_value,
+                      kd.domain_key AS knowledge_domain,
+                      COALESCE(kd.default_scope_key, kd.domain_key) AS scope_key,
+                      kd.default_epistemic_namespace AS epistemic_namespace,
+                      COALESCE(cs.access_class, 'domain') AS access_class,
+                      COALESCE((kdi.meta->>'priority')::integer, 0) AS priority,
+                      kdi.meta
+               FROM aios.knowledge_domain_identifier kdi
+               JOIN aios.knowledge_domain kd
+                 ON kd.domain_id=kdi.domain_id AND kd.enabled
+               LEFT JOIN aios.corpus_scope cs
+                 ON cs.scope_key=COALESCE(kd.default_scope_key, kd.domain_key)
+               WHERE kdi.identifier_type = ANY($1::text[])
+               ORDER BY priority DESC, kd.domain_key""",
             sorted({kind for kind, _ in facets}),
         )
         matched: list[CorpusFacetRoute] = []
@@ -113,6 +122,35 @@ class CorpusFacetRouter:
         else:
             namespace = classification.epistemic_namespace
         return CorpusDocumentRoute(scopes, domains, namespace, tuple(matched))
+
+    async def observe_unresolved(self, *, document_id, classification: CorpusClassification, route: CorpusDocumentRoute) -> int:
+        """Inventory unknown trusted structured identifiers without granting access."""
+        matched = {
+            (r.facet_type, normalize_facet_value(r.facet_value))
+            for r in route.matched_routes
+        }
+        unresolved = {
+            (str(f.facet_type).strip().lower(), normalize_facet_value(f.facet_value))
+            for f in classification.facets
+            if str(f.facet_type).strip().lower() in self.ROUTABLE_FACET_TYPES
+            and normalize_facet_value(f.facet_value)
+            and (str(f.facet_type).strip().lower(), normalize_facet_value(f.facet_value)) not in matched
+        }
+        for identifier_type, identifier_value in unresolved:
+            await self.db.execute(
+                """INSERT INTO aios.knowledge_domain_candidate (
+                       identifier_type, identifier_value, occurrence_count,
+                       first_document_id, last_document_id, source, meta
+                   )
+                   VALUES ($1,$2,1,$3,$3,'corpus_structured_metadata',
+                           jsonb_build_object('evidence','trusted_structured_facet'))
+                   ON CONFLICT (identifier_type, identifier_value) DO UPDATE
+                   SET occurrence_count=aios.knowledge_domain_candidate.occurrence_count+1,
+                       last_document_id=EXCLUDED.last_document_id,
+                       last_seen_at=now()""",
+                identifier_type, identifier_value, document_id,
+            )
+        return len(unresolved)
 
     async def apply(self, *, document_id, route: CorpusDocumentRoute) -> None:
         for matched in route.matched_routes:
@@ -208,6 +246,11 @@ class CorpusFacetRouter:
             document_id,
         )
         await self.apply(document_id=document_id, route=route)
+        await self.observe_unresolved(
+            document_id=document_id,
+            classification=classification,
+            route=route,
+        )
         return route
 
     async def reconcile_matching_documents(
