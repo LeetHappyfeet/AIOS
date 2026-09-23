@@ -188,3 +188,15 @@ def test_automatic_corpus_research_rejects_character_own_output():
 def test_automatic_corpus_research_rejects_assistant_output():
     attention = _corpus_attention(speaker_id="Renamon", speaker_role="assistant")
     assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
+
+
+def test_domain_identifier_normalization_is_stable():
+    from aios_app.corpus_routing import normalize_facet_value
+    assert normalize_facet_value("  Star Wars   - All Media Types ") == "star wars - all media types"
+
+
+def test_only_trusted_structured_fandom_identifiers_route_domains():
+    from aios_app.corpus_routing import CorpusFacetRouter
+    assert "fandom" in CorpusFacetRouter.ROUTABLE_FACET_TYPES
+    assert "character" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
+    assert "tag" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
