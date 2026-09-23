@@ -330,20 +330,38 @@ class CorpusAccessReconciler:
         return {"knowledge_domain": knowledge_domain, "characters": results}
 
     async def set_character_domains(self, character_id: str, domains: list[str]) -> dict:
+        """Replace operator-configured corpus domains without mutating identity-owned affinity."""
         normalized = sorted({str(value).strip() for value in domains if str(value).strip()})
         await self.db.execute(
             """UPDATE aios.character_knowledge_domain
                SET enabled=FALSE, updated_at=now()
-               WHERE character_id=$1""",
+               WHERE character_id=$1 AND provenance='operator'""",
             character_id,
         )
         for domain in normalized:
+            existing = await self.db.fetchrow(
+                """SELECT provenance
+                   FROM aios.character_knowledge_domain
+                   WHERE character_id=$1 AND knowledge_domain=$2""",
+                character_id, domain,
+            )
+            if existing and existing["provenance"] != "operator":
+                # A stronger/specialized owner already supplies this affinity.
+                # Do not steal provenance merely because an operator also listed it.
+                continue
             await self.db.execute(
                 """INSERT INTO aios.character_knowledge_domain
-                       (character_id, knowledge_domain, enabled, meta)
-                   VALUES ($1,$2,TRUE,$3::jsonb)
+                       (character_id, knowledge_domain, enabled, relationship,
+                        provenance, meta)
+                   VALUES ($1,$2,TRUE,'granted','operator',$3::jsonb)
                    ON CONFLICT (character_id, knowledge_domain) DO UPDATE
-                   SET enabled=TRUE, updated_at=now()""",
-                character_id, domain, json.dumps({"assigned_by": "character_configuration"}),
+                   SET enabled=TRUE,
+                       relationship='granted',
+                       provenance='operator',
+                       source_facet_id=NULL,
+                       meta=aios.character_knowledge_domain.meta || EXCLUDED.meta,
+                       updated_at=now()""",
+                character_id, domain,
+                json.dumps({"assigned_by": "character_configuration"}),
             )
         return await self.reconcile_character(character_id)
