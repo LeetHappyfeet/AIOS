@@ -162,36 +162,6 @@ async def bootstrap_character_card(
 
         candidates = _facet_candidates(card)
 
-        # Source-native structured franchise/fandom/universe metadata may resolve
-        # through the trusted domain registry. This never examines description,
-        # personality, scenario, dialogue, or other prose.
-        resolved_domains = await CharacterDomainResolver(db).resolve(
-            character_id=character_id,
-            source_id=source_id,
-            card=card,
-        )
-        explicit_domains = {
-            item["facet_key"]
-            for item in candidates
-            if item.get("facet_type") == "domain"
-        }
-        for declaration in resolved_domains:
-            domain = declaration["domain"]
-            if domain in explicit_domains:
-                continue
-            candidates.append({
-                "facet_type": "domain",
-                "facet_key": domain,
-                "value": {
-                    "domain": domain,
-                    "relationship": declaration["relationship"],
-                },
-                "stability": "structural",
-                "source_field": declaration["source_field"],
-                "source_fragment": declaration["source_fragment"],
-                "meta": declaration.get("meta") or {},
-            })
-
         candidate_ids: list[str] = []
         for item in candidates:
             row = await con.fetchrow(
@@ -214,6 +184,42 @@ async def bootstrap_character_card(
                 json.dumps(item.get("meta") or {}),
             )
             candidate_ids.append(str(row["candidate_id"]))
+
+    # Resolve source-native structured affiliations after the identity-source
+    # transaction commits, so candidate provenance/FKs are visible normally.
+    resolved_domains = await CharacterDomainResolver(db).resolve(
+        character_id=character_id,
+        source_id=source_id,
+        card=card,
+    )
+    explicit_domains = {
+        item["facet_key"]
+        for item in candidates
+        if item.get("facet_type") == "domain"
+    }
+    for declaration in resolved_domains:
+        domain = declaration["domain"]
+        if domain in explicit_domains:
+            continue
+        row = await db.execute_returning_row(
+            """INSERT INTO aios.character_identity_candidate (
+                   character_id, source_id, facet_type, facet_key, value,
+                   stability, authority, mutability, perspective,
+                   source_field, source_fragment, disposition, meta
+               )
+               VALUES ($1,$2,'domain',$3,$4::jsonb,'structural','authored',
+                       'explicit','self',$5,$6,'proposed',$7::jsonb)
+               ON CONFLICT (source_id, facet_type, facet_key, source_field) DO UPDATE
+               SET value=EXCLUDED.value,
+                   source_fragment=EXCLUDED.source_fragment,
+                   meta=aios.character_identity_candidate.meta || EXCLUDED.meta
+               RETURNING candidate_id""",
+            character_id, source_id, domain,
+            json.dumps({"domain": domain, "relationship": declaration["relationship"]}),
+            declaration["source_field"], declaration["source_fragment"],
+            json.dumps(declaration.get("meta") or {}),
+        )
+        candidate_ids.append(str(row["candidate_id"]))
 
     accepted = []
     if auto_accept_authored:
