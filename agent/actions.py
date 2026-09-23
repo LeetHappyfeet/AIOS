@@ -8,6 +8,7 @@ from aios_app.db import Database
 from aios_app.epistemic.research import CharacterResearchService
 from .lifecycle import ActionRecord, CharacterAgencyStore
 from .policy import ActionPolicyService
+from .gateway import ExternalGateway
 
 
 ActionHandler = Callable[[UUID, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
@@ -90,9 +91,17 @@ class ActionDispatcher:
             return await self.store.transition_action(
                 action_id, "failed", error=str(exc)[:2000]
             )
-        return await self.store.transition_action(
-            action_id, "succeeded", result=dict(result)
-        )
+        result = dict(result)
+        delivery = result.get("external_delivery")
+        if isinstance(delivery, dict):
+            delivery_id = await ExternalGateway(self.db).queue_delivery(
+                action_id=action_id,
+                integration_key=str(delivery["integration_key"]),
+                payload=dict(delivery.get("payload") or {}),
+            )
+            result["delivery_id"] = str(delivery_id)
+            result["delivery_status"] = "pending"
+        return await self.store.transition_action(action_id, "succeeded", result=result)
 
 
 def default_action_registry(db: Database) -> ActionRegistry:
