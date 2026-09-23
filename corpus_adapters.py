@@ -55,6 +55,61 @@ class AO3Adapter:
         return CorpusClassification(facets=tuple(facets), epistemic_namespace="fanwork", metadata={"adapter": "ao3"})
 
 
+class StructuredMetadataAdapter:
+    """Classify explicit source/catalog metadata without reading document prose."""
+
+    FIELD_MAP = (
+        ("fandom", "fandom"), ("fandoms", "fandom"),
+        ("franchise", "franchise"), ("franchises", "franchise"),
+        ("universe", "universe"), ("universes", "universe"),
+        ("subject", "subject"), ("subjects", "subject"),
+        ("topic", "subject"), ("topics", "subject"),
+        ("domain", "domain"), ("domains", "domain"),
+    )
+    CONTAINERS = ("structured", "catalog", "book", "schema_org")
+
+    def matches(self, *, source_uri: str | None, metadata: Mapping[str, object]) -> bool:
+        return any(isinstance(metadata.get(key), Mapping) for key in self.CONTAINERS)
+
+    def classify(self, *, source_uri: str | None, metadata: Mapping[str, object]) -> CorpusClassification:
+        facets: list[CorpusFacet] = []
+        seen: set[tuple[str, str]] = set()
+        for container_name in self.CONTAINERS:
+            container = metadata.get(container_name)
+            if not isinstance(container, Mapping):
+                continue
+            for field, facet_type in self.FIELD_MAP:
+                for raw in _values(container.get(field)):
+                    value = raw.casefold()
+                    key = (facet_type, value)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    facets.append(CorpusFacet(
+                        facet_type, value,
+                        meta={
+                            "evidence": "source_native_structured_metadata",
+                            "container": container_name,
+                            "field": field,
+                            "raw_value": raw,
+                        },
+                    ))
+            source_type = _values(container.get("source_type") or container.get("type"))
+            for raw in source_type:
+                key = ("source_type", raw.casefold())
+                if key not in seen:
+                    seen.add(key)
+                    facets.append(CorpusFacet(
+                        "source_type", raw.casefold(),
+                        meta={"evidence": "source_native_structured_metadata",
+                              "container": container_name},
+                    ))
+        return CorpusClassification(
+            facets=tuple(facets),
+            metadata={"adapter": "structured-metadata"},
+        )
+
+
 class GenericWebAdapter:
     def matches(self, *, source_uri: str | None, metadata: Mapping[str, object]) -> bool:
         return True
@@ -65,7 +120,7 @@ class GenericWebAdapter:
         return CorpusClassification(facets=facets, metadata={"adapter": "generic-web"})
 
 
-ADAPTERS: tuple[CorpusSourceAdapter, ...] = (AO3Adapter(), GenericWebAdapter())
+ADAPTERS: tuple[CorpusSourceAdapter, ...] = (AO3Adapter(), StructuredMetadataAdapter(), GenericWebAdapter())
 
 
 def classify_corpus_document(*, source_uri: str | None, metadata: Mapping[str, object] | None = None) -> CorpusClassification:
