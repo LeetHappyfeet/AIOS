@@ -407,3 +407,82 @@ async def health_inference_provider(provider_id: UUID) -> dict[str, Any]:
     ok = await InferenceBroker(db).health_check(provider_id)
     provider = await InferenceProviderStore(db).get(provider_id)
     return {"ok": ok, "provider": _provider_dict(provider) if provider else None}
+
+
+# -------------------------------------------------
+# Character agent task / wake / heartbeat API
+# -------------------------------------------------
+
+from aios_app.agent import AgentRuntimeStore, CharacterAgencyStore, CharacterWorker
+
+
+class CognitiveTaskIn(BaseModel):
+    task_type: str = Field(pattern="^(executive|research|planning|reflection|communication)$")
+    objective: str = Field(min_length=1)
+    hud_profile_name: str | None = None
+    retrieval_focus: str | None = None
+    priority: int = 100
+
+
+class WakeEventIn(BaseModel):
+    event_type: str = Field(min_length=1)
+    source_type: str | None = None
+    source_id: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    priority: int = 100
+    dedupe_key: str | None = None
+
+
+class HeartbeatControlIn(BaseModel):
+    enabled: bool
+    interval_seconds: int = Field(default=300, ge=60)
+
+
+@app.post("/agent/instance/{instance_id}/task")
+async def create_agent_task(instance_id: UUID, req: CognitiveTaskIn) -> dict[str, Any]:
+    task = await CharacterAgencyStore(db).create_task(
+        instance_id=instance_id, task_type=req.task_type, objective=req.objective,
+        hud_profile_name=req.hud_profile_name, retrieval_focus=req.retrieval_focus,
+        priority=req.priority, trigger_type="api",
+    )
+    await AgentRuntimeStore(db).wake(
+        instance_id=instance_id, event_type="TASK_ASSIGNED",
+        source_type="task", source_id=str(task.task_id),
+        payload={"task_id": str(task.task_id), "task_type": task.task_type},
+        dedupe_key=f"task:{task.task_id}",
+    )
+    return {"task_id": str(task.task_id), "status": task.status}
+
+
+@app.post("/agent/task/{task_id}/run")
+async def run_agent_task(task_id: UUID) -> dict[str, Any]:
+    return await CharacterWorker(db).run_task(task_id)
+
+
+@app.post("/agent/instance/{instance_id}/wake")
+async def wake_agent(instance_id: UUID, req: WakeEventIn) -> dict[str, Any]:
+    wake_id = await AgentRuntimeStore(db).wake(
+        instance_id=instance_id, event_type=req.event_type,
+        source_type=req.source_type, source_id=req.source_id,
+        payload=req.payload, priority=req.priority, dedupe_key=req.dedupe_key,
+    )
+    return {"wake_id": str(wake_id), "status": "pending"}
+
+
+@app.put("/agent/instance/{instance_id}/heartbeat")
+async def configure_agent_heartbeat(
+    instance_id: UUID, req: HeartbeatControlIn
+) -> dict[str, Any]:
+    await AgentRuntimeStore(db).configure_heartbeat(
+        instance_id, enabled=req.enabled, interval_seconds=req.interval_seconds
+    )
+    return {
+        "instance_id": str(instance_id), "heartbeat_enabled": req.enabled,
+        "heartbeat_interval_seconds": req.interval_seconds,
+    }
+
+
+@app.post("/agent/heartbeats/emit")
+async def emit_agent_heartbeats(limit: int = 100) -> dict[str, Any]:
+    count = await AgentRuntimeStore(db).emit_due_heartbeats(limit=limit)
+    return {"emitted": count}
