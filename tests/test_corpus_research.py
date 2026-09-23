@@ -260,7 +260,7 @@ def test_domain_router_accepts_real_and_fictional_structured_identifier_types():
 
 
 def test_web_structured_metadata_uses_jsonld_not_article_prose():
-    from aios_app.accumulator.web.extractor import extract_structured_source_metadata
+    from accumulator.web.extractor import extract_structured_source_metadata
     html = """
     <html><head>
       <script type="application/ld+json">
