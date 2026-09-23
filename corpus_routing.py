@@ -379,12 +379,38 @@ async def ensure_facet_route(
     priority: int = 0,
     meta: dict | None = None,
 ) -> dict:
+    """Compatibility API: author the canonical domain + identifier and mirror the legacy route."""
     facet_type = facet_type.strip().lower()
     facet_value = normalize_facet_value(facet_value)
     if facet_type not in CorpusFacetRouter.ROUTABLE_FACET_TYPES:
         raise ValueError(f"facet type {facet_type!r} is not trusted for corpus routing")
     if access_class not in {"domain", "restricted"}:
         raise ValueError("facet routes may only create domain or restricted scopes")
+
+    await db.execute(
+        """INSERT INTO aios.corpus_scope (scope_key, display_name, access_class)
+           VALUES ($1,$1,$2)
+           ON CONFLICT (scope_key) DO NOTHING""",
+        scope_key, access_class,
+    )
+    await ensure_knowledge_domain(
+        db,
+        domain_key=knowledge_domain,
+        display_name=knowledge_domain,
+        domain_kind="fictional_universe" if knowledge_domain.startswith("fiction.") else "general",
+        default_scope_key=scope_key,
+        default_epistemic_namespace=epistemic_namespace,
+        meta={"created_via": "facet_route_compatibility"},
+    )
+    identifier = await register_domain_identifier(
+        db,
+        domain_key=knowledge_domain,
+        identifier_type=facet_type,
+        identifier_value=facet_value,
+        source="facet_route_compatibility",
+        confidence=1.0,
+        meta={"priority": int(priority), **(meta or {})},
+    )
     row = await db.execute_returning_row(
         """INSERT INTO aios.corpus_facet_route
                (facet_type, facet_value, knowledge_domain, scope_key,
@@ -404,10 +430,5 @@ async def ensure_facet_route(
         epistemic_namespace, access_class, int(priority), json.dumps(meta or {}),
     )
     result = dict(row)
-    result["documents_reclassified"] = await CorpusFacetRouter(
-        db
-    ).reconcile_matching_documents(
-        facet_type=facet_type,
-        facet_value=facet_value,
-    )
+    result["documents_reclassified"] = identifier["documents_reclassified"]
     return result
