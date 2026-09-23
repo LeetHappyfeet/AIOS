@@ -25,6 +25,10 @@ class InferenceUnavailable(RuntimeError):
     pass
 
 
+class InferenceProviderBusy(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class InferenceRequest:
     instance_id: UUID
@@ -140,7 +144,7 @@ class InferenceBroker:
         for provider in providers:
             try:
                 return await self._attempt(provider, request)
-            except StructuredResponseError as exc:
+            except (StructuredResponseError, InferenceProviderBusy) as exc:
                 last_error = exc
                 continue
             except Exception as exc:
@@ -162,7 +166,15 @@ class InferenceBroker:
                 instance_id, task_id, provider_id, worker_class, model,
                 context_state_version, hud_profile_name, prompt_hash,
                 allowed_actions, output_schema, status, attempts, started_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'running',1,now())
+            )
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'running',1,now()
+            WHERE (
+                SELECT count(*) FROM aios.inference_request r
+                WHERE r.provider_id=$3 AND r.status='running'
+                  AND (r.lease_expires_at IS NULL OR r.lease_expires_at > now())
+            ) < (
+                SELECT max_concurrency FROM aios.inference_provider WHERE provider_id=$3
+            )
             RETURNING request_id
             """,
             request.instance_id, request.task_id, provider.provider_id,
@@ -171,6 +183,8 @@ class InferenceBroker:
             json.dumps(dict(request.allowed_actions or {})),
             json.dumps(dict(request.output_schema)) if request.output_schema else None,
         )
+        if not row:
+            raise InferenceProviderBusy(f"Provider '{provider.provider_key}' reached concurrency limit")
         request_id = row["request_id"]
         started = time.monotonic()
         lease_seconds = max(60, int(provider.timeout_seconds) + 60)
