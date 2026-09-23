@@ -1,4 +1,4 @@
-from aios_app.char.identity_bootstrap import _card_data, _facet_candidates
+from aios_app.char.identity_bootstrap import _authored_domain_declarations, _card_data, _facet_candidates
 from aios_app.char.identity_kernel import _render, _json_value
 
 
@@ -79,3 +79,35 @@ def test_identity_json_values_decode_from_asyncpg_text():
     assert _json_value('["reserved","pragmatic"]') == ["reserved", "pragmatic"]
     assert _json_value('{"value":true}') == {"value": True}
     assert _json_value("plain prose") == "plain prose"
+
+
+def test_explicit_aios_domains_become_identity_facets_without_prose_inference():
+    card = {
+        "description": "Renamon appears in a crossover story with Shego.",
+        "extensions": {
+            "aios": {
+                "identity": {
+                    "domains": [
+                        {"domain": "fiction.digimon", "relationship": "native"},
+                        {"domain": "fiction.kim-possible", "relationship": "crossover"},
+                    ]
+                }
+            }
+        },
+    }
+    declarations = _authored_domain_declarations(card)
+    assert declarations == [
+        {"domain": "fiction.digimon", "relationship": "native"},
+        {"domain": "fiction.kim-possible", "relationship": "crossover"},
+    ]
+    domains = [item for item in _facet_candidates(card) if item["facet_type"] == "domain"]
+    assert [item["facet_key"] for item in domains] == ["fiction.digimon", "fiction.kim-possible"]
+
+
+def test_character_names_and_description_never_create_domain_affinity():
+    card = {
+        "name": "Renamon",
+        "description": "Renamon is a Digimon and meets Shego in Kim Possible.",
+    }
+    assert _authored_domain_declarations(card) == []
+    assert not [item for item in _facet_candidates(card) if item["facet_type"] == "domain"]

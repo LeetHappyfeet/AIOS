@@ -21,6 +21,38 @@ def _clean(value: Any) -> str | None:
     return value or None
 
 
+
+def _authored_domain_declarations(card: dict[str, Any]) -> list[dict[str, str]]:
+    """Read only explicit AIOS domain metadata; never infer domains from prose."""
+    extensions = card.get("extensions")
+    extension_aios = extensions.get("aios") if isinstance(extensions, dict) else None
+    aios = card.get("aios") if isinstance(card.get("aios"), dict) else extension_aios
+    if not isinstance(aios, dict):
+        return []
+    identity = aios.get("identity")
+    if not isinstance(identity, dict):
+        return []
+    raw_domains = identity.get("domains")
+    if not isinstance(raw_domains, list):
+        return []
+
+    declarations: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw_domains:
+        if not isinstance(item, dict):
+            continue
+        domain = _clean(item.get("domain"))
+        relationship = (_clean(item.get("relationship")) or "native").lower()
+        if not domain or relationship not in {"native", "crossover"}:
+            continue
+        key = (domain, relationship)
+        if key in seen:
+            continue
+        seen.add(key)
+        declarations.append({"domain": domain, "relationship": relationship})
+    return declarations
+
+
 def _facet_candidates(card: dict[str, Any]) -> list[dict[str, Any]]:
     """Route authored card fields into identity without inventing new facts."""
     candidates: list[dict[str, Any]] = []
@@ -40,6 +72,18 @@ def _facet_candidates(card: dict[str, Any]) -> list[dict[str, Any]]:
                 "source_field": field,
                 "source_fragment": value,
             })
+
+    for declaration in _authored_domain_declarations(card):
+        domain = declaration["domain"]
+        relationship = declaration["relationship"]
+        candidates.append({
+            "facet_type": "domain",
+            "facet_key": domain,
+            "value": {"domain": domain, "relationship": relationship},
+            "stability": "structural",
+            "source_field": "aios.identity.domains",
+            "source_fragment": f"{domain}:{relationship}",
+        })
 
     # Character-card scenario and first_mes are intentionally excluded: they
     # describe initial circumstances/examples, not durable identity.

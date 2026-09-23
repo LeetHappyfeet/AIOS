@@ -6,6 +6,7 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.char.identity_kernel import IdentityKernelStore, _json_value
+from aios_app.char.domain_affinity import CharacterDomainProjector
 
 
 async def accept_identity_candidate(
@@ -146,6 +147,9 @@ async def accept_identity_candidate(
                 json.dumps(_json_value(candidate["value"])), actor, reason,
                 candidate["perspective"], candidate["continuity_key"],
             )
+
+    if candidate["facet_type"] == "domain":
+        await CharacterDomainProjector(db).reconcile(character_id)
 
     kernel = await IdentityKernelStore(db).compile(character_id)
     return {
