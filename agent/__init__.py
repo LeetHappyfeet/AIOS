@@ -24,3 +24,6 @@ from .worker import CharacterWorker
 
 from .autonomy import AutonomyScheduler
 from .deterministic import DEFAULT_DETERMINISTIC_TASKS, DeterministicTaskRegistry, DeterministicTaskSpec
+
+from .gateway import ExternalGateway
+from .policy import ActionPolicyService
