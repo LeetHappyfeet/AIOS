@@ -24,7 +24,7 @@ run_async(db.connect())
 PRESETS = {
     "Local / custom": "",
     "OpenAI": "https://api.openai.com/v1",
-    "DeepSeek": "https://api.deepseek.com/v1",
+    "DeepSeek": "https://api.deepseek.com",
     "Mancer": "https://neuro.mancer.tech/oai/v1",
 }
 
