@@ -260,6 +260,15 @@ async def run_supervisor() -> None:
     logger.info("AIOS supervisor started")
     try:
         while True:
+            # Heartbeats are cheap events; ready inboxes coalesce into one wake job.
+            try:
+                from aios_app.agent.autonomy import AutonomyScheduler
+                from aios_app.agent.runtime import AgentRuntimeStore
+                await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)
+                await AutonomyScheduler(db).schedule_ready(limit=100)
+            except Exception:
+                logger.exception("Agent autonomy scheduling failed")
+
             qcnt = await queued_job_count(db)
             queued_by_type = await queued_job_counts_by_type(db)
             critical_reserve = getattr(settings, "supervisor_critical_queue_reserve", 128)
