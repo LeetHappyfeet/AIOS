@@ -7,6 +7,7 @@ from typing import Any
 from aios_app.db import Database
 from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.char.identity_revision import accept_identity_candidate
+from aios_app.char.domain_resolution import CharacterDomainResolver
 
 
 def _card_data(payload: dict[str, Any]) -> dict[str, Any]:
@@ -160,6 +161,37 @@ async def bootstrap_character_card(
             )
 
         candidates = _facet_candidates(card)
+
+        # Source-native structured franchise/fandom/universe metadata may resolve
+        # through the trusted domain registry. This never examines description,
+        # personality, scenario, dialogue, or other prose.
+        resolved_domains = await CharacterDomainResolver(db).resolve(
+            character_id=character_id,
+            source_id=source_id,
+            card=card,
+        )
+        explicit_domains = {
+            item["facet_key"]
+            for item in candidates
+            if item.get("facet_type") == "domain"
+        }
+        for declaration in resolved_domains:
+            domain = declaration["domain"]
+            if domain in explicit_domains:
+                continue
+            candidates.append({
+                "facet_type": "domain",
+                "facet_key": domain,
+                "value": {
+                    "domain": domain,
+                    "relationship": declaration["relationship"],
+                },
+                "stability": "structural",
+                "source_field": declaration["source_field"],
+                "source_fragment": declaration["source_fragment"],
+                "meta": declaration.get("meta") or {},
+            })
+
         candidate_ids: list[str] = []
         for item in candidates:
             row = await con.fetchrow(
@@ -167,9 +199,9 @@ async def bootstrap_character_card(
                 INSERT INTO aios.character_identity_candidate (
                     character_id, source_id, facet_type, facet_key, value,
                     stability, authority, mutability, perspective,
-                    source_field, source_fragment, disposition
+                    source_field, source_fragment, disposition, meta
                 )
-                VALUES ($1,$2,$3,$4,$5::jsonb,$6,'authored','explicit','self',$7,$8,'proposed')
+                VALUES ($1,$2,$3,$4,$5::jsonb,$6,'authored','explicit','self',$7,$8,'proposed',$9::jsonb)
                 ON CONFLICT (source_id, facet_type, facet_key, source_field) DO UPDATE
                 SET value=EXCLUDED.value,
                     stability=EXCLUDED.stability,
@@ -179,6 +211,7 @@ async def bootstrap_character_card(
                 character_id, source_id, item["facet_type"], item["facet_key"],
                 json.dumps(item["value"], ensure_ascii=False), item["stability"],
                 item["source_field"], item["source_fragment"],
+                json.dumps(item.get("meta") or {}),
             )
             candidate_ids.append(str(row["candidate_id"]))
 
