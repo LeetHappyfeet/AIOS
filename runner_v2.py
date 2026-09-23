@@ -27,12 +27,29 @@ async def handle_project_semantic_scope(db: Database, job: Dict[str, Any]) -> No
 
 base.JOB_HANDLERS["project_semantic_scope"] = handle_project_semantic_scope
 
+async def handle_agent_wake(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.autonomy import AutonomyScheduler
+    from aios_app.agent.worker import CharacterWorker
+    task_id = job.get("payload", {}).get("task_id")
+    if not task_id:
+        raise ValueError("agent_wake requires task_id")
+    task_uuid = UUID(str(task_id))
+    try:
+        await CharacterWorker(db).run_task(task_uuid)
+    finally:
+        await AutonomyScheduler(db).consume_task_wakes(task_uuid)
+
+base.JOB_HANDLERS["agent_wake"] = handle_agent_wake
+
 _original_resolve_partition_key = base._resolve_partition_key
 
 
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
+    if job_type == "agent_wake" and payload.get("instance_id"):
+        return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])
     if job_type == "project_character_knowledge" and payload.get("live_instance_id"):
