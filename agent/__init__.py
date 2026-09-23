@@ -21,3 +21,6 @@ __all__ = [
 from .actions import ActionDispatcher, ActionRegistry, ActionSpec, default_action_registry
 from .runtime import AgentRuntimeStore
 from .worker import CharacterWorker
+
+from .autonomy import AutonomyScheduler
+from .deterministic import DEFAULT_DETERMINISTIC_TASKS, DeterministicTaskRegistry, DeterministicTaskSpec
