@@ -60,7 +60,7 @@ class CorpusFacetRouter:
     tags as permissions by themselves.
     """
 
-    ROUTABLE_FACET_TYPES = frozenset({"fandom"})
+    ROUTABLE_FACET_TYPES = frozenset({"fandom", "franchise", "universe", "subject", "domain"})
 
     def __init__(self, db: Database):
         self.db = db
@@ -361,9 +361,23 @@ async def register_domain_identifier(
     reconciled = await CorpusFacetRouter(db).reconcile_matching_documents(
         facet_type=identifier_type, facet_value=identifier_value
     )
+    # Character sources that previously exposed this structured identifier
+    # become visibly resolvable too. Their identity is not silently rewritten;
+    # re-bootstrap/acceptance remains the authority boundary.
+    try:
+        from aios_app.char.domain_resolution import reconcile_character_domain_candidates
+        character_candidates = await reconcile_character_domain_candidates(
+            db,
+            identifier_type=identifier_type,
+            identifier_value=identifier_value,
+        )
+    except Exception:
+        character_candidates = 0
+
     result = dict(row)
     result["domain_key"] = domain_key.strip()
     result["documents_reclassified"] = reconciled
+    result["character_candidates_now_resolvable"] = character_candidates
     return result
 
 
