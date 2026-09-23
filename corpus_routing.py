@@ -364,15 +364,12 @@ async def register_domain_identifier(
     # Character sources that previously exposed this structured identifier
     # become visibly resolvable too. Their identity is not silently rewritten;
     # re-bootstrap/acceptance remains the authority boundary.
-    try:
-        from aios_app.char.domain_resolution import reconcile_character_domain_candidates
-        character_candidates = await reconcile_character_domain_candidates(
-            db,
-            identifier_type=identifier_type,
-            identifier_value=identifier_value,
-        )
-    except Exception:
-        character_candidates = 0
+    from aios_app.char.domain_resolution import reconcile_character_domain_candidates
+    character_candidates = await reconcile_character_domain_candidates(
+        db,
+        identifier_type=identifier_type,
+        identifier_value=identifier_value,
+    )
 
     result = dict(row)
     result["domain_key"] = domain_key.strip()
