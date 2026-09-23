@@ -66,5 +66,24 @@ def validate_structured_response(
             raise StructuredResponseError(f"actions[{index}].arguments must be an object")
         if allowed and action_type not in allowed:
             raise StructuredResponseError(f"action '{action_type}' is not allowed for this request")
+        if allowed:
+            schema = allowed.get(action_type) or {}
+            required = schema.get("required", [])
+            properties = schema.get("properties", {})
+            if not isinstance(required, list) or not isinstance(properties, dict):
+                raise StructuredResponseError(f"configured schema for action '{action_type}' is malformed")
+            missing = [key for key in required if key not in arguments]
+            if missing:
+                raise StructuredResponseError(f"action '{action_type}' is missing required arguments: {missing}")
+            if schema.get("additionalProperties") is False:
+                unknown = [key for key in arguments if key not in properties]
+                if unknown:
+                    raise StructuredResponseError(f"action '{action_type}' has unknown arguments: {unknown}")
+            type_map = {"string": str, "object": dict, "array": list, "boolean": bool, "integer": int, "number": (int, float)}
+            for key, value in arguments.items():
+                expected = (properties.get(key) or {}).get("type")
+                python_type = type_map.get(expected)
+                if python_type is not None and not isinstance(value, python_type):
+                    raise StructuredResponseError(f"action '{action_type}' argument '{key}' must be {expected}")
         proposals.append(StructuredActionProposal(action_type, dict(arguments)))
     return StructuredInferenceResponse(expression, tuple(proposals), dict(payload))
