@@ -225,6 +225,11 @@ class JSONLDAGIngestor:
                 document_id=corpus["document_id"],
                 route=document_route,
             )
+            await facet_router.observe_unresolved(
+                document_id=corpus["document_id"],
+                classification=classification,
+                route=document_route,
+            )
             if context["ingest_mode"] == "consume":
                 target_character_id = context["target_character_id"]
                 if not target_character_id:
