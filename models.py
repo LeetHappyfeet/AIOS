@@ -264,6 +264,25 @@ class CorpusSourceProfileIn(BaseModel):
     reclassify_existing: bool = True
 
 
+class KnowledgeDomainIn(BaseModel):
+    domain_key: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    domain_kind: str = "general"
+    parent_domain_key: Optional[str] = None
+    default_scope_key: Optional[str] = None
+    default_epistemic_namespace: str = "reference"
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeDomainIdentifierIn(BaseModel):
+    domain_key: str = Field(min_length=1)
+    identifier_type: str = Field(min_length=1)
+    identifier_value: str = Field(min_length=1)
+    source: str = "operator"
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
 class CorpusFacetRouteIn(BaseModel):
     facet_type: str = Field(min_length=1)
     facet_value: str = Field(min_length=1)
