@@ -7,13 +7,13 @@ DAG, runtime-cursor, HUD-dirty, and downstream pipeline side effects.
 
 from aios_app.main_legacy import app, db
 from aios_app.ingest_api import ingest_message
-from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn, CorpusFacetRouteIn, CharacterKnowledgeDomainsIn
+from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn, CorpusFacetRouteIn, CharacterKnowledgeDomainsIn, KnowledgeDomainIn, KnowledgeDomainIdentifierIn
 from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
 from aios_app.char.identity_sources import stage_identity_source, identity_snapshot
 from aios_app.corpus import import_corpus_document, consume_corpus_sections
 from aios_app.corpus_catalog import CorpusCatalogService, CorpusAccessReconciler
-from aios_app.corpus_routing import ensure_facet_route
+from aios_app.corpus_routing import ensure_facet_route, ensure_knowledge_domain, register_domain_identifier
 from pydantic import BaseModel, Field
 from typing import Any
 
@@ -201,6 +201,63 @@ async def list_corpus_source_profiles() -> dict[str, Any]:
         """
     )
     return {"profiles": [dict(row) for row in rows]}
+
+
+@app.post("/corpus/knowledge-domain")
+async def upsert_knowledge_domain(req: KnowledgeDomainIn) -> dict[str, Any]:
+    return await ensure_knowledge_domain(
+        db,
+        domain_key=req.domain_key,
+        display_name=req.display_name,
+        domain_kind=req.domain_kind,
+        parent_domain_key=req.parent_domain_key,
+        default_scope_key=req.default_scope_key,
+        default_epistemic_namespace=req.default_epistemic_namespace,
+        meta=req.meta,
+    )
+
+
+@app.get("/corpus/knowledge-domains")
+async def list_knowledge_domains() -> dict[str, Any]:
+    rows = await db.fetch(
+        """SELECT kd.domain_id, kd.domain_key, kd.display_name, kd.domain_kind,
+                  parent.domain_key AS parent_domain_key, kd.default_scope_key,
+                  kd.default_epistemic_namespace, kd.enabled, kd.meta,
+                  kd.created_at, kd.updated_at
+           FROM aios.knowledge_domain kd
+           LEFT JOIN aios.knowledge_domain parent
+             ON parent.domain_id=kd.parent_domain_id
+           ORDER BY kd.domain_key"""
+    )
+    return {"domains": [dict(row) for row in rows]}
+
+
+@app.post("/corpus/knowledge-domain/identifier")
+async def upsert_knowledge_domain_identifier(req: KnowledgeDomainIdentifierIn) -> dict[str, Any]:
+    return await register_domain_identifier(
+        db,
+        domain_key=req.domain_key,
+        identifier_type=req.identifier_type,
+        identifier_value=req.identifier_value,
+        source=req.source,
+        confidence=req.confidence,
+        meta=req.meta,
+    )
+
+
+@app.get("/corpus/knowledge-domain-candidates")
+async def list_knowledge_domain_candidates(status: str = "unresolved") -> dict[str, Any]:
+    rows = await db.fetch(
+        """SELECT candidate_id, identifier_type, identifier_value, status,
+                  occurrence_count, first_document_id, last_document_id,
+                  resolved_domain_id, source, meta, first_seen_at, last_seen_at,
+                  resolved_at
+           FROM aios.knowledge_domain_candidate
+           WHERE ($1='' OR status=$1)
+           ORDER BY occurrence_count DESC, last_seen_at DESC""",
+        status,
+    )
+    return {"candidates": [dict(row) for row in rows]}
 
 
 @app.post("/corpus/facet-route")
