@@ -139,7 +139,7 @@ async def accept_identity_candidate(
                     actor, reason, meta
                 )
                 VALUES ($1,$2,'accept_candidate',$3,$4::uuid,$5,$6::jsonb,$7::jsonb,$8,$9,
-                        jsonb_build_object('perspective',$10,'continuity_key',$11))
+                        jsonb_build_object('perspective',$10::text,'continuity_key',$11::text))
                 """,
                 character_id, version, candidate["source_id"], str(candidate_id),
                 facet["facet_id"],
