@@ -362,8 +362,7 @@ async def register_domain_identifier(
         facet_type=identifier_type, facet_value=identifier_value
     )
     # Character sources that previously exposed this structured identifier
-    # become visibly resolvable too. Their identity is not silently rewritten;
-    # re-bootstrap/acceptance remains the authority boundary.
+    # reconcile through the normal identity-candidate/revision authority path.
     from aios_app.char.domain_resolution import reconcile_character_domain_candidates
     character_candidates = await reconcile_character_domain_candidates(
         db,
