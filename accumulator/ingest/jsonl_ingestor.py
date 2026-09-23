@@ -10,7 +10,8 @@ from uuid import UUID, uuid4
 
 from aios_app.db import Database
 from aios_app.dag import add_node_and_edge, get_or_create_timeline
-from aios_app.corpus import import_corpus_document, consume_corpus_sections
+from aios_app.corpus import import_corpus_document
+from aios_app.epistemic.research import CharacterResearchService
 from aios_app.corpus_catalog import CorpusCatalogService
 from aios_app.corpus_adapters import classify_corpus_document
 from aios_app.corpus_routing import CorpusFacetRouter
@@ -241,7 +242,11 @@ class JSONLDAGIngestor:
                 if not instance:
                     raise RuntimeError(f"web consume target {target_character_id!r} has no active character instance")
                 sections = await self.db.fetch("SELECT section_id FROM aios.corpus_section WHERE document_id=$1 ORDER BY section_order", corpus["document_id"])
-                await consume_corpus_sections(self.db, instance_id=instance["instance_id"], section_ids=[row["section_id"] for row in sections], mode=context["consumption_mode"])
+                await CharacterResearchService(self.db).acquire(
+                    instance_id=instance["instance_id"],
+                    section_ids=[row["section_id"] for row in sections],
+                    mode=context["consumption_mode"],
+                )
             logger.info("Stored web document %s in cold corpus mode=%s source=%s sections=%s", corpus["document_id"], context["ingest_mode"], context["source_id"], corpus["section_count"])
             return
 
