@@ -486,3 +486,7 @@ async def configure_agent_heartbeat(
 async def emit_agent_heartbeats(limit: int = 100) -> dict[str, Any]:
     count = await AgentRuntimeStore(db).emit_due_heartbeats(limit=limit)
     return {"emitted": count}
+
+
+from aios_app.agent.api import install_external_agency_routes
+install_external_agency_routes(app, db)
