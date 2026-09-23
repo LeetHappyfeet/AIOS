@@ -270,6 +270,103 @@ class CorpusFacetRouter:
         return len(rows)
 
 
+async def ensure_knowledge_domain(
+    db: Database,
+    *,
+    domain_key: str,
+    display_name: str,
+    domain_kind: str = "general",
+    parent_domain_key: str | None = None,
+    default_scope_key: str | None = None,
+    default_epistemic_namespace: str = "reference",
+    meta: dict | None = None,
+) -> dict:
+    parent_id = None
+    if parent_domain_key:
+        parent = await db.fetchrow(
+            "SELECT domain_id FROM aios.knowledge_domain WHERE domain_key=$1 AND enabled",
+            parent_domain_key.strip(),
+        )
+        if not parent:
+            raise ValueError(f"unknown parent knowledge domain {parent_domain_key!r}")
+        parent_id = parent["domain_id"]
+    row = await db.execute_returning_row(
+        """INSERT INTO aios.knowledge_domain (
+               domain_key, display_name, domain_kind, parent_domain_id,
+               default_scope_key, default_epistemic_namespace, meta
+           )
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+           ON CONFLICT (domain_key) DO UPDATE
+           SET display_name=EXCLUDED.display_name,
+               domain_kind=EXCLUDED.domain_kind,
+               parent_domain_id=EXCLUDED.parent_domain_id,
+               default_scope_key=COALESCE(EXCLUDED.default_scope_key, aios.knowledge_domain.default_scope_key),
+               default_epistemic_namespace=EXCLUDED.default_epistemic_namespace,
+               meta=aios.knowledge_domain.meta || EXCLUDED.meta,
+               enabled=TRUE,
+               updated_at=now()
+           RETURNING domain_id, domain_key, display_name, domain_kind,
+                     parent_domain_id, default_scope_key,
+                     default_epistemic_namespace, enabled, meta""",
+        domain_key.strip(), display_name.strip(), domain_kind.strip(), parent_id,
+        default_scope_key.strip() if default_scope_key else None,
+        default_epistemic_namespace.strip(), json.dumps(meta or {}),
+    )
+    return dict(row)
+
+
+async def register_domain_identifier(
+    db: Database,
+    *,
+    domain_key: str,
+    identifier_type: str,
+    identifier_value: str,
+    source: str = "operator",
+    confidence: float = 1.0,
+    meta: dict | None = None,
+) -> dict:
+    identifier_type = identifier_type.strip().lower()
+    identifier_value = normalize_facet_value(identifier_value)
+    if identifier_type not in CorpusFacetRouter.ROUTABLE_FACET_TYPES:
+        raise ValueError(f"identifier type {identifier_type!r} is not trusted for corpus routing")
+    domain = await db.fetchrow(
+        """SELECT domain_id, default_scope_key, default_epistemic_namespace
+           FROM aios.knowledge_domain WHERE domain_key=$1 AND enabled""",
+        domain_key.strip(),
+    )
+    if not domain:
+        raise ValueError(f"unknown knowledge domain {domain_key!r}")
+    row = await db.execute_returning_row(
+        """INSERT INTO aios.knowledge_domain_identifier (
+               identifier_type, identifier_value, domain_id, source, confidence, meta
+           )
+           VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+           ON CONFLICT (identifier_type, identifier_value, domain_id) DO UPDATE
+           SET source=EXCLUDED.source,
+               confidence=EXCLUDED.confidence,
+               meta=aios.knowledge_domain_identifier.meta || EXCLUDED.meta,
+               updated_at=now()
+           RETURNING identifier_type, identifier_value, domain_id, source,
+                     confidence, meta""",
+        identifier_type, identifier_value, domain["domain_id"], source,
+        float(confidence), json.dumps(meta or {}),
+    )
+    await db.execute(
+        """UPDATE aios.knowledge_domain_candidate
+           SET status='resolved', resolved_domain_id=$3, resolved_at=now(),
+               last_seen_at=now()
+           WHERE identifier_type=$1 AND identifier_value=$2""",
+        identifier_type, identifier_value, domain["domain_id"],
+    )
+    reconciled = await CorpusFacetRouter(db).reconcile_matching_documents(
+        facet_type=identifier_type, facet_value=identifier_value
+    )
+    result = dict(row)
+    result["domain_key"] = domain_key.strip()
+    result["documents_reclassified"] = reconciled
+    return result
+
+
 async def ensure_facet_route(
     db: Database,
     *,
