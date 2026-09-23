@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bs4 import BeautifulSoup
 import hashlib
+import json
 from urllib.parse import urljoin, urlparse
 
 
@@ -116,11 +117,8 @@ def clean_html(html: str) -> dict:
 
 
 def extract_structured_source_metadata(html: str, url: str) -> dict:
-    """Extract repository-native classification metadata without prose inference."""
+    """Extract repository-native/schema metadata without interpreting page prose."""
     host = (urlparse(url).hostname or "").lower()
-    if host not in {"archiveofourown.org", "www.archiveofourown.org"}:
-        return {}
-
     soup = BeautifulSoup(html, "lxml")
 
     def tags(selector: str) -> list[str]:
@@ -133,14 +131,73 @@ def extract_structured_source_metadata(html: str, url: str) -> dict:
                 values.append(value)
         return values
 
-    # AO3 exposes these as explicit work metadata/tag fields. Keep their raw
-    # labels so the corpus adapter can classify deterministically and retain
-    # provenance; do not inspect story prose for identity or fandom.
+    if host in {"archiveofourown.org", "www.archiveofourown.org"}:
+        return {
+            "ao3": {
+                "fandoms": tags("dd.fandom.tags a.tag"),
+                "characters": tags("dd.character.tags a.tag"),
+                "relationships": tags("dd.relationship.tags a.tag"),
+                "tags": tags("dd.freeform.tags a.tag"),
+            }
+        }
+
+    # JSON-LD is publisher-declared structured metadata. We retain only
+    # classification fields; article/body/description prose is never inspected.
+    subjects: list[str] = []
+    source_types: list[str] = []
+    seen_subjects: set[str] = set()
+
+    def add_subject(value) -> None:
+        if isinstance(value, str):
+            for part in value.split(",") if "," in value else (value,):
+                item = part.strip()
+                if item and item not in seen_subjects:
+                    seen_subjects.add(item)
+                    subjects.append(item)
+        elif isinstance(value, list):
+            for item in value:
+                add_subject(item)
+        elif isinstance(value, dict):
+            # schema.org Thing values commonly carry a structured name.
+            add_subject(value.get("name"))
+
+    def visit(node) -> None:
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+            return
+        if not isinstance(node, dict):
+            return
+        raw_type = node.get("@type")
+        if isinstance(raw_type, str):
+            source_types.append(raw_type)
+        elif isinstance(raw_type, list):
+            source_types.extend(str(v) for v in raw_type if str(v).strip())
+        add_subject(node.get("about"))
+        add_subject(node.get("keywords"))
+        # Traverse @graph only. Do not recursively inspect arbitrary JSON-LD
+        # fields that may contain article text.
+        visit(node.get("@graph"))
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = script.string or script.get_text()
+        if not raw or not raw.strip():
+            continue
+        try:
+            visit(json.loads(raw))
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    # Dublin Core / citation subject metadata is also explicit catalog data.
+    for name in ("dc.subject", "dcterms.subject", "citation_keywords"):
+        for node in soup.find_all("meta", attrs={"name": name}):
+            add_subject(node.get("content"))
+
+    if not subjects and not source_types:
+        return {}
     return {
-        "ao3": {
-            "fandoms": tags("dd.fandom.tags a.tag"),
-            "characters": tags("dd.character.tags a.tag"),
-            "relationships": tags("dd.relationship.tags a.tag"),
-            "tags": tags("dd.freeform.tags a.tag"),
+        "schema_org": {
+            "subjects": subjects,
+            "source_type": source_types,
         }
     }
