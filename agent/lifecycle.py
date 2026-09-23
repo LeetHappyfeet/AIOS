@@ -262,9 +262,7 @@ class CharacterAgencyStore:
                 proposed_by, meta
             )
             VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10::jsonb)
-            ON CONFLICT (instance_id, idempotency_key)
-                WHERE idempotency_key IS NOT NULL
-            DO NOTHING
+            ON CONFLICT (instance_id, idempotency_key) DO NOTHING
             RETURNING *
             """,
             instance_id,
