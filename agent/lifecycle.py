@@ -254,6 +254,24 @@ class CharacterAgencyStore:
         proposed_by: str | None = None,
         meta: Mapping[str, Any] | None = None,
     ) -> ActionRecord:
+        if task_id is not None:
+            task = await self.get_task(task_id)
+            if task is None:
+                raise LookupError(f"Unknown cognitive task {task_id}")
+            if task.instance_id != instance_id:
+                raise ValueError(
+                    f"Task {task_id} belongs to instance {task.instance_id}, not {instance_id}"
+                )
+        if parent_action_id is not None:
+            parent = await self.get_action(parent_action_id)
+            if parent is None:
+                raise LookupError(f"Unknown parent action {parent_action_id}")
+            if parent.instance_id != instance_id:
+                raise ValueError(
+                    f"Parent action {parent_action_id} belongs to instance "
+                    f"{parent.instance_id}, not {instance_id}"
+                )
+
         row = await self.db.execute_returning_row(
             """
             INSERT INTO aios.character_action (
