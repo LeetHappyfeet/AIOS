@@ -137,19 +137,35 @@ class CorpusFacetRouter:
             and (str(f.facet_type).strip().lower(), normalize_facet_value(f.facet_value)) not in matched
         }
         for identifier_type, identifier_value in unresolved:
-            await self.db.execute(
+            candidate = await self.db.execute_returning_row(
                 """INSERT INTO aios.knowledge_domain_candidate (
                        identifier_type, identifier_value, occurrence_count,
                        first_document_id, last_document_id, source, meta
                    )
-                   VALUES ($1,$2,1,$3,$3,'corpus_structured_metadata',
+                   VALUES ($1,$2,0,$3,$3,'corpus_structured_metadata',
                            jsonb_build_object('evidence','trusted_structured_facet'))
                    ON CONFLICT (identifier_type, identifier_value) DO UPDATE
-                   SET occurrence_count=aios.knowledge_domain_candidate.occurrence_count+1,
-                       last_document_id=EXCLUDED.last_document_id,
-                       last_seen_at=now()""",
+                   SET last_document_id=EXCLUDED.last_document_id,
+                       last_seen_at=now()
+                   RETURNING candidate_id""",
                 identifier_type, identifier_value, document_id,
             )
+            evidence = await self.db.execute(
+                """INSERT INTO aios.knowledge_domain_candidate_document (
+                       candidate_id, document_id
+                   )
+                   VALUES ($1,$2)
+                   ON CONFLICT DO NOTHING""",
+                candidate["candidate_id"], document_id,
+            )
+            if evidence.endswith(" 1"):
+                await self.db.execute(
+                    """UPDATE aios.knowledge_domain_candidate
+                       SET occurrence_count=occurrence_count+1,
+                           last_document_id=$2, last_seen_at=now()
+                       WHERE candidate_id=$1""",
+                    candidate["candidate_id"], document_id,
+                )
         return len(unresolved)
 
     async def apply(self, *, document_id, route: CorpusDocumentRoute) -> None:
