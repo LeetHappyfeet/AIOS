@@ -269,6 +269,23 @@ async def run_supervisor() -> None:
             except Exception:
                 logger.exception("Agent autonomy scheduling failed")
 
+            # Inference endpoints are ephemeral donated/external capacity. Probe them
+            # continuously and reap abandoned leases so dead processes cannot consume
+            # provider concurrency forever.
+            try:
+                from aios_app.inference import InferenceBroker, InferenceProviderStore
+                inference_store = InferenceProviderStore(db)
+                await inference_store.reap_stale_requests()
+                inference_broker = InferenceBroker(db)
+                due_providers = await inference_store.due_for_health(limit=100)
+                if due_providers:
+                    await asyncio.gather(
+                        *(inference_broker.health_check(p.provider_id) for p in due_providers),
+                        return_exceptions=True,
+                    )
+            except Exception:
+                logger.exception("Inference worker health scheduling failed")
+
             qcnt = await queued_job_count(db)
             queued_by_type = await queued_job_counts_by_type(db)
             critical_reserve = getattr(settings, "supervisor_critical_queue_reserve", 128)
