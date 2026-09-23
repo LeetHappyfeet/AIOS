@@ -8,6 +8,23 @@ ALTER TABLE aios.character_knowledge_domain
     ADD COLUMN IF NOT EXISTS source_facet_id uuid
         REFERENCES aios.character_identity_facet(facet_id) ON DELETE SET NULL;
 
+-- The immediately preceding character-domain-affinity migration used the
+-- transitional vocabulary "acquired" and "legacy_configuration". Normalize
+-- those values before replacing its constraints with the canonical vocabulary.
+UPDATE aios.character_knowledge_domain
+SET relationship = 'study'
+WHERE relationship = 'acquired';
+
+UPDATE aios.character_knowledge_domain
+SET provenance = 'operator'
+WHERE provenance = 'legacy_configuration';
+
+-- ADD COLUMN IF NOT EXISTS does not update defaults on columns that already
+-- exist, so explicitly move upgraded installations to the canonical defaults.
+ALTER TABLE aios.character_knowledge_domain
+    ALTER COLUMN relationship SET DEFAULT 'granted',
+    ALTER COLUMN provenance SET DEFAULT 'operator';
+
 ALTER TABLE aios.character_knowledge_domain
     DROP CONSTRAINT IF EXISTS character_knowledge_domain_relationship_check;
 
