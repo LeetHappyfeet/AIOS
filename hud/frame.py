@@ -10,6 +10,7 @@ from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
+from aios_app.hud.recent_events import project_scene_change
 from aios_app.hud.profile import get_profile as get_hud_profile, get_profile_by_name
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
@@ -321,7 +322,13 @@ class HUDAssembler:
         # follow the source-DAG/current-event ordering instead.
         if cognitive_snapshot.current_events:
             last = cognitive_snapshot.current_events[0]
-            last_change = last.get("message_text") or last.get("text")
+            # Persist a semantic scene projection, never an unbounded source
+            # transcript. The source event remains available as evidence and in
+            # RECENT EVENTS when no semantic projection has caught up yet.
+            last_change = project_scene_change(
+                cognitive_snapshot.current_events,
+                max_chars=max(160, min(640, section_caps["scene"] * 2)),
+            )
             node_value = last.get("node_id") or last.get("source_node_id")
             if node_value:
                 try:
