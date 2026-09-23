@@ -260,6 +260,27 @@ async def list_knowledge_domain_candidates(status: str = "unresolved") -> dict[s
     return {"candidates": [dict(row) for row in rows]}
 
 
+@app.get("/character/domain-candidates")
+async def list_character_domain_candidates(
+    status: str = "unresolved",
+    character_id: str | None = None,
+) -> dict[str, Any]:
+    rows = await db.fetch(
+        """SELECT cdc.candidate_id, cdc.character_id, cdc.source_id,
+                  cdc.identifier_type, cdc.identifier_value, cdc.relationship,
+                  cdc.status, kd.domain_key AS resolved_domain,
+                  cdc.source_field, cdc.meta, cdc.created_at, cdc.resolved_at
+           FROM aios.character_domain_candidate cdc
+           LEFT JOIN aios.knowledge_domain kd
+             ON kd.domain_id=cdc.resolved_domain_id
+           WHERE ($1='' OR cdc.status=$1)
+             AND ($2::text IS NULL OR cdc.character_id=$2)
+           ORDER BY cdc.created_at DESC""",
+        status, character_id,
+    )
+    return {"candidates": [dict(row) for row in rows]}
+
+
 @app.post("/corpus/facet-route")
 async def upsert_corpus_facet_route(req: CorpusFacetRouteIn) -> dict[str, Any]:
     """Register one trusted structured-facet to document-domain route."""
