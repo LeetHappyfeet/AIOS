@@ -246,21 +246,29 @@ class CorpusFacetRouter:
         route = await self.resolve(classification)
 
         # Recompute all facet-derived routing from the document's complete
-        # current facet set. Manual/source-profile scopes are left untouched.
+        # current facet set. Remove only scopes recorded by our own prior
+        # document-domain projection; source-profile/manual scopes survive even
+        # when they happen to share names with registry routes.
+        prior = await self.db.fetch(
+            """SELECT meta->>'scope_key' AS scope_key
+               FROM aios.corpus_document_domain
+               WHERE document_id=$1 AND source='facet_route'""",
+            document_id,
+        )
+        prior_scopes = sorted({
+            str(row["scope_key"]) for row in prior if row["scope_key"]
+        })
         await self.db.execute(
             """DELETE FROM aios.corpus_document_domain
                WHERE document_id=$1 AND source='facet_route'""",
             document_id,
         )
-        await self.db.execute(
-            """DELETE FROM aios.corpus_document_scope cds
-               WHERE cds.document_id=$1
-                 AND EXISTS (
-                     SELECT 1 FROM aios.corpus_facet_route cfr
-                     WHERE cfr.scope_key=cds.scope_key
-                 )""",
-            document_id,
-        )
+        if prior_scopes:
+            await self.db.execute(
+                """DELETE FROM aios.corpus_document_scope
+                   WHERE document_id=$1 AND scope_key = ANY($2::text[])""",
+                document_id, prior_scopes,
+            )
         await self.apply(document_id=document_id, route=route)
         await self.observe_unresolved(
             document_id=document_id,
