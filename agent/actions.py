@@ -151,6 +151,8 @@ def default_action_registry(db: Database) -> ActionRegistry:
         allowed_worker_classes=frozenset({"executive","research","planning"}),
         handler=corpus_search,
     ))
+    from .adapters import register_external_actions, register_interagent_actions
+
     registry.register(ActionSpec(
         name="corpus.acquire",
         schema={
@@ -166,4 +168,6 @@ def default_action_registry(db: Database) -> ActionRegistry:
         allowed_worker_classes=frozenset({"executive","research"}),
         handler=corpus_acquire,
     ))
+    register_external_actions(db, registry)
+    register_interagent_actions(db, registry)
     return registry
