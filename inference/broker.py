@@ -59,9 +59,11 @@ class OpenAICompatibleClient:
     def _headers(self, provider: InferenceProvider) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if provider.api_key_env:
-            token = os.getenv(provider.api_key_env)
+            token = os.getenv(provider.api_key_env) or provider.api_key_secret
             if token:
                 headers["Authorization"] = f"Bearer {token}"
+        elif provider.api_key_secret:
+            headers["Authorization"] = f"Bearer {provider.api_key_secret}"
         return headers
 
     def _models(self, provider: InferenceProvider) -> None:
@@ -117,12 +119,15 @@ class InferenceBroker:
         provider = await self.providers.get(provider_id)
         if not provider:
             raise LookupError(f"Unknown inference provider {provider_id}")
+        started = time.monotonic()
         try:
             await self.client.health(provider)
         except Exception as exc:
             await self.providers.record_health(provider_id, ok=False, error=str(exc)[:1000])
             return False
-        await self.providers.record_health(provider_id, ok=True)
+        await self.providers.record_health(
+            provider_id, ok=True, latency_ms=int((time.monotonic() - started) * 1000)
+        )
         return True
 
     async def infer(self, request: InferenceRequest) -> InferenceResult:
@@ -135,6 +140,9 @@ class InferenceBroker:
         for provider in providers:
             try:
                 return await self._attempt(provider, request)
+            except StructuredResponseError as exc:
+                last_error = exc
+                continue
             except Exception as exc:
                 last_error = exc
                 await self.providers.record_health(
@@ -165,6 +173,26 @@ class InferenceBroker:
         )
         request_id = row["request_id"]
         started = time.monotonic()
+        lease_seconds = max(60, int(provider.timeout_seconds) + 60)
+        await self.db.execute(
+            """UPDATE aios.inference_request SET leased_at=now(),
+                 lease_expires_at=now() + ($2 * interval '1 second'),
+                 last_progress_at=now() WHERE request_id=$1""",
+            request_id, lease_seconds,
+        )
+        stop_lease = asyncio.Event()
+        async def renew_lease() -> None:
+            while not stop_lease.is_set():
+                try:
+                    await asyncio.wait_for(stop_lease.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    await self.db.execute(
+                        """UPDATE aios.inference_request SET last_progress_at=now(),
+                             lease_expires_at=now() + ($2 * interval '1 second'), updated_at=now()
+                           WHERE request_id=$1 AND status='running'""",
+                        request_id, lease_seconds,
+                    )
+        lease_task = asyncio.create_task(renew_lease())
         try:
             text = await self.client.complete(provider, request)
             payload = extract_json_object(text)
@@ -187,6 +215,7 @@ class InferenceBroker:
                 provider.model, structured, latency_ms
             )
         except StructuredResponseError as exc:
+            await self.providers.record_protocol_failure(provider.provider_id, str(exc))
             await self.db.execute(
                 """
                 UPDATE aios.inference_request SET status='invalid',
@@ -206,3 +235,6 @@ class InferenceBroker:
                 request_id, str(exc)[:2000],
             )
             raise
+        finally:
+            stop_lease.set()
+            await asyncio.gather(lease_task, return_exceptions=True)
