@@ -257,3 +257,21 @@ def test_domain_router_accepts_real_and_fictional_structured_identifier_types():
     assert {"fandom", "franchise", "universe", "subject", "domain"} <= CorpusFacetRouter.ROUTABLE_FACET_TYPES
     assert "character" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
     assert "tag" not in CorpusFacetRouter.ROUTABLE_FACET_TYPES
+
+
+def test_web_structured_metadata_uses_jsonld_not_article_prose():
+    from aios_app.accumulator.web.extractor import extract_structured_source_metadata
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+        {"@type":"MedicalWebPage","about":{"@type":"Thing","name":"Cardiology"},
+         "keywords":["Heart Disease","Medicine"],
+         "description":"This field must never become a routing subject."}
+      </script>
+    </head><body><article>Star Wars Digimon My Little Pony prose.</article></body></html>
+    """
+    result = extract_structured_source_metadata(html, "https://example.org/heart")
+    assert set(result["schema_org"]["subjects"]) == {"Cardiology", "Heart Disease", "Medicine"}
+    assert result["schema_org"]["source_type"] == ["MedicalWebPage"]
+    assert all("Star Wars" not in value for value in result["schema_org"]["subjects"])
+    assert all("description" not in value.lower() for value in result["schema_org"]["subjects"])
