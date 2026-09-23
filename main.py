@@ -328,3 +328,82 @@ async def consume_corpus(instance_id: str, req: CorpusConsumeIn) -> dict[str, An
         section_ids=req.section_ids,
         mode=req.mode,
     )
+
+
+# -------------------------------------------------
+# Donated inference worker control plane
+# -------------------------------------------------
+
+from uuid import UUID
+from aios_app.inference import InferenceBroker, InferenceProviderStore
+
+
+class InferenceProviderIn(BaseModel):
+    provider_key: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    base_url: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    api_key_env: str | None = None
+    enabled: bool = True
+    drain: bool = False
+    max_concurrency: int = Field(default=1, ge=1, le=64)
+    context_window: int | None = Field(default=None, ge=1)
+    timeout_seconds: float = Field(default=90.0, gt=0, le=600)
+    worker_classes: list[str] = Field(default_factory=list)
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+
+class InferenceProviderControlIn(BaseModel):
+    enabled: bool | None = None
+    drain: bool | None = None
+
+
+def _provider_dict(provider) -> dict[str, Any]:
+    return {
+        "provider_id": str(provider.provider_id),
+        "provider_key": provider.provider_key,
+        "display_name": provider.display_name,
+        "base_url": provider.base_url,
+        "model": provider.model,
+        "api_key_env": provider.api_key_env,
+        "enabled": provider.enabled,
+        "drain": provider.drain,
+        "max_concurrency": provider.max_concurrency,
+        "context_window": provider.context_window,
+        "timeout_seconds": provider.timeout_seconds,
+        "worker_classes": list(provider.worker_classes),
+        "capabilities": provider.capabilities,
+        "status": provider.status,
+        "consecutive_failures": provider.consecutive_failures,
+        "cooldown_until": str(provider.cooldown_until or ""),
+        "last_error": provider.last_error,
+    }
+
+
+@app.get("/inference/providers")
+async def list_inference_providers() -> dict[str, Any]:
+    providers = await InferenceProviderStore(db).list()
+    return {"providers": [_provider_dict(p) for p in providers]}
+
+
+@app.post("/inference/providers")
+async def upsert_inference_provider(req: InferenceProviderIn) -> dict[str, Any]:
+    provider = await InferenceProviderStore(db).upsert(**req.model_dump())
+    return _provider_dict(provider)
+
+
+@app.patch("/inference/providers/{provider_id}")
+async def control_inference_provider(
+    provider_id: UUID, req: InferenceProviderControlIn
+) -> dict[str, Any]:
+    provider = await InferenceProviderStore(db).set_control(
+        provider_id, enabled=req.enabled, drain=req.drain
+    )
+    return _provider_dict(provider)
+
+
+@app.post("/inference/providers/{provider_id}/health")
+async def health_inference_provider(provider_id: UUID) -> dict[str, Any]:
+    ok = await InferenceBroker(db).health_check(provider_id)
+    provider = await InferenceProviderStore(db).get(provider_id)
+    return {"ok": ok, "provider": _provider_dict(provider) if provider else None}
