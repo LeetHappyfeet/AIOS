@@ -68,6 +68,7 @@ class CognitiveTask:
     result: Any
     error: Optional[str]
     meta: dict[str, Any]
+    execution_mode: str = "auto"
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "CognitiveTask":
@@ -88,6 +89,7 @@ class CognitiveTask:
             result=_decode(row["result"]),
             error=row["error"],
             meta=dict(_decode(row["meta"]) or {}),
+            execution_mode=str(row.get("execution_mode", "auto")),
         )
 
 
@@ -156,15 +158,17 @@ class CharacterAgencyStore:
         source_state_version: int | None = None,
         source_node_id: UUID | None = None,
         meta: Mapping[str, Any] | None = None,
+        execution_mode: str = "auto",
     ) -> CognitiveTask:
         row = await self.db.execute_returning_row(
             """
             INSERT INTO aios.character_cognitive_task (
                 instance_id, parent_task_id, task_type, objective,
                 hud_profile_name, retrieval_focus, priority,
-                trigger_type, trigger_id, source_state_version, source_node_id, meta
+                trigger_type, trigger_id, source_state_version, source_node_id, meta,
+                execution_mode
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)
             RETURNING *
             """,
             instance_id,
@@ -179,6 +183,7 @@ class CharacterAgencyStore:
             source_state_version,
             source_node_id,
             _json(meta),
+            execution_mode,
         )
         return CognitiveTask.from_row(row)
 
