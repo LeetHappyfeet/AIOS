@@ -10,7 +10,7 @@ from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
-from aios_app.hud.profile import get_profile as get_hud_profile
+from aios_app.hud.profile import get_profile as get_hud_profile, get_profile_by_name
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.plugins.manager import PluginManager
@@ -106,6 +106,8 @@ class HUDAssembler:
         *,
         recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
+        profile_name: Optional[str] = None,
+        focus_text: Optional[str] = None,
     ) -> dict[str, Any]:
         context = await self.context_resolver.resolve(instance_id)
         raw_state = await self._runtime_state(instance_id)
@@ -121,7 +123,11 @@ class HUDAssembler:
                 raw_state=raw_state,
             )
         )
-        hud_profile = await get_hud_profile(self.db, character_id=context.character_id)
+        hud_profile = (
+            await get_profile_by_name(self.db, profile_name=profile_name)
+            if profile_name
+            else await get_hud_profile(self.db, character_id=context.character_id)
+        )
         effective_recent_limit = (
             hud_profile.recent_event_limit if recent_limit is None else recent_limit
         )
@@ -132,6 +138,7 @@ class HUDAssembler:
             raw_state,
             plugin_snapshot,
             recent_limit=cognitive_recent_limit,
+            focus_text=focus_text,
         )
         cognitive_snapshot = await self.cognition.resolve_knowledge(
             context,
@@ -445,6 +452,7 @@ class HUDAssembler:
                     "durable_knowledge": False,
                 },
                 "focus_text": attention.focus_text,
+                "focus_override": focus_text,
                 "plugin_focus_text": attention.plugin_focus_text,
                 "plugin_status": plugin_snapshot.get("status") or {},
                 "plugin_retrieval_signals": plugin_snapshot.get("retrieval_signals") or [],
