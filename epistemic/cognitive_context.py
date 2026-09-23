@@ -201,6 +201,7 @@ class CognitiveContextService:
         plugin_snapshot: Mapping[str, Any],
         *,
         recent_limit: int,
+        focus_text: str | None = None,
     ) -> CognitiveAttentionInputs:
         bounded_limit = max(1, min(int(recent_limit), 100))
 
@@ -257,9 +258,13 @@ class CognitiveContextService:
             for row in recent_newest
             if row.get("node_id") is not None and row.get("message_text")
         )
-        focus_text = next(
+        event_focus_text = next(
             (row.get("message_text") for row in recent_newest if row.get("message_text")),
             "",
+        )
+        resolved_focus_text = (
+            str(focus_text).strip() if focus_text is not None and str(focus_text).strip()
+            else event_focus_text
         )
         goals = list(_json_value(raw_state.get("goals"), []))
         plugin_focus_text = " ".join(
@@ -272,12 +277,12 @@ class CognitiveContextService:
             if signal.get("focus_text")
         )
         retrieval_focus_text = " ".join(
-            part for part in (focus_text, plugin_focus_text) if part
+            part for part in (resolved_focus_text, plugin_focus_text) if part
         )
         return CognitiveAttentionInputs(
             recent_newest=recent_newest,
             visible_source_node_ids=visible_source_node_ids,
-            focus_text=focus_text,
+            focus_text=resolved_focus_text,
             plugin_focus_text=plugin_focus_text,
             retrieval_focus_text=retrieval_focus_text,
             goals=goals,
