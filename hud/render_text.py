@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from aios_app.hud.recent_events import project_recent_events
+from aios_app.hud.recent_events import normalized_text, project_recent_events
 
 
 def _name(value: Mapping[str, Any]) -> str:
@@ -162,10 +162,18 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"- {prefix}{item.get('text', '')}")
 
     goals = frame.get("goals") or []
-    if goals:
+    immediate_goal_key = normalized_text(str(working_scene.get("immediate_goal") or ""))
+    rendered_goals = []
+    for goal in goals:
+        text = goal.get("text") if isinstance(goal, dict) else str(goal)
+        # Keep the canonical goal in the frame, but do not spend prompt tokens
+        # repeating the CURRENT SCENE immediate goal verbatim.
+        if immediate_goal_key and normalized_text(str(text)) == immediate_goal_key:
+            continue
+        rendered_goals.append((goal, text))
+    if rendered_goals:
         lines.append("\nGOALS:")
-        for goal in goals:
-            text = goal.get("text") if isinstance(goal, dict) else str(goal)
+        for goal, text in rendered_goals:
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
             lines.append(f"-{annotation} {text}")
     rules = frame.get("rules") or []
