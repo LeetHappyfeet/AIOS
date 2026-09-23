@@ -7,6 +7,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.research import CharacterResearchService
 from .lifecycle import ActionRecord, CharacterAgencyStore
+from .policy import ActionPolicyService
 
 
 ActionHandler = Callable[[UUID, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
@@ -72,6 +73,14 @@ class ActionDispatcher:
                 return await self.store.transition_action(
                     action_id, "rejected", rejection_reason="stale_character_state"
                 )
+
+        policy = ActionPolicyService(self.db)
+        disposition = await policy.disposition(action.instance_id, action.action_type, action.side_effect_class)
+        if disposition == "deny":
+            return await self.store.transition_action(action_id, "rejected", rejection_reason="action_policy_denied")
+        if disposition == "require_approval" and not await policy.is_approved(action_id):
+            await policy.request_approval(action_id)
+            return await self.store.transition_action(action_id, "waiting")
 
         action = await self.store.transition_action(action_id, "validated")
         action = await self.store.transition_action(action_id, "running")
