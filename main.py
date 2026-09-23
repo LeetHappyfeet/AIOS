@@ -12,6 +12,7 @@ from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
 from aios_app.char.identity_sources import stage_identity_source, identity_snapshot
 from aios_app.corpus import import_corpus_document, consume_corpus_sections
+from aios_app.epistemic.research import CharacterResearchService
 from aios_app.corpus_catalog import CorpusCatalogService, CorpusAccessReconciler
 from aios_app.corpus_routing import ensure_facet_route, ensure_knowledge_domain, register_domain_identifier
 from pydantic import BaseModel, Field
@@ -322,8 +323,7 @@ async def reconcile_character_corpus_access(character_id: str) -> dict[str, Any]
 async def consume_corpus(instance_id: str, req: CorpusConsumeIn) -> dict[str, Any]:
     """Intentionally cross cold corpus sections into this actor's knowledge path."""
     from uuid import UUID
-    return await consume_corpus_sections(
-        db,
+    return await CharacterResearchService(db).acquire(
         instance_id=UUID(instance_id),
         section_ids=req.section_ids,
         mode=req.mode,
