@@ -28,7 +28,7 @@ class AutonomyScheduler:
             """SELECT t.task_id,t.instance_id,t.priority
                FROM aios.character_cognitive_task t
                WHERE t.status='queued'
-                 AND t.trigger_type IN ('api_task','cognitive_delegation')
+                 AND t.trigger_type IN ('api_task','cognitive_delegation','cognitive_resume')
                  AND NOT EXISTS (
                    SELECT 1 FROM aios.pipeline_job j
                    WHERE j.job_type='agent_wake'
@@ -119,6 +119,7 @@ class AutonomyScheduler:
                 await self.db.execute(
                     """UPDATE aios.character_cognitive_task
                        SET retrieval_focus=COALESCE(retrieval_focus,'') || $2,
+                           trigger_type='cognitive_resume',
                            resume_count=resume_count+1, updated_at=now()
                        WHERE task_id=$1""",
                     parent_id,
