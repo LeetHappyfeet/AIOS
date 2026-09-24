@@ -55,19 +55,19 @@ class InternalHUDAssembler:
         clue_lines = [_clip(v, 220) for v in list(clues)[:2] if _clip(v, 220)]
         lines = [
             identity,
-            "This is one disposable internal decision. Use only the clues below; do not invent missing context.",
+            "These are thoughts AIOS found evidence for. I only choose which one deserves my attention now.",
         ]
         if clue_lines:
             lines.append("CLUES:")
             lines.extend(f"- {v}" for v in clue_lines)
         else:
-            lines.append("CLUES: none. Prefer WAIT unless a prepared choice is still clearly justified.")
+            lines.append("No extra context is needed; the choices themselves are my context.")
 
         lines.append("CHOOSE ONE:")
         for item in candidates:
             lines.append(f"{item['key']}. {_clip(item['label'], 180)}")
         lines.extend([
-            "Return JSON only: {\"choice\":\"A\",\"focus\":\"short reason or query\"}",
+            "Return JSON only: {\"choice\":\"A\"}",
             "The choice is only a proposal. AIOS will recheck whether it is still timely before doing anything.",
         ])
         prompt = "\n".join(lines)
