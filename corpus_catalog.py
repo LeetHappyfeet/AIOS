@@ -282,6 +282,22 @@ class CorpusCatalogService:
                 document_id,
             )
             await self.assign_document(document_id=document_id, route=route)
+            if profile["knowledge_domain"]:
+                await self.db.execute(
+                    """INSERT INTO aios.corpus_document_domain
+                           (document_id, knowledge_domain, source, meta)
+                       VALUES ($1,$2,'source_profile',$3::jsonb)
+                       ON CONFLICT (document_id, knowledge_domain) DO UPDATE
+                       SET source='source_profile',
+                           meta=aios.corpus_document_domain.meta || EXCLUDED.meta""",
+                    document_id,
+                    profile["knowledge_domain"],
+                    json.dumps({
+                        "profile_key": profile["profile_key"],
+                        "scope_key": profile["scope_key"],
+                        "evidence": "trusted_source_profile",
+                    }),
+                )
         return {"profile_key": profile_key, "reclassified_documents": len(matched)}
 
 
