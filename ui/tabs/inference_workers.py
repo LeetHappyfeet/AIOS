@@ -41,7 +41,7 @@ def _rows():
 def _preset(name):
     return PRESETS.get(str(name), "")
 
-def _save(key, name, url, model, api_env, api_key, concurrency, context, timeout, classes, strict, json_mode):
+def _save(key, name, url, model, api_env, api_key, concurrency, context, timeout, classes, strict, json_mode, thinking):
     worker_classes = [v.strip() for v in str(classes or "").split(",") if v.strip()]
     provider = run_async(InferenceProviderStore(db).upsert(
         provider_key=str(key).strip(), display_name=str(name).strip(),
@@ -52,7 +52,7 @@ def _save(key, name, url, model, api_env, api_key, concurrency, context, timeout
         context_window=int(context) if context else None,
         timeout_seconds=float(timeout or 900),
         worker_classes=worker_classes, strict_worker_classes=bool(strict),
-        capabilities={"json_mode": bool(json_mode)},
+        capabilities={"json_mode": bool(json_mode), "thinking": bool(thinking)},
     ))
     return f"Saved **{provider.display_name}**.", _rows()
 
@@ -115,6 +115,7 @@ def render():
             )
             strict = gr.Checkbox(label="Strict classes (never accept other task classes)", value=False)
             json_mode = gr.Checkbox(label="Supports response_format json_object", value=True)
+            thinking = gr.Checkbox(label="Enable model thinking / reasoning", value=False)
             save = gr.Button("Save worker", variant="primary")
             preset.change(fn=_preset, inputs=preset, outputs=url)
 
@@ -129,7 +130,7 @@ def render():
         refresh.click(fn=_rows, outputs=table)
         save.click(
             fn=_save,
-            inputs=[key,name,url,model,api_env,api_key,concurrency,context,timeout,classes,strict,json_mode],
+            inputs=[key,name,url,model,api_env,api_key,concurrency,context,timeout,classes,strict,json_mode,thinking],
             outputs=[status,table],
         )
         apply.click(fn=_control, inputs=[provider_id,operation], outputs=[status,table])
