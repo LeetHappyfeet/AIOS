@@ -443,14 +443,11 @@ async def create_agent_task(instance_id: UUID, req: CognitiveTaskIn) -> dict[str
     task = await CharacterAgencyStore(db).create_task(
         instance_id=instance_id, task_type=req.task_type, objective=req.objective,
         hud_profile_name=req.hud_profile_name, retrieval_focus=req.retrieval_focus,
-        priority=req.priority, trigger_type="api",
+        priority=req.priority, trigger_type="api_task",
     )
-    await AgentRuntimeStore(db).wake(
-        instance_id=instance_id, event_type="TASK_ASSIGNED",
-        source_type="task", source_id=str(task.task_id),
-        payload={"task_id": str(task.task_id), "task_type": task.task_type},
-        dedupe_key=f"task:{task.task_id}",
-    )
+    # The scheduler enqueues already-created API tasks directly. A second
+    # TASK_ASSIGNED wake would deadlock against the queued-task guard.
+    await AgentRuntimeStore(db).ensure(instance_id)
     return {"task_id": str(task.task_id), "status": task.status}
 
 
