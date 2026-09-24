@@ -71,6 +71,7 @@ class JSONLDAGIngestor:
             "ingest_mode": (record.get("ingestion") or {}).get("mode") or "semantic",
             "consumption_mode": (record.get("ingestion") or {}).get("consumption_mode") or "read",
             "corpus_profile_key": (record.get("ingestion") or {}).get("corpus_profile_key"),
+            "knowledge_domain": (record.get("ingestion") or {}).get("knowledge_domain"),
         }
 
     async def _ensure_source_identity(self, context: dict, url: str) -> None:
@@ -183,7 +184,7 @@ class JSONLDAGIngestor:
             if context.get("corpus_profile_key"):
                 profile = await self.db.fetchrow(
                     """SELECT profile_id, profile_key, collection_key, scope_key,
-                              epistemic_namespace, identity_binding
+                              epistemic_namespace, identity_binding, knowledge_domain
                        FROM aios.corpus_source_profile
                        WHERE profile_key=$1 AND enabled=TRUE""",
                     context["corpus_profile_key"],
@@ -200,6 +201,7 @@ class JSONLDAGIngestor:
                     identity_binding=profile["identity_binding"],
                     profile_id=profile["profile_id"],
                     profile_key=profile["profile_key"],
+                    knowledge_domain=profile["knowledge_domain"],
                     matched_by="crawl_task",
                 )
             adapter_metadata = dict(document)
@@ -217,7 +219,7 @@ class JSONLDAGIngestor:
                 title=document.get("title") or record.get("content", {}).get("title"),
                 author=document.get("author"), source_uri=url,
                 language=record.get("content", {}).get("lang"),
-                meta={"accumulator_id": record.get("accumulator_id"), "schema_version": record.get("schema_version"), "retrieved_at": record.get("retrieved_at"), "crawl": record.get("crawl") or {}, "web_document": document, "catalog": {"profile_key": route.profile_key, "matched_by": route.matched_by, "collection_key": route.collection_key}},
+                meta={"accumulator_id": record.get("accumulator_id"), "schema_version": record.get("schema_version"), "retrieved_at": record.get("retrieved_at"), "crawl": record.get("crawl") or {}, "crawl_domain": context.get("knowledge_domain"), "web_document": document, "catalog": {"profile_key": route.profile_key, "matched_by": route.matched_by, "collection_key": route.collection_key, "knowledge_domain": route.knowledge_domain}},
                 catalog_route=route,
                 epistemic_namespace=document_route.epistemic_namespace or classification.epistemic_namespace or route.epistemic_namespace,
                 facets=classification.facets,
@@ -226,6 +228,29 @@ class JSONLDAGIngestor:
                 document_id=corpus["document_id"],
                 route=document_route,
             )
+
+            # Trusted source profiles classify every matching document. A
+            # crawl-level domain declaration is deliberately narrower: it
+            # authoritatively classifies only the seed document. Descendants
+            # retain the declaration in provenance but require their own
+            # structured route/profile before gaining domain membership.
+            declared_domain = route.knowledge_domain
+            declared_evidence = "source_profile"
+            crawl = record.get("crawl") or {}
+            if not declared_domain and int(crawl.get("depth") or 0) == 0:
+                declared_domain = context.get("knowledge_domain")
+                declared_evidence = "crawl_declaration"
+            if declared_domain:
+                declared_route = await facet_router.resolve_domain_key(
+                    declared_domain,
+                    evidence=declared_evidence,
+                    classification=classification,
+                )
+                await facet_router.apply(
+                    document_id=corpus["document_id"],
+                    route=declared_route,
+                )
+
             await facet_router.observe_unresolved(
                 document_id=corpus["document_id"],
                 classification=classification,
