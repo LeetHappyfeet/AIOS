@@ -64,7 +64,7 @@ class CognitiveOperationEngine:
 
     async def _queue_decision(self, op: Mapping[str,Any]) -> None:
         from aios_app.agent.transactions import InternalCognitionTransactions
-        payload=self._json(op["input"],{})
+        payload=self._mapping(op["input"])
         subject=" ".join(str(v) for v in payload.values() if v)[:220]
         labels={
             "reflection.review":[
