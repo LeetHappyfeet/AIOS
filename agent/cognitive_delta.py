@@ -40,23 +40,23 @@ class CognitiveDeltaService:
             """
             WITH RECURSIVE ancestry AS (
                 SELECT dn.node_id, dn.event_id, dn.timeline_id, 0 AS depth
-                FROM aios.dag_node dn WHERE dn.node_id=$2
+                FROM aios.dag_node dn WHERE dn.node_id=$1
                 UNION ALL
                 SELECT parent.node_id, parent.event_id, parent.timeline_id, a.depth + 1
                 FROM ancestry a
                 JOIN aios.dag_edge de ON de.child_node_id=a.node_id
                 JOIN aios.dag_node parent ON parent.node_id=de.parent_node_id
-                WHERE a.depth < $4 AND a.node_id IS DISTINCT FROM $3
+                WHERE a.depth < $3 AND a.node_id IS DISTINCT FROM $2
             )
             SELECT a.node_id, a.event_id, ie.kind, ie.speaker_id, ie.speaker_role,
                    ie.recipient_id, ie.message_text, ie.event_time, a.depth
             FROM ancestry a
             LEFT JOIN aios.ingest_event ie ON ie.event_id=a.event_id
-            WHERE a.node_id IS DISTINCT FROM $3
+            WHERE a.node_id IS DISTINCT FROM $2
             ORDER BY a.depth DESC
-            LIMIT $4
+            LIMIT $3
             """,
-            instance_id, through_node_id, from_node_id, max(1, min(int(limit), 128)),
+            through_node_id, from_node_id, max(1, min(int(limit), 128)),
         )
         nodes = tuple({
             "node_id": str(r["node_id"]), "event_id": r["event_id"],
