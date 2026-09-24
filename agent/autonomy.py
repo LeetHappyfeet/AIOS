@@ -101,6 +101,35 @@ class AutonomyScheduler:
             await self.runtime.finish_semantic_turn(instance_id, semantic=False)
             return False
 
+        # A delegated child completion resumes its existing parent task rather
+        # than inventing another executive identity/task.
+        child_events = [
+            e for e in events
+            if str(e["event_type"]) in {"COGNITIVE_TASK_COMPLETED","COGNITIVE_TASK_FAILED"}
+            and isinstance(e["payload"], dict) and e["payload"].get("parent_task_id")
+        ]
+        if child_events:
+            event = child_events[0]
+            parent_id = UUID(str(event["payload"]["parent_task_id"]))
+            parent = await self.agency.get_task(parent_id)
+            if parent and parent.status in {"waiting","running"}:
+                if parent.status == "running":
+                    parent = await self.agency.transition_task(parent_id, "waiting")
+                await self.agency.transition_task(parent_id, "queued")
+                await self.db.execute(
+                    """UPDATE aios.character_cognitive_task
+                       SET retrieval_focus=COALESCE(retrieval_focus,'') || $2,
+                           resume_count=resume_count+1, updated_at=now()
+                       WHERE task_id=$1""",
+                    parent_id,
+                    "\n\nDELEGATED COGNITION RESULT:\n" + json.dumps(event["payload"], default=str),
+                )
+                await self.db.execute(
+                    """UPDATE aios.character_wake_event SET status='consumed',consumed_at=now()
+                       WHERE wake_id=$1 AND status='pending'""", event["wake_id"],
+                )
+                return True
+
         ids = [str(e["wake_id"]) for e in events]
         summaries = [
             {
