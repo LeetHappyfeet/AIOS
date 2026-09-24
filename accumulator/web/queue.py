@@ -22,6 +22,7 @@ class CrawlTask:
     ingest_mode: str = "corpus"
     consumption_mode: str = "read"
     corpus_profile_key: Optional[str] = None
+    knowledge_domain: Optional[str] = None
     crawl_mode: str = "page"
     max_depth: int = 0
     max_pages: int = 1
