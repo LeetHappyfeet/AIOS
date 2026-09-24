@@ -38,11 +38,29 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
             for item in candidates[:limit]
         ]}
 
+    async def _origin(instance_id: UUID) -> tuple[Any, Any, Any, Any]:
+        row = await db.fetchrow(
+            """SELECT ar.active_task_id, t.source_node_id,
+                      COALESCE(t.root_task_id,t.task_id) AS root_task_id
+               FROM aios.character_agent_runtime ar
+               LEFT JOIN aios.character_cognitive_task t ON t.task_id=ar.active_task_id
+               WHERE ar.instance_id=$1""", instance_id,
+        )
+        return (
+            row["active_task_id"] if row else None,
+            row["source_node_id"] if row else None,
+            row["root_task_id"] if row else None,
+            None,
+        )
+
     async def goal_create(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        parent_task, source_node, root_task, _ = await _origin(instance_id)
         row = await db.execute_returning_row(
-            """INSERT INTO aios.character_agent_goal(instance_id,goal_text,priority,meta)
-               VALUES($1,$2,$3,$4::jsonb) RETURNING goal_id,status""",
-            instance_id, str(args["goal"]).strip(), int(args.get("priority",100)),
+            """INSERT INTO aios.character_agent_goal(
+                   instance_id,source_task_id,source_node_id,root_task_id,goal_text,priority,meta)
+               VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING goal_id,status""",
+            instance_id, parent_task, source_node, root_task,
+            str(args["goal"]).strip(), int(args.get("priority",100)),
             json.dumps({"created_by":"cognitive_action"}),
         )
         return {"goal_id":str(row["goal_id"]),"status":row["status"],"goal":str(args["goal"])}
@@ -71,11 +89,14 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
 
     async def task_create(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         task_type=str(args.get("task_type") or "executive")
+        parent_task, source_node, root_task, _ = await _origin(instance_id)
         task=await agency.create_task(
             instance_id=instance_id, task_type=task_type, objective=str(args["objective"]),
             retrieval_focus=args.get("retrieval_focus"), priority=int(args.get("priority",100)),
-            trigger_type="cognitive_delegation", execution_mode=str(args.get("execution_mode","auto")),
-            meta={"created_by":"cognitive_action"},
+            parent_task_id=parent_task, trigger_type="cognitive_delegation",
+            source_node_id=source_node, root_task_id=root_task,
+            execution_mode=str(args.get("execution_mode","auto")),
+            meta={"created_by":"cognitive_action","await_parent":True},
         )
         return {"task_id":str(task.task_id),"task_type":task.task_type,"status":task.status}
 
@@ -87,11 +108,13 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
         return {"task_id":str(task.task_id),"status":task.status}
 
     async def delegate(kind: str, instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
+        parent_task, source_node, root_task, _ = await _origin(instance_id)
         task=await agency.create_task(
             instance_id=instance_id, task_type=kind, objective=str(args["objective"]),
             retrieval_focus=args.get("focus"), priority=int(args.get("priority",100)),
-            trigger_type="cognitive_delegation", execution_mode="auto",
-            meta={"created_by":"cognitive_action","specialization":kind},
+            parent_task_id=parent_task, trigger_type="cognitive_delegation",
+            source_node_id=source_node, root_task_id=root_task, execution_mode="auto",
+            meta={"created_by":"cognitive_action","specialization":kind,"await_parent":True},
         )
         return {"task_id":str(task.task_id),"task_type":kind,"status":task.status}
 
