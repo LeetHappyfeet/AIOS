@@ -46,6 +46,7 @@ class InternalCognitionTransactions:
         candidates: Sequence[Mapping[str, Any]] = DEFAULT_CHOICES,
         priority: int = 150, ttl_seconds: int = 300,
         source_task_id: UUID | None = None,
+        opportunity_ids: Sequence[UUID] = (),
     ) -> UUID:
         choices = [dict(x) for x in candidates][:5]
         hud = await self.huds.build(instance_id, clues=clues, candidates=choices)
@@ -53,15 +54,15 @@ class InternalCognitionTransactions:
             """INSERT INTO aios.internal_cognition_transaction(
                  instance_id,source_task_id,priority,source_state_version,
                  source_timeline_id,source_node_id,context_fingerprint,clues,
-                 candidates,prompt_text,prompt_hash,expires_at)
+                 candidates,prompt_text,prompt_hash,expires_at,opportunity_ids)
                VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,
-                      now()+($12*interval '1 second'))
+                      now()+($12*interval '1 second'),$13::uuid[])
                RETURNING transaction_id""",
             instance_id, source_task_id, int(priority), hud.state_version,
             hud.source_timeline_id, hud.source_node_id, hud.fingerprint,
             json.dumps(list(clues)[:2]), json.dumps(choices), hud.prompt,
             hashlib.sha256(hud.prompt.encode()).hexdigest(),
-            max(10,min(int(ttl_seconds),3600)),
+            max(10,min(int(ttl_seconds),3600)), list(opportunity_ids),
         )
         return row["transaction_id"]
 
@@ -82,7 +83,7 @@ class InternalCognitionTransactions:
 
         tx=dict(row); candidates=self._json(tx["candidates"],[])
         output_schema={"type":"object","required":["choice"],"properties":{
-            "choice":{"type":"string"},"focus":{"type":"string"}},"additionalProperties":False}
+            "choice":{"type":"string"}},"additionalProperties":False}
         try:
             inference=await self.broker.infer(InferenceRequest(
                 instance_id=tx["instance_id"], task_id=tx["source_task_id"],
@@ -93,7 +94,7 @@ class InternalCognitionTransactions:
             ))
             raw=inference.response.raw
             choice=str(raw.get("choice") or "").strip().upper()
-            focus=" ".join(str(raw.get("focus") or "").split())[:240] or None
+            focus=None
             selected=next((x for x in candidates if str(x.get("key","")).upper()==choice),None)
             if not selected:
                 return await self._reject(transaction_id,"invalid",f"unknown choice {choice!r}")
@@ -128,23 +129,51 @@ class InternalCognitionTransactions:
     async def _materialize(self, tx: Mapping[str,Any], selected: Mapping[str,Any],
                            focus: str | None) -> Mapping[str,Any]:
         operation=str(selected.get("operation") or "wait")
+        offered=list(tx.get("opportunity_ids") or [])
         if operation == "wait":
+            if offered:
+                await self.db.execute(
+                    """UPDATE aios.character_cognitive_opportunity
+                       SET status='suppressed',resolved_at=now(),updated_at=now()
+                       WHERE opportunity_id=ANY($1::uuid[]) AND status='offered'""",offered)
             return {"kind":"none"}
+        oid=selected.get("opportunity_id")
+        if not oid: return {"kind":"none"}
+        opportunity=await self.db.fetchrow(
+            "SELECT * FROM aios.character_cognitive_opportunity WHERE opportunity_id=$1",UUID(str(oid)))
+        if not opportunity or opportunity["status"] not in {"pending","offered"}:
+            return {"kind":"stale_opportunity"}
+        opportunity=dict(opportunity)
+        if offered:
+            await self.db.execute(
+                """UPDATE aios.character_cognitive_opportunity
+                   SET status=CASE WHEN opportunity_id=$2 THEN 'selected' ELSE 'suppressed' END,
+                       selected_at=CASE WHEN opportunity_id=$2 THEN now() ELSE selected_at END,
+                       resolved_at=CASE WHEN opportunity_id<>$2 THEN now() ELSE resolved_at END,
+                       updated_at=now()
+                   WHERE opportunity_id=ANY($1::uuid[]) AND status='offered'""",
+                offered,UUID(str(oid)))
         from .lifecycle import CharacterAgencyStore
         agency=CharacterAgencyStore(self.db)
-        task_type={"memory":"reflection","research":"research","planning":"planning",
-                   "urgent":"executive"}.get(operation,"reflection")
-        objective=focus or str(selected.get("label") or operation)
+        op=str(opportunity["operation_type"])
+        task_type=("research" if op=="corpus.search" else "planning" if op=="planning.review"
+                   else "executive" if op=="executive.review" else "reflection")
         task=await agency.create_task(
-            instance_id=tx["instance_id"], task_type=task_type, objective=objective,
-            hud_profile_name=f"agent.{task_type}", priority=int(tx["priority"]),
-            trigger_type="transaction_choice", trigger_id=str(tx["transaction_id"]),
-            source_state_version=tx["source_state_version"], source_node_id=tx["source_node_id"],
-            source_through_node_id=tx["source_node_id"],
-            meta={"transaction_id":str(tx["transaction_id"]),"operation":operation},
-            execution_mode="auto",
-        )
-        return {"kind":"cognitive_task","task_id":str(task.task_id),"task_type":task_type}
+            instance_id=tx["instance_id"],task_type=task_type,
+            objective=str(opportunity["natural_language"]),
+            retrieval_focus=json.dumps(opportunity["operation_payload"],default=str),
+            hud_profile_name=f"agent.{task_type}",priority=int(tx["priority"]),
+            trigger_type="transaction_choice",trigger_id=str(tx["transaction_id"]),
+            source_state_version=opportunity["source_state_version"],
+            source_node_id=opportunity["source_node_id"],
+            source_through_node_id=opportunity["source_node_id"],
+            meta={"transaction_id":str(tx["transaction_id"]),"opportunity_id":str(oid),
+                  "operation_type":op},execution_mode="auto")
+        await self.db.execute(
+            """UPDATE aios.character_cognitive_opportunity SET status='executed',
+               resolved_at=now(),updated_at=now() WHERE opportunity_id=$1""",UUID(str(oid)))
+        return {"kind":"cognitive_task","task_id":str(task.task_id),"task_type":task_type,
+                "opportunity_id":str(oid),"operation_type":op}
 
     async def _timely(self, tx: Mapping[str,Any], selected: Mapping[str,Any]) -> tuple[bool,str]:
         now=datetime.now(timezone.utc)
@@ -155,9 +184,10 @@ class InternalCognitionTransactions:
         # source-timeline switch. Immediate choices require the exact snapshot.
         if tx["source_timeline_id"] and current.source_timeline_id != tx["source_timeline_id"]:
             return False,"source timeline changed"
-        if operation == "urgent":
+        policy=str(selected.get("freshness_policy") or ("strict" if operation=="urgent" else "contextual"))
+        if policy == "strict":
             if current.state_version != tx["source_state_version"] or current.source_head_node_id != tx["source_node_id"]:
-                return False,"immediate context advanced"
+                return False,"strict opportunity context advanced"
         return True,"current"
 
     async def _reject(self, transaction_id:UUID,status:str,reason:str,
