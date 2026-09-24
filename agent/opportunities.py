@@ -44,8 +44,15 @@ class CognitiveOpportunityService:
             "SELECT * FROM aios.character_runtime_state WHERE instance_id=$1",instance_id)
         if not raw: return OpportunityBatch(instance_id,())
         raw=dict(raw)
+        delta_focus=None
+        if source_node_id is not None:
+            source_row=await self.db.fetchrow(
+                "SELECT message_text FROM aios.dag_node WHERE node_id=$1 AND timeline_id=$2",
+                source_node_id,context.source_timeline_id)
+            if source_row and source_row["message_text"]:
+                delta_focus=str(source_row["message_text"])
         attention=await self.cognition.resolve_attention_inputs(
-            context,raw,{},recent_limit=6)
+            context,raw,{},recent_limit=6,focus_text=delta_focus)
         snapshot=await self.cognition.resolve_knowledge(context,None,attention)
         focus=_clip(attention.focus_text,360)
         goals=list(attention.goals)
@@ -72,7 +79,8 @@ class CognitiveOpportunityService:
                 relevance=min(1,rel/5),memory_affinity=min(1,rel/4),
                 recency=max(.2,1-rank*.25),
                 evidence=[{"kind":"recalled_memory","id":str(item.get("proposition_id") or "")}],
-                key=f"memory:{item.get('proposition_id') or text[:80]}"))
+                key=f"memory:{item.get('proposition_id') or text[:80]}",
+                subject_id=primary_subject.subject_id if primary_subject else None))
 
         known=[str(x.get("text") or "") for x in snapshot.knowledge]
         kd=snapshot.corpus_demand
@@ -118,7 +126,8 @@ class CognitiveOpportunityService:
                     "planning.review",{"goal":g,"focus":focus},
                     source_node_id or context.source_head_node_id,context,
                     relevance=.45+affinity*.35,goal_affinity=max(.35,affinity),recency=1,
-                    evidence=[{"kind":"active_goal","text":g}],key=f"goal:{g.lower()[:100]}"))
+                    evidence=[{"kind":"active_goal","text":g}],key=f"goal:{g.lower()[:100]}",
+                    subject_id=primary_subject.subject_id if primary_subject else None))
 
         # Scene transitions are explicit deterministic evidence for immediate/reflection needs.
         if context.source_head_node_id:
@@ -143,7 +152,8 @@ class CognitiveOpportunityService:
                     novelty=.7,recency=1,
                     freshness="strict" if immediate else "contextual",
                     evidence=[{"kind":"scene_transition","slot":slot}],
-                    key=f"scene:{slot}:{after.lower()[:80]}"))
+                    key=f"scene:{slot}:{after.lower()[:80]}",
+                    subject_id=primary_subject.subject_id if primary_subject else None))
 
         proposals.sort(key=lambda x:x["priority_score"],reverse=True)
         stored=[]
@@ -160,7 +170,9 @@ class CognitiveOpportunityService:
                    DO UPDATE SET natural_language=EXCLUDED.natural_language,
                      operation_payload=EXCLUDED.operation_payload,source_node_id=EXCLUDED.source_node_id,
                      source_state_version=EXCLUDED.source_state_version,priority_score=EXCLUDED.priority_score,
-                     evidence=EXCLUDED.evidence,valid_until=EXCLUDED.valid_until,updated_at=now()
+                     evidence=EXCLUDED.evidence,valid_until=EXCLUDED.valid_until,
+                     subject_id=COALESCE(EXCLUDED.subject_id,aios.character_cognitive_opportunity.subject_id),
+                     updated_at=now()
                    RETURNING *""",
                 instance_id,p["opportunity_type"],p["natural_language"],p["operation_type"],
                 json.dumps(p["operation_payload"]),p["source_node_id"],p["source_timeline_id"],
