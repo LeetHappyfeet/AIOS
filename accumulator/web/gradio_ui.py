@@ -14,7 +14,7 @@ worker = AccumulatorWorker(queue)
 worker.start()
 
 
-def submit_url(url: str, source_id: str, corpus_profile_key: str, crawl_site: bool, allow_external_links: bool):
+def submit_url(url: str, source_id: str, corpus_profile_key: str, knowledge_domain: str, crawl_site: bool, allow_external_links: bool):
     url = (url or "").strip()
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -22,10 +22,12 @@ def submit_url(url: str, source_id: str, corpus_profile_key: str, crawl_site: bo
 
     source_id = (source_id or "").strip() or parsed.netloc.lower()
     corpus_profile_key = (corpus_profile_key or "").strip() or None
+    knowledge_domain = (knowledge_domain or "").strip() or None
     task = CrawlTask(
         url=url,
         source_id=source_id,
         corpus_profile_key=corpus_profile_key,
+        knowledge_domain=knowledge_domain,
         same_domain_only=not bool(allow_external_links),
         crawl_mode="site" if crawl_site else "page",
         max_depth=2 if crawl_site else 0,
@@ -44,6 +46,7 @@ with gr.Blocks() as demo:
     url_input = gr.Textbox(label="URL")
     source_id = gr.Textbox(label="Source ID", placeholder="Defaults to hostname")
     corpus_profile_key = gr.Textbox(label="Corpus profile (optional)", placeholder="Auto-routes by source/domain when blank")
+    knowledge_domain = gr.Textbox(label="Declared knowledge domain (optional)", placeholder="Classifies the crawl seed only")
     crawl_site = gr.Checkbox(label="Crawl linked pages on this domain", value=False)
     allow_external_links = gr.Checkbox(label="Allow crawl to leave source domain (unsafe for corpus imports)", value=False)
     status = gr.Textbox(label="Status")
@@ -51,7 +54,7 @@ with gr.Blocks() as demo:
     submit = gr.Button("Start accumulation")
     submit.click(
         fn=submit_url,
-        inputs=[url_input, source_id, corpus_profile_key, crawl_site, allow_external_links],
+        inputs=[url_input, source_id, corpus_profile_key, knowledge_domain, crawl_site, allow_external_links],
         outputs=status,
     )
 
