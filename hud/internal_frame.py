@@ -65,11 +65,24 @@ class InternalHUDAssembler:
         kernel = await self.identities.get(context.character_id)
         core = dict(kernel.kernel_json.get("core") or {}) if kernel else {}
         name = core.get("display_name") or core.get("canonical_name") or context.character_id
+        facets = dict(kernel.kernel_json.get("facets") or {}) if kernel else {}
         persona_bits = [
-            core.get("species"), core.get("archetype"), core.get("default_tone"),
-            core.get("speech_style"),
+            core.get("species"), core.get("primary_role"), core.get("archetype"),
+            core.get("default_tone"), core.get("speech_style"),
         ]
-        persona = ", ".join(_clip(v, 56) for v in persona_bits if v)
+        # Decision workers need a tiny authored roleplay anchor, not the full
+        # foreground identity prompt. Personality/values/role/expression are
+        # preferred because they affect choices; appearance is intentionally omitted.
+        for facet_type in ("personality","values","role","expression","constraint"):
+            for facet in list(facets.get(facet_type) or [])[:2]:
+                value=facet.get("value") if isinstance(facet, Mapping) else None
+                if isinstance(value, Mapping):
+                    persona_bits.extend(value.values())
+                elif isinstance(value, Sequence) and not isinstance(value, (str,bytes)):
+                    persona_bits.extend(value)
+                elif value:
+                    persona_bits.append(value)
+        persona = "; ".join(_clip(v, 72) for v in persona_bits if _clip(v,72))[:300]
         identity = f"I am {name}." + (f" {persona}." if persona else "")
 
         clue_lines = [_clip(v, 220) for v in list(clues)[:2] if _clip(v, 220)]
