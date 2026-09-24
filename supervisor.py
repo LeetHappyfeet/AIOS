@@ -266,6 +266,10 @@ async def run_supervisor() -> None:
                 from aios_app.agent.runtime import AgentRuntimeStore
                 await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)
                 await AutonomyScheduler(db).schedule_ready(limit=100)
+                # Disposable micro-HUD work opportunistically consumes free
+                # donated inference capacity and never survives its receipt.
+                from aios_app.agent.transaction_scheduler import TransactionScheduler
+                await TransactionScheduler(db).run_pending(limit=8)
             except Exception:
                 logger.exception("Agent autonomy scheduling failed")
 
