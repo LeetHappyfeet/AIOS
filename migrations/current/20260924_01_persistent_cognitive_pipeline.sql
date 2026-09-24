@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS aios.character_cognitive_operation (
     input jsonb NOT NULL DEFAULT '{}'::jsonb,
     result jsonb,
     source_state_version bigint,
+    source_timeline_id uuid,
     source_node_id uuid,
     freshness_policy text NOT NULL DEFAULT 'contextual',
     depth integer NOT NULL DEFAULT 0,
