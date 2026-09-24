@@ -95,6 +95,9 @@ async def _partition_key_for_enqueue(
         )
         return str(row["scope_key"]) if row else f"assertion:{assertion_id}"
 
+    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference"} and payload.get("instance_id"):
+        return f"instance:{payload['instance_id']}"
+
     for key in ("world_id", "character_id", "section_id", "node_id"):
         if payload.get(key):
             return f"{key}:{payload[key]}"
