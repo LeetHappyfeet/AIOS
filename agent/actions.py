@@ -21,6 +21,7 @@ class ActionSpec:
     side_effect_class: str
     allowed_worker_classes: frozenset[str]
     handler: ActionHandler
+    result_mode: str = "terminal"
 
 
 class ActionRegistry:
@@ -83,6 +84,10 @@ class ActionDispatcher:
             await policy.request_approval(action_id)
             return await self.store.transition_action(action_id, "waiting")
 
+        await self.db.execute(
+            "UPDATE aios.character_action SET result_mode=$2 WHERE action_id=$1",
+            action_id, spec.result_mode,
+        )
         action = await self.store.transition_action(action_id, "validated")
         action = await self.store.transition_action(action_id, "running")
         try:
@@ -161,6 +166,7 @@ def default_action_registry(db: Database) -> ActionRegistry:
         handler=corpus_search,
     ))
     from .adapters import register_external_actions, register_interagent_actions
+    from .cognitive_actions import register_cognitive_actions
 
     registry.register(ActionSpec(
         name="corpus.acquire",
@@ -177,6 +183,7 @@ def default_action_registry(db: Database) -> ActionRegistry:
         allowed_worker_classes=frozenset({"executive","research"}),
         handler=corpus_acquire,
     ))
+    register_cognitive_actions(db, registry)
     register_external_actions(db, registry)
     register_interagent_actions(db, registry)
     return registry
