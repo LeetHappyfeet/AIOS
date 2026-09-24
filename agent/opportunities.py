@@ -11,6 +11,7 @@ from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
+from aios_app.agent.cognitive_subjects import CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver
 
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
@@ -33,6 +34,8 @@ class CognitiveOpportunityService:
         self.contexts=HUDContextResolver(db)
         self.cognition=CognitiveContextService(db)
         self.demand=KnowledgeDemandResolver(minimum_terms=1,coverage_threshold=.60)
+        self.subjects=CognitiveSubjectBuilder(db)
+        self.subject_demand=SubjectKnowledgeDemandResolver()
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                        limit:int=8) -> OpportunityBatch:
@@ -47,6 +50,14 @@ class CognitiveOpportunityService:
         focus=_clip(attention.focus_text,360)
         goals=list(attention.goals)
         proposals:list[dict[str,Any]]=[]
+        subjects=await self.subjects.build(
+            instance_id=instance_id,focus_text=focus,knowledge=list(snapshot.knowledge),
+            source_node_id=source_node_id or context.source_head_node_id)
+        primary_subject=subjects[0] if subjects else None
+        structured_demand=(
+            self.subject_demand.resolve(primary_subject,list(snapshot.knowledge))
+            if primary_subject else None
+        )
 
         # Established topology recall is already character-relative and ranked.
         for rank,item in enumerate(snapshot.recalled_memories[:3]):
@@ -65,21 +76,36 @@ class CognitiveOpportunityService:
 
         known=[str(x.get("text") or "") for x in snapshot.knowledge]
         kd=snapshot.corpus_demand
-        if not kd and focus:
-            d=self.demand.resolve(focus,known_texts=known)
-            if d.needed:
-                kd={"missing_terms":list(d.missing_terms),"coverage":d.coverage,"reason":d.reason}
-        if kd:
-            missing=list(kd.get("missing_terms") or [])
-            subject=" ".join(missing[:6]) or focus
-            if subject:
-                gap=max(0,min(1,1-float(kd.get("coverage") or 0)))
-                proposals.append(self._p(
-                    "knowledge_gap",f"Find out more about {subject}.","corpus.search",
-                    {"query":subject,"focus":focus},source_node_id or context.source_head_node_id,
-                    context,relevance=.65,knowledge_gap=gap,novelty=.7,recency=1,
-                    evidence=[{"kind":"corpus_demand","reason":kd.get("reason")}],
-                    key=f"research:{subject.lower()[:100]}"))
+        if structured_demand and structured_demand["next_source"]=="corpus":
+            subject=primary_subject.display_label
+            query=structured_demand["query"]
+            gap=max(0.0,1.0-float(structured_demand["internal_coverage"]))
+            proposals.append(self._p(
+                "knowledge_gap",f"Find out more about {subject}.","corpus.search",
+                {"query":query,"focus":primary_subject.retrieval_text,
+                 "subject_id":str(primary_subject.subject_id)},
+                source_node_id or context.source_head_node_id,context,
+                relevance=.7,knowledge_gap=gap,novelty=.7,recency=1,
+                evidence=[{"kind":"subject_knowledge_demand",
+                           "internal_coverage":structured_demand["internal_coverage"]}],
+                key=f"research:{primary_subject.canonical_key}"[:180],
+                subject_id=primary_subject.subject_id))
+        elif not primary_subject:
+            if not kd and focus:
+                d=self.demand.resolve(focus,known_texts=known)
+                if d.needed:
+                    kd={"missing_terms":list(d.missing_terms),"coverage":d.coverage,"reason":d.reason}
+            if kd:
+                missing=list(kd.get("missing_terms") or [])
+                subject=" ".join(missing[:6]) or focus
+                if subject:
+                    gap=max(0,min(1,1-float(kd.get("coverage") or 0)))
+                    proposals.append(self._p(
+                        "knowledge_gap",f"Find out more about {subject}.","corpus.search",
+                        {"query":subject,"focus":focus},source_node_id or context.source_head_node_id,
+                        context,relevance=.65,knowledge_gap=gap,novelty=.7,recency=1,
+                        evidence=[{"kind":"corpus_demand","reason":kd.get("reason")}],
+                        key=f"research:{subject.lower()[:100]}"))
 
         goal_words=set(re.findall(r"[a-z0-9']+",focus.lower()))
         for goal in goals[:3]:
@@ -127,9 +153,9 @@ class CognitiveOpportunityService:
                    instance_id,opportunity_type,natural_language,operation_type,operation_payload,
                    source_node_id,source_timeline_id,source_state_version,novelty,relevance,urgency,
                    uncertainty,goal_affinity,memory_affinity,knowledge_gap,recency,priority_score,
-                   freshness_policy,supersession_key,evidence,valid_until)
+                   freshness_policy,supersession_key,evidence,valid_until,subject_id)
                    VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,
-                          now()+CASE WHEN $18='strict' THEN interval '2 minutes' ELSE interval '15 minutes' END)
+                          now()+CASE WHEN $18='strict' THEN interval '2 minutes' ELSE interval '15 minutes' END,$21)
                    ON CONFLICT (instance_id,supersession_key) WHERE status IN ('pending','offered')
                    DO UPDATE SET natural_language=EXCLUDED.natural_language,
                      operation_payload=EXCLUDED.operation_payload,source_node_id=EXCLUDED.source_node_id,
@@ -141,13 +167,13 @@ class CognitiveOpportunityService:
                 p["source_state_version"],p["novelty"],p["relevance"],p["urgency"],p["uncertainty"],
                 p["goal_affinity"],p["memory_affinity"],p["knowledge_gap"],p["recency"],
                 p["priority_score"],p["freshness_policy"],p["supersession_key"],
-                json.dumps(p["evidence"]))
+                json.dumps(p["evidence"]),p.get("subject_id"))
             if row: stored.append(dict(row))
         return OpportunityBatch(instance_id,tuple(stored))
 
     def _p(self,typ,label,op,payload,node,context,*,novelty=0,relevance=0,urgency=0,
            uncertainty=0,goal_affinity=0,memory_affinity=0,knowledge_gap=0,recency=0,
-           evidence=(),key:str,freshness="contextual"):
+           evidence=(),key:str,freshness="contextual",subject_id:UUID|None=None):
         score=(1.7*urgency+1.35*goal_affinity+1.2*relevance+1.1*knowledge_gap+
                .9*memory_affinity+.65*novelty+.45*uncertainty+.55*recency)
         return {"opportunity_type":typ,"natural_language":_clip(label,220),"operation_type":op,
@@ -157,4 +183,5 @@ class CognitiveOpportunityService:
                 "relevance":relevance,"urgency":urgency,"uncertainty":uncertainty,
                 "goal_affinity":goal_affinity,"memory_affinity":memory_affinity,
                 "knowledge_gap":knowledge_gap,"recency":recency,"priority_score":score,
-                "freshness_policy":freshness,"supersession_key":key,"evidence":list(evidence)}
+                "freshness_policy":freshness,"supersession_key":key,"evidence":list(evidence),
+                "subject_id":subject_id}
