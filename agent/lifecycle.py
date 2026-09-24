@@ -115,6 +115,7 @@ class ActionRecord:
     result: Any
     error: Optional[str]
     rejection_reason: Optional[str]
+    result_mode: str
     meta: dict[str, Any]
 
     @classmethod
@@ -134,6 +135,7 @@ class ActionRecord:
             result=_decode(row["result"]),
             error=row["error"],
             rejection_reason=row["rejection_reason"],
+            result_mode=str(row.get("result_mode", "terminal")),
             meta=dict(_decode(row["meta"]) or {}),
         )
 
