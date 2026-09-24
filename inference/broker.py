@@ -96,6 +96,11 @@ class OpenAICompatibleClient:
         }
         if provider.capabilities.get("json_mode", True):
             body["response_format"] = {"type": "json_object"}
+        thinking = provider.capabilities.get("thinking")
+        if thinking is not None:
+            enabled = bool(thinking)
+            body["enable_thinking"] = enabled
+            body["chat_template_kwargs"] = {"enable_thinking": enabled}
         req = urllib.request.Request(
             provider.base_url + "/chat/completions",
             data=json.dumps(body).encode("utf-8"),
@@ -254,13 +259,16 @@ class InferenceBroker:
             )
             raise
         except Exception as exc:
+            latency_ms = int((time.monotonic() - started) * 1000)
             await self.db.execute(
                 """
                 UPDATE aios.inference_request SET status='failed',
-                    error=$2, completed_at=now(), updated_at=now()
+                    response_text=$2, error=$3, latency_ms=$4,
+                    completed_at=now(), updated_at=now()
                 WHERE request_id=$1
                 """,
-                request_id, str(exc)[:2000],
+                request_id, text if 'text' in locals() else None,
+                str(exc)[:2000], latency_ms,
             )
             raise
         finally:
