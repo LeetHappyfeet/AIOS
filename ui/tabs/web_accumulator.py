@@ -38,6 +38,8 @@ def _submit(
     target_world_id: str,
     ingest_mode: str,
     consumption_mode: str,
+    corpus_profile_key: str,
+    knowledge_domain: str,
     crawl_mode: str,
     max_depth: float,
     max_pages: float,
@@ -72,6 +74,8 @@ def _submit(
         target_world_id=target_world,
         ingest_mode=ingest_value,
         consumption_mode=(consumption_mode or "read").strip().lower(),
+        corpus_profile_key=_clean_optional(corpus_profile_key),
+        knowledge_domain=_clean_optional(knowledge_domain),
         crawl_mode=mode,
         max_depth=int(max_depth or 0) if mode == "site" else 0,
         max_pages=int(max_pages or 1) if mode == "site" else 1,
@@ -196,6 +200,20 @@ Fetch web material into the **cold searchable corpus** by default. Storing a pag
                 info="Used only with Store and read as target.",
             )
 
+        with gr.Accordion("Corpus classification", open=False):
+            gr.Markdown(
+                "Use a source profile for a dedicated repository/host. A declared knowledge domain classifies only the crawl seed; linked descendants must qualify independently."
+            )
+            with gr.Row():
+                corpus_profile_key = gr.Textbox(
+                    label="Corpus profile key",
+                    placeholder="Optional trusted source profile",
+                )
+                knowledge_domain = gr.Textbox(
+                    label="Declared knowledge domain",
+                    placeholder="Optional, e.g. fiction.my-little-pony",
+                )
+
         with gr.Accordion("Optional enrichment / world routing hints", open=False):
             gr.Markdown(
                 "These fields do not assign the scrape to a character and do not assert it as world truth."
@@ -244,6 +262,8 @@ Fetch web material into the **cold searchable corpus** by default. Storing a pag
                 target_world_id,
                 ingest_mode,
                 consumption_mode,
+                corpus_profile_key,
+                knowledge_domain,
                 crawl_mode,
                 max_depth,
                 max_pages,
