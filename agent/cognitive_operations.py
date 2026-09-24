@@ -91,8 +91,15 @@ class CognitiveOperationEngine:
         candidates.append({"key":"E","label":"Stop considering this for now.",
                            "operation":"operation_choice","operation_id":str(op["operation_id"]),
                            "option_index":4,"freshness_policy":choice_freshness})
+        faculty_profile={
+            "reflection.review":"reflection",
+            "planning.review":"planning",
+            "executive.review":"executive",
+        }.get(str(op["operation_type"]),"attention")
         tx=await InternalCognitionTransactions(self.db).create(
-            instance_id=op["instance_id"],candidates=candidates,priority=120,ttl_seconds=300)
+            instance_id=op["instance_id"], candidates=candidates, priority=120,
+            ttl_seconds=300, worker_profile=faculty_profile,
+            focus_text=subject, subject=subject)
         await self.db.execute(
             """UPDATE aios.character_cognitive_operation SET status='waiting_inference',
                transaction_id=$2,updated_at=now() WHERE operation_id=$1""",
