@@ -137,6 +137,13 @@ class InternalCognitionTransactions:
                        SET status='suppressed',resolved_at=now(),updated_at=now()
                        WHERE opportunity_id=ANY($1::uuid[]) AND status='offered'""",offered)
             return {"kind":"none"}
+        if operation == "operation_choice":
+            operation_id=selected.get("operation_id")
+            if not operation_id: return {"kind":"none"}
+            from .cognitive_operations import CognitiveOperationEngine
+            await CognitiveOperationEngine(self.db).accept_choice(UUID(str(operation_id)),selected)
+            return {"kind":"cognitive_operation_choice","operation_id":str(operation_id),
+                    "option_index":selected.get("option_index")}
         oid=selected.get("opportunity_id")
         if not oid: return {"kind":"none"}
         opportunity=await self.db.fetchrow(
@@ -153,27 +160,14 @@ class InternalCognitionTransactions:
                        updated_at=now()
                    WHERE opportunity_id=ANY($1::uuid[]) AND status='offered'""",
                 offered,UUID(str(oid)))
-        from .lifecycle import CharacterAgencyStore
-        agency=CharacterAgencyStore(self.db)
-        op=str(opportunity["operation_type"])
-        task_type=("research" if op=="corpus.search" else "planning" if op=="planning.review"
-                   else "executive" if op=="executive.review" else "reflection")
-        task=await agency.create_task(
-            instance_id=tx["instance_id"],task_type=task_type,
-            objective=str(opportunity["natural_language"]),
-            retrieval_focus=json.dumps(opportunity["operation_payload"],default=str),
-            hud_profile_name=f"agent.{task_type}",priority=int(tx["priority"]),
-            trigger_type="transaction_choice",trigger_id=str(tx["transaction_id"]),
-            source_state_version=opportunity["source_state_version"],
-            source_node_id=opportunity["source_node_id"],
-            source_through_node_id=opportunity["source_node_id"],
-            meta={"transaction_id":str(tx["transaction_id"]),"opportunity_id":str(oid),
-                  "operation_type":op},execution_mode="auto")
-        await self.db.execute(
-            """UPDATE aios.character_cognitive_opportunity SET status='executed',
-               resolved_at=now(),updated_at=now() WHERE opportunity_id=$1""",UUID(str(oid)))
-        return {"kind":"cognitive_task","task_id":str(task.task_id),"task_type":task_type,
-                "opportunity_id":str(oid),"operation_type":op}
+        from .cognitive_operations import CognitiveOperationEngine
+        thread_id=selected.get("thread_id")
+        operation_id=await CognitiveOperationEngine(self.db).create_from_opportunity(
+            opportunity=opportunity,
+            thread_id=UUID(str(thread_id)) if thread_id else None,
+            priority=int(tx["priority"]))
+        return {"kind":"cognitive_operation","operation_id":str(operation_id),
+                "opportunity_id":str(oid),"operation_type":str(opportunity["operation_type"])}
 
     async def _timely(self, tx: Mapping[str,Any], selected: Mapping[str,Any]) -> tuple[bool,str]:
         now=datetime.now(timezone.utc)
