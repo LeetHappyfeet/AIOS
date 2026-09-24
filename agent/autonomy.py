@@ -28,7 +28,7 @@ class AutonomyScheduler:
             """SELECT t.task_id,t.instance_id,t.priority
                FROM aios.character_cognitive_task t
                WHERE t.status='queued'
-                 AND t.trigger_type IN ('api_task','cognitive_delegation','cognitive_resume')
+                 AND t.trigger_type IN ('api_task','cognitive_delegation','cognitive_resume','transaction_choice')
                  AND NOT EXISTS (
                    SELECT 1 FROM aios.pipeline_job j
                    WHERE j.job_type='agent_wake'
