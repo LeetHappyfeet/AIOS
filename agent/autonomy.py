@@ -131,6 +131,36 @@ class AutonomyScheduler:
                 )
                 return True
 
+        # Ordinary accumulated host experience is first projected through the
+        # graph/epistemic machinery into evidence-backed possible thoughts.
+        # Only ambiguous character-relative attention reaches the tiny LLM.
+        delta_events=[e for e in events if str(e["event_type"])=="COGNITIVE_DELTA_READY"]
+        if delta_events:
+            event=delta_events[-1]
+            payload=event["payload"] if isinstance(event["payload"],dict) else {}
+            def _delta_uuid(value):
+                try: return UUID(str(value)) if value else None
+                except (TypeError,ValueError): return None
+            from .opportunity_router import OpportunityRouter
+            tx_id=await OpportunityRouter(self.db).admit(
+                instance_id=instance_id,
+                source_node_id=_delta_uuid(payload.get("source_through_node_id")))
+            for item in delta_events:
+                await self.db.execute(
+                    """UPDATE aios.character_wake_event SET status='consumed',consumed_at=now()
+                       WHERE wake_id=$1 AND status='pending'""",item["wake_id"])
+            if tx_id is not None:
+                await self.runtime.finish_semantic_turn(instance_id,semantic=False)
+                return True
+            # No worthwhile opportunity: advance the background cognition cursor
+            # without paying for an executive LLM call.
+            from .admission import AutonomyAdmissionService
+            await AutonomyAdmissionService(self.db).mark_episode_succeeded(
+                instance_id=instance_id,
+                through_node_id=_delta_uuid(payload.get("source_through_node_id")))
+            await self.runtime.finish_semantic_turn(instance_id,semantic=False)
+            return False
+
         ids = [str(e["wake_id"]) for e in events]
         summaries = [
             {
