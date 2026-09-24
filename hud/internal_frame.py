@@ -9,6 +9,8 @@ from uuid import UUID
 from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.db import Database
 from aios_app.hud.context import HUDContextResolver
+from aios_app.hud.frame import HUDAssembler
+from aios_app.hud.worker_profile import get_worker_hud_profile
 
 
 @dataclass(frozen=True)
@@ -25,23 +27,41 @@ def _clip(value: Any, chars: int) -> str:
     return text[:chars].rstrip()
 
 
-class InternalHUDAssembler:
-    """Build a tiny snapshot-bound HUD without semantic retrieval.
+def _item_text(item: Mapping[str, Any]) -> str:
+    return _clip(
+        item.get("text")
+        or item.get("canonical_text")
+        or item.get("message_text")
+        or item.get("label")
+        or "",
+        260,
+    )
 
-    This deliberately does not call HUDAssembler/CognitiveContextService. The
-    worker receives identity, zero-to-two supplied clues, and prepared choices.
+
+class InternalHUDAssembler:
+    """Render a small, purpose-specific HUD from cognition already resolved by AIOS.
+
+    The worker never performs its own retrieval. HUDAssembler/CognitiveContextService
+    owns branch-safe recall and relevance selection; this layer projects only the
+    few items useful to the selected faculty and enforces a hard micro-prompt cap.
     """
 
     def __init__(self, db: Database):
         self.db = db
         self.contexts = HUDContextResolver(db)
         self.identities = IdentityKernelStore(db)
+        self.foreground = HUDAssembler(db)
 
     async def build(
         self, instance_id: UUID, *, clues: Sequence[str],
-        candidates: Sequence[Mapping[str, Any]], token_budget: int = 360,
+        candidates: Sequence[Mapping[str, Any]], token_budget: int | None = None,
+        worker_profile: str = "attention", focus_text: str | None = None,
+        subject: str | None = None,
     ) -> InternalHUD:
         context = await self.contexts.resolve(instance_id)
+        profile = get_worker_hud_profile(worker_profile)
+        resolved_budget = max(180, min(int(token_budget or profile.token_budget), 700))
+
         kernel = await self.identities.get(context.character_id)
         core = dict(kernel.kernel_json.get("core") or {}) if kernel else {}
         name = core.get("display_name") or core.get("canonical_name") or context.character_id
@@ -49,36 +69,73 @@ class InternalHUDAssembler:
             core.get("species"), core.get("archetype"), core.get("default_tone"),
             core.get("speech_style"),
         ]
-        persona = ", ".join(_clip(v, 72) for v in persona_bits if v)
+        persona = ", ".join(_clip(v, 56) for v in persona_bits if v)
         identity = f"I am {name}." + (f" {persona}." if persona else "")
 
         clue_lines = [_clip(v, 220) for v in list(clues)[:2] if _clip(v, 220)]
-        lines = [
-            identity,
-            "These are thoughts AIOS found evidence for. I only choose which one deserves my attention now.",
-        ]
+        resolved_focus = _clip(
+            focus_text or subject or (clue_lines[0] if clue_lines else ""), 420
+        )
+
+        # Reuse the canonical cognition/relevance pipeline.  A small presentation
+        # budget keeps this projection cheap; retrieval depth remains cognition-owned.
+        frame = await self.foreground.build(
+            instance_id,
+            recent_limit=max(1, profile.recent_event_items),
+            token_budget=max(resolved_budget, 320),
+            focus_text=resolved_focus or None,
+        )
+
+        lines = [identity]
+        if subject:
+            lines.extend(["SUBJECT:", _clip(subject, 260)])
+
+        scene = frame.get("scene") or {}
+        working = scene.get("working_state") or {}
+        scene_change = (
+            working.get("last_significant_change")
+            if isinstance(working, Mapping)
+            else None
+        ) or scene.get("last_significant_change")
+        if profile.include_scene and scene_change:
+            lines.extend(["CURRENT:", _clip(scene_change, 300)])
+
         if clue_lines:
             lines.append("CLUES:")
-            lines.extend(f"- {v}" for v in clue_lines)
-        else:
-            lines.append("No extra context is needed; the choices themselves are my context.")
+            lines.extend(f"- {value}" for value in clue_lines)
+
+        def add_items(title: str, values: Sequence[Mapping[str, Any]], limit: int) -> None:
+            texts = [_item_text(item) for item in list(values)[:max(0, limit)]]
+            texts = [value for value in texts if value]
+            if texts:
+                lines.append(title + ":")
+                lines.extend(f"- {value}" for value in texts)
+
+        if profile.include_memories:
+            add_items("RELEVANT MEMORY", frame.get("memories") or [], profile.memory_items)
+        if profile.include_beliefs:
+            add_items("KNOWN / BELIEVED", frame.get("beliefs") or [], profile.belief_items)
+        if profile.include_goals:
+            add_items("ACTIVE GOAL", frame.get("goals") or [], profile.goal_items)
 
         lines.append("CHOOSE ONE:")
         for item in candidates:
             lines.append(f"{item['key']}. {_clip(item['label'], 180)}")
-        lines.extend([
-            "Return JSON only: {\"choice\":\"A\"}",
-            "The choice is only a proposal. AIOS will recheck whether it is still timely before doing anything.",
-        ])
+        lines.append('Return JSON only: {"choice":"A"}')
+
         prompt = "\n".join(lines)
-        # Hard character cap is intentional: this surface must stay micro even
-        # when authored identity fields are unexpectedly verbose.
-        prompt = prompt[: max(600, int(token_budget) * 4)]
+        # Character approximation is intentional and matches the foreground HUD's
+        # inexpensive budgeting convention. Keep room for the complete choice set.
+        prompt = prompt[: resolved_budget * 4]
         fingerprint = hashlib.sha256(
             json.dumps({
-                "instance": str(instance_id), "state": context.state_version,
+                "instance": str(instance_id),
+                "state": context.state_version,
                 "timeline": str(context.source_timeline_id or ""),
                 "node": str(context.source_head_node_id or ""),
+                "worker_profile": profile.name,
+                "focus": resolved_focus,
+                "subject": subject or "",
                 "clues": clue_lines,
                 "choices": [(str(x["key"]), str(x.get("operation"))) for x in candidates],
             }, sort_keys=True).encode()
