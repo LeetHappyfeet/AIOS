@@ -9,6 +9,9 @@ from typing import Any
 import gradio as gr
 
 from aios_app.config import settings
+from aios_app.char.identity_kernel import IdentityKernelStore
+from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
+from aios_app.char.identity_sources import identity_snapshot, stage_identity_source
 from aios_app.corpus_catalog import CorpusAccessReconciler
 from aios_app.db import Database
 from aios_app.epistemic.weights import (
@@ -138,6 +141,70 @@ async def _save_character(character_id: str, values: dict[str, Any]) -> None:
         bool(values["process_ontology"]),
         bool(values["is_canonical"]),
         bool(values["is_mutable"]),
+    )
+
+
+async def _identity_view(character_id: str):
+    snapshot = await identity_snapshot(db, character_id)
+    kernel = await IdentityKernelStore(db).get(character_id)
+    identity = snapshot["identity"]
+    overview = {
+        "character_id": character_id,
+        "display_name": identity.get("display_name") or identity.get("canonical_name") or character_id,
+        "identity_version": int(identity.get("identity_version") or 1),
+        "compiler_version": kernel.compiler_version if kernel else None,
+        "active_facets": sum(1 for row in snapshot["facets"] if row.get("status") == "active"),
+        "pending_candidates": sum(1 for row in snapshot["candidates"] if row.get("disposition") == "proposed"),
+        "identity_sources": len(snapshot["sources"]),
+        "revisions": len(snapshot["revisions"]),
+    }
+    facets = [[
+        str(r["facet_id"]), r["facet_type"], r["facet_key"],
+        json.dumps(r["value"], ensure_ascii=False), r["stability"], r["authority"],
+        r["mutability"], r["status"], str(r.get("source_id") or ""),
+    ] for r in snapshot["facets"]]
+    sources = [[
+        str(r["source_id"]), r["source_type"], r.get("source_format") or "",
+        r.get("source_name") or "", r["authority"], str(r["imported_at"]),
+    ] for r in snapshot["sources"]]
+    candidates = [[
+        str(r["candidate_id"]), r["facet_type"], r["facet_key"],
+        json.dumps(r["value"], ensure_ascii=False), r["stability"], r["authority"],
+        r["mutability"], r["perspective"], r.get("continuity_key") or "",
+        r["disposition"], str(r.get("source_id") or ""),
+    ] for r in snapshot["candidates"]]
+    revisions = [[
+        r["identity_version"], r["operation"], str(r.get("facet_id") or ""),
+        str(r.get("candidate_id") or ""), r["actor"], r.get("reason") or "",
+        str(r["created_at"]),
+    ] for r in reversed(snapshot["revisions"])]
+    return overview, (kernel.kernel_text if kernel else ""), facets, sources, candidates, revisions
+
+
+async def _stage_manual_facet(character_id: str, facet_type: str, facet_key: str,
+                              value_text: str, stability: str, mutability: str,
+                              perspective: str, authority: str) -> dict:
+    facet_type = str(facet_type or "").strip()
+    facet_key = str(facet_key or "").strip()
+    if not facet_type or not facet_key:
+        raise ValueError("Facet type and key are required")
+    try:
+        value = json.loads(value_text)
+    except (TypeError, json.JSONDecodeError):
+        value = value_text
+    payload = {"facet_type": facet_type, "facet_key": facet_key, "value": value}
+    return await stage_identity_source(
+        db, character_id=character_id, source_type="manual",
+        source_name="Character Control", source_format="gradio",
+        authority=str(authority or "authored"),
+        payload=payload,
+        candidates=[{
+            "facet_type": facet_type, "facet_key": facet_key, "value": value,
+            "stability": stability or "core", "mutability": mutability or "explicit",
+            "perspective": perspective or "self", "authority": authority or "authored",
+            "source_field": facet_key,
+        }],
+        meta={"ui": "character_control"},
     )
 
 
@@ -364,38 +431,79 @@ def render():
         status = gr.Markdown()
 
         with gr.Tabs():
+            with gr.Tab("Overview"):
+                character_overview = gr.JSON(label="Character summary")
+                gr.Markdown("The summary reflects durable identity plus the current identity-kernel lifecycle.")
+
             with gr.Tab("Identity"):
-                with gr.Row():
-                    canonical_name = gr.Textbox(label="Canonical name")
-                    display_name = gr.Textbox(label="Display name")
-                    entity_type = gr.Textbox(label="Entity type", value="character")
-                with gr.Row():
-                    canon = gr.Textbox(label="Canon")
-                    franchise = gr.Textbox(label="Franchise")
-                    species = gr.Textbox(label="Species")
-                with gr.Row():
-                    gender = gr.Textbox(label="Gender")
-                    age_descriptor = gr.Textbox(label="Age descriptor")
-                    primary_role = gr.Textbox(label="Primary role")
-                visual_summary = gr.Textbox(label="Visual summary", lines=3)
-                with gr.Row():
-                    archetype = gr.Textbox(label="Archetype")
-                    default_tone = gr.CheckboxGroup(
-                        label="Default tone",
-                        choices=["calm","playful","sarcastic","formal","aggressive","empathetic","curious"],
-                    )
-                speech_style = gr.Textbox(label="Speech style", lines=2)
-                moral_constraints = gr.Textbox(label="Moral constraints (one per line)", lines=4)
-                with gr.Accordion("Legacy / advanced identity fields", open=False):
-                    gr.Markdown(
-                        "These fields remain in the schema but have limited current runtime enforcement."
-                    )
-                    with gr.Row():
-                        content_rating = gr.Textbox(label="Content rating", value="PG")
-                        process_ontology = gr.Checkbox(label="Process ontology")
-                        is_canonical = gr.Checkbox(label="Canonical identity", value=True)
-                        is_mutable = gr.Checkbox(label="Identity mutable")
-                save_identity = gr.Button("Save identity")
+                gr.Markdown(
+                    "Identity is versioned and provenance-backed. New identity material is staged as a candidate; "
+                    "only acceptance changes durable facets and recompiles the runtime kernel."
+                )
+                with gr.Tabs():
+                    with gr.Tab("Kernel"):
+                        identity_kernel_text = gr.Textbox(
+                            label="Compiled runtime identity kernel", lines=16, interactive=False
+                        )
+                    with gr.Tab("Facets"):
+                        identity_facets = gr.Dataframe(
+                            headers=["facet_id","type","key","value","stability","authority",
+                                     "mutability","status","source_id"],
+                            interactive=False, label="Durable identity facets",
+                        )
+                        with gr.Accordion("Propose manual identity facet", open=False):
+                            with gr.Row():
+                                new_facet_type = gr.Dropdown(
+                                    choices=["identity","appearance","personality","values","expression",
+                                             "constraint","role","developmental","domain"],
+                                    value="personality", allow_custom_value=True, label="Facet type",
+                                )
+                                new_facet_key = gr.Textbox(label="Facet key")
+                            new_facet_value = gr.Textbox(
+                                label="Value (plain text or JSON)", lines=3
+                            )
+                            with gr.Row():
+                                new_facet_stability = gr.Dropdown(
+                                    choices=["structural","constitutional","core","developmental"],
+                                    value="core", label="Stability",
+                                )
+                                new_facet_mutability = gr.Dropdown(
+                                    choices=["locked","explicit","developmental"],
+                                    value="explicit", label="Mutability",
+                                )
+                                new_facet_perspective = gr.Dropdown(
+                                    choices=["self","biographical","public_reputation","secret","unknown"],
+                                    value="self", label="Perspective",
+                                )
+                                new_facet_authority = gr.Textbox(label="Authority", value="authored")
+                            stage_facet = gr.Button("Stage candidate", variant="primary")
+                    with gr.Tab("Sources & Candidates"):
+                        identity_sources = gr.Dataframe(
+                            headers=["source_id","type","format","name","authority","imported_at"],
+                            interactive=False, label="Identity sources",
+                        )
+                        identity_candidates = gr.Dataframe(
+                            headers=["candidate_id","type","key","value","stability","authority",
+                                     "mutability","perspective","continuity","disposition","source_id"],
+                            interactive=False, label="Identity candidates",
+                        )
+                        with gr.Row():
+                            candidate_id = gr.Textbox(label="Candidate ID")
+                            candidate_reason = gr.Textbox(label="Decision reason")
+                        with gr.Row():
+                            accept_candidate = gr.Button("Accept candidate", variant="primary")
+                            reject_candidate = gr.Button("Reject candidate")
+                    with gr.Tab("Revisions"):
+                        identity_revisions = gr.Dataframe(
+                            headers=["version","operation","facet_id","candidate_id","actor","reason","created_at"],
+                            interactive=False, label="Identity revision history",
+                        )
+                    with gr.Tab("Compatibility Record"):
+                        gr.Markdown(
+                            "Legacy root fields remain visible for migration/compatibility. "
+                            "They are no longer the primary identity editing surface."
+                        )
+                        legacy_identity = gr.JSON(label="character_identity root record")
 
             with gr.Tab("Epistemics & Learning"):
                 gr.Markdown(
@@ -529,10 +637,8 @@ def render():
                         )
 
         identity_outputs = [
-            canonical_name, display_name, entity_type, canon, franchise, species,
-            gender, age_descriptor, primary_role, visual_summary, archetype,
-            default_tone, speech_style, moral_constraints, content_rating,
-            process_ontology, is_canonical, is_mutable,
+            character_overview, identity_kernel_text, identity_facets,
+            identity_sources, identity_candidates, identity_revisions, legacy_identity,
         ]
         epistemic_outputs = [
             skepticism, curiosity, authority_trust, novelty_seeking,
@@ -562,16 +668,13 @@ def render():
                 raise gr.Error(f"Character '{cid}' not found")
             epi = run_async(get_epistemic_profile(db, character_id=cid))
             hud = run_async(get_hud_profile(db, character_id=cid))
-            identity = [
-                row["canonical_name"] or "", row["display_name"] or "",
-                row["entity_type"] or "character", row["canon"] or "",
-                row["franchise"] or "", row["species"] or "", row["gender"] or "",
-                row["age_descriptor"] or "", row["primary_role"] or "",
-                row["visual_summary"] or "", row["archetype"] or "",
-                row["default_tone"] or [], row["speech_style"] or "",
-                "\n".join(row["moral_constraints"] or []), row["content_rating"] or "PG",
-                bool(row["process_ontology"]), bool(row["is_canonical"]), bool(row["is_mutable"]),
-            ]
+            overview, kernel_text, facets, sources, candidates, revisions = run_async(_identity_view(cid))
+            legacy = {
+                key: (list(value) if isinstance(value, tuple) else value)
+                for key, value in dict(row).items()
+                if key not in {"meta"}
+            }
+            identity = [overview, kernel_text, facets, sources, candidates, revisions, legacy]
             return (
                 identity + _epistemic_values(epi) + _hud_values(hud)
                 + [run_async(_domain_rows(cid)), run_async(_access_rows(cid)),
@@ -591,29 +694,79 @@ def render():
             outputs=load_outputs,
         )
 
-        def save_identity_click(selection, *values):
+        def refresh_identity_components(cid):
+            overview, kernel_text, facets, sources, candidates, revisions = run_async(_identity_view(cid))
+            row = run_async(_load_character(cid))
+            legacy = dict(row) if row else {}
+            legacy.pop("meta", None)
+            return overview, kernel_text, facets, sources, candidates, revisions, legacy
+
+        def stage_facet_click(selection, facet_type, facet_key, value, stability,
+                              mutability, perspective, authority):
             cid = _character_id(selection)
             if not cid:
                 raise gr.Error("Character is required")
-            (
-                canonical, display, entity, canon_value, franchise_value, species_value,
-                gender_value, age_value, role, visual, archetype_value, tones, speech,
-                constraints, rating, ontology, canonical_flag, mutable,
-            ) = values
-            run_async(_save_character(cid, {
-                "canonical_name": canonical, "display_name": display, "entity_type": entity,
-                "canon": canon_value, "franchise": franchise_value, "species": species_value,
-                "gender": gender_value, "age_descriptor": age_value, "primary_role": role,
-                "visual_summary": visual, "archetype": archetype_value, "default_tone": tones or [],
-                "speech_style": speech, "moral_constraints": [
-                    line.strip() for line in (constraints or "").splitlines() if line.strip()
-                ], "content_rating": rating, "process_ontology": ontology,
-                "is_canonical": canonical_flag, "is_mutable": mutable,
-            }))
-            return f"Saved identity for **{cid}**."
+            try:
+                result = run_async(_stage_manual_facet(
+                    cid, facet_type, facet_key, value, stability, mutability,
+                    perspective, authority,
+                ))
+            except Exception as exc:
+                raise gr.Error(str(exc))
+            return (*refresh_identity_components(cid),
+                    f"Staged identity candidate **{result['candidate_ids'][0]}** for **{cid}**.")
 
-        save_identity.click(
-            fn=save_identity_click, inputs=[character_selector] + identity_outputs, outputs=status
+        stage_facet.click(
+            fn=stage_facet_click,
+            inputs=[character_selector, new_facet_type, new_facet_key, new_facet_value,
+                    new_facet_stability, new_facet_mutability, new_facet_perspective,
+                    new_facet_authority],
+            outputs=identity_outputs + [status],
+        )
+
+        def accept_candidate_click(selection, candidate, reason):
+            cid = _character_id(selection)
+            if not cid or not str(candidate or "").strip():
+                raise gr.Error("Character and candidate ID are required")
+            try:
+                result = run_async(accept_identity_candidate(
+                    db, str(candidate).strip(), actor="character-control",
+                    reason=str(reason or "").strip() or None,
+                ))
+            except Exception as exc:
+                raise gr.Error(str(exc))
+            if result["character_id"] != cid:
+                raise gr.Error("Candidate belongs to a different character")
+            return (*refresh_identity_components(cid),
+                    f"Accepted candidate. Identity is now version **{result['identity_version']}**.")
+
+        accept_candidate.click(
+            fn=accept_candidate_click,
+            inputs=[character_selector, candidate_id, candidate_reason],
+            outputs=identity_outputs + [status],
+        )
+
+        def reject_candidate_click(selection, candidate, reason):
+            cid = _character_id(selection)
+            if not cid or not str(candidate or "").strip():
+                raise gr.Error("Character and candidate ID are required")
+            snapshot = run_async(identity_snapshot(db, cid))
+            match = next((r for r in snapshot["candidates"]
+                          if str(r["candidate_id"]) == str(candidate).strip()), None)
+            if not match:
+                raise gr.Error("Candidate does not belong to the selected character")
+            try:
+                run_async(reject_identity_candidate(
+                    db, str(candidate).strip(), reason=str(reason or "").strip() or None
+                ))
+            except Exception as exc:
+                raise gr.Error(str(exc))
+            return (*refresh_identity_components(cid), f"Rejected candidate for **{cid}**.")
+
+        reject_candidate.click(
+            fn=reject_candidate_click,
+            inputs=[character_selector, candidate_id, candidate_reason],
+            outputs=identity_outputs + [status],
         )
 
         def save_epistemics_click(selection, skepticism_v, curiosity_v, authority_v,
