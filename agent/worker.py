@@ -142,7 +142,6 @@ class CharacterWorker:
             task.instance_id, task.task_id,
         )
         try:
-            await self.runtime.assert_inference_budget(task.instance_id, task.task_id)
             delta = None
             if task.source_through_node_id is not None:
                 delta_obj = await self.deltas.build(
@@ -151,68 +150,101 @@ class CharacterWorker:
                     through_node_id=task.source_through_node_id,
                 )
                 delta = delta_obj.as_prompt_context()
-            prompt, state_version = await self._first_person_prompt(
-                instance_id=task.instance_id, worker_class=worker_class,
-                objective=task.retrieval_focus or task.objective,
-                profile_name=profile, cognitive_delta=delta,
-            )
+
             schemas = self.registry.schemas_for(worker_class)
-            inference = await self.broker.infer(InferenceRequest(
-                instance_id=task.instance_id, task_id=task.task_id,
-                worker_class=worker_class, prompt=prompt,
-                context_state_version=state_version, hud_profile_name=profile,
-                allowed_actions=schemas,
-            ))
-            await self.db.execute(
-                """
-                UPDATE aios.character_agent_runtime
-                SET last_inference_at=now(), state='acting', updated_at=now()
-                WHERE instance_id=$1
-                """,
+            continuation: list[dict[str, Any]] = []
+            all_action_results: list[dict[str, Any]] = []
+            inference = None
+            state_version = task.source_state_version
+            max_rounds_row = await self.db.fetchrow(
+                "SELECT max_inference_per_task FROM aios.character_agent_runtime WHERE instance_id=$1",
                 task.instance_id,
             )
+            max_rounds = int(max_rounds_row["max_inference_per_task"] if max_rounds_row else 1)
 
-            action_results = []
-            await self.runtime.assert_action_budget(task.instance_id, task.task_id, len(inference.response.actions))
-            for index, proposal in enumerate(inference.response.actions):
-                spec = self.registry.get(proposal.type)
-                if not spec:
-                    continue
-                idem = hashlib.sha256(
-                    f"{inference.request_id}:{index}:{proposal.type}".encode()
-                ).hexdigest()
-                action = await self.agency.create_action(
+            for round_index in range(max_rounds):
+                await self.runtime.assert_inference_budget(task.instance_id, task.task_id)
+                prompt, current_state_version = await self._first_person_prompt(
+                    instance_id=task.instance_id, worker_class=worker_class,
+                    objective=task.retrieval_focus or task.objective,
+                    profile_name=profile, cognitive_delta=delta,
+                )
+                if continuation:
+                    prompt += (
+                        "\n\nRESULTS OF COGNITIVE TOOLS I REQUESTED:\n"
+                        + json.dumps(continuation, default=str)
+                        + "\nUse these results to continue my reasoning. Do not repeat a tool call "
+                          "unless I need materially different information."
+                    )
+                state_version = current_state_version
+                inference = await self.broker.infer(InferenceRequest(
                     instance_id=task.instance_id, task_id=task.task_id,
-                    action_type=proposal.type, arguments=proposal.arguments,
-                    side_effect_class=spec.side_effect_class,
-                    idempotency_key=idem, expected_state_version=state_version,
-                    proposed_by=f"inference:{inference.request_id}",
-                )
-                action = await self.dispatcher.dispatch(
-                    action.action_id, worker_class=worker_class
-                )
-                action_results.append({
-                    "action_id": str(action.action_id), "type": action.action_type,
-                    "status": action.status, "result": action.result,
-                    "error": action.error, "rejection_reason": action.rejection_reason,
-                })
-                await self.runtime.wake(
-                    instance_id=task.instance_id,
-                    event_type=(
-                        "ACTION_COMPLETED" if action.status == "succeeded"
-                        else "ACTION_FAILED"
-                    ),
-                    source_type="action", source_id=str(action.action_id),
-                    payload={"task_id": str(task.task_id), "status": action.status},
-                    dedupe_key=f"action-terminal:{action.action_id}:{action.status}",
+                    worker_class=worker_class, prompt=prompt,
+                    context_state_version=state_version, hud_profile_name=profile,
+                    allowed_actions=schemas,
+                ))
+                await self.db.execute(
+                    """UPDATE aios.character_agent_runtime
+                       SET last_inference_at=now(), state='acting', updated_at=now()
+                       WHERE instance_id=$1""",
+                    task.instance_id,
                 )
 
+                await self.runtime.assert_action_budget(
+                    task.instance_id, task.task_id, len(inference.response.actions)
+                )
+                continuation = []
+                for index, proposal in enumerate(inference.response.actions):
+                    spec = self.registry.get(proposal.type)
+                    if not spec:
+                        continue
+                    idem = hashlib.sha256(
+                        f"{inference.request_id}:{round_index}:{index}:{proposal.type}".encode()
+                    ).hexdigest()
+                    action = await self.agency.create_action(
+                        instance_id=task.instance_id, task_id=task.task_id,
+                        action_type=proposal.type, arguments=proposal.arguments,
+                        side_effect_class=spec.side_effect_class,
+                        idempotency_key=idem, expected_state_version=state_version,
+                        proposed_by=f"inference:{inference.request_id}",
+                    )
+                    action = await self.dispatcher.dispatch(
+                        action.action_id, worker_class=worker_class
+                    )
+                    item = {
+                        "action_id": str(action.action_id), "type": action.action_type,
+                        "status": action.status, "result": action.result,
+                        "error": action.error, "rejection_reason": action.rejection_reason,
+                        "result_mode": spec.result_mode,
+                    }
+                    all_action_results.append(item)
+                    if action.status == "succeeded" and spec.result_mode == "return_to_cognition":
+                        continuation.append(item)
+                    if spec.result_mode != "return_to_cognition":
+                        await self.runtime.wake(
+                            instance_id=task.instance_id,
+                            event_type=("ACTION_COMPLETED" if action.status == "succeeded" else "ACTION_FAILED"),
+                            source_type="action", source_id=str(action.action_id),
+                            payload={"task_id": str(task.task_id), "status": action.status},
+                            dedupe_key=f"action-terminal:{action.action_id}:{action.status}",
+                        )
+
+                if not continuation:
+                    break
+                await self.db.execute(
+                    "UPDATE aios.character_agent_runtime SET state='thinking', updated_at=now() WHERE instance_id=$1",
+                    task.instance_id,
+                )
+
+            if inference is None:
+                raise RuntimeError("cognitive task produced no inference")
             result = {
                 "expression": inference.response.expression,
                 "inference_request_id": str(inference.request_id),
                 "provider": inference.provider_key,
                 "model": inference.model,
-                "actions": action_results,
+                "actions": all_action_results,
+                "cognitive_rounds": round_index + 1,
             }
             await self.agency.transition_task(task_id, "succeeded", result=result)
             await self.admission.mark_episode_succeeded(
