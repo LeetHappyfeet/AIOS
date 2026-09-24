@@ -7,6 +7,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.pipeline.jobs import enqueue_job
 from aios_app.epistemic.research import CorpusSearchService
+from aios_app.hud.context import HUDContextResolver
 
 
 class CognitiveOperationEngine:
@@ -20,13 +21,13 @@ class CognitiveOperationEngine:
         row = await self.db.execute_returning_row(
             """INSERT INTO aios.character_cognitive_operation(
                    thread_id,instance_id,opportunity_id,operation_type,input,
-                   source_state_version,source_node_id,freshness_policy)
-               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8) RETURNING operation_id""",
+                   source_state_version,source_timeline_id,source_node_id,freshness_policy)
+               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9) RETURNING operation_id""",
             thread_id, opportunity["instance_id"], opportunity["opportunity_id"],
             opportunity["operation_type"],
             json.dumps(opportunity.get("operation_payload") or {}, default=str),
-            opportunity.get("source_state_version"), opportunity.get("source_node_id"),
-            opportunity.get("freshness_policy") or "contextual",
+            opportunity.get("source_state_version"), opportunity.get("source_timeline_id"),
+            opportunity.get("source_node_id"), opportunity.get("freshness_policy") or "contextual",
         )
         operation_id=row["operation_id"]
         await enqueue_job(self.db,job_type="cognitive_operation",
@@ -85,12 +86,14 @@ class CognitiveOperationEngine:
                 "I should preserve this concern but not act yet.",
                 "This no longer needs action."],
         }[str(op["operation_type"])]
+        choice_freshness="strict" if str(op["operation_type"])=="executive.review" else str(op.get("freshness_policy") or "contextual")
         candidates=[{"key":k,"label":label,"operation":"operation_choice",
-                     "operation_id":str(op["operation_id"]),"option_index":i}
+                     "operation_id":str(op["operation_id"]),"option_index":i,
+                     "freshness_policy":choice_freshness}
                     for i,(k,label) in enumerate(zip("ABCD",labels))]
         candidates.append({"key":"E","label":"Stop considering this for now.",
                            "operation":"operation_choice","operation_id":str(op["operation_id"]),
-                           "option_index":4})
+                           "option_index":4,"freshness_policy":choice_freshness})
         tx=await InternalCognitionTransactions(self.db).create(
             instance_id=op["instance_id"],candidates=candidates,priority=120,ttl_seconds=300)
         await self.db.execute(
@@ -101,19 +104,55 @@ class CognitiveOperationEngine:
             payload={"instance_id":str(op["instance_id"]),"transaction_id":str(tx),
                      "operation_id":str(op["operation_id"])},priority=120)
 
-    async def accept_choice(self, operation_id: UUID, selected: Mapping[str,Any]) -> None:
+    async def accept_choice(self, operation_id: UUID, selected: Mapping[str,Any]) -> bool:
         row=await self.db.fetchrow(
             "SELECT * FROM aios.character_cognitive_operation WHERE operation_id=$1",operation_id)
         if not row or row["status"]!="waiting_inference":
-            return
-        await self._finish(dict(row),{"kind":"choice","option_index":selected.get("option_index"),
-                                      "label":selected.get("label")})
+            return False
+        op=dict(row)
+        current=await HUDContextResolver(self.db).resolve(op["instance_id"])
+        if op.get("source_timeline_id") and current.source_timeline_id != op["source_timeline_id"]:
+            await self._stale(op,"source timeline changed while inference was running")
+            return False
+        policy=str(op.get("freshness_policy") or "contextual")
+        if str(op["operation_type"])=="executive.review":
+            policy="strict"
+        if policy=="strict" and (
+            current.state_version != op.get("source_state_version")
+            or current.source_head_node_id != op.get("source_node_id")
+        ):
+            await self._stale(op,"strict operation context advanced while inference was running")
+            return False
+        changed=await self.db.execute_returning_row(
+            """UPDATE aios.character_cognitive_operation
+               SET status='succeeded',result=$2::jsonb,completed_at=now(),updated_at=now()
+               WHERE operation_id=$1 AND status='waiting_inference' RETURNING operation_id""",
+            operation_id,json.dumps({"kind":"choice","option_index":selected.get("option_index"),
+                                     "label":selected.get("label")},default=str))
+        if not changed:
+            return False
+        await self._finish_side_effects(op,{"kind":"choice","option_index":selected.get("option_index"),
+                                            "label":selected.get("label")})
+        return True
+
+    async def _stale(self, op: Mapping[str,Any], reason: str) -> None:
+        await self.db.execute(
+            """UPDATE aios.character_cognitive_operation SET status='stale',result=$2::jsonb,
+               completed_at=now(),updated_at=now()
+               WHERE operation_id=$1 AND status IN ('queued','running','waiting_inference')""",
+            op["operation_id"],json.dumps({"reason":reason}))
 
     async def _finish(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
-        await self.db.execute(
+        changed=await self.db.execute_returning_row(
             """UPDATE aios.character_cognitive_operation SET status='succeeded',result=$2::jsonb,
-               completed_at=now(),updated_at=now() WHERE operation_id=$1""",
+               completed_at=now(),updated_at=now()
+               WHERE operation_id=$1 AND status='running' RETURNING operation_id""",
             op["operation_id"],json.dumps(result,default=str))
+        if not changed:
+            return
+        await self._finish_side_effects(op,result)
+
+    async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
         if op.get("opportunity_id"):
             await self.db.execute(
                 """UPDATE aios.character_cognitive_opportunity SET status='executed',
