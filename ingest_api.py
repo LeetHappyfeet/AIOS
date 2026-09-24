@@ -295,52 +295,10 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             audience_ids=actor_specs.keys(),
         )
 
-        # A source cursor may move backwards only when the request is actually
-        # changing the selected alternative in a stable source slot. Merely
-        # coming from SillyTavern is not permission to rewind runtime state.
-        allow_source_rewind = bool(
-            source_event_id
-            and (
-                source_slot_replaced
-                or disposition is IngestEventDisposition.SUPERSEDED_RESELECTION
-            )
-        )
-        await db.execute(
-            """
-            UPDATE aios.character_runtime_state rs
-            SET source_timeline_id=$1, source_head_node_id=$2, updated_at=now()
-            FROM aios.character_instance ci, aios.timeline rt, aios.world rw
-            WHERE ci.instance_id=rs.instance_id
-              AND rt.timeline_id=rs.timeline_id
-              AND rw.world_id=rs.world_id
-              AND ci.character_id=$3
-              AND rt.session_id IS NOT DISTINCT FROM $4
-              AND rt.user_name IS NOT DISTINCT FROM $5
-              AND rt.scope_key=$6
-              AND (
-                    rs.source_timeline_id=$1
-                    OR (rs.source_timeline_id IS NULL AND rw.anchor_timeline_id=$1)
-                  )
-              AND (
-                    COALESCE(
-                        (SELECT dn.event_id FROM aios.dag_node dn
-                         WHERE dn.node_id=rs.source_head_node_id),
-                        -1
-                    ) <= $7
-                    OR $8::boolean
-                  )
-            """,
-            timeline_id,
-            node_id,
-            req.character_id,
-            req.session_id,
-            req.user_name,
-            req.scope_key or settings.default_scope,
-            event_id,
-            allow_source_rewind,
-        )
-
-        await mark_matching_runtime_dirty(
+        # Source perception has one authority: the cursor propagation layer.
+        # It returns the exact runtimes that adopted this event so downstream
+        # consequences never rediscover an arbitrary matching instance.
+        affected_instance_ids = await mark_matching_runtime_dirty(
             db,
             character_id=req.character_id,
             session_id=req.session_id,
@@ -352,30 +310,17 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
         )
         source_head_node_id = await _runtime_source_head(db, req, timeline_id)
 
-        # Host-driven roleplay already had foreground cognition. Record only a
-        # cheap cognitive delta here; admission batches several source turns
-        # before waking background metacognition.
-        if (
-            disposition is IngestEventDisposition.NEW
-            and client_source.lower() == "sillytavern"
-            and source_head_node_id == node_id
-        ):
-            instance = await db.fetchrow(
-                """
-                SELECT rs.instance_id
-                FROM aios.character_runtime_state rs
-                JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
-                WHERE ci.character_id=$1
-                  AND rs.source_timeline_id=$2
-                  AND rs.source_head_node_id=$3
-                ORDER BY rs.updated_at DESC LIMIT 1
-                """,
-                req.character_id, timeline_id, node_id,
-            )
-            if instance:
-                from aios_app.agent.admission import AutonomyAdmissionService
-                await AutonomyAdmissionService(db).observe_host_experience(
-                    instance_id=instance["instance_id"],
+        # A genuinely new perceived host experience contributes one cognitive
+        # delta to every runtime that actually adopted the source coordinate.
+        # Transport provenance (SillyTavern, API, email, etc.) is not cognition
+        # policy. Replays and superseded re-selections are deliberately excluded.
+        if disposition is IngestEventDisposition.NEW and affected_instance_ids:
+            from aios_app.agent.admission import AutonomyAdmissionService
+
+            admission = AutonomyAdmissionService(db)
+            for instance_id in affected_instance_ids:
+                await admission.observe_host_experience(
+                    instance_id=instance_id,
                     source_node_id=node_id,
                     source_event_id=event_id,
                     source=client_source,
