@@ -106,7 +106,9 @@ class InternalCognitionTransactions:
             timely,reason=await self._timely(tx,selected)
             if not timely:
                 return await self._reject(transaction_id,"stale",reason,choice,selected.get("operation"),focus)
-            result={"operation":selected.get("operation"),"focus":focus,"choice":choice}
+            materialized=await self._materialize(tx,selected,focus)
+            result={"operation":selected.get("operation"),"focus":focus,"choice":choice,
+                    "materialized":materialized}
             await self.db.execute(
                 """UPDATE aios.internal_cognition_transaction SET status='consumed',
                      result=$2::jsonb,completed_at=now(),consumed_at=now(),updated_at=now()
@@ -122,6 +124,27 @@ class InternalCognitionTransactions:
                 transaction_id,str(exc)[:1000],
             )
             raise
+
+    async def _materialize(self, tx: Mapping[str,Any], selected: Mapping[str,Any],
+                           focus: str | None) -> Mapping[str,Any]:
+        operation=str(selected.get("operation") or "wait")
+        if operation == "wait":
+            return {"kind":"none"}
+        from .lifecycle import CharacterAgencyStore
+        agency=CharacterAgencyStore(self.db)
+        task_type={"memory":"reflection","research":"research","planning":"planning",
+                   "urgent":"executive"}.get(operation,"reflection")
+        objective=focus or str(selected.get("label") or operation)
+        task=await agency.create_task(
+            instance_id=tx["instance_id"], task_type=task_type, objective=objective,
+            hud_profile_name=f"agent.{task_type}", priority=int(tx["priority"]),
+            trigger_type="transaction_choice", trigger_id=str(tx["transaction_id"]),
+            source_state_version=tx["source_state_version"], source_node_id=tx["source_node_id"],
+            source_through_node_id=tx["source_node_id"],
+            meta={"transaction_id":str(tx["transaction_id"]),"operation":operation},
+            execution_mode="auto",
+        )
+        return {"kind":"cognitive_task","task_id":str(task.task_id),"task_type":task_type}
 
     async def _timely(self, tx: Mapping[str,Any], selected: Mapping[str,Any]) -> tuple[bool,str]:
         now=datetime.now(timezone.utc)
