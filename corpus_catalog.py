@@ -16,6 +16,7 @@ class CorpusRoute:
     identity_binding: str
     profile_id: UUID | None = None
     profile_key: str | None = None
+    knowledge_domain: str | None = None
     matched_by: str = "fallback"
 
     @property
@@ -104,6 +105,7 @@ class CorpusCatalogService:
             identity_binding=row["identity_binding"],
             profile_id=row["profile_id"],
             profile_key=row["profile_key"],
+            knowledge_domain=row["knowledge_domain"],
             matched_by=matched_by,
         )
 
@@ -249,6 +251,7 @@ class CorpusCatalogService:
             identity_binding=profile["identity_binding"],
             profile_id=profile["profile_id"],
             profile_key=profile["profile_key"],
+            knowledge_domain=profile["knowledge_domain"],
             matched_by="reclassification",
         )
         for document_id in matched:
