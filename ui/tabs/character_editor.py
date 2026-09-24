@@ -141,6 +141,32 @@ async def _save_character(character_id: str, values: dict[str, Any]) -> None:
     )
 
 
+async def _registered_domain_choices() -> list[str]:
+    rows = await db.fetch(
+        """SELECT display_name, domain_key FROM aios.knowledge_domain
+           WHERE enabled ORDER BY lower(display_name), domain_key"""
+    )
+    return [f"{row['display_name']} — {row['domain_key']}" for row in rows]
+
+
+def _registered_domain_key(selection: str) -> str:
+    value = str(selection or "").strip()
+    return value.rsplit(" — ", 1)[1].strip() if " — " in value else value
+
+
+async def _add_character_domain(character_id: str, selection: str) -> dict:
+    domain = _registered_domain_key(selection)
+    if not domain:
+        raise ValueError("Select a registered universe / knowledge domain")
+    current = await db.fetch(
+        """SELECT knowledge_domain FROM aios.character_knowledge_domain
+           WHERE character_id=$1 AND enabled""",
+        character_id,
+    )
+    domains = sorted({str(row["knowledge_domain"]) for row in current} | {domain})
+    return await CorpusAccessReconciler(db).set_character_domains(character_id, domains)
+
+
 async def _domain_rows(character_id: str) -> list[list[Any]]:
     rows = await db.fetch(
         """
@@ -414,10 +440,20 @@ def render():
                     without a domain assignment; restricted corpus uses explicit ACLs.
                     """
                 )
+                with gr.Row():
+                    registered_domain = gr.Dropdown(
+                        label="Add registered universe / domain",
+                        choices=run_async(_registered_domain_choices()),
+                        allow_custom_value=True,
+                        scale=4,
+                    )
+                    add_registered_domain = gr.Button("Add affinity", scale=1)
+                    refresh_registered_domains = gr.Button("Refresh domains", scale=1)
                 knowledge_domains = gr.Dataframe(
                     headers=["knowledge_domain", "enabled"], datatype=["str","bool"],
                     row_count=(2, "dynamic"), col_count=(2, "fixed"),
                     label="Research / knowledge-domain affinity",
+                    info="Advanced view. Registered domains should normally be added with the selector above.",
                 )
                 save_domains = gr.Button("Save domain affinity")
                 affinity_status = gr.JSON(label="Resolved affinity")
@@ -620,6 +656,29 @@ def render():
 
         save_domains.click(
             fn=save_domains_click, inputs=[character_selector, knowledge_domains],
+            outputs=[knowledge_domains, affinity_status, status],
+        )
+
+        def refresh_registered_domain_choices():
+            return gr.update(choices=run_async(_registered_domain_choices()))
+
+        refresh_registered_domains.click(
+            fn=refresh_registered_domain_choices, outputs=registered_domain
+        )
+
+        def add_registered_domain_click(selection, domain_selection):
+            cid = _character_id(selection)
+            if not cid:
+                raise gr.Error("Character is required")
+            try:
+                result = run_async(_add_character_domain(cid, domain_selection))
+            except Exception as exc:
+                raise gr.Error(str(exc))
+            return run_async(_domain_rows(cid)), result, f"Added registered domain affinity for **{cid}**."
+
+        add_registered_domain.click(
+            fn=add_registered_domain_click,
+            inputs=[character_selector, registered_domain],
             outputs=[knowledge_domains, affinity_status, status],
         )
 
