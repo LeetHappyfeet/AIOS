@@ -93,7 +93,12 @@ class InternalCognitionTransactions:
                 allowed_actions={}, output_schema=output_schema,
             ))
             raw=inference.response.raw
-            choice=str(raw.get("choice") or "").strip().upper()
+            if set(raw) != {"choice"} or not isinstance(raw.get("choice"),str):
+                return await self._reject(
+                    transaction_id,"invalid","micro inference must return exactly one string field: choice")
+            choice=raw["choice"].strip().upper()
+            if len(choice) != 1:
+                return await self._reject(transaction_id,"invalid",f"invalid choice {choice!r}")
             focus=None
             selected=next((x for x in candidates if str(x.get("key","")).upper()==choice),None)
             if not selected:
