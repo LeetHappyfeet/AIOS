@@ -9,11 +9,41 @@ from aios_app.ui.registry import register_tab
 from aios_app.accumulator.web.config import OUTPUT_DIR
 from aios_app.accumulator.web.queue import CrawlQueue, CrawlTask
 from aios_app.accumulator.web.worker import AccumulatorWorker
+from aios_app.config import settings
+from aios_app.db import Database
+
+import asyncio
+import threading
 
 
 queue = CrawlQueue(OUTPUT_DIR / ".crawl_state.json")
 worker = AccumulatorWorker(queue)
 worker.start()
+
+_domain_loop = asyncio.new_event_loop()
+_domain_thread = threading.Thread(target=_domain_loop.run_forever, daemon=True)
+_domain_thread.start()
+_domain_db = Database(settings.db_dsn)
+asyncio.run_coroutine_threadsafe(_domain_db.connect(), _domain_loop).result()
+
+
+def _run_domain(coro):
+    return asyncio.run_coroutine_threadsafe(coro, _domain_loop).result()
+
+
+async def _domain_choices():
+    rows = await _domain_db.fetch(
+        """SELECT display_name, domain_key FROM aios.knowledge_domain
+           WHERE enabled ORDER BY lower(display_name), domain_key"""
+    )
+    return [f"{r['display_name']} — {r['domain_key']}" for r in rows]
+
+
+def _domain_key(selection: str | None) -> str | None:
+    value = (selection or "").strip()
+    if not value:
+        return None
+    return value.rsplit(" — ", 1)[1].strip() if " — " in value else value
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -75,7 +105,7 @@ def _submit(
         ingest_mode=ingest_value,
         consumption_mode=(consumption_mode or "read").strip().lower(),
         corpus_profile_key=_clean_optional(corpus_profile_key),
-        knowledge_domain=_clean_optional(knowledge_domain),
+        knowledge_domain=_domain_key(knowledge_domain),
         crawl_mode=mode,
         max_depth=int(max_depth or 0) if mode == "site" else 0,
         max_pages=int(max_pages or 1) if mode == "site" else 1,
@@ -209,10 +239,13 @@ Fetch web material into the **cold searchable corpus** by default. Storing a pag
                     label="Corpus profile key",
                     placeholder="Optional trusted source profile",
                 )
-                knowledge_domain = gr.Textbox(
-                    label="Declared knowledge domain",
-                    placeholder="Optional, e.g. fiction.my-little-pony",
+                knowledge_domain = gr.Dropdown(
+                    label="Universe / declared knowledge domain",
+                    choices=_run_domain(_domain_choices()),
+                    allow_custom_value=True,
+                    info="Select a registered domain. For site crawls this declaration classifies only the seed; descendants must qualify independently.",
                 )
+                refresh_domains = gr.Button("Refresh registered domains")
 
         with gr.Accordion("Optional enrichment / world routing hints", open=False):
             gr.Markdown(
@@ -273,3 +306,8 @@ Fetch web material into the **cold searchable corpus** by default. Storing a pag
             outputs=[status, jobs],
         )
         refresh.click(fn=_status_rows, inputs=None, outputs=jobs)
+
+        def refresh_domain_choices():
+            return gr.update(choices=_run_domain(_domain_choices()))
+
+        refresh_domains.click(fn=refresh_domain_choices, outputs=knowledge_domain)
