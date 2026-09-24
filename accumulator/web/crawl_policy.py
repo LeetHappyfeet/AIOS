@@ -65,6 +65,18 @@ def evaluate_url(url: str, *, seed: bool = False) -> AdmissionDecision:
     if query_keys & BLOCKED_QUERY_KEYS:
         return AdmissionDecision(False, "action_url")
 
+    # MediaWiki exposes administrative namespaces through /w/index.php?title=...
+    # as well as /wiki/Special:... . Reject both forms deterministically.
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    title_value = next(
+        (value for key, value in query.items() if key.lower() == "title"),
+        "",
+    )
+    if ":" in title_value:
+        namespace = title_value.split(":", 1)[0].lower()
+        if namespace in BLOCKED_WIKI_NAMESPACES:
+            return AdmissionDecision(False, "wiki_namespace")
+
     segments = [segment for segment in lower_path.split("/") if segment]
     if any(segment in BLOCKED_PATH_PARTS for segment in segments):
         return AdmissionDecision(False, "administrative_path")
