@@ -50,6 +50,10 @@ def validate_structured_response(
     expression = payload.get("expression", "")
     if not isinstance(expression, str):
         raise StructuredResponseError("expression must be a string")
+    if allowed_actions is not None and not allowed_actions:
+        # Transactional/classifier calls have no action authority. Preserve
+        # their compact response fields instead of requiring expression/actions.
+        return StructuredInferenceResponse(expression=expression, actions=(), raw=dict(payload))
     raw_actions = payload.get("actions", [])
     if not isinstance(raw_actions, list):
         raise StructuredResponseError("actions must be an array")
