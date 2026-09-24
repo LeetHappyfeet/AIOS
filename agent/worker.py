@@ -254,6 +254,27 @@ class CharacterWorker:
                             dedupe_key=f"action-terminal:{action.action_id}:{action.status}",
                         )
 
+                asynchronous_children = [
+                    item for item in all_action_results
+                    if item.get("result_mode") == "asynchronous"
+                    and item.get("status") == "succeeded"
+                ]
+                if asynchronous_children and not continuation:
+                    await self.agency.transition_task(task_id, "waiting", result={
+                        "expression": inference.response.expression,
+                        "actions": all_action_results,
+                        "waiting_for": [
+                            item.get("result", {}).get("task_id")
+                            for item in asynchronous_children
+                            if isinstance(item.get("result"), dict)
+                        ],
+                    })
+                    await self.runtime.finish_semantic_turn(task.instance_id, semantic=True)
+                    return {
+                        "expression": inference.response.expression,
+                        "actions": all_action_results,
+                        "status": "waiting",
+                    }
                 if not continuation:
                     break
                 await self.db.execute(
