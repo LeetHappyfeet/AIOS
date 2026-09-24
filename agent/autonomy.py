@@ -32,7 +32,7 @@ class AutonomyScheduler:
                  AND NOT EXISTS (
                    SELECT 1 FROM aios.pipeline_job j
                    WHERE j.job_type='agent_wake'
-                     AND j.status IN ('pending','claimed','running')
+                     AND j.status IN ('queued','running')
                      AND j.payload->>'task_id'=t.task_id::text
                  )
                ORDER BY t.priority,t.created_at LIMIT $1""",
