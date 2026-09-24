@@ -65,6 +65,9 @@ class CognitiveTask:
     trigger_id: Optional[str]
     source_state_version: Optional[int]
     source_node_id: Optional[UUID]
+    source_from_node_id: Optional[UUID]
+    source_through_node_id: Optional[UUID]
+    source_scene_snapshot_id: Optional[UUID]
     result: Any
     error: Optional[str]
     meta: dict[str, Any]
@@ -86,6 +89,9 @@ class CognitiveTask:
             trigger_id=row["trigger_id"],
             source_state_version=row["source_state_version"],
             source_node_id=row["source_node_id"],
+            source_from_node_id=row.get("source_from_node_id"),
+            source_through_node_id=row.get("source_through_node_id"),
+            source_scene_snapshot_id=row.get("source_scene_snapshot_id"),
             result=_decode(row["result"]),
             error=row["error"],
             meta=dict(_decode(row["meta"]) or {}),
@@ -157,6 +163,9 @@ class CharacterAgencyStore:
         trigger_id: str | None = None,
         source_state_version: int | None = None,
         source_node_id: UUID | None = None,
+        source_from_node_id: UUID | None = None,
+        source_through_node_id: UUID | None = None,
+        source_scene_snapshot_id: UUID | None = None,
         meta: Mapping[str, Any] | None = None,
         execution_mode: str = "auto",
     ) -> CognitiveTask:
@@ -165,10 +174,11 @@ class CharacterAgencyStore:
             INSERT INTO aios.character_cognitive_task (
                 instance_id, parent_task_id, task_type, objective,
                 hud_profile_name, retrieval_focus, priority,
-                trigger_type, trigger_id, source_state_version, source_node_id, meta,
+                trigger_type, trigger_id, source_state_version, source_node_id,
+                source_from_node_id, source_through_node_id, source_scene_snapshot_id, meta,
                 execution_mode
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16)
             RETURNING *
             """,
             instance_id,
@@ -182,6 +192,9 @@ class CharacterAgencyStore:
             trigger_id,
             source_state_version,
             source_node_id,
+            source_from_node_id,
+            source_through_node_id,
+            source_scene_snapshot_id,
             _json(meta),
             execution_mode,
         )
