@@ -21,32 +21,37 @@ class CognitiveThreadService:
             """INSERT INTO aios.character_cognitive_thread(
                    instance_id,subject_key,pressure,current_question,source_timeline_id,
                    last_source_node_id,last_state_version,crossing_count,meta)
-               VALUES($1,$2,$3,$4,$5,$6,$7,1,$8::jsonb)
+               VALUES($1,$2,0,$3,$4,$5,$6,0,$7::jsonb)
                ON CONFLICT(instance_id,subject_key) DO UPDATE SET
                    status=CASE WHEN aios.character_cognitive_thread.status='resolved'
                                THEN 'open' ELSE aios.character_cognitive_thread.status END,
-                   pressure=LEAST(10.0,aios.character_cognitive_thread.pressure + EXCLUDED.pressure),
                    current_question=EXCLUDED.current_question,
                    source_timeline_id=EXCLUDED.source_timeline_id,
                    last_source_node_id=EXCLUDED.last_source_node_id,
                    last_state_version=EXCLUDED.last_state_version,
-                   crossing_count=aios.character_cognitive_thread.crossing_count+1,
-                   last_crossed_at=now(),updated_at=now()
+                   updated_at=now()
                RETURNING thread_id""",
-            instance_id, subject_key, strength,
+            instance_id, subject_key,
             str(opportunity.get("natural_language") or "")[:1000],
             opportunity.get("source_timeline_id"), opportunity.get("source_node_id"),
             opportunity.get("source_state_version"),
             json.dumps({"last_operation_type": opportunity.get("operation_type")}, default=str),
         )
         thread_id = row["thread_id"]
-        await self.db.execute(
+        crossing=await self.db.execute_returning_row(
             """INSERT INTO aios.character_cognitive_thread_crossing(
                    thread_id,opportunity_id,source_node_id,crossing_type,evidence,strength)
                VALUES($1,$2,$3,$4,$5::jsonb,$6)
-               ON CONFLICT(thread_id,opportunity_id) DO NOTHING""",
+               ON CONFLICT(thread_id,opportunity_id) DO NOTHING
+               RETURNING crossing_id""",
             thread_id, opportunity["opportunity_id"], opportunity.get("source_node_id"),
             str(opportunity.get("opportunity_type") or "unknown"),
             json.dumps(opportunity.get("evidence") or [], default=str), strength,
         )
+        if crossing:
+            await self.db.execute(
+                """UPDATE aios.character_cognitive_thread
+                   SET pressure=LEAST(10.0,pressure+$2),crossing_count=crossing_count+1,
+                       last_crossed_at=now(),updated_at=now()
+                   WHERE thread_id=$1""",thread_id,strength)
         return thread_id
