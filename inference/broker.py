@@ -79,12 +79,19 @@ class OpenAICompatibleClient:
                 raise RuntimeError(f"health returned HTTP {response.status}")
 
     def _complete(self, provider: InferenceProvider, request: InferenceRequest) -> str:
-        instruction = (
-            "Return exactly one JSON object. Do not use markdown. "
-            "Shape: {\"expression\": string, \"actions\": "
-            "[{\"type\": string, \"arguments\": object}]}. "
-            "Only propose action types explicitly listed in the prompt."
-        )
+        if request.output_schema and request.allowed_actions == {}:
+            instruction = (
+                "Return exactly one small JSON object and no markdown. "
+                "Follow the output shape stated by the user prompt. "
+                "Do not add actions, commentary, or invented context."
+            )
+        else:
+            instruction = (
+                "Return exactly one JSON object. Do not use markdown. "
+                "Shape: {\"expression\": string, \"actions\": "
+                "[{\"type\": string, \"arguments\": object}]}. "
+                "Only propose action types explicitly listed in the prompt."
+            )
         body = {
             "model": provider.model,
             "messages": [
