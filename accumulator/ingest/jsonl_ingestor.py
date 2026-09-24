@@ -245,6 +245,8 @@ class JSONLDAGIngestor:
                     declared_domain,
                     evidence=declared_evidence,
                     classification=classification,
+                    scope_key=route.scope_key if declared_evidence == "source_profile" else None,
+                    epistemic_namespace=route.epistemic_namespace if declared_evidence == "source_profile" else None,
                 )
                 await facet_router.apply(
                     document_id=corpus["document_id"],
