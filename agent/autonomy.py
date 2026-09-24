@@ -86,12 +86,31 @@ class AutonomyScheduler:
             for e in events
         ]
         objective = "Review the pending events and decide the next bounded action."
+        provenance = next(
+            (
+                e["payload"] for e in reversed(events)
+                if str(e["event_type"]) == "COGNITIVE_DELTA_READY"
+                and isinstance(e["payload"], dict)
+            ),
+            {},
+        )
+        def _uuid(value):
+            try:
+                return UUID(str(value)) if value else None
+            except (TypeError, ValueError):
+                return None
+        through_node = _uuid(provenance.get("source_through_node_id"))
         task = await self.agency.create_task(
             instance_id=instance_id, task_type="executive", objective=objective,
             hud_profile_name="agent.executive", retrieval_focus=json.dumps(summaries, default=str),
             priority=min(int(e["priority"]) for e in events), trigger_type="wake_batch",
             trigger_id=",".join(ids), execution_mode="auto",
-            meta={"wake_ids": ids, "events": summaries},
+            source_state_version=provenance.get("source_state_version"),
+            source_node_id=through_node,
+            source_from_node_id=_uuid(provenance.get("source_from_node_id")),
+            source_through_node_id=through_node,
+            meta={"wake_ids": ids, "events": summaries,
+                  "host_cognition": bool(provenance.get("host_cognition", False))},
         )
         await self.db.execute(
             """UPDATE aios.character_wake_event SET status='claimed', claimed_at=now()
