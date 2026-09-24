@@ -141,9 +141,9 @@ class InternalCognitionTransactions:
             operation_id=selected.get("operation_id")
             if not operation_id: return {"kind":"none"}
             from .cognitive_operations import CognitiveOperationEngine
-            await CognitiveOperationEngine(self.db).accept_choice(UUID(str(operation_id)),selected)
+            accepted=await CognitiveOperationEngine(self.db).accept_choice(UUID(str(operation_id)),selected)
             return {"kind":"cognitive_operation_choice","operation_id":str(operation_id),
-                    "option_index":selected.get("option_index")}
+                    "option_index":selected.get("option_index"),"accepted":accepted}
         oid=selected.get("opportunity_id")
         if not oid: return {"kind":"none"}
         opportunity=await self.db.fetchrow(
