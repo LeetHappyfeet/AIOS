@@ -182,6 +182,13 @@ class CognitiveOperationEngine:
         await self._finish_side_effects(op,result)
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
+        # A routed host episode is complete only when its selected operation
+        # succeeds. This advances the cognition cursor without losing newer
+        # pending source experience.
+        if op.get("source_node_id"):
+            from aios_app.agent.admission import AutonomyAdmissionService
+            await AutonomyAdmissionService(self.db).mark_episode_succeeded(
+                instance_id=op["instance_id"], through_node_id=op["source_node_id"])
         if op.get("opportunity_id"):
             await self.db.execute(
                 """UPDATE aios.character_cognitive_opportunity SET status='executed',
