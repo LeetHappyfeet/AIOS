@@ -185,7 +185,22 @@ class InternalCognitionTransactions:
         if tx["source_timeline_id"] and current.source_timeline_id != tx["source_timeline_id"]:
             return False,"source timeline changed"
         policy=str(selected.get("freshness_policy") or ("strict" if operation=="urgent" else "contextual"))
-        if policy == "strict":
+        oid=selected.get("opportunity_id")
+        if oid:
+            row=await self.db.fetchrow(
+                "SELECT freshness_policy,source_state_version,source_node_id,valid_until,status "
+                "FROM aios.character_cognitive_opportunity WHERE opportunity_id=$1",UUID(str(oid)))
+            if not row or row["status"] not in {"pending","offered"}:
+                return False,"opportunity no longer live"
+            if row["valid_until"] <= now:
+                return False,"opportunity expired"
+            policy=str(row["freshness_policy"] or policy)
+            if policy == "strict" and (
+                current.state_version != row["source_state_version"]
+                or current.source_head_node_id != row["source_node_id"]
+            ):
+                return False,"strict opportunity context advanced"
+        elif policy == "strict":
             if current.state_version != tx["source_state_version"] or current.source_head_node_id != tx["source_node_id"]:
                 return False,"strict opportunity context advanced"
         return True,"current"
