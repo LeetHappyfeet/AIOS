@@ -13,6 +13,8 @@ from .actions import ActionDispatcher, default_action_registry
 from .lifecycle import CharacterAgencyStore
 from .runtime import AgentRuntimeStore
 from .deterministic import DEFAULT_DETERMINISTIC_TASKS, DeterministicTaskRegistry
+from .cognitive_delta import CognitiveDeltaService
+from .admission import AutonomyAdmissionService
 
 
 PROFILE_BY_WORKER = {
@@ -34,10 +36,13 @@ class CharacterWorker:
         self.broker = InferenceBroker(db)
         self.hud = HUDAssembler(db)
         self.deterministic = deterministic or DEFAULT_DETERMINISTIC_TASKS
+        self.deltas = CognitiveDeltaService(db)
+        self.admission = AutonomyAdmissionService(db)
 
     async def _first_person_prompt(
         self, *, instance_id: UUID, worker_class: str, objective: str,
         profile_name: str,
+        cognitive_delta: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
         row = await self.db.fetchrow(
             """
@@ -63,7 +68,9 @@ class CharacterWorker:
             "I must reason and speak in first person as this character. "
             "Task specialization limits what I may do; it does not change who I am.\n\n"
             f"{hud_text}\n\n"
-            f"CURRENT {worker_class.upper()} OBJECTIVE:\n{objective}\n\n"
+            + ("NEW EXPERIENCE SINCE MY LAST BACKGROUND COGNITIVE EPISODE:\n"
+               + json.dumps(cognitive_delta, default=str) + "\n\n" if cognitive_delta else "")
+            + f"CURRENT {worker_class.upper()} OBJECTIVE:\n{objective}\n\n"
             "AVAILABLE ACTIONS (names and argument schemas):\n"
             f"{json.dumps(schemas, default=str)}\n\n"
             "Choose what I should express and zero or more bounded actions."
@@ -136,10 +143,18 @@ class CharacterWorker:
         )
         try:
             await self.runtime.assert_inference_budget(task.instance_id, task.task_id)
+            delta = None
+            if task.source_through_node_id is not None:
+                delta_obj = await self.deltas.build(
+                    instance_id=task.instance_id,
+                    from_node_id=task.source_from_node_id,
+                    through_node_id=task.source_through_node_id,
+                )
+                delta = delta_obj.as_prompt_context()
             prompt, state_version = await self._first_person_prompt(
                 instance_id=task.instance_id, worker_class=worker_class,
                 objective=task.retrieval_focus or task.objective,
-                profile_name=profile,
+                profile_name=profile, cognitive_delta=delta,
             )
             schemas = self.registry.schemas_for(worker_class)
             inference = await self.broker.infer(InferenceRequest(
@@ -200,6 +215,10 @@ class CharacterWorker:
                 "actions": action_results,
             }
             await self.agency.transition_task(task_id, "succeeded", result=result)
+            await self.admission.mark_episode_succeeded(
+                instance_id=task.instance_id,
+                through_node_id=task.source_through_node_id,
+            )
             await self.runtime.finish_semantic_turn(task.instance_id, semantic=True)
             return result
         except Exception as exc:
