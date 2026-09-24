@@ -25,7 +25,7 @@ class CognitiveOperationEngine:
                VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9) RETURNING operation_id""",
             thread_id, opportunity["instance_id"], opportunity["opportunity_id"],
             opportunity["operation_type"],
-            json.dumps(opportunity.get("operation_payload") or {}, default=str),
+            json.dumps(self._mapping(opportunity.get("operation_payload")), default=str),
             opportunity.get("source_state_version"), opportunity.get("source_timeline_id"),
             opportunity.get("source_node_id"), opportunity.get("freshness_policy") or "contextual",
         )
@@ -46,10 +46,10 @@ class CognitiveOperationEngine:
         try:
             kind=str(op["operation_type"])
             if kind=="memory.retrieve":
-                result={"kind":"recall","input":self._json(op["input"],{})}
+                result={"kind":"recall","input":self._mapping(op["input"])}
                 await self._finish(op,result)
             elif kind=="corpus.search":
-                payload=self._json(op["input"],{})
+                payload=self._mapping(op["input"])
                 found=await CorpusSearchService(self.db).search(
                     instance_id=op["instance_id"],query=str(payload.get("query") or ""),limit=8)
                 await self._finish(op,{"kind":"inquiry","research_id":str(found.research_id),
@@ -59,10 +59,7 @@ class CognitiveOperationEngine:
             else:
                 await self._finish(op,{"kind":"unsupported","operation_type":kind})
         except Exception as exc:
-            await self.db.execute(
-                """UPDATE aios.character_cognitive_operation SET status='failed',
-                   result=$2::jsonb,completed_at=now(),updated_at=now() WHERE operation_id=$1""",
-                operation_id,json.dumps({"error":str(exc)[:1000]}))
+            await self._fail(op, exc)
             raise
 
     async def _queue_decision(self, op: Mapping[str,Any]) -> None:
@@ -136,11 +133,43 @@ class CognitiveOperationEngine:
         return True
 
     async def _stale(self, op: Mapping[str,Any], reason: str) -> None:
-        await self.db.execute(
+        changed=await self.db.execute_returning_row(
             """UPDATE aios.character_cognitive_operation SET status='stale',result=$2::jsonb,
                completed_at=now(),updated_at=now()
-               WHERE operation_id=$1 AND status IN ('queued','running','waiting_inference')""",
+               WHERE operation_id=$1 AND status IN ('queued','running','waiting_inference')
+               RETURNING operation_id""",
             op["operation_id"],json.dumps({"reason":reason}))
+        if changed:
+            await self._terminal_side_effects(op,status="stale",result={"reason":reason})
+
+    async def _fail(self, op: Mapping[str,Any], exc: Exception) -> None:
+        result={"error":str(exc)[:1000],"error_type":type(exc).__name__}
+        changed=await self.db.execute_returning_row(
+            """UPDATE aios.character_cognitive_operation SET status='failed',
+               result=$2::jsonb,completed_at=now(),updated_at=now()
+               WHERE operation_id=$1 AND status IN ('queued','running','waiting_inference')
+               RETURNING operation_id""",
+            op["operation_id"],json.dumps(result))
+        if changed:
+            await self._terminal_side_effects(op,status="failed",result=result)
+
+    async def _terminal_side_effects(
+        self, op: Mapping[str,Any], *, status: str, result: Mapping[str,Any]
+    ) -> None:
+        if op.get("opportunity_id"):
+            await self.db.execute(
+                """UPDATE aios.character_cognitive_opportunity
+                   SET status='suppressed',resolved_at=now(),updated_at=now()
+                   WHERE opportunity_id=$1 AND status IN ('pending','offered','selected')""",
+                op["opportunity_id"])
+        if op.get("thread_id"):
+            await self.db.execute(
+                """UPDATE aios.character_cognitive_thread
+                   SET status='open',meta=meta || $2::jsonb,updated_at=now()
+                   WHERE thread_id=$1""",
+                op["thread_id"],
+                json.dumps({"last_terminal_operation":{
+                    "status":status,"result":dict(result)}},default=str))
 
     async def _finish(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
         changed=await self.db.execute_returning_row(
@@ -165,7 +194,21 @@ class CognitiveOperationEngine:
                 json.dumps({"last_result":result},default=str))
 
     @staticmethod
-    def _json(value:Any,default:Any)->Any:
-        if isinstance(value,(dict,list)): return value
-        try: return json.loads(value) if value is not None else default
-        except (TypeError,json.JSONDecodeError): return default
+    def _mapping(value: Any) -> dict[str, Any]:
+        """Normalize a JSONB object, including legacy double-encoded object rows."""
+        current=value
+        for _ in range(2):
+            if isinstance(current,Mapping):
+                return dict(current)
+            if isinstance(current,(bytes,bytearray)):
+                try:
+                    current=current.decode("utf-8")
+                except UnicodeDecodeError:
+                    return {}
+            if not isinstance(current,str):
+                return {}
+            try:
+                current=json.loads(current)
+            except (TypeError,ValueError,json.JSONDecodeError):
+                return {}
+        return dict(current) if isinstance(current,Mapping) else {}
