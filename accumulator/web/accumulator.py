@@ -18,6 +18,17 @@ from .crawl_policy import evaluate_page, evaluate_url, normalize_url
 from .writer import JSONLWriter
 
 
+def _ao3_work_url(url: str) -> str | None:
+    """Return the canonical AO3 work URL for a chapter URL."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() not in {"archiveofourown.org", "www.archiveofourown.org"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 4 and parts[0] == "works" and parts[2] == "chapters":
+        return f"{parsed.scheme or 'https'}://{parsed.netloc}/works/{parts[1]}"
+    return None
+
+
 class WebAccumulator:
     """
     Fetch and normalize web observations without assigning truth or character
@@ -163,19 +174,16 @@ class WebAccumulator:
         # AO3 chapter pages do not reliably repeat the work-level fandom tags.
         # Fetch the canonical work page only for repository-native metadata;
         # chapter text/provenance remains attached to the requested chapter URL.
-        parsed_final = urlparse(final_url)
-        if (parsed_final.hostname or "").lower() in {"archiveofourown.org", "www.archiveofourown.org"}:
-            parts = [part for part in parsed_final.path.split("/") if part]
-            if len(parts) >= 4 and parts[0] == "works" and parts[2] == "chapters":
-                work_url = f"{parsed_final.scheme or 'https'}://{parsed_final.netloc}/works/{parts[1]}"
-                work_fetched, _, _ = self._fetch(work_url)
-                if work_fetched is not None:
-                    work_html = work_fetched.get("html") or ""
-                    work_meta = extract_structured_source_metadata(work_html, work_url)
-                    if isinstance(work_meta.get("ao3"), dict):
-                        structured_metadata = dict(structured_metadata or {})
-                        structured_metadata["ao3"] = work_meta["ao3"]
-                        structured_metadata["ao3_work_url"] = work_url
+        work_url = _ao3_work_url(final_url)
+        if work_url:
+            work_fetched, _, _ = self._fetch(work_url)
+            if work_fetched is not None:
+                work_html = work_fetched.get("html") or ""
+                work_meta = extract_structured_source_metadata(work_html, work_url)
+                if isinstance(work_meta.get("ao3"), dict):
+                    structured_metadata = dict(structured_metadata or {})
+                    structured_metadata["ao3"] = work_meta["ao3"]
+                    structured_metadata["ao3_work_url"] = work_url
 
         page_decision = evaluate_page(
             metadata=metadata,
