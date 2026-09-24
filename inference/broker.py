@@ -163,21 +163,21 @@ class InferenceBroker:
         row = await self.db.execute_returning_row(
             """
             WITH provider_lock AS (
-                SELECT pg_advisory_xact_lock(hashtext($3::text))
+                SELECT pg_advisory_xact_lock(hashtext(($3::uuid)::text))
             )
             INSERT INTO aios.inference_request (
                 instance_id, task_id, provider_id, worker_class, model,
                 context_state_version, hud_profile_name, prompt_hash,
                 allowed_actions, output_schema, status, attempts, started_at
             )
-            SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'running',1,now()
+            SELECT $1,$2,$3::uuid,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'running',1,now()
             FROM provider_lock
             WHERE (
                 SELECT count(*) FROM aios.inference_request r
-                WHERE r.provider_id=$3 AND r.status='running'
+                WHERE r.provider_id=$3::uuid AND r.status='running'
                   AND (r.lease_expires_at IS NULL OR r.lease_expires_at > now())
             ) < (
-                SELECT max_concurrency FROM aios.inference_provider WHERE provider_id=$3
+                SELECT max_concurrency FROM aios.inference_provider WHERE provider_id=$3::uuid
             )
             RETURNING request_id
             """,
