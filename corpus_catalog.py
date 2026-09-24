@@ -282,6 +282,14 @@ class CorpusCatalogService:
                 document_id,
             )
             await self.assign_document(document_id=document_id, route=route)
+            await self.db.execute(
+                """DELETE FROM aios.corpus_document_domain
+                   WHERE document_id=$1
+                     AND source='source_profile'
+                     AND meta->>'profile_key'=$2
+                     AND ($3::text IS NULL OR knowledge_domain<>$3)""",
+                document_id, profile["profile_key"], profile["knowledge_domain"],
+            )
             if profile["knowledge_domain"]:
                 await self.db.execute(
                     """INSERT INTO aios.corpus_document_domain
