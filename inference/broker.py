@@ -107,9 +107,17 @@ class OpenAICompatibleClient:
         choices = payload.get("choices") or []
         if not choices:
             raise RuntimeError("provider returned no choices")
-        content = ((choices[0].get("message") or {}).get("content"))
+        choice = choices[0]
+        message = choice.get("message") or {}
+        content = message.get("content")
         if not isinstance(content, str):
             raise RuntimeError("provider returned no message content")
+        if not content.strip():
+            finish_reason = choice.get("finish_reason")
+            reasoning = message.get("reasoning_content")
+            if finish_reason == "length" and isinstance(reasoning, str) and reasoning.strip():
+                raise RuntimeError("provider exhausted completion budget during reasoning; no final content returned")
+            raise RuntimeError(f"provider returned empty message content (finish_reason={finish_reason!r})")
         return content
 
 
@@ -237,10 +245,12 @@ class InferenceBroker:
             await self.db.execute(
                 """
                 UPDATE aios.inference_request SET status='invalid',
-                    validation_error=$2, completed_at=now(), updated_at=now()
+                    response_text=$2, validation_error=$3, latency_ms=$4,
+                    completed_at=now(), updated_at=now()
                 WHERE request_id=$1
                 """,
-                request_id, str(exc)[:2000],
+                request_id, text if 'text' in locals() else None, str(exc)[:2000],
+                int((time.monotonic() - started) * 1000),
             )
             raise
         except Exception as exc:
