@@ -150,14 +150,10 @@ class AutonomyScheduler:
                     """UPDATE aios.character_wake_event SET status='consumed',consumed_at=now()
                        WHERE wake_id=$1 AND status='pending'""",item["wake_id"])
             if tx_id is not None:
-                # Routing owns this delta now. Keep the cursor pending until the
-                # selected operation succeeds, but keep the runtime schedulable so
-                # newer host experience can wake it while inference is outstanding.
-                await self.db.execute(
-                    """UPDATE aios.character_agent_runtime
-                       SET state='ready',last_activity_at=now(),updated_at=now()
-                       WHERE instance_id=$1 AND state <> 'paused'""",
-                    instance_id)
+                # The episode remains pending until the selected cognitive operation
+                # reaches a terminal state. Consuming the wake only means routing
+                # succeeded; it is not cognition completion.
+                await self.runtime.finish_semantic_turn(instance_id,semantic=False)
                 return True
             # No worthwhile opportunity: advance the background cognition cursor
             # without paying for an executive LLM call.
