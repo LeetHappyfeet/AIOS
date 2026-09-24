@@ -42,6 +42,7 @@ class CorpusFacetRoute:
     access_class: str
     priority: int
     meta: dict
+    projection_source: str = "facet_route"
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,52 @@ class CorpusFacetRouter:
             namespace = classification.epistemic_namespace
         return CorpusDocumentRoute(scopes, domains, namespace, tuple(matched))
 
+    async def resolve_domain_key(
+        self,
+        knowledge_domain: str,
+        *,
+        evidence: str,
+        classification: CorpusClassification | None = None,
+    ) -> CorpusDocumentRoute:
+        """Resolve an explicit trusted domain declaration without inferring from prose/URLs."""
+        row = await self.db.fetchrow(
+            """SELECT kd.domain_key AS knowledge_domain,
+                      COALESCE(kd.default_scope_key, kd.domain_key) AS scope_key,
+                      kd.default_epistemic_namespace AS epistemic_namespace,
+                      COALESCE(cs.access_class, 'domain') AS access_class
+               FROM aios.knowledge_domain kd
+               LEFT JOIN aios.corpus_scope cs
+                 ON cs.scope_key=COALESCE(kd.default_scope_key, kd.domain_key)
+               WHERE kd.domain_key=$1 AND kd.enabled""",
+            knowledge_domain.strip(),
+        )
+        if not row:
+            raise ValueError(f"unknown enabled knowledge domain {knowledge_domain!r}")
+        matched = CorpusFacetRoute(
+            facet_type="domain",
+            facet_value=str(row["knowledge_domain"]),
+            knowledge_domain=str(row["knowledge_domain"]),
+            scope_key=str(row["scope_key"]),
+            epistemic_namespace=str(row["epistemic_namespace"]),
+            access_class=str(row["access_class"]),
+            priority=1000,
+            meta={"evidence": evidence},
+            projection_source=evidence,
+        )
+        namespace = matched.epistemic_namespace
+        if classification and classification.epistemic_namespace == "fanwork":
+            namespace = (
+                namespace.replace("canon.", "fanwork.", 1)
+                if namespace.startswith("canon.")
+                else f"fanwork.{matched.knowledge_domain.removeprefix('fiction.')}"
+            )
+        return CorpusDocumentRoute(
+            (matched.scope_key,),
+            (matched.knowledge_domain,),
+            namespace,
+            (matched,),
+        )
+
     async def observe_unresolved(self, *, document_id, classification: CorpusClassification, route: CorpusDocumentRoute) -> int:
         """Inventory unknown trusted structured identifiers without granting access."""
         matched = {
@@ -188,11 +235,18 @@ class CorpusFacetRouter:
             await self.db.execute(
                 """INSERT INTO aios.corpus_document_domain
                        (document_id, knowledge_domain, source, meta)
-                   VALUES ($1,$2,'facet_route',$3::jsonb)
+                   VALUES ($1,$2,$3,$4::jsonb)
                    ON CONFLICT (document_id, knowledge_domain) DO UPDATE
-                   SET meta=aios.corpus_document_domain.meta || EXCLUDED.meta""",
+                   SET source=CASE
+                       WHEN aios.corpus_document_domain.source='facet_route'
+                            AND EXCLUDED.source<>'facet_route'
+                       THEN EXCLUDED.source
+                       ELSE aios.corpus_document_domain.source
+                   END,
+                       meta=aios.corpus_document_domain.meta || EXCLUDED.meta""",
                 document_id,
                 matched.knowledge_domain,
+                matched.projection_source,
                 json.dumps({
                     "facet_type": matched.facet_type,
                     "facet_value": matched.facet_value,
