@@ -2,11 +2,13 @@
 
 # AIOS
 
-**Persistent memory and world state for AI agents.**
+**Persistent cognition, memory, and world state for AI agents.**
 
-AIOS gives long-running AI characters and agents continuity beyond a single prompt or chat. It remembers events, tracks changing world state, maintains what individual characters know and believe, preserves durable character identity, and retrieves the context that matters for the current moment.
+AIOS gives long-running AI characters and agents continuity beyond a single prompt or chat. It remembers events, tracks changing world state, maintains what individual characters know and believe, preserves durable identity, acquires external knowledge, and retrieves the context that matters for the current moment.
 
 Instead of treating memory as a pile of old text, AIOS maintains persistent state and produces a focused **HUD** for the active agent.
+
+AIOS can also coordinate agent tasks and actions and accept inference capacity from compatible LLM endpoints.
 
 **Want to try it without installing anything?**
 Open the [AIOS Google Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing).
@@ -17,16 +19,14 @@ Open the [AIOS Google Colab demo](https://colab.research.google.com/drive/1c-eaL
 
 ## Run AIOS
 
-AIOS currently requires:
+AIOS requires:
 
 * Python 3.10 or newer
 * Docker with Docker Compose v2
 * Git
 
-For the current development branch:
-
 ```bash
-git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git
+git clone https://github.com/LeetHappyfeet/AIOS.git
 cd AIOS
 bash setup.sh
 ```
@@ -92,7 +92,7 @@ Optional infrastructure settings are documented in `.env.example`.
 
 See [docs/installation.md](docs/installation.md) for installation details and troubleshooting.
 
-## What Does AIOS Remember?
+## What Does AIOS Maintain?
 
 AIOS separates several kinds of persistent state that ordinary retrieval systems tend to mix together.
 
@@ -100,11 +100,31 @@ AIOS separates several kinds of persistent state that ordinary retrieval systems
 
 **Experience** records what happened. AIOS can represent individual event occurrences and combine related events into episodes without throwing away the original evidence.
 
-**Knowledge and belief** represent what a particular character knows, remembers, or currently accepts. Two characters can therefore inhabit the same world without automatically sharing the same information.
+**Knowledge and belief** represent what a particular character knows, remembers, or currently accepts. Two characters can inhabit the same world without automatically sharing the same information.
 
 **World state** represents shared information and concrete runtime state independently of private character cognition.
 
-**The HUD** selects the useful portion of all of this state for the active agent at the current point in the world and timeline.
+**Scene state** maintains the immediate situation around a character independently of long-term memory.
+
+**The HUD** selects the useful portion of this state for the active agent at the current point in the world and timeline.
+
+## Knowledge Acquisition
+
+AIOS can ingest external material and turn it into character-accessible knowledge while preserving its source and provenance.
+
+A shared corpus can contain documents and web material without automatically giving every character access to everything it contains. AIOS can associate material with knowledge domains and track what a character has actually acquired.
+
+This allows external research and learned information to enter the same persistent knowledge system used by conversation and experience.
+
+## Agents and Inference
+
+AIOS includes a runtime for persistent agent tasks and actions.
+
+Agents can maintain work across individual generations instead of requiring every operation to begin and end inside one prompt. Actions can be handled deterministically where appropriate or delegated to an LLM when reasoning is required.
+
+AIOS can accept inference workers through compatible LLM endpoints. Inference capacity is separate from persistent state: AIOS memory and knowledge remain available whether or not an external LLM worker is connected.
+
+These systems are new and remain experimental.
 
 ## Why Not Just RAG?
 
@@ -122,8 +142,10 @@ Was this the same event or a different occurrence?
 Which world did it happen in?
 What does this character know?
 What does this character believe?
+What has this character learned?
 What belongs to public world knowledge?
 Who is this character supposed to be?
+What is happening right now?
 What is relevant right now?
 ```
 
@@ -132,24 +154,28 @@ Vector search is useful inside AIOS, but similarity does not decide truth, chron
 A simplified view is:
 
 ```text
-observations
-     ↓
-events / knowledge / world state
-     ↓
-character-specific memory and belief
-     ↓
-relevant recall
-     ↓
-HUD
-     ↓
-LLM or human
+conversation / observations / external knowledge
+                     ↓
+          persistent AIOS state
+                     ↓
+       character knowledge + belief
+                     ↓
+        scene state + relevant recall
+                     ↓
+                    HUD
+                     ↓
+             agent / LLM / human
+                     ↓
+              tasks + actions
+                     ↓
+               new observations
 ```
 
-The larger memory remains persistent even though only a small portion is placed into the active prompt.
+The larger state remains persistent even though only a small portion is placed into an active prompt.
 
 ## Character Identity
 
-AIOS now maintains character identity separately from ordinary memory.
+AIOS maintains character identity separately from ordinary memory.
 
 Character cards and other reference sources can provide identity material, but imported material passes through a provenance-backed identity layer rather than becoming runtime memory.
 
@@ -179,23 +205,23 @@ The HUD is the primary generation-facing boundary. Clients do not need to unders
 
 The [MemoryVaultIngest SillyTavern extension](https://github.com/LeetHappyfeet/extension-MemoryVaultIngest) is one example of a live AIOS client.
 
-AIOS also exposes APIs for world state, character knowledge, documents, epistemic search, identity management, and runtime actions.
+AIOS also exposes APIs for world state, character knowledge, documents, epistemic search, identity management, agent actions, knowledge acquisition, and inference workers.
 
 ## Architecture
 
 AIOS currently uses:
 
-**PostgreSQL** for durable memory, provenance, timelines, character/world state, cognition, belief state, events, episodes, and pipeline state.
+**PostgreSQL** for durable memory, provenance, timelines, character/world state, cognition, belief state, events, episodes, knowledge acquisition, agent state, and pipeline state.
 
 **Apache Jena Fuseki** for RDF semantic representations of world and character knowledge.
 
 **Qdrant** for semantic candidate discovery and retrieval acceleration.
 
-**AIOS runtime services** for ingestion, semantic processing, cognition, retrieval, character/world runtime, and HUD assembly.
+**AIOS runtime services** for ingestion, semantic processing, cognition, retrieval, character/world runtime, HUD assembly, agent actions, and inference coordination.
 
 The storage systems have different responsibilities. Vector similarity is never treated as the sole authority over memory or truth.
 
-For the deeper architecture, see the documentation instead of the root README:
+For deeper architecture, see:
 
 * [Architecture](docs/architecture.md)
 * [Installation](docs/installation.md)
@@ -208,11 +234,11 @@ For the deeper architecture, see the documentation instead of the root README:
 
 ## Development
 
-AIOS is under active development and its internal schema and APIs may still change.
+AIOS is under active development. Internal schemas and APIs may change.
 
-The current development work is focused on making persistent memory behave less like search and more like an evolving cognitive/runtime system: preserving event identity, episodic continuity, character perspective, durable identity, public world knowledge, and reliable recall over long-running sessions.
+Memory, identity, belief, retrieval, knowledge acquisition, agent actions, and external inference are all active areas of development. Newer agent and research capabilities should be considered experimental.
 
-Issues and regression reports are welcome, especially when accompanied by the AIOS logs and the source interaction that produced the problem.
+Issues and regression reports are welcome, especially when accompanied by AIOS logs and the source interaction that produced the problem.
 
 ## License
 
