@@ -21,6 +21,18 @@ def _clip(value: Any, n: int = 220) -> str:
     return " ".join(str(value or "").split())[:n].rstrip()
 
 
+def _uuid_or_none(value: Any) -> UUID | None:
+    """Return a real UUID for database FK columns; synthetic cognition IDs stay provenance."""
+    if value is None:
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 @dataclass(frozen=True)
 class CognitiveSubject:
     subject_id: UUID
@@ -130,13 +142,23 @@ class CognitiveSubjectBuilder:
             json.dumps(list(item["entity_keys"])),item.get("predicate_key"),item.get("object_key"),
             item.get("topic_key"),item.get("question_type"),item.get("question"),
             item["display_label"],item["confidence"],item["uncertainty"],item["salience"])
+        source_node_raw=item.get("source_node_id")
+        proposition_raw=item.get("proposition_id")
+        source_node_id=_uuid_or_none(source_node_raw)
+        proposition_id=_uuid_or_none(proposition_raw)
+        evidence_meta={}
+        if source_node_raw is not None and source_node_id is None:
+            evidence_meta["source_identifier"]=str(source_node_raw)
+        if proposition_raw is not None and proposition_id is None:
+            evidence_meta["proposition_identifier"]=str(proposition_raw)
         await self.db.execute(
             """INSERT INTO aios.character_cognitive_subject_evidence(
                    subject_id,source_node_id,proposition_id,evidence_kind,strength,meta)
-               VALUES($1,$2,$3,$4,$5,'{}'::jsonb)
+               VALUES($1,$2,$3,$4,$5,$6::jsonb)
                ON CONFLICT DO NOTHING""",
-            row["subject_id"],item.get("source_node_id"),item.get("proposition_id"),
-            item["evidence_kind"],max(.05,min(1.0,float(item["confidence"]))))
+            row["subject_id"],source_node_id,proposition_id,
+            item["evidence_kind"],max(.05,min(1.0,float(item["confidence"]))),
+            json.dumps(evidence_meta,default=str))
         return self._from_row(row)
 
     @staticmethod
