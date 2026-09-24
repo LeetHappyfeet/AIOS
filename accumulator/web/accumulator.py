@@ -159,6 +159,24 @@ class WebAccumulator:
 
         metadata = extract_page_metadata(html, final_url)
         structured_metadata = extract_structured_source_metadata(html, final_url)
+
+        # AO3 chapter pages do not reliably repeat the work-level fandom tags.
+        # Fetch the canonical work page only for repository-native metadata;
+        # chapter text/provenance remains attached to the requested chapter URL.
+        parsed_final = urlparse(final_url)
+        if (parsed_final.hostname or "").lower() in {"archiveofourown.org", "www.archiveofourown.org"}:
+            parts = [part for part in parsed_final.path.split("/") if part]
+            if len(parts) >= 4 and parts[0] == "works" and parts[2] == "chapters":
+                work_url = f"{parsed_final.scheme or 'https'}://{parsed_final.netloc}/works/{parts[1]}"
+                work_fetched, _, _ = self._fetch(work_url)
+                if work_fetched is not None:
+                    work_html = work_fetched.get("html") or ""
+                    work_meta = extract_structured_source_metadata(work_html, work_url)
+                    if isinstance(work_meta.get("ao3"), dict):
+                        structured_metadata = dict(structured_metadata or {})
+                        structured_metadata["ao3"] = work_meta["ao3"]
+                        structured_metadata["ao3_work_url"] = work_url
+
         page_decision = evaluate_page(
             metadata=metadata,
             body=body,
@@ -201,6 +219,7 @@ class WebAccumulator:
                 "mode": task.ingest_mode,
                 "consumption_mode": task.consumption_mode,
                 "corpus_profile_key": task.corpus_profile_key,
+                "knowledge_domain": task.knowledge_domain,
             },
             "crawl": {
                 "task_id": task.task_id,
