@@ -118,15 +118,18 @@ class InternalHUDAssembler:
         if profile.include_goals:
             add_items("ACTIVE GOAL", frame.get("goals") or [], profile.goal_items)
 
-        lines.append("CHOOSE ONE:")
+        choice_lines = ["CHOOSE ONE:"]
         for item in candidates:
-            lines.append(f"{item['key']}. {_clip(item['label'], 180)}")
-        lines.append('Return JSON only: {"choice":"A"}')
+            choice_lines.append(f"{item['key']}. {_clip(item['label'], 180)}")
+        choice_lines.append('Return JSON only: {"choice":"A"}')
 
-        prompt = "\n".join(lines)
-        # Character approximation is intentional and matches the foreground HUD's
-        # inexpensive budgeting convention. Keep room for the complete choice set.
-        prompt = prompt[: resolved_budget * 4]
+        # Never truncate the decision surface. Context is expendable; the complete
+        # A-E choice set and response contract are not.
+        suffix = "\n".join(choice_lines)
+        char_budget = resolved_budget * 4
+        context_budget = max(160, char_budget - len(suffix) - 1)
+        prefix = "\n".join(lines)[:context_budget].rstrip()
+        prompt = f"{prefix}\n{suffix}" if prefix else suffix
         fingerprint = hashlib.sha256(
             json.dumps({
                 "instance": str(instance_id),
