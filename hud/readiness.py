@@ -111,8 +111,8 @@ async def mark_matching_runtime_dirty(
     source_timeline_id: UUID,
     source_head_node_id: UUID,
     source_head_event_id: int,
-) -> None:
-    """Adopt the exact source coordinate, dirty matching runtimes, then commit cognition."""
+) -> list[UUID]:
+    """Adopt the exact source coordinate and return the runtimes that perceived it."""
     from aios_app.world.source_cursor import advance_matching_runtime_source_cursor
 
     instance_ids = await advance_matching_runtime_source_cursor(
@@ -138,6 +138,7 @@ async def mark_matching_runtime_dirty(
             instance_id=instance_id,
             node_id=source_head_node_id,
         )
+    return instance_ids
 
 
 async def character_projection_clean(
