@@ -130,28 +130,32 @@ class CorpusFacetRouter:
         *,
         evidence: str,
         classification: CorpusClassification | None = None,
+        scope_key: str | None = None,
+        epistemic_namespace: str | None = None,
     ) -> CorpusDocumentRoute:
         """Resolve an explicit trusted domain declaration without inferring from prose/URLs."""
         row = await self.db.fetchrow(
             """SELECT kd.domain_key AS knowledge_domain,
                       COALESCE(kd.default_scope_key, kd.domain_key) AS scope_key,
-                      kd.default_epistemic_namespace AS epistemic_namespace,
-                      COALESCE(cs.access_class, 'domain') AS access_class
+                      kd.default_epistemic_namespace AS epistemic_namespace
                FROM aios.knowledge_domain kd
-               LEFT JOIN aios.corpus_scope cs
-                 ON cs.scope_key=COALESCE(kd.default_scope_key, kd.domain_key)
                WHERE kd.domain_key=$1 AND kd.enabled""",
             knowledge_domain.strip(),
         )
         if not row:
             raise ValueError(f"unknown enabled knowledge domain {knowledge_domain!r}")
+        resolved_scope = scope_key or str(row["scope_key"])
+        scope = await self.db.fetchrow(
+            "SELECT access_class FROM aios.corpus_scope WHERE scope_key=$1",
+            resolved_scope,
+        )
         matched = CorpusFacetRoute(
             facet_type="domain",
             facet_value=str(row["knowledge_domain"]),
             knowledge_domain=str(row["knowledge_domain"]),
-            scope_key=str(row["scope_key"]),
-            epistemic_namespace=str(row["epistemic_namespace"]),
-            access_class=str(row["access_class"]),
+            scope_key=resolved_scope,
+            epistemic_namespace=epistemic_namespace or str(row["epistemic_namespace"]),
+            access_class=str(scope["access_class"]) if scope else "domain",
             priority=1000,
             meta={"evidence": evidence},
             projection_source=evidence,
