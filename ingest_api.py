@@ -351,6 +351,35 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             source_head_event_id=event_id,
         )
         source_head_node_id = await _runtime_source_head(db, req, timeline_id)
+
+        # Host-driven roleplay already had foreground cognition. Record only a
+        # cheap cognitive delta here; admission batches several source turns
+        # before waking background metacognition.
+        if (
+            disposition is IngestEventDisposition.NEW
+            and client_source.lower() == "sillytavern"
+            and source_head_node_id == node_id
+        ):
+            instance = await db.fetchrow(
+                """
+                SELECT rs.instance_id
+                FROM aios.character_runtime_state rs
+                JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
+                WHERE ci.character_id=$1
+                  AND rs.source_timeline_id=$2
+                  AND rs.source_head_node_id=$3
+                ORDER BY rs.updated_at DESC LIMIT 1
+                """,
+                req.character_id, timeline_id, node_id,
+            )
+            if instance:
+                from aios_app.agent.admission import AutonomyAdmissionService
+                await AutonomyAdmissionService(db).observe_host_experience(
+                    instance_id=instance["instance_id"],
+                    source_node_id=node_id,
+                    source_event_id=event_id,
+                    source=client_source,
+                )
     except Exception as exc:
         await db.execute(
             """
