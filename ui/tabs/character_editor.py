@@ -453,7 +453,6 @@ def render():
                     headers=["knowledge_domain", "enabled"], datatype=["str","bool"],
                     row_count=(2, "dynamic"), col_count=(2, "fixed"),
                     label="Research / knowledge-domain affinity",
-                    info="Advanced view. Registered domains should normally be added with the selector above.",
                 )
                 save_domains = gr.Button("Save domain affinity")
                 affinity_status = gr.JSON(label="Resolved affinity")
