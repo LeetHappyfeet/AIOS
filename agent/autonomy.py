@@ -23,7 +23,33 @@ class AutonomyScheduler:
         self.runtime = AgentRuntimeStore(db)
         self.agency = CharacterAgencyStore(db)
 
+    async def _enqueue_existing_tasks(self, limit: int) -> int:
+        rows = await self.db.fetch(
+            """SELECT t.task_id,t.instance_id,t.priority
+               FROM aios.character_cognitive_task t
+               WHERE t.status='queued'
+                 AND t.trigger_type IN ('api_task','cognitive_delegation')
+                 AND NOT EXISTS (
+                   SELECT 1 FROM aios.pipeline_job j
+                   WHERE j.job_type='agent_wake'
+                     AND j.status IN ('pending','claimed','running')
+                     AND j.payload->>'task_id'=t.task_id::text
+                 )
+               ORDER BY t.priority,t.created_at LIMIT $1""",
+            max(1,min(int(limit),1000)),
+        )
+        count=0
+        for row in rows:
+            job_id=await enqueue_job(
+                self.db,job_type="agent_wake",
+                payload={"instance_id":str(row["instance_id"]),"task_id":str(row["task_id"])},
+                priority=int(row["priority"]),
+            )
+            if job_id is not None: count += 1
+        return count
+
     async def schedule_ready(self, limit: int = 100) -> int:
+        direct = await self._enqueue_existing_tasks(limit)
         rows = await self.db.fetch(
             """
             SELECT ar.instance_id
@@ -45,7 +71,7 @@ class AutonomyScheduler:
             """,
             max(1, min(int(limit), 1000)),
         )
-        scheduled = 0
+        scheduled = direct
         for row in rows:
             if await self._schedule_instance(row["instance_id"]):
                 scheduled += 1
