@@ -3,6 +3,7 @@ from pathlib import Path
 from aios_app.accumulator.ingest.jsonl_ingestor import JSONLDAGIngestor
 from aios_app.accumulator.web.extractor import extract_links, extract_page_metadata
 from aios_app.accumulator.web.queue import CrawlQueue, CrawlTask
+from aios_app.accumulator.web.accumulator import _ao3_work_url
 from aios_app.accumulator.web.crawl_policy import (
     evaluate_page,
     evaluate_url,
@@ -224,3 +225,30 @@ def test_page_policy_ignores_challenge_boilerplate_in_large_article_body():
         html="<html><title>Kim Possible Wiki</title><article>content</article></html>",
     )
     assert decision.accept
+
+
+def test_crawl_task_preserves_declared_knowledge_domain():
+    task = CrawlTask(
+        url="https://en.wikipedia.org/wiki/My_Little_Pony",
+        source_id="en.wikipedia.org",
+        knowledge_domain="fiction.my-little-pony",
+    )
+    assert task.knowledge_domain == "fiction.my-little-pony"
+
+
+def test_crawl_policy_rejects_mediawiki_special_query_namespace():
+    assert not evaluate_url(
+        "https://en.wikipedia.org/w/index.php?title=Special%3ACiteThisPage&page=My_Little_Pony"
+    ).accept
+    assert not evaluate_url(
+        "https://en.wikipedia.org/w/index.php?title=Special%3AUrlShortener"
+    ).accept
+
+
+def test_ao3_chapter_url_canonicalizes_to_work_for_metadata():
+    assert _ao3_work_url(
+        "https://archiveofourown.org/works/85804401/chapters/226790471"
+    ) == "https://archiveofourown.org/works/85804401"
+    assert _ao3_work_url(
+        "https://archiveofourown.org/works/85804401?view_full_work=true"
+    ) is None
