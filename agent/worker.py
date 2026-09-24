@@ -77,6 +77,31 @@ class CharacterWorker:
         )
         return prompt, int(row["state_version"])
 
+    async def _notify_parent(
+        self, task, status: str, result: dict[str, Any],
+    ) -> None:
+        if task.parent_task_id is None:
+            return
+        parent = await self.agency.get_task(task.parent_task_id)
+        if parent is None:
+            return
+        await self.runtime.wake(
+            instance_id=task.instance_id,
+            event_type="COGNITIVE_TASK_COMPLETED" if status == "succeeded" else "COGNITIVE_TASK_FAILED",
+            source_type="cognitive_task", source_id=str(task.task_id),
+            payload={
+                "child_task_id": str(task.task_id),
+                "parent_task_id": str(parent.task_id),
+                "task_type": task.task_type,
+                "status": status,
+                "result": result,
+                "source_node_id": str(task.source_node_id or ""),
+                "root_task_id": str(task.root_task_id or parent.root_task_id or parent.task_id),
+            },
+            priority=parent.priority,
+            dedupe_key=f"cognitive-child:{task.task_id}:{status}",
+        )
+
     async def run_task(self, task_id: UUID) -> dict[str, Any]:
         task = await self.agency.get_task(task_id)
         if not task:
@@ -247,6 +272,7 @@ class CharacterWorker:
                 "cognitive_rounds": round_index + 1,
             }
             await self.agency.transition_task(task_id, "succeeded", result=result)
+            await self._notify_parent(task, "succeeded", result)
             await self.admission.mark_episode_succeeded(
                 instance_id=task.instance_id,
                 through_node_id=task.source_through_node_id,
@@ -255,6 +281,7 @@ class CharacterWorker:
             return result
         except Exception as exc:
             await self.agency.transition_task(task_id, "failed", error=str(exc)[:2000])
+            await self._notify_parent(task, "failed", {"error": str(exc)[:2000]})
             await self.db.execute(
                 """
                 UPDATE aios.character_agent_runtime
