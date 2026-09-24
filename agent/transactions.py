@@ -47,9 +47,15 @@ class InternalCognitionTransactions:
         priority: int = 150, ttl_seconds: int = 300,
         source_task_id: UUID | None = None,
         opportunity_ids: Sequence[UUID] = (),
+        worker_profile: str = "attention",
+        focus_text: str | None = None,
+        subject: str | None = None,
     ) -> UUID:
         choices = [dict(x) for x in candidates][:5]
-        hud = await self.huds.build(instance_id, clues=clues, candidates=choices)
+        hud = await self.huds.build(
+            instance_id, clues=clues, candidates=choices,
+            worker_profile=worker_profile, focus_text=focus_text, subject=subject,
+        )
         row = await self.db.execute_returning_row(
             """INSERT INTO aios.internal_cognition_transaction(
                  instance_id,source_task_id,priority,source_state_version,
