@@ -12,6 +12,23 @@ def _norm(text: str) -> str:
     return " ".join(token.lower() for token in _WORD_RE.findall(text))
 
 
+def normalized_text(text: str) -> str:
+    """Normalize presentation text for deterministic cross-section deduplication."""
+    return _norm(text)
+
+
+def _bounded(text: str, max_chars: int) -> str:
+    text = " ".join(str(text).split())
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars].rstrip()
+    # Prefer a natural sentence boundary when one exists reasonably near the cap.
+    boundary = max(clipped.rfind(". "), clipped.rfind("! "), clipped.rfind("? "))
+    if boundary >= max_chars // 2:
+        return clipped[: boundary + 1].rstrip()
+    return clipped.rstrip(" ,;:-") + "…"
+
+
 def narrative_text(event: Mapping[str, Any]) -> str:
     """Return presentation text without pretending a narrative subject is a speaker."""
     text = str(event.get("text") or event.get("message_text") or "").strip()
@@ -65,3 +82,52 @@ def project_recent_events(events: Iterable[Mapping[str, Any]]) -> list[dict[str,
         event["text"] = text
         projected.append(event)
     return projected
+
+
+
+def project_scene_change(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    max_chars: int = 480,
+) -> str | None:
+    """Project the newest source event into a compact scene-state change.
+
+    Scene state must never persist an unbounded source transcript. Prefer a
+    semantic event tied to the newest source node, then structured/narrative
+    event text, and use the raw source message only as a bounded last resort.
+    """
+    rows = [dict(event) for event in events]
+    if not rows:
+        return None
+
+    newest = rows[0]
+    newest_node = newest.get("node_id") or newest.get("source_node_id")
+    candidates = rows
+    if newest_node:
+        node_key = str(newest_node)
+        same_source = [
+            event
+            for event in rows
+            if str(event.get("source_node_id") or event.get("node_id") or "") == node_key
+        ]
+        if same_source:
+            candidates = same_source
+
+    # Semantic rows do not carry message_text. They are the preferred scene
+    # projection when cognition has caught up with the source turn.
+    for event in candidates:
+        if event.get("message_text"):
+            continue
+        text = narrative_text(event)
+        if text:
+            return _bounded(text, max_chars)
+
+    # Some current-event rows carry both a bounded semantic text and the raw
+    # source message. Prefer that explicit text before falling back to transcript.
+    for event in candidates:
+        text = str(event.get("text") or "").strip()
+        if text:
+            return _bounded(narrative_text({**event, "message_text": None}), max_chars)
+
+    raw = narrative_text(newest)
+    return _bounded(raw, max_chars) if raw else None

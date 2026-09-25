@@ -236,6 +236,73 @@ class LongDocumentIn(BaseModel):
     source_name: str = "long_document"
 
 
+class CorpusDocumentIn(BaseModel):
+    text: str
+    source_id: str = Field(min_length=1)
+    source_kind: str = "document"
+    title: Optional[str] = None
+    author: Optional[str] = None
+    source_uri: Optional[str] = None
+    language: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CorpusSourceProfileIn(BaseModel):
+    profile_key: str = Field(min_length=1)
+    collection_key: str = Field(min_length=1)
+    scope_key: str = Field(min_length=1)
+    display_name: Optional[str] = None
+    source_id: Optional[str] = None
+    domain_pattern: Optional[str] = None
+    path_prefix: Optional[str] = None
+    knowledge_domain: Optional[str] = None
+    access_class: Literal["public", "domain", "restricted"] = "restricted"
+    epistemic_namespace: str = "reference"
+    identity_binding: Literal["external", "world", "character"] = "external"
+    priority: int = 0
+    meta: Dict[str, Any] = Field(default_factory=dict)
+    reclassify_existing: bool = True
+
+
+class KnowledgeDomainIn(BaseModel):
+    domain_key: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    domain_kind: str = "general"
+    parent_domain_key: Optional[str] = None
+    default_scope_key: Optional[str] = None
+    default_epistemic_namespace: str = "reference"
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeDomainIdentifierIn(BaseModel):
+    domain_key: str = Field(min_length=1)
+    identifier_type: str = Field(min_length=1)
+    identifier_value: str = Field(min_length=1)
+    source: str = "operator"
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CorpusFacetRouteIn(BaseModel):
+    facet_type: str = Field(min_length=1)
+    facet_value: str = Field(min_length=1)
+    knowledge_domain: str = Field(min_length=1)
+    scope_key: str = Field(min_length=1)
+    epistemic_namespace: str = Field(min_length=1)
+    access_class: Literal["domain", "restricted"] = "domain"
+    priority: int = 0
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CharacterKnowledgeDomainsIn(BaseModel):
+    knowledge_domains: List[str] = Field(default_factory=list)
+
+
+class CorpusConsumeIn(BaseModel):
+    section_ids: List[UUID]
+    mode: Literal["read", "research", "taught", "import"] = "read"
+
+
 class CharacterEpistemicProfileIn(BaseModel):
     skepticism: float = 0.5
     curiosity: float = 0.5

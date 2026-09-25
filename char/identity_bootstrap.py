@@ -7,6 +7,7 @@ from typing import Any
 from aios_app.db import Database
 from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.char.identity_revision import accept_identity_candidate
+from aios_app.char.domain_resolution import CharacterDomainResolver
 
 
 def _card_data(payload: dict[str, Any]) -> dict[str, Any]:
@@ -19,6 +20,38 @@ def _clean(value: Any) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+
+def _authored_domain_declarations(card: dict[str, Any]) -> list[dict[str, str]]:
+    """Read only explicit AIOS domain metadata; never infer domains from prose."""
+    extensions = card.get("extensions")
+    extension_aios = extensions.get("aios") if isinstance(extensions, dict) else None
+    aios = card.get("aios") if isinstance(card.get("aios"), dict) else extension_aios
+    if not isinstance(aios, dict):
+        return []
+    identity = aios.get("identity")
+    if not isinstance(identity, dict):
+        return []
+    raw_domains = identity.get("domains")
+    if not isinstance(raw_domains, list):
+        return []
+
+    declarations: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw_domains:
+        if not isinstance(item, dict):
+            continue
+        domain = _clean(item.get("domain"))
+        relationship = (_clean(item.get("relationship")) or "native").lower()
+        if not domain or relationship not in {"native", "crossover"}:
+            continue
+        key = (domain, relationship)
+        if key in seen:
+            continue
+        seen.add(key)
+        declarations.append({"domain": domain, "relationship": relationship})
+    return declarations
 
 
 def _facet_candidates(card: dict[str, Any]) -> list[dict[str, Any]]:
@@ -40,6 +73,18 @@ def _facet_candidates(card: dict[str, Any]) -> list[dict[str, Any]]:
                 "source_field": field,
                 "source_fragment": value,
             })
+
+    for declaration in _authored_domain_declarations(card):
+        domain = declaration["domain"]
+        relationship = declaration["relationship"]
+        candidates.append({
+            "facet_type": "domain",
+            "facet_key": domain,
+            "value": {"domain": domain, "relationship": relationship},
+            "stability": "structural",
+            "source_field": "aios.identity.domains",
+            "source_fragment": f"{domain}:{relationship}",
+        })
 
     # Character-card scenario and first_mes are intentionally excluded: they
     # describe initial circumstances/examples, not durable identity.
@@ -116,6 +161,7 @@ async def bootstrap_character_card(
             )
 
         candidates = _facet_candidates(card)
+
         candidate_ids: list[str] = []
         for item in candidates:
             row = await con.fetchrow(
@@ -123,9 +169,9 @@ async def bootstrap_character_card(
                 INSERT INTO aios.character_identity_candidate (
                     character_id, source_id, facet_type, facet_key, value,
                     stability, authority, mutability, perspective,
-                    source_field, source_fragment, disposition
+                    source_field, source_fragment, disposition, meta
                 )
-                VALUES ($1,$2,$3,$4,$5::jsonb,$6,'authored','explicit','self',$7,$8,'proposed')
+                VALUES ($1,$2,$3,$4,$5::jsonb,$6,'authored','explicit','self',$7,$8,'proposed',$9::jsonb)
                 ON CONFLICT (source_id, facet_type, facet_key, source_field) DO UPDATE
                 SET value=EXCLUDED.value,
                     stability=EXCLUDED.stability,
@@ -135,8 +181,45 @@ async def bootstrap_character_card(
                 character_id, source_id, item["facet_type"], item["facet_key"],
                 json.dumps(item["value"], ensure_ascii=False), item["stability"],
                 item["source_field"], item["source_fragment"],
+                json.dumps(item.get("meta") or {}),
             )
             candidate_ids.append(str(row["candidate_id"]))
+
+    # Resolve source-native structured affiliations after the identity-source
+    # transaction commits, so candidate provenance/FKs are visible normally.
+    resolved_domains = await CharacterDomainResolver(db).resolve(
+        character_id=character_id,
+        source_id=source_id,
+        card=card,
+    )
+    explicit_domains = {
+        item["facet_key"]
+        for item in candidates
+        if item.get("facet_type") == "domain"
+    }
+    for declaration in resolved_domains:
+        domain = declaration["domain"]
+        if domain in explicit_domains:
+            continue
+        row = await db.execute_returning_row(
+            """INSERT INTO aios.character_identity_candidate (
+                   character_id, source_id, facet_type, facet_key, value,
+                   stability, authority, mutability, perspective,
+                   source_field, source_fragment, disposition, meta
+               )
+               VALUES ($1,$2,'domain',$3,$4::jsonb,'structural','authored',
+                       'explicit','self',$5,$6,'proposed',$7::jsonb)
+               ON CONFLICT (source_id, facet_type, facet_key, source_field) DO UPDATE
+               SET value=EXCLUDED.value,
+                   source_fragment=EXCLUDED.source_fragment,
+                   meta=aios.character_identity_candidate.meta || EXCLUDED.meta
+               RETURNING candidate_id""",
+            character_id, source_id, domain,
+            json.dumps({"domain": domain, "relationship": declaration["relationship"]}),
+            declaration["source_field"], declaration["source_fragment"],
+            json.dumps(declaration.get("meta") or {}),
+        )
+        candidate_ids.append(str(row["candidate_id"]))
 
     accepted = []
     if auto_accept_authored:

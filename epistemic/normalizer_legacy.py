@@ -296,6 +296,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             ie.source AS ingest_source,
             ie.source_id,
             ie.source_kind AS explicit_source_kind,
+            sc.consumption_id,
             sd.source_type, sd.source_url, sd.retrieved_at
         FROM aios.claim_candidate cc
         LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
@@ -303,6 +304,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
         LEFT JOIN aios.dag_node n ON n.node_id=ds.node_id
         LEFT JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         LEFT JOIN aios.source_document sd ON sd.document_id=ds.document_id
+        LEFT JOIN aios.source_consumption sc ON sc.ingest_event_id=ie.event_id
         LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
         LEFT JOIN aios.claim_semantic_frame_projection sfp ON sfp.claim_id=cc.claim_id
         LEFT JOIN aios.claim_semantic_frame sf ON sf.frame_id=sfp.primary_frame_id
@@ -474,9 +476,9 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             """
             INSERT INTO aios.knowledge_acquisition_event (
                 instance_id, proposition_id, claim_id, acquisition_mode,
-                epistemic_status, confidence, dag_node_id, meta
+                epistemic_status, confidence, dag_node_id, consumption_id, meta
             )
-            SELECT $1,$2,$3,$4,$5,$6,$7,$8::jsonb
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM aios.knowledge_acquisition_event kae
@@ -492,6 +494,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
             _context_epistemic_status(row["claim_kind"]),
             float(row["confidence"] or 0.0),
             row["node_id"],
+            row["consumption_id"],
             json.dumps({
                 "source": "context-resolver-v3",
                 "semantic_frame_id": str(row["semantic_frame_id"]) if row["semantic_frame_id"] else None,

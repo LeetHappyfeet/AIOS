@@ -13,6 +13,14 @@ from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.epistemic.message_cognition import current_message_cognition
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer, select_recalled_cognition
+from aios_app.epistemic.research import (
+    CharacterResearchService,
+    CorpusLearningService,
+    CorpusReinforcementService,
+    SemanticCorpusReinforcementService,
+    SemanticKnowledgeCoverageService,
+    KnowledgeDemandResolver,
+)
 from aios_app.epistemic.retrieval_policy import (
     CognitiveRetrievalPolicy,
     DEFAULT_COGNITIVE_RETRIEVAL_POLICY,
@@ -46,6 +54,8 @@ class CognitiveKnowledgeSnapshot:
     goals: list[dict[str, Any]]
     rules: list[dict[str, Any]]
     current_events: list[dict[str, Any]]
+    corpus_references: list[dict[str, Any]]
+    corpus_demand: dict[str, Any] | None
     recall_suppressed: dict[str, int]
     topology_retrieval: bool
     topology_partial_fallback: bool
@@ -123,6 +133,27 @@ def cognitive_rejection_reason(
     return None
 
 
+def automatic_corpus_research_allowed(
+    attention: CognitiveAttentionInputs,
+    *,
+    character_id: str,
+) -> bool:
+    """Allow automatic lookup only when the current focus came from outside the character."""
+    focus_row = next(
+        (row for row in attention.recent_newest if row.get("message_text")),
+        None,
+    )
+    if not focus_row:
+        return False
+    speaker_id = str(focus_row.get("speaker_id") or "").strip()
+    speaker_role = str(focus_row.get("speaker_role") or "").strip().lower()
+    if speaker_id and speaker_id == str(character_id):
+        return False
+    if speaker_role == "assistant":
+        return False
+    return True
+
+
 def admit_cognitive_candidates(
     items: Iterable[dict[str, Any]],
     *,
@@ -148,6 +179,15 @@ class CognitiveContextService:
     def __init__(self, db: Database, *, retrieval_policy: CognitiveRetrievalPolicy | None = None):
         self.db = db
         self.retriever = TopologyRetriever(db)
+        self.research = CharacterResearchService(db)
+        self.corpus_learning = CorpusLearningService(db)
+        self.corpus_reinforcement = CorpusReinforcementService(db)
+        self.semantic_corpus_reinforcement = SemanticCorpusReinforcementService(db)
+        self.semantic_knowledge_coverage = SemanticKnowledgeCoverageService()
+        self.knowledge_demand = KnowledgeDemandResolver(
+            minimum_terms=2,
+            coverage_threshold=0.60,
+        )
         self.retrieval_policy = retrieval_policy or DEFAULT_COGNITIVE_RETRIEVAL_POLICY
         self._prepared_retrieval: dict[tuple[Any, ...], PreparedRetrievalSnapshot] = {}
         self._prepared_retrieval_flights: AsyncSingleFlight[
@@ -161,6 +201,7 @@ class CognitiveContextService:
         plugin_snapshot: Mapping[str, Any],
         *,
         recent_limit: int,
+        focus_text: str | None = None,
     ) -> CognitiveAttentionInputs:
         bounded_limit = max(1, min(int(recent_limit), 100))
 
@@ -217,9 +258,13 @@ class CognitiveContextService:
             for row in recent_newest
             if row.get("node_id") is not None and row.get("message_text")
         )
-        focus_text = next(
+        event_focus_text = next(
             (row.get("message_text") for row in recent_newest if row.get("message_text")),
             "",
+        )
+        resolved_focus_text = (
+            str(focus_text).strip() if focus_text is not None and str(focus_text).strip()
+            else event_focus_text
         )
         goals = list(_json_value(raw_state.get("goals"), []))
         plugin_focus_text = " ".join(
@@ -232,12 +277,12 @@ class CognitiveContextService:
             if signal.get("focus_text")
         )
         retrieval_focus_text = " ".join(
-            part for part in (focus_text, plugin_focus_text) if part
+            part for part in (resolved_focus_text, plugin_focus_text) if part
         )
         return CognitiveAttentionInputs(
             recent_newest=recent_newest,
             visible_source_node_ids=visible_source_node_ids,
-            focus_text=focus_text,
+            focus_text=resolved_focus_text,
             plugin_focus_text=plugin_focus_text,
             retrieval_focus_text=retrieval_focus_text,
             goals=goals,
@@ -547,6 +592,101 @@ class CognitiveContextService:
             else:
                 beliefs.append(item)
 
+        # Corpus research is a deterministic reference channel, not durable
+        # character knowledge. Only established/recalled cognition is used to
+        # judge coverage; corpus hits are never merged into knowledge/beliefs.
+        # Prefer proposition structure over raw text when deciding whether
+        # established /char cognition covers the current information need.
+        # The lexical resolver remains as a conservative fallback for old or
+        # provisional cognition that has not acquired semantic roles yet.
+        structured_knowledge = [
+            item for item in knowledge
+            if item.get("subject_norm") or item.get("predicate_norm")
+               or item.get("object_norm") or item.get("topic_key")
+        ]
+        if structured_knowledge:
+            corpus_demand = self.semantic_knowledge_coverage.resolve(
+                attention.retrieval_focus_text,
+                knowledge=structured_knowledge,
+                minimum_terms=2,
+                threshold=0.60,
+            )
+        else:
+            known_texts = [
+                str(item.get("text") or "")
+                for item in knowledge
+                if item.get("text")
+            ]
+            corpus_demand = self.knowledge_demand.resolve(
+                attention.retrieval_focus_text,
+                known_texts=known_texts,
+            )
+        corpus_references: list[dict[str, Any]] = []
+        corpus_result = None
+        allow_automatic_corpus = automatic_corpus_research_allowed(
+            attention,
+            character_id=context.character_id,
+        )
+        if corpus_demand.needed and allow_automatic_corpus:
+            # Search the missing concepts rather than replaying the entire turn.
+            # This keeps dialogue/scaffolding words out of the FTS query.
+            corpus_query = " OR ".join(corpus_demand.missing_terms)
+            try:
+                corpus_result = await self.research.search(
+                    instance_id=context.instance_id,
+                    query=corpus_query,
+                    limit=5,
+                )
+                corpus_references = corpus_result.reference_context()
+            except Exception:
+                # Corpus lookup is supplementary. A missing migration, unavailable
+                # corpus, or search failure must never block normal cognition.
+                logger.exception(
+                    "Corpus reference lookup failed instance=%s",
+                    context.instance_id,
+                )
+
+        # Repeated external focus is stronger evidence of attention than a
+        # one-turn lookup. Character-generated output must not recursively
+        # reinforce or teach from corpus references either.
+        if allow_automatic_corpus:
+            try:
+                current_research_id = (
+                    corpus_result.research_id if corpus_result is not None else None
+                )
+                await self.corpus_reinforcement.reinforce_from_focus(
+                    instance_id=context.instance_id,
+                    focus_text=attention.retrieval_focus_text,
+                    current_research_id=current_research_id,
+                )
+                await self.semantic_corpus_reinforcement.reinforce_from_knowledge(
+                    instance_id=context.instance_id,
+                    knowledge=structured_knowledge,
+                    current_research_id=current_research_id,
+                )
+                if corpus_result is not None and corpus_result.hits:
+                    await self.corpus_learning.evaluate_and_acquire(
+                        instance_id=context.instance_id,
+                        research_id=corpus_result.research_id,
+                        section_ids=[hit.section_id for hit in corpus_result.hits],
+                    )
+            except Exception:
+                # Learning is subordinate to cognition exactly like corpus search.
+                # Failed acquisition must not make the HUD unavailable.
+                logger.exception(
+                    "Corpus learning evaluation failed instance=%s",
+                    context.instance_id,
+                )
+
+        corpus_demand_meta = {
+            "needed": corpus_demand.needed,
+            "terms": list(corpus_demand.terms),
+            "missing_terms": list(corpus_demand.missing_terms),
+            "coverage": corpus_demand.coverage,
+            "reason": corpus_demand.reason,
+            "automatic_lookup_allowed": allow_automatic_corpus,
+        }
+
         anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
         visible_world_context_count = sum(
             len(item.get("world_context") or [])
@@ -563,7 +703,12 @@ class CognitiveContextService:
             beliefs=beliefs,
             goals=goals,
             rules=rules,
-            current_events=list(reversed(attention.recent_newest)),
+            # Preserve the attention-layer newest-first invariant. HUD relevance
+            # scoring treats index/distance 0 as the current event; reversing here
+            # made the oldest visible source event look causally closest.
+            current_events=list(attention.recent_newest),
+            corpus_references=corpus_references,
+            corpus_demand=corpus_demand_meta,
             recall_suppressed=recall_suppressed,
             topology_retrieval=bool(topology_knowledge),
             topology_partial_fallback=bool(legacy_knowledge),

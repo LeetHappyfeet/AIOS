@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from aios_app.hud.recent_events import project_recent_events
+from aios_app.hud.recent_events import normalized_text, project_recent_events
 
 
 def _name(value: Mapping[str, Any]) -> str:
@@ -104,6 +104,17 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("\nPRESENT OBJECTS:")
         for obj in objects:
             lines.append(f"- {_name(obj)}")
+    working_scene = scene.get("working_state") or {}
+    scene_lines = []
+    if working_scene.get("immediate_goal"):
+        scene_lines.append(f"Immediate goal: {working_scene['immediate_goal']}")
+    if working_scene.get("pending_action"):
+        scene_lines.append(f"Pending action: {working_scene['pending_action']}")
+    if working_scene.get("last_significant_change"):
+        scene_lines.append(f"Last change: {working_scene['last_significant_change']}")
+    if scene_lines:
+        lines.append("\nCURRENT SCENE:")
+        lines.extend(f"- {value}" for value in scene_lines)
     relationships = frame.get("relationships") or []
     if relationships:
         lines.append("\nRELATIONSHIPS:")
@@ -137,11 +148,32 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"- [{status}{suffix}]{_knowledge_annotation(item)} {item.get('text', '')}")
             for conflict in item.get("conflicts") or []:
                 lines.append(f"  ! conflicts with: {conflict.get('text', '')}")
+    corpus_references = frame.get("corpus_references") or []
+    if corpus_references:
+        lines.append("\nCORPUS REFERENCES (LOOKED UP; NOT MEMORY OR BELIEF):")
+        for item in corpus_references:
+            source_bits = [
+                str(value)
+                for value in (item.get("title"), item.get("heading"))
+                if value
+            ]
+            source = " / ".join(source_bits)
+            prefix = f"[{source}] " if source else ""
+            lines.append(f"- {prefix}{item.get('text', '')}")
+
     goals = frame.get("goals") or []
-    if goals:
+    immediate_goal_key = normalized_text(str(working_scene.get("immediate_goal") or ""))
+    rendered_goals = []
+    for goal in goals:
+        text = goal.get("text") if isinstance(goal, dict) else str(goal)
+        # Keep the canonical goal in the frame, but do not spend prompt tokens
+        # repeating the CURRENT SCENE immediate goal verbatim.
+        if immediate_goal_key and normalized_text(str(text)) == immediate_goal_key:
+            continue
+        rendered_goals.append((goal, text))
+    if rendered_goals:
         lines.append("\nGOALS:")
-        for goal in goals:
-            text = goal.get("text") if isinstance(goal, dict) else str(goal)
+        for goal, text in rendered_goals:
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
             lines.append(f"-{annotation} {text}")
     rules = frame.get("rules") or []

@@ -15,6 +15,11 @@ from aios_app.ingest_identity import (
     should_short_circuit_replay,
 )
 from aios_app.models import IngestIn, IngestOut
+from aios_app.world.conversation import (
+    bind_available_instance,
+    ensure_participant,
+    record_message_participation,
+)
 
 
 async def _runtime_source_head(db, req: IngestIn, timeline_id):
@@ -237,6 +242,34 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                 payload["supersedes_event_id"] = int(prior["event_id"])
                 payload["source_branch_mode"] = "replacement"
 
+        # Establish all known actors as participants before the node is
+        # projected. This keeps live API ingestion on the same multi-party
+        # contract as imported chat logs.
+        actor_specs: dict[str, tuple[str, str]] = {}
+        if req.character_id:
+            actor_specs[req.character_id] = ("character", "agent")
+        if req.user_name:
+            actor_specs.setdefault(req.user_name, ("user", "human"))
+        if req.speaker_id:
+            actor_specs[req.speaker_id] = (
+                req.speaker_type or "character",
+                "human" if req.speaker_type == "user" else "agent",
+            )
+        if req.recipient_id:
+            actor_specs.setdefault(req.recipient_id, ("character", "agent"))
+        for actor_id, (actor_type, controller_type) in actor_specs.items():
+            participant_id = await ensure_participant(
+                db,
+                timeline_id=timeline_id,
+                source_actor_id=actor_id,
+                actor_type=actor_type,
+                controller_type=controller_type,
+                controller_ref=actor_id if controller_type == "human" else f"character:{actor_id}",
+                participant_role="primary" if actor_id == req.character_id else "participant",
+                meta={"source": client_source, "live_ingest": True},
+            )
+            await bind_available_instance(db, participant_id=participant_id)
+
         node_id, _ = await add_node_and_edge(
             db,
             timeline_id=timeline_id,
@@ -253,52 +286,19 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             edge_type="alternative" if replacement_parent_node_id else "next",
         )
 
-        # A source cursor may move backwards only when the request is actually
-        # changing the selected alternative in a stable source slot. Merely
-        # coming from SillyTavern is not permission to rewind runtime state.
-        allow_source_rewind = bool(
-            source_event_id
-            and (
-                source_slot_replaced
-                or disposition is IngestEventDisposition.SUPERSEDED_RESELECTION
-            )
-        )
-        await db.execute(
-            """
-            UPDATE aios.character_runtime_state rs
-            SET source_timeline_id=$1, source_head_node_id=$2, updated_at=now()
-            FROM aios.character_instance ci, aios.timeline rt, aios.world rw
-            WHERE ci.instance_id=rs.instance_id
-              AND rt.timeline_id=rs.timeline_id
-              AND rw.world_id=rs.world_id
-              AND ci.character_id=$3
-              AND rt.session_id IS NOT DISTINCT FROM $4
-              AND rt.user_name IS NOT DISTINCT FROM $5
-              AND rt.scope_key=$6
-              AND (
-                    rs.source_timeline_id=$1
-                    OR (rs.source_timeline_id IS NULL AND rw.anchor_timeline_id=$1)
-                  )
-              AND (
-                    COALESCE(
-                        (SELECT dn.event_id FROM aios.dag_node dn
-                         WHERE dn.node_id=rs.source_head_node_id),
-                        -1
-                    ) <= $7
-                    OR $8::boolean
-                  )
-            """,
-            timeline_id,
-            node_id,
-            req.character_id,
-            req.session_id,
-            req.user_name,
-            req.scope_key or settings.default_scope,
-            event_id,
-            allow_source_rewind,
+        await record_message_participation(
+            db,
+            timeline_id=timeline_id,
+            node_id=node_id,
+            speaker_id=req.speaker_id,
+            addressee_ids=[req.recipient_id] if req.recipient_id else [],
+            audience_ids=actor_specs.keys(),
         )
 
-        await mark_matching_runtime_dirty(
+        # Source perception has one authority: the cursor propagation layer.
+        # It returns the exact runtimes that adopted this event so downstream
+        # consequences never rediscover an arbitrary matching instance.
+        affected_instance_ids = await mark_matching_runtime_dirty(
             db,
             character_id=req.character_id,
             session_id=req.session_id,
@@ -309,6 +309,22 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             source_head_event_id=event_id,
         )
         source_head_node_id = await _runtime_source_head(db, req, timeline_id)
+
+        # A genuinely new perceived host experience contributes one cognitive
+        # delta to every runtime that actually adopted the source coordinate.
+        # Transport provenance (SillyTavern, API, email, etc.) is not cognition
+        # policy. Replays and superseded re-selections are deliberately excluded.
+        if disposition is IngestEventDisposition.NEW and affected_instance_ids:
+            from aios_app.agent.admission import AutonomyAdmissionService
+
+            admission = AutonomyAdmissionService(db)
+            for instance_id in affected_instance_ids:
+                await admission.observe_host_experience(
+                    instance_id=instance_id,
+                    source_node_id=node_id,
+                    source_event_id=event_id,
+                    source=client_source,
+                )
     except Exception as exc:
         await db.execute(
             """

@@ -8,6 +8,15 @@ from uuid import UUID
 
 from aios_app.dag import add_node_and_edge, get_or_create_timeline
 from aios_app.db import Database
+from aios_app.epistemic.message_cognition import commit_message_cognition
+from aios_app.world.conversation import (
+    bind_available_instance,
+    ensure_cognitive_instance,
+    ensure_participant,
+    ensure_source_character_identity,
+    perceiving_instances,
+    record_message_participation,
+)
 
 from .config import ACCUMULATOR_ID, SOURCE_KIND
 from .parser import ParsedChatLog, ParsedMessage, parse_sillytavern_jsonl
@@ -55,6 +64,59 @@ class SillyTavernChatIngestor:
             source_id=source_id,
         )
 
+        # Discover the full participant set before projecting any message.
+        # SillyTavern group/public logs can contain more actors than the header pair.
+        participant_types: dict[str, str] = {
+            parsed.user_name: "user",
+            parsed.character_name: "character",
+        }
+        for message in parsed.messages:
+            if message.speaker_type != "system":
+                participant_types.setdefault(message.speaker_id, message.speaker_type)
+
+        participant_ids: dict[str, UUID] = {}
+        for actor_id, actor_type in participant_types.items():
+            # SillyTavern supplies authoritative actor labels. Give every
+            # non-system speaker a durable cognitive identity, source-qualified
+            # when it does not already resolve to an AIOS identity.
+            character_id = await ensure_source_character_identity(
+                self.db,
+                source_actor_id=actor_id,
+                source_namespace="sillytavern-user" if actor_type == "user" else "sillytavern-character",
+                display_name=actor_id,
+                human_controlled=actor_type == "user",
+            )
+            participant_id = await ensure_participant(
+                self.db,
+                timeline_id=timeline_id,
+                source_actor_id=actor_id,
+                actor_type=actor_type,
+                controller_type="human" if actor_type == "user" else "agent",
+                controller_ref=actor_id if actor_type == "user" else f"character:{character_id}",
+                participant_role=(
+                    "primary" if actor_id == parsed.character_name else "participant"
+                ),
+                character_id=character_id,
+                meta={
+                    "source_id": source_id,
+                    "source_kind": SOURCE_KIND,
+                    "adapter": "sillytavern",
+                },
+            )
+            participant_ids[actor_id] = participant_id
+            instance_id = await ensure_cognitive_instance(
+                self.db,
+                character_id=character_id,
+                source_namespace="sillytavern",
+            )
+            await self.db.execute(
+                """UPDATE aios.conversation_participant
+                   SET character_instance_id=$2,updated_at=now()
+                   WHERE participant_id=$1""",
+                participant_id, instance_id,
+            )
+            await bind_available_instance(self.db, participant_id=participant_id)
+
         imported = 0
         parent_node_id = None
         for message in parsed.messages:
@@ -88,6 +150,26 @@ class SillyTavernChatIngestor:
                 parent_node_id=parent_node_id,
                 edge_type="next",
             )
+            # In a normal chat turn every active participant is an audience
+            # member unless explicitly represented as speaker/addressee. This is
+            # a projection over one canonical DAG node, not duplicated history.
+            addressees = [recipient_id] if recipient_id else []
+            await record_message_participation(
+                self.db,
+                timeline_id=timeline_id,
+                node_id=node_id,
+                speaker_id=message.speaker_id,
+                addressee_ids=addressees,
+                audience_ids=participant_ids.keys(),
+            )
+            # Commit the same canonical message independently for each
+            # perceiving cognitive identity. The interpreter keeps first-person
+            # MEMORY/BELIEF/GOAL/RULE ownership with the speaker, so this fan-out
+            # does not turn testimony into the listener's autobiography.
+            for instance_id in await perceiving_instances(self.db, node_id=node_id):
+                await commit_message_cognition(
+                    self.db, instance_id=instance_id, node_id=node_id
+                )
             parent_node_id = node_id
             imported += 1
 
@@ -106,6 +188,7 @@ class SillyTavernChatIngestor:
             "character_name": parsed.character_name,
             "user_name": parsed.user_name,
             "messages": imported,
+            "participants": len(participant_ids),
         }
 
     async def _ensure_source_identity(

@@ -147,7 +147,7 @@ STAGES: List[Stage] = [
     """, empty_payload, 40, 4, True),
     Stage("derive_character_acquisition_topology", "derive_character_acquisition_topology", """
         SELECT kae.acquisition_id FROM aios.knowledge_acquisition_event kae LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-        WHERE kae.proposition_id IS NOT NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+        WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.acquisition_id=kae.acquisition_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_character_acquisition_topology' AND pj.status IN ('queued','running') AND pj.payload->>'acquisition_id'=kae.acquisition_id::text)
         ORDER BY kae.created_at LIMIT $1
@@ -260,6 +260,36 @@ async def run_supervisor() -> None:
     logger.info("AIOS supervisor started")
     try:
         while True:
+            # Heartbeats are cheap events; ready inboxes coalesce into one wake job.
+            try:
+                from aios_app.agent.autonomy import AutonomyScheduler
+                from aios_app.agent.runtime import AgentRuntimeStore
+                await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)
+                await AutonomyScheduler(db).schedule_ready(limit=100)
+                # Disposable micro-HUD work opportunistically consumes free
+                # donated inference capacity and never survives its receipt.
+                from aios_app.agent.transaction_scheduler import TransactionScheduler
+                await TransactionScheduler(db).run_pending(limit=8)
+            except Exception:
+                logger.exception("Agent autonomy scheduling failed")
+
+            # Inference endpoints are ephemeral donated/external capacity. Probe them
+            # continuously and reap abandoned leases so dead processes cannot consume
+            # provider concurrency forever.
+            try:
+                from aios_app.inference import InferenceBroker, InferenceProviderStore
+                inference_store = InferenceProviderStore(db)
+                await inference_store.reap_stale_requests()
+                inference_broker = InferenceBroker(db)
+                due_providers = await inference_store.due_for_health(limit=100)
+                if due_providers:
+                    await asyncio.gather(
+                        *(inference_broker.health_check(p.provider_id) for p in due_providers),
+                        return_exceptions=True,
+                    )
+            except Exception:
+                logger.exception("Inference worker health scheduling failed")
+
             qcnt = await queued_job_count(db)
             queued_by_type = await queued_job_counts_by_type(db)
             critical_reserve = getattr(settings, "supervisor_critical_queue_reserve", 128)

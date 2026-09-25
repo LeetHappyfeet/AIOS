@@ -10,8 +10,10 @@ from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
-from aios_app.hud.profile import get_profile as get_hud_profile
+from aios_app.hud.recent_events import project_scene_change
+from aios_app.hud.profile import get_profile as get_hud_profile, get_profile_by_name
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
+from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
@@ -31,6 +33,7 @@ class HUDBudget:
             "goals": 140,
             "rules": 140,
             "recent_events": 220,
+            "corpus_references": 260,
         }
     )
 
@@ -94,6 +97,7 @@ class HUDAssembler:
         self.context_resolver = HUDContextResolver(db)
         self.cognition = CognitiveContextService(db)
         self.identity_kernels = IdentityKernelStore(db)
+        self.scene_state = CharacterSceneStateStore(db)
         self.budget = budget or HUDBudget()
         self.plugin_manager = plugin_manager or PluginManager()
 
@@ -103,6 +107,8 @@ class HUDAssembler:
         *,
         recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
+        profile_name: Optional[str] = None,
+        focus_text: Optional[str] = None,
     ) -> dict[str, Any]:
         context = await self.context_resolver.resolve(instance_id)
         raw_state = await self._runtime_state(instance_id)
@@ -118,7 +124,11 @@ class HUDAssembler:
                 raw_state=raw_state,
             )
         )
-        hud_profile = await get_hud_profile(self.db, character_id=context.character_id)
+        hud_profile = (
+            await get_profile_by_name(self.db, profile_name=profile_name)
+            if profile_name
+            else await get_hud_profile(self.db, character_id=context.character_id)
+        )
         effective_recent_limit = (
             hud_profile.recent_event_limit if recent_limit is None else recent_limit
         )
@@ -129,6 +139,7 @@ class HUDAssembler:
             raw_state,
             plugin_snapshot,
             recent_limit=cognitive_recent_limit,
+            focus_text=focus_text,
         )
         cognitive_snapshot = await self.cognition.resolve_knowledge(
             context,
@@ -159,6 +170,9 @@ class HUDAssembler:
             "goals": hud_profile.goals_budget,
             "rules": hud_profile.rules_budget,
             "recent_events": max(32, int(hud_profile.token_budget * 0.14)),
+            # Corpus is supplementary reference material and receives a hard,
+            # deliberately small share of the generation context.
+            "corpus_references": max(64, int(hud_profile.token_budget * 0.16)),
         }
         resolved_total = hud_profile.token_budget
         if token_budget is not None and token_budget > 0:
@@ -283,6 +297,67 @@ class HUDAssembler:
             lambda x: x.get("message_text") or x.get("text") or "",
         )
 
+        corpus_references = _trim_to_budget(
+            cognitive_snapshot.corpus_references,
+            section_caps["corpus_references"],
+            lambda x: (
+                f"{x.get('title') or ''} {x.get('heading') or ''} {x.get('text') or ''}"
+            ),
+        )
+
+        # Materialize a compact, branch-safe working scene at the exact runtime
+        # and source DAG coordinates used for this HUD.  Scene ownership is the
+        # character instance; cognitive lineage is deliberately not consulted.
+        active_tasks = _json_value(raw_state.get("active_tasks"), [])
+        pending_action = str(active_tasks[0]) if active_tasks else None
+        immediate_goal = (
+            str(goal_items[0].get("text"))
+            if goal_items and goal_items[0].get("text")
+            else None
+        )
+        last_change = None
+        evidence_nodes: list[UUID] = []
+        # RECENT EVENTS is relevance-ranked for rendering, so its first item is
+        # not guaranteed to be the newest source event. Scene chronology must
+        # follow the source-DAG/current-event ordering instead.
+        if cognitive_snapshot.current_events:
+            last = cognitive_snapshot.current_events[0]
+            # Persist a semantic scene projection, never an unbounded source
+            # transcript. The source event remains available as evidence and in
+            # RECENT EVENTS when no semantic projection has caught up yet.
+            last_change = project_scene_change(
+                cognitive_snapshot.current_events,
+                max_chars=max(160, min(640, section_caps["scene"] * 2)),
+            )
+            node_value = last.get("node_id") or last.get("source_node_id")
+            if node_value:
+                try:
+                    evidence_nodes.append(UUID(str(node_value)))
+                except (TypeError, ValueError):
+                    pass
+        if context.source_head_node_id:
+            evidence_nodes.append(context.source_head_node_id)
+        if context.head_node_id:
+            evidence_nodes.append(context.head_node_id)
+
+        working_scene = await self.scene_state.materialize(
+            instance_id=context.instance_id,
+            runtime_timeline_id=context.timeline_id,
+            runtime_head_node_id=context.head_node_id,
+            source_timeline_id=context.source_timeline_id,
+            source_head_node_id=context.source_head_node_id,
+            scene={
+                "location": scene.get("location"),
+                "present_entities": scene.get("actors") or [],
+                "relevant_objects": scene.get("objects") or [],
+                "immediate_goal": immediate_goal,
+                "pending_action": pending_action,
+                "last_significant_change": last_change,
+            },
+            evidence_node_ids=evidence_nodes,
+        )
+        scene["working_state"] = working_scene
+
         suppressed = cognitive_snapshot.firewall_suppressed
         return {
             "identity": identity,
@@ -329,6 +404,7 @@ class HUDAssembler:
             "goals": goal_items,
             "rules": rule_items,
             "recent_events": event_items,
+            "corpus_references": corpus_references,
             "plugins": plugin_snapshot.get("plugins") or {},
             "plugin_sections": plugin_snapshot.get("sections") or [],
             "actions": [
@@ -377,7 +453,13 @@ class HUDAssembler:
                     "suppressed_by_reason": cognitive_snapshot.recall_suppressed,
                     "stage": "cognition",
                 },
+                "corpus_research": {
+                    "reference_count": len(corpus_references),
+                    "demand": cognitive_snapshot.corpus_demand,
+                    "durable_knowledge": False,
+                },
                 "focus_text": attention.focus_text,
+                "focus_override": focus_text,
                 "plugin_focus_text": attention.plugin_focus_text,
                 "plugin_status": plugin_snapshot.get("status") or {},
                 "plugin_retrieval_signals": plugin_snapshot.get("retrieval_signals") or [],

@@ -1,6 +1,6 @@
 from aios_app.epistemic.message_cognition import INTERPRETER_VERSION, interpret_message
 from aios_app.epistemic.semantic_interpreter import interpret_frame
-from aios_app.hud.recent_events import project_recent_events
+from aios_app.hud.recent_events import project_recent_events, project_scene_change
 from aios_app.hud.render_text import render_hud_text
 
 
@@ -125,3 +125,49 @@ def test_recent_event_projection_deduplicates_identical_narrative_events():
     )
     assert len(projected) == 1
     assert projected[0]["text"] == "He opened the door."
+
+
+
+def test_scene_change_prefers_semantic_projection_over_long_source_turn():
+    raw = "Shego delivers a very long speech about server power. " * 100
+    projected = project_scene_change(
+        [
+            {"node_id": "n1", "message_text": raw},
+            {
+                "source_node_id": "n1",
+                "text": "Shego proposes using security work to fund more hardware.",
+            },
+        ]
+    )
+    assert projected == "Shego proposes using security work to fund more hardware."
+    assert raw[:100] not in projected
+
+
+def test_scene_change_bounds_raw_source_when_semantics_are_not_ready():
+    projected = project_scene_change(
+        [{"node_id": "n1", "message_text": "RAW source transcript " * 200}],
+        max_chars=120,
+    )
+    assert projected is not None
+    assert len(projected) <= 121
+    assert projected.endswith("…")
+
+
+def test_renderer_does_not_repeat_immediate_goal_in_goals():
+    frame = {
+        "identity": {"character_id": "Shego_001"},
+        "presence": {"world_key": "test", "instance_id": "i", "state_version": 1},
+        "scene": {
+            "working_state": {
+                "immediate_goal": "Shego wants the other half of that sentence."
+            }
+        },
+        "goals": [
+            {"text": "Shego wants the other half of that sentence."},
+            {"text": "Shego wants to learn game control."},
+        ],
+        "actions": [],
+    }
+    rendered = render_hud_text(frame)
+    assert rendered.count("Shego wants the other half of that sentence.") == 1
+    assert "Shego wants to learn game control." in rendered

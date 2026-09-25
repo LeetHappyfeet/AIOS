@@ -11,7 +11,7 @@ from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
 from .config import SemanticIndexConfig
 from .service import (
-    index_source_sections_once, index_semantic_frames_once,
+    index_source_sections_once, index_corpus_sections_once, index_semantic_frames_once,
     index_propositions_once, index_epistemic_objects_once,
     initialize_backend, _get_embedder, _get_store,
 )
@@ -93,6 +93,8 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
 
         while True:
             source_indexed = await run_stage("vector-source", index_source_sections_once, db, cfg)
+            corpus_indexed = await run_stage("vector-corpus", index_corpus_sections_once, db, cfg)
+            source_indexed = int(source_indexed) + int(corpus_indexed)
             last_batches["source"] = int(source_indexed); totals["source_indexed"] += int(source_indexed)
             frames_indexed = await run_stage("vector-frames", index_semantic_frames_once, db, cfg)
             last_batches["frames"] = int(frames_indexed); totals["frames_indexed"] += int(frames_indexed)

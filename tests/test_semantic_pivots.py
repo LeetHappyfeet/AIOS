@@ -1,5 +1,6 @@
 from aios_app.epistemic.pivots import (
     CHARACTER_IDENTITY_RULESET,
+    CORPUS_REFERENCE_RULESET,
     resolve_subject_pivot,
 )
 
@@ -92,3 +93,35 @@ def test_character_viewpoint_keeps_character_memory_owner():
     assert pivot.subject == "alice"
     assert pivot.memory_owner_id == "alice"
     assert pivot.epistemic_scope == "character"
+
+
+def test_corpus_reference_named_character_is_not_autobiographical_pivot():
+    result = resolve_subject_pivot(
+        "Renamon",
+        character_id="Renamon",
+        speaker_id=None,
+        speaker_role="source",
+        recipient_id=None,
+        ruleset_id=CORPUS_REFERENCE_RULESET,
+    )
+    assert result.subject == "Renamon"
+    assert result.epistemic_scope == "source"
+    assert result.memory_owner_id is None
+    assert result.pivot_type is None
+    assert not result.resolved
+
+
+def test_corpus_reference_first_person_is_not_reader_identity():
+    result = resolve_subject_pivot(
+        "I",
+        character_id="Renamon",
+        speaker_id=None,
+        speaker_role="source",
+        recipient_id=None,
+        ruleset_id=CORPUS_REFERENCE_RULESET,
+    )
+    assert result.subject == "I"
+    assert result.epistemic_scope == "source"
+    assert result.viewpoint_id is None
+    assert result.memory_owner_id is None
+    assert not result.resolved

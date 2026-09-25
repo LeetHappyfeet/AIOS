@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 import hashlib
-import traceback
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -12,10 +11,22 @@ from selenium.common.exceptions import TimeoutException
 from .config import ACCUMULATOR_ID, DEFAULT_USER_AGENT, OUTPUT_DIR
 from .fetcher import SeleniumFetcher
 from .requests_fetcher import RequestsFetcher
-from .extractor import clean_html, extract_links, extract_page_metadata
+from .extractor import clean_html, extract_links, extract_page_metadata, extract_structured_source_metadata
 from .body_extractor import extract_body
 from .queue import CrawlTask
+from .crawl_policy import evaluate_page, evaluate_url, normalize_url
 from .writer import JSONLWriter
+
+
+def _ao3_work_url(url: str) -> str | None:
+    """Return the canonical AO3 work URL for a chapter URL."""
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() not in {"archiveofourown.org", "www.archiveofourown.org"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) >= 4 and parts[0] == "works" and parts[2] == "chapters":
+        return f"{parsed.scheme or 'https'}://{parsed.netloc}/works/{parts[1]}"
+    return None
 
 
 class WebAccumulator:
@@ -30,27 +41,62 @@ class WebAccumulator:
         self.writer = JSONLWriter(OUTPUT_DIR)
         self._robots: dict[str, RobotFileParser] = {}
 
-    def _fetch(self, url: str) -> tuple[dict, str] | tuple[None, None]:
-        fetched = None
-        fetch_method = None
+    def _fetch(self, url: str) -> tuple[dict | None, str | None, list[dict]]:
+        """Fetch with requests first, falling back to Selenium when needed."""
+        attempts: list[dict] = []
+        try:
+            fetched = self.requests.fetch(url)
+            attempts.append({
+                "method": "requests",
+                "ok": True,
+                "status_code": fetched.get("status_code"),
+                "content_type": fetched.get("content_type"),
+            })
+            return fetched, "requests", attempts
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            attempts.append({
+                "method": "requests",
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "status_code": getattr(response, "status_code", None),
+                "content_type": (
+                    response.headers.get("content-type")
+                    if response is not None else None
+                ),
+            })
 
         try:
             fetched = self.selenium.fetch(url)
-            fetch_method = "selenium"
-        except TimeoutException:
-            pass
-        except Exception:
-            traceback.print_exc()
+            attempts.append({"method": "selenium", "ok": True})
+            return fetched, "selenium", attempts
+        except TimeoutException as exc:
+            attempts.append({
+                "method": "selenium",
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc) or "page load timed out",
+            })
+        except Exception as exc:
+            attempts.append({
+                "method": "selenium",
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            })
 
-        if fetched is None:
-            try:
-                fetched = self.requests.fetch(url)
-                fetch_method = "requests"
-            except Exception:
-                traceback.print_exc()
-                return None, None
+        return None, None, attempts
 
-        return fetched, fetch_method
+    @staticmethod
+    def _failure_detail(reason: str, *, url: str, **details) -> dict:
+        return {
+            "ok": False,
+            "url": url,
+            "reason": reason,
+            "detail": details,
+            "links": [],
+        }
 
     def _robots_allowed(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -80,14 +126,32 @@ class WebAccumulator:
         depth: int = 0,
     ) -> dict:
         if task.respect_robots and not self._robots_allowed(url):
-            return {"ok": False, "url": url, "reason": "robots_denied", "links": []}
+            return self._failure_detail("robots_denied", url=url)
 
-        fetched, fetch_method = self._fetch(url)
+        fetched, fetch_method, fetch_attempts = self._fetch(url)
         if fetched is None:
-            return {"ok": False, "url": url, "reason": "fetch_failed", "links": []}
+            return self._failure_detail(
+                "fetch_failed", url=url, fetch_attempts=fetch_attempts
+            )
 
         html = fetched["html"]
         final_url = fetched.get("final_url") or url
+
+        # Never silently admit a redirect outside the crawl boundary.
+        if task.same_domain_only:
+            seed_host = urlparse(task.url).netloc.lower()
+            final_host = urlparse(final_url).netloc.lower()
+            if final_host != seed_host:
+                return self._failure_detail(
+                    "redirect_off_domain",
+                    url=final_url,
+                    requested_url=url,
+                    seed_host=seed_host,
+                    final_host=final_host,
+                    fetch_method=fetch_method,
+                    fetch_attempts=fetch_attempts,
+                )
+
         body = extract_body(html)
         if not body["extracted"]:
             fallback = clean_html(html)
@@ -95,9 +159,51 @@ class WebAccumulator:
             body = fallback
 
         if not body.get("text"):
-            return {"ok": False, "url": final_url, "reason": "empty_content", "links": []}
+            return self._failure_detail(
+                "empty_content",
+                url=final_url,
+                fetch_method=fetch_method,
+                status_code=fetched.get("status_code"),
+                content_type=fetched.get("content_type"),
+                html_bytes=len(html.encode("utf-8")),
+            )
 
         metadata = extract_page_metadata(html, final_url)
+        structured_metadata = extract_structured_source_metadata(html, final_url)
+
+        # AO3 chapter pages do not reliably repeat the work-level fandom tags.
+        # Fetch the canonical work page only for repository-native metadata;
+        # chapter text/provenance remains attached to the requested chapter URL.
+        work_url = _ao3_work_url(final_url)
+        if work_url:
+            work_fetched, _, _ = self._fetch(work_url)
+            if work_fetched is not None:
+                work_html = work_fetched.get("html") or ""
+                work_meta = extract_structured_source_metadata(work_html, work_url)
+                if isinstance(work_meta.get("ao3"), dict):
+                    structured_metadata = dict(structured_metadata or {})
+                    structured_metadata["ao3"] = work_meta["ao3"]
+                    structured_metadata["ao3_work_url"] = work_url
+
+        page_decision = evaluate_page(
+            metadata=metadata,
+            body=body,
+            html=html,
+        )
+        if not page_decision.accept:
+            return self._failure_detail(
+                "page_rejected",
+                url=final_url,
+                rejection=page_decision.reason,
+                fetch_method=fetch_method,
+                status_code=fetched.get("status_code"),
+                content_type=fetched.get("content_type"),
+                fetch_attempts=fetch_attempts,
+                title=metadata.get("title"),
+                text_chars=len(body.get("text") or ""),
+                text_preview=(body.get("text") or "")[:500],
+            )
+
         content_sha = body.get("text_sha256") or hashlib.sha256(
             body["text"].encode("utf-8")
         ).hexdigest()
@@ -116,6 +222,12 @@ class WebAccumulator:
             "target": {
                 "character_id": task.target_character_id,
                 "world_id": task.target_world_id,
+            },
+            "ingestion": {
+                "mode": task.ingest_mode,
+                "consumption_mode": task.consumption_mode,
+                "corpus_profile_key": task.corpus_profile_key,
+                "knowledge_domain": task.knowledge_domain,
             },
             "crawl": {
                 "task_id": task.task_id,
@@ -136,6 +248,7 @@ class WebAccumulator:
                 "content_type": fetched.get("content_type"),
             },
             "document": metadata,
+            "structured_metadata": structured_metadata,
             "content": {
                 "lang": "en",
                 "title": metadata.get("title"),
@@ -150,6 +263,8 @@ class WebAccumulator:
                 "body_extracted": body.get("extracted", False),
                 "target_character_is_hint": task.target_character_id is not None,
                 "target_world_is_hint": task.target_world_id is not None,
+                "cold_corpus": task.ingest_mode in {"corpus", "consume"},
+                "intentional_consumption": task.ingest_mode == "consume",
             },
             "raw": {
                 "html_sha256": hashlib.sha256(html.encode("utf-8")).hexdigest(),
@@ -175,12 +290,14 @@ class WebAccumulator:
             max_pages = 1
             max_depth = 0
 
-        seed_host = urlparse(task.url).netloc.lower()
-        frontier = deque([(task.url, None, 0)])
-        queued = {task.url}
+        seed_url = normalize_url(task.url)
+        seed_host = urlparse(seed_url).netloc.lower()
+        frontier = deque([(seed_url, None, 0)])
+        queued = {seed_url}
         visited: set[str] = set()
         written = 0
         failed = 0
+        failures: list[dict] = []
 
         while frontier and len(visited) < max_pages:
             url, parent_url, depth = frontier.popleft()
@@ -196,6 +313,27 @@ class WebAccumulator:
                     pages_failed=failed,
                 )
 
+            # Source-bound crawls never fetch an off-domain frontier entry.
+            # This also protects recovered legacy tasks whose queue already escaped.
+            if task.same_domain_only and urlparse(url).netloc.lower() != seed_host:
+                failed += 1
+                failures.append({
+                    "url": url,
+                    "reason": "off_domain_blocked",
+                    "detail": {"seed_host": seed_host},
+                })
+                continue
+
+            url_decision = evaluate_url(url, seed=(depth == 0))
+            if not url_decision.accept:
+                failed += 1
+                failures.append({
+                    "url": url,
+                    "reason": "url_rejected",
+                    "detail": {"rejection": url_decision.reason},
+                })
+                continue
+
             result = self.accumulate_page(
                 url,
                 task=task,
@@ -206,6 +344,11 @@ class WebAccumulator:
                 written += 1
             else:
                 failed += 1
+                failures.append({
+                    "url": result.get("url") or url,
+                    "reason": result.get("reason") or "unknown",
+                    "detail": result.get("detail") or {},
+                })
 
             if (
                 task.crawl_mode != "site"
@@ -215,9 +358,13 @@ class WebAccumulator:
                 continue
 
             for link in result.get("links", []):
+                link = normalize_url(link)
                 if link in queued or link in visited:
                     continue
                 if task.same_domain_only and urlparse(link).netloc.lower() != seed_host:
+                    continue
+                link_decision = evaluate_url(link)
+                if not link_decision.accept:
                     continue
                 queued.add(link)
                 frontier.append((link, result["url"], depth + 1))
@@ -238,6 +385,7 @@ class WebAccumulator:
             "pages_visited": len(visited),
             "pages_written": written,
             "pages_failed": failed,
+            "failures": failures,
         }
 
     def shutdown(self):

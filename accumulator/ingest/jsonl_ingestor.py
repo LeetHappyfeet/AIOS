@@ -10,6 +10,11 @@ from uuid import UUID, uuid4
 
 from aios_app.db import Database
 from aios_app.dag import add_node_and_edge, get_or_create_timeline
+from aios_app.corpus import import_corpus_document
+from aios_app.epistemic.research import CharacterResearchService
+from aios_app.corpus_catalog import CorpusCatalogService
+from aios_app.corpus_adapters import classify_corpus_document
+from aios_app.corpus_routing import CorpusFacetRouter
 
 logger = logging.getLogger("accumulator.ingest.jsonl")
 
@@ -63,6 +68,10 @@ class JSONLDAGIngestor:
             "speaker_id": speaker_id,
             "target_character_id": target.get("character_id"),
             "target_world_id": target.get("world_id"),
+            "ingest_mode": (record.get("ingestion") or {}).get("mode") or "semantic",
+            "consumption_mode": (record.get("ingestion") or {}).get("consumption_mode") or "read",
+            "corpus_profile_key": (record.get("ingestion") or {}).get("corpus_profile_key"),
+            "knowledge_domain": (record.get("ingestion") or {}).get("knowledge_domain"),
         }
 
     async def _ensure_source_identity(self, context: dict, url: str) -> None:
@@ -167,6 +176,107 @@ class JSONLDAGIngestor:
 
         context = self._source_context(record)
         await self._ensure_source_identity(context, url)
+
+        if context["ingest_mode"] in {"corpus", "consume"}:
+            document = record.get("document") or {}
+            catalog = CorpusCatalogService(self.db)
+            route = await catalog.resolve(source_id=context["source_id"], source_uri=url)
+            if context.get("corpus_profile_key"):
+                profile = await self.db.fetchrow(
+                    """SELECT profile_id, profile_key, collection_key, scope_key,
+                              epistemic_namespace, identity_binding, knowledge_domain
+                       FROM aios.corpus_source_profile
+                       WHERE profile_key=$1 AND enabled=TRUE""",
+                    context["corpus_profile_key"],
+                )
+                if not profile:
+                    raise RuntimeError(
+                        f"unknown enabled corpus profile {context['corpus_profile_key']!r}"
+                    )
+                from aios_app.corpus_catalog import CorpusRoute
+                route = CorpusRoute(
+                    collection_key=profile["collection_key"],
+                    scope_key=profile["scope_key"],
+                    epistemic_namespace=profile["epistemic_namespace"],
+                    identity_binding=profile["identity_binding"],
+                    profile_id=profile["profile_id"],
+                    profile_key=profile["profile_key"],
+                    knowledge_domain=profile["knowledge_domain"],
+                    matched_by="crawl_task",
+                )
+            adapter_metadata = dict(document)
+            structured = record.get("structured_metadata")
+            if isinstance(structured, dict):
+                adapter_metadata.update(structured)
+            classification = classify_corpus_document(
+                source_uri=url, metadata=adapter_metadata
+            )
+            facet_router = CorpusFacetRouter(self.db)
+            document_route = await facet_router.resolve(classification)
+            corpus = await import_corpus_document(
+                self.db, text=content, source_id=context["source_id"],
+                source_kind=context["source_kind"],
+                title=document.get("title") or record.get("content", {}).get("title"),
+                author=document.get("author"), source_uri=url,
+                language=record.get("content", {}).get("lang"),
+                meta={"accumulator_id": record.get("accumulator_id"), "schema_version": record.get("schema_version"), "retrieved_at": record.get("retrieved_at"), "crawl": record.get("crawl") or {}, "crawl_domain": context.get("knowledge_domain"), "web_document": document, "catalog": {"profile_key": route.profile_key, "matched_by": route.matched_by, "collection_key": route.collection_key, "knowledge_domain": route.knowledge_domain}},
+                catalog_route=route,
+                epistemic_namespace=document_route.epistemic_namespace or classification.epistemic_namespace or route.epistemic_namespace,
+                facets=classification.facets,
+            )
+            await facet_router.apply(
+                document_id=corpus["document_id"],
+                route=document_route,
+            )
+
+            # Trusted source profiles classify every matching document. A
+            # crawl-level domain declaration is deliberately narrower: it
+            # authoritatively classifies only the seed document. Descendants
+            # retain the declaration in provenance but require their own
+            # structured route/profile before gaining domain membership.
+            declared_domain = route.knowledge_domain
+            declared_evidence = "source_profile"
+            crawl = record.get("crawl") or {}
+            if not declared_domain and int(crawl.get("depth") or 0) == 0:
+                declared_domain = context.get("knowledge_domain")
+                declared_evidence = "crawl_declaration"
+            if declared_domain:
+                declared_route = await facet_router.resolve_domain_key(
+                    declared_domain,
+                    evidence=declared_evidence,
+                    classification=classification,
+                    scope_key=route.scope_key if declared_evidence == "source_profile" else None,
+                    epistemic_namespace=route.epistemic_namespace if declared_evidence == "source_profile" else None,
+                )
+                await facet_router.apply(
+                    document_id=corpus["document_id"],
+                    route=declared_route,
+                )
+
+            await facet_router.observe_unresolved(
+                document_id=corpus["document_id"],
+                classification=classification,
+                route=document_route,
+            )
+            if context["ingest_mode"] == "consume":
+                target_character_id = context["target_character_id"]
+                if not target_character_id:
+                    raise RuntimeError("web consume mode requires target_character_id")
+                instance = await self.db.fetchrow(
+                    "SELECT instance_id FROM aios.character_instance WHERE character_id=$1 AND active=TRUE ORDER BY created_at DESC LIMIT 1",
+                    target_character_id,
+                )
+                if not instance:
+                    raise RuntimeError(f"web consume target {target_character_id!r} has no active character instance")
+                sections = await self.db.fetch("SELECT section_id FROM aios.corpus_section WHERE document_id=$1 ORDER BY section_order", corpus["document_id"])
+                await CharacterResearchService(self.db).acquire(
+                    instance_id=instance["instance_id"],
+                    section_ids=[row["section_id"] for row in sections],
+                    mode=context["consumption_mode"],
+                )
+            logger.info("Stored web document %s in cold corpus mode=%s source=%s sections=%s", corpus["document_id"], context["ingest_mode"], context["source_id"], corpus["section_count"])
+            return
+
         document_id = await self._source_document(record, paragraphs)
 
         target_world_id = self._uuid_or_none(context["target_world_id"])

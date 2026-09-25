@@ -25,7 +25,10 @@ from aios_app.hud.readiness import (
 from aios_app.plugins.types import PluginRuntimeContext
 
 from . import runtime as _runtime
-from .source_cursor import advance_matching_runtime_source_cursor
+from .source_cursor import (
+    advance_matching_runtime_source_cursor,
+    advance_conversation_runtime_source_cursors,
+)
 
 logger = logging.getLogger("aios.world")
 
@@ -239,6 +242,13 @@ if not getattr(_readiness, "_head_only_dirty_v1", False):
             source_head_node_id=source_head_node_id,
             source_head_event_id=source_head_event_id,
         )
+        participant_instance_ids = await advance_conversation_runtime_source_cursors(
+            db,
+            source_timeline_id=source_timeline_id,
+            source_head_node_id=source_head_node_id,
+            source_head_event_id=source_head_event_id,
+        )
+        instance_ids = list(dict.fromkeys([*instance_ids, *participant_instance_ids]))
         for instance_id in instance_ids:
             await _readiness.mark_source_dirty(
                 db,

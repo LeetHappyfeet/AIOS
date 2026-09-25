@@ -54,6 +54,9 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "materialize_event_occurrences": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
     "derive_semantic_episodes": JobSpec(ResourceClass.SEMANTIC, "global", True),
     "assign_narratives": JobSpec(ResourceClass.GLOBAL, "global", True),
+    "agent_wake": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
+    "cognitive_operation": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
+    "internal_cognition_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
 }
 
 
@@ -66,6 +69,8 @@ def job_spec(job_type: str) -> JobSpec:
 
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
+    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference"}:
+        return SchedulingLane.LIVE
     # LIVE here means fresh semantic enrichment, not a generation barrier. The
     # message_cognitive_commit is the only generation-critical semantic path.
     # Keeping fresh context/normalization on this lane reserves two semantic

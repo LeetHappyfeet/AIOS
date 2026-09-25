@@ -74,6 +74,11 @@ async def persist_external_observation(
     await ensure_source_identity(db, req)
 
     payload = dict(req.payload or {})
+    identity_ruleset = (
+        "corpus-reference-v1"
+        if payload.get("corpus_reference_identity")
+        else "external-source-v1"
+    )
     payload.update(
         {
             "text": req.text,
@@ -87,7 +92,7 @@ async def persist_external_observation(
             "target_character_id": req.target_character_id,
             "target_world_id": str(req.target_world_id) if req.target_world_id else None,
             "provenance_version": PROVENANCE_VERSION,
-            "identity_ruleset": "external-source-v1",
+            "identity_ruleset": identity_ruleset,
         }
     )
 

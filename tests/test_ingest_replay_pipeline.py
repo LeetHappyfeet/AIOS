@@ -29,7 +29,7 @@ class FakeDB:
         return "UPDATE 1"
 
 
-def request(*, text="Hello", message_id=12):
+def request(*, text="Hello", message_id=12, source="sillytavern"):
     return IngestIn(
         session_id=uuid4(),
         speaker_id="Alex",
@@ -38,15 +38,16 @@ def request(*, text="Hello", message_id=12):
         character_id="Alex",
         user_name="Mia",
         text=text,
-        payload={"source": "sillytavern", "message_id": message_id},
+        payload={"source": source, "message_id": message_id},
         scope_key="chat:test",
     )
 
 
-def install_structural_mocks(monkeypatch, *, timeline_id=None, node_id=None):
+def install_structural_mocks(monkeypatch, *, timeline_id=None, node_id=None, instance_ids=None):
     timeline_id = timeline_id or uuid4()
     node_id = node_id or uuid4()
     calls = {"timeline": 0, "dag": [], "dirty": []}
+    instance_ids = list(instance_ids or [])
 
     async def fake_timeline(*args, **kwargs):
         calls["timeline"] += 1
@@ -58,6 +59,7 @@ def install_structural_mocks(monkeypatch, *, timeline_id=None, node_id=None):
 
     async def fake_dirty(*args, **kwargs):
         calls["dirty"].append(kwargs)
+        return instance_ids
 
     monkeypatch.setattr(ingest_api, "get_or_create_timeline", fake_timeline)
     monkeypatch.setattr(ingest_api, "add_node_and_edge", fake_dag)
@@ -134,8 +136,7 @@ async def test_new_sillytavern_message_does_not_get_blanket_rewind_permission(mo
     out = await ingest_api.ingest_message(db, request(message_id=13))
 
     runtime_updates = [call for call in db.executes if "character_runtime_state" in call[0]]
-    assert len(runtime_updates) == 1
-    assert runtime_updates[0][1][-1] is False
+    assert runtime_updates == []
     assert len(calls["dag"]) == 1
     assert len(calls["dirty"]) == 1
     assert out.disposition == "new"
@@ -156,7 +157,7 @@ async def test_changed_text_same_source_slot_is_replacement_and_can_rewind(monke
     assert calls["dag"][0]["parent_node_id"] == parent_node_id
     assert calls["dag"][0]["edge_type"] == "alternative"
     runtime_updates = [call for call in db.executes if "character_runtime_state" in call[0]]
-    assert runtime_updates[0][1][-1] is True
+    assert runtime_updates == []
     assert out.disposition == "new"
 
 
@@ -178,7 +179,7 @@ async def test_old_swipe_reselection_reactivates_and_reuses_existing_event(monke
     assert any("superseded_at=now()" in sql for sql, _ in db.executes)
     assert calls["dag"][0]["event_id"] == 61
     runtime_updates = [call for call in db.executes if "character_runtime_state" in call[0]]
-    assert runtime_updates[0][1][-1] is True
+    assert runtime_updates == []
 
 
 @pytest.mark.asyncio
@@ -197,4 +198,85 @@ async def test_active_replay_without_dag_node_repairs_structural_ingest(monkeypa
     assert len(calls["dag"]) == 1
     assert len(calls["dirty"]) == 1
     runtime_updates = [call for call in db.executes if "character_runtime_state" in call[0]]
-    assert runtime_updates[0][1][-1] is False
+    assert runtime_updates == []
+
+
+@pytest.mark.asyncio
+async def test_new_perceived_event_admits_exact_runtime_ids(monkeypatch):
+    first = uuid4()
+    second = uuid4()
+    db = FakeDB(
+        {"event_id": 81, "inserted": True, "was_superseded": False},
+        [None, {"source_head_node_id": uuid4()}],
+    )
+    _, node_id, calls = install_structural_mocks(
+        monkeypatch, instance_ids=[first, second]
+    )
+    admissions = []
+
+    class FakeAdmission:
+        def __init__(self, db):
+            pass
+
+        async def observe_host_experience(self, **kwargs):
+            admissions.append(kwargs)
+
+    import aios_app.agent.admission as admission_module
+    monkeypatch.setattr(admission_module, "AutonomyAdmissionService", FakeAdmission)
+
+    await ingest_api.ingest_message(db, request(message_id=50))
+
+    assert len(calls["dirty"]) == 1
+    assert [item["instance_id"] for item in admissions] == [first, second]
+    assert all(item["source_node_id"] == node_id for item in admissions)
+    assert all(item["source_event_id"] == 81 for item in admissions)
+
+
+@pytest.mark.asyncio
+async def test_new_non_sillytavern_perceived_event_is_admitted(monkeypatch):
+    instance_id = uuid4()
+    db = FakeDB(
+        {"event_id": 82, "inserted": True, "was_superseded": False},
+        [None, {"source_head_node_id": uuid4()}],
+    )
+    _, node_id, _ = install_structural_mocks(
+        monkeypatch, instance_ids=[instance_id]
+    )
+    admissions = []
+
+    class FakeAdmission:
+        def __init__(self, db):
+            pass
+
+        async def observe_host_experience(self, **kwargs):
+            admissions.append(kwargs)
+
+    import aios_app.agent.admission as admission_module
+    monkeypatch.setattr(admission_module, "AutonomyAdmissionService", FakeAdmission)
+
+    await ingest_api.ingest_message(
+        db, request(message_id=51, source="external-host")
+    )
+
+    assert len(admissions) == 1
+    assert admissions[0]["instance_id"] == instance_id
+    assert admissions[0]["source_node_id"] == node_id
+    assert admissions[0]["source"] == "external-host"
+
+
+@pytest.mark.asyncio
+async def test_new_event_not_admitted_when_no_runtime_adopts_source(monkeypatch):
+    db = FakeDB(
+        {"event_id": 83, "inserted": True, "was_superseded": False},
+        [None, None],
+    )
+    install_structural_mocks(monkeypatch, instance_ids=[])
+
+    class ForbiddenAdmission:
+        def __init__(self, db):
+            raise AssertionError("unperceived source event must not be admitted")
+
+    import aios_app.agent.admission as admission_module
+    monkeypatch.setattr(admission_module, "AutonomyAdmissionService", ForbiddenAdmission)
+
+    await ingest_api.ingest_message(db, request(message_id=52))

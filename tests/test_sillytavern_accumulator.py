@@ -112,3 +112,19 @@ def test_missing_header_identity_is_rejected(tmp_path):
         assert "user_name and character_name" in str(exc)
     else:
         raise AssertionError("invalid SillyTavern log should be rejected")
+
+
+def test_parser_preserves_additional_group_chat_speakers(tmp_path):
+    path = tmp_path / "group.jsonl"
+    rows = [
+        {"user_name": "Alex", "character_name": "Renamon", "chat_metadata": {}},
+        {"name": "Alex", "is_user": True, "mes": "I remember the station."},
+        {"name": "Renamon", "is_user": False, "mes": "I remember it too."},
+        {"name": "Rika", "is_user": False, "mes": "I think the west door is open."},
+        {"name": "Henry", "is_user": False, "mes": "Let's check."},
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    parsed = parse_sillytavern_jsonl(path)
+    assert [m.speaker_id for m in parsed.messages] == ["Alex", "Renamon", "Rika", "Henry"]
+    assert parsed.messages[0].speaker_type == "user"
+    assert all(m.viewpoint_id == m.speaker_id for m in parsed.messages)

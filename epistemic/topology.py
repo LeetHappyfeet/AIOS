@@ -960,7 +960,7 @@ async def derive_character_acquisition_topology(
         """
         SELECT
             kae.acquisition_id, kae.instance_id, kae.proposition_id, kae.claim_id,
-            kae.acquisition_mode, kae.epistemic_status, kae.confidence,
+            kae.acquisition_mode, kae.epistemic_status, kae.confidence, kae.processed_at,
             kae.source_entity_id, kae.dag_node_id, kae.meta,
             ci.character_id, ci.current_world_id, ci.world_id,
             ci.parent_instance_id, ci.forked_from_node_id,
@@ -981,7 +981,10 @@ async def derive_character_acquisition_topology(
         """,
         acquisition_id,
     )
-    if not row or row["proposition_id"] is None:
+    # Topology is downstream of /char materialization. Running against an
+    # unprocessed acquisition races the projector over the same acquisition
+    # and proposition rows and can form a PostgreSQL lock cycle.
+    if not row or row["proposition_id"] is None or row["processed_at"] is None:
         return False
 
     data = dict(row)

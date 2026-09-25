@@ -3,6 +3,12 @@ from pathlib import Path
 from aios_app.accumulator.ingest.jsonl_ingestor import JSONLDAGIngestor
 from aios_app.accumulator.web.extractor import extract_links, extract_page_metadata
 from aios_app.accumulator.web.queue import CrawlQueue, CrawlTask
+from aios_app.accumulator.web.accumulator import _ao3_work_url
+from aios_app.accumulator.web.crawl_policy import (
+    evaluate_page,
+    evaluate_url,
+    normalize_url,
+)
 
 
 def test_crawl_task_defaults_to_single_page_and_source_identity():
@@ -15,6 +21,8 @@ def test_crawl_task_defaults_to_single_page_and_source_identity():
     assert task.source_id == "example.com"
     assert task.target_character_id is None
     assert task.target_world_id is None
+    assert task.ingest_mode == "corpus"
+    assert task.consumption_mode == "read"
 
 
 def test_queue_tracks_status_without_losing_provenance():
@@ -130,3 +138,117 @@ def test_queue_recovers_pending_tasks(tmp_path):
     popped = recovered.pop()
     assert popped is not None
     assert popped.task_id == task_id
+
+
+def test_v2_web_record_defaults_legacy_records_to_semantic_ingestion():
+    ingestor = JSONLDAGIngestor(None, Path("."))
+    context = ingestor._source_context({"url": "https://example.com/story"})
+    assert context["ingest_mode"] == "semantic"
+    assert context["consumption_mode"] == "read"
+
+
+def test_v2_web_record_preserves_explicit_corpus_consumption_intent():
+    ingestor = JSONLDAGIngestor(None, Path("."))
+    context = ingestor._source_context({
+        "url": "https://example.com/story",
+        "target": {"character_id": "Renamon"},
+        "ingestion": {"mode": "consume", "consumption_mode": "read"},
+    })
+    assert context["target_character_id"] == "Renamon"
+    assert context["ingest_mode"] == "consume"
+    assert context["consumption_mode"] == "read"
+
+
+def test_crawl_policy_rejects_fandom_non_content_namespaces():
+    rejected = [
+        "https://digimon.fandom.com/wiki/Special:AllPages",
+        "https://digimon.fandom.com/wiki/Category:Characters",
+        "https://digimon.fandom.com/wiki/Talk:Digimon_Wiki",
+        "https://digimon.fandom.com/wiki/Forum:Index",
+        "https://digimon.fandom.com/wiki/Fan:Main_Page",
+        "https://digimon.fandom.com/wiki/Renamon?veaction=edit",
+    ]
+    for url in rejected:
+        assert not evaluate_url(url).accept
+
+    assert evaluate_url("https://digimon.fandom.com/wiki/Renamon").accept
+    assert evaluate_url("https://digimon.fandom.com/wiki/Digital_World").accept
+
+
+def test_crawl_policy_normalizes_tracking_and_fragments():
+    assert normalize_url(
+        "https://Example.com/wiki/Renamon?utm_source=test#History"
+    ) == "https://example.com/wiki/Renamon"
+
+
+def test_page_policy_rejects_cloudflare_challenge():
+    decision = evaluate_page(
+        metadata={"title": "Just a moment..."},
+        body={"text": "Checking your browser before accessing the site. " * 5},
+        html="<html><title>Just a moment...</title><div id='cf-chl-widget'>wait</div></html>",
+    )
+    assert not decision.accept
+    assert decision.reason == "challenge_page"
+
+
+def test_page_policy_accepts_substantive_reference_content():
+    decision = evaluate_page(
+        metadata={"title": "Renamon"},
+        body={"text": "Renamon is a Digimon character. " * 20},
+        html="<html><title>Renamon</title><article>reference content</article></html>",
+    )
+    assert decision.accept
+
+
+def test_page_policy_does_not_reject_valid_fandom_page_for_embedded_cloudflare_markup():
+    decision = evaluate_page(
+        metadata={"title": "Ron Stoppable"},
+        body={"text": "Ron Stoppable is a main character in Kim Possible. " * 20},
+        html=(
+            "<html><title>Ron Stoppable</title>"
+            "<script src='/cdn-cgi/challenge-platform/x/cf-chl-widget.js'></script>"
+            "<article>substantive character reference content</article></html>"
+        ),
+    )
+    assert decision.accept
+
+
+def test_page_policy_ignores_challenge_boilerplate_in_large_article_body():
+    text = (
+        ("Kim Possible is the title character of the series. " * 80)
+        + " Enable JavaScript and cookies to continue. "
+        + ("The article continues with character and episode information. " * 40)
+    )
+    decision = evaluate_page(
+        metadata={"title": "Kim Possible Wiki"},
+        body={"text": text},
+        html="<html><title>Kim Possible Wiki</title><article>content</article></html>",
+    )
+    assert decision.accept
+
+
+def test_crawl_task_preserves_declared_knowledge_domain():
+    task = CrawlTask(
+        url="https://en.wikipedia.org/wiki/My_Little_Pony",
+        source_id="en.wikipedia.org",
+        knowledge_domain="fiction.my-little-pony",
+    )
+    assert task.knowledge_domain == "fiction.my-little-pony"
+
+
+def test_crawl_policy_rejects_mediawiki_special_query_namespace():
+    assert not evaluate_url(
+        "https://en.wikipedia.org/w/index.php?title=Special%3ACiteThisPage&page=My_Little_Pony"
+    ).accept
+    assert not evaluate_url(
+        "https://en.wikipedia.org/w/index.php?title=Special%3AUrlShortener"
+    ).accept
+
+
+def test_ao3_chapter_url_canonicalizes_to_work_for_metadata():
+    assert _ao3_work_url(
+        "https://archiveofourown.org/works/85804401/chapters/226790471"
+    ) == "https://archiveofourown.org/works/85804401"
+    assert _ao3_work_url(
+        "https://archiveofourown.org/works/85804401?view_full_work=true"
+    ) is None

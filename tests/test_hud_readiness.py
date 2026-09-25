@@ -47,7 +47,6 @@ def test_message_is_not_ready_without_cognitive_commit():
 def test_message_is_ready_with_cognitive_commit_even_before_enrichment():
     db = SequenceDB([
         {"?column?": 1},
-        {"clean": True},
     ])
     ready = asyncio.run(
         source_node_retrieval_ready(
@@ -57,15 +56,13 @@ def test_message_is_ready_with_cognitive_commit_even_before_enrichment():
         )
     )
     assert ready is True
-    assert len(db.calls) == 2
+    assert len(db.calls) == 1
     assert "message_cognitive_commit" in db.calls[0][0]
-    assert "knowledge_acquisition_event" in db.calls[1][0]
 
 
-def test_known_stale_character_projection_blocks_generation_ready():
+def test_historical_projection_cleanup_does_not_block_generation_ready():
     db = SequenceDB([
         {"?column?": 1},
-        {"clean": False},
     ])
     ready = asyncio.run(
         source_node_retrieval_ready(
@@ -74,7 +71,9 @@ def test_known_stale_character_projection_blocks_generation_ready():
             node_id=uuid4(),
         )
     )
-    assert ready is False
+    assert ready is True
+    assert len(db.calls) == 1
+    assert "knowledge_acquisition_event" not in db.calls[0][0]
 
 
 def test_no_source_node_is_trivially_ready():
