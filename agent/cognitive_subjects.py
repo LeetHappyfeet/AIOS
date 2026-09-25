@@ -9,7 +9,8 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.research import research_terms
 
-_LOW = {"it","this","that","something","anything","someone","somebody","they","them","she","he","i","you",\n        "the","a","an","my","your","our","his","her","their","okay","ok","yeah","yes","no","plainly","well","but","and","so"}
+_LOW = {"it","this","that","something","anything","someone","somebody","they","them","she","he","i","you",
+        "the","a","an","my","your","our","his","her","their","okay","ok","yeah","yes","no","plainly","well","but","and","so"}
 _NAME = re.compile(r"\b(?:Dr\.?\s+)?[A-Z][A-Za-z0-9_-]+(?:\s+[A-Z][A-Za-z0-9_-]+){0,2}\b")
 
 
