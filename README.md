@@ -4,11 +4,9 @@
 
 **Persistent cognition, memory, and world state for AI agents.**
 
-AIOS gives long-running AI characters and agents continuity beyond a single prompt or chat. It remembers events, tracks changing world state, maintains what individual characters know and believe, preserves durable identity, acquires external knowledge, and retrieves the context that matters for the current moment.
+AIOS gives long-running AI characters and agents continuity beyond a single prompt or chat. It maintains identity, experience, knowledge, belief, scene and world state, and retrieves a focused view of that information through its **HUD**.
 
-Instead of treating memory as a pile of old text, AIOS maintains persistent state and produces a focused **HUD** for the active agent.
-
-AIOS can also coordinate agent tasks and actions and accept inference capacity from compatible LLM endpoints.
+AIOS can also acquire external knowledge and identify cognitive work that can be handled deterministically or delegated as bounded tasks to compatible LLM endpoints. Persistent state, scheduling, and provenance remain outside the language model.
 
 **Want to try it without installing anything?**
 Open the [AIOS Google Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing).
@@ -118,13 +116,13 @@ This allows external research and learned information to enter the same persiste
 
 ## Agents and Inference
 
-AIOS includes a runtime for persistent agent tasks and actions.
+AIOS includes a runtime for persistent agent tasks, actions, and cognitive work.
 
-Agents can maintain work across individual generations instead of requiring every operation to begin and end inside one prompt. Actions can be handled deterministically where appropriate or delegated to an LLM when reasoning is required.
+Agents can maintain work across individual generations instead of requiring every operation to begin and end inside one prompt. AIOS can identify persistent cognitive subjects and opportunities, handle work deterministically where appropriate, or delegate bounded decisions to compatible LLM inference workers.
 
-AIOS can accept inference workers through compatible LLM endpoints. Inference capacity is separate from persistent state: AIOS memory and knowledge remain available whether or not an external LLM worker is connected.
+Inference is an optional cognitive resource rather than the owner of agent state. AIOS retains memory, knowledge, scheduling, and provenance whether or not an external LLM worker is connected.
 
-These systems are new and remain experimental.
+Agent cognition, inference workers, and external knowledge acquisition are new and remain experimental.
 
 ## Why Not Just RAG?
 
@@ -236,7 +234,7 @@ For deeper architecture, see:
 
 AIOS is under active development. Internal schemas and APIs may change.
 
-Memory, identity, belief, retrieval, knowledge acquisition, agent actions, and external inference are all active areas of development. Newer agent and research capabilities should be considered experimental.
+Memory, identity, belief, retrieval, knowledge acquisition, agent cognition, actions, and external inference are all active areas of development. Agent cognition, inference workers, and external knowledge acquisition should be considered experimental.
 
 Issues and regression reports are welcome, especially when accompanied by AIOS logs and the source interaction that produced the problem.
 
