@@ -7,7 +7,7 @@ from uuid import UUID
 from aios_app.db import Database
 
 
-PROJECTION_VERSION = "character-scene-v1"
+PROJECTION_VERSION = "character-scene-v2"
 
 
 def _jsonable(value: Any) -> Any:
@@ -43,9 +43,8 @@ def _slot_view(scene: Mapping[str, Any]) -> dict[str, Any]:
         for key in (
             "location",
             "present_entities",
-            "relevant_objects",
             "immediate_goal",
-            "pending_action",
+            "pending_work",
             "last_significant_change",
         )
     }
@@ -61,6 +60,42 @@ class CharacterSceneStateStore:
 
     def __init__(self, db: Database):
         self.db = db
+
+    async def current(
+        self,
+        *,
+        instance_id: UUID,
+        runtime_timeline_id: UUID,
+        runtime_head_node_id: Optional[UUID],
+        source_timeline_id: Optional[UUID],
+        source_head_node_id: Optional[UUID],
+    ) -> dict[str, Any]:
+        """Read the best scene snapshot without mutating projection state."""
+        row = await self.db.fetchrow(
+            """SELECT snapshot_id,scene_state,projection_version
+               FROM aios.character_scene_snapshot
+               WHERE instance_id=$1 AND projection_version=$2
+                 AND runtime_timeline_id=$3
+                 AND runtime_head_node_id IS NOT DISTINCT FROM $4
+                 AND source_timeline_id IS NOT DISTINCT FROM $5
+                 AND source_head_node_id IS NOT DISTINCT FROM $6
+               ORDER BY updated_at DESC LIMIT 1""",
+            instance_id,PROJECTION_VERSION,runtime_timeline_id,runtime_head_node_id,
+            source_timeline_id,source_head_node_id,
+        )
+        if not row:
+            # Transitional read only: v1 remains available until a v2 projection
+            # is produced, but HUD never writes either version.
+            row = await self.db.fetchrow(
+                """SELECT snapshot_id,scene_state,projection_version
+                   FROM aios.character_scene_snapshot
+                   WHERE instance_id=$1 AND projection_version='character-scene-v1'
+                   ORDER BY updated_at DESC LIMIT 1""",instance_id)
+        if not row:
+            return {}
+        return {"snapshot_id":row["snapshot_id"],
+                "projection_version":row["projection_version"],
+                **_json_object(row["scene_state"])}
 
     async def materialize(
         self,
