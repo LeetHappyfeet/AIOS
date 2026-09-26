@@ -446,13 +446,16 @@ class CognitiveContextService:
         if any(missing_modes.values()):
             legacy_knowledge = await flat_task
         else:
-            # Do not leave speculative work detached from the request.
+            # Do not leave speculative work detached from the request. If the
+            # topology path is complete, failure of an unused speculative
+            # fallback must not fail cognition.
             if not flat_task.done():
                 flat_task.cancel()
             try:
-                legacy_knowledge = await flat_task
-            except asyncio.CancelledError:
-                legacy_knowledge = []
+                await flat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            legacy_knowledge = []
         snapshot = PreparedRetrievalSnapshot(
             topology_knowledge=topology_knowledge,
             legacy_knowledge=legacy_knowledge,
