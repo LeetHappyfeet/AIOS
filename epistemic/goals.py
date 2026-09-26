@@ -246,6 +246,9 @@ class CharacterGoalService:
         source_unit_id: UUID | None = None,
         confidence: float | None = None,
         salience: float | None = None,
+        intent_type: str | None = None,
+        horizon: str | None = None,
+        objective: str | None = None,
         refresh_scene: bool = True,
     ) -> CognitiveGoal | None:
         """Project character-owned GOAL evidence into managed intention state.
@@ -274,6 +277,9 @@ class CharacterGoalService:
             "source_unit_id": str(source_unit_id) if source_unit_id else None,
             "confidence": confidence,
             "salience": salience,
+            "intent_type": intent_type,
+            "horizon": horizon,
+            "objective": objective,
         }
         if polarity < 0:
             if active:
