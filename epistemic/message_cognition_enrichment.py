@@ -78,9 +78,6 @@ class MessageCognitionEnricher:
                     continue
                 if source_index<0 or source_index>=len(sentences):
                     continue
-                topic=cognition_topic_key(
-                    text, character_id=str(row["character_id"]),
-                    owner=str(row["character_id"]), kind=kind)
                 intent_type=str(item.get("intent_type") or "").lower() if kind=="GOAL" else ""
                 horizon=str(item.get("horizon") or "").lower() if kind=="GOAL" else ""
                 objective=" ".join(str(item.get("objective") or "").split())[:300] if kind=="GOAL" else ""
@@ -89,6 +86,10 @@ class MessageCognitionEnricher:
                         continue
                     if horizon not in {"immediate","scene","session","persistent"} or not objective:
                         continue
+                topic=cognition_topic_key(
+                    text, character_id=str(row["character_id"]),
+                    owner=str(row["character_id"]), kind=kind,
+                    objective=objective or None)
                 unit=await self.db.execute_returning_row(
                     """INSERT INTO aios.message_cognitive_unit(
                          commit_id,ordinal,claim_kind,text,topic_key,polarity,
