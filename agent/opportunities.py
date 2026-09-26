@@ -56,6 +56,7 @@ class CognitiveOpportunityService:
         snapshot=await self.cognition.resolve_knowledge(context,None,attention)
         focus=_clip(attention.focus_text,360)
         goals=list(attention.goals)
+        goal_states=await self.cognition.goals.cognitive_states(instance_id, goals)
         proposals:list[dict[str,Any]]=[]
         subjects=await self.subjects.build(
             instance_id=instance_id,focus_text=focus,knowledge=list(snapshot.knowledge),
@@ -124,7 +125,8 @@ class CognitiveOpportunityService:
                 goal_id=str(goal.goal_id) if goal.goal_id else None
                 proposals.append(self._p(
                     "goal_review",f"Consider whether what just happened changes my goal: {g}",
-                    "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus},
+                    "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
+                    "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {}},
                     source_node_id or context.source_head_node_id,context,
                     relevance=.45+affinity*.35,goal_affinity=max(.35,affinity),recency=1,
                     evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g}],
