@@ -115,3 +115,64 @@ def test_no_longer_goal_is_parsed_as_negative_goal_evidence():
     goals = [unit for unit in units if unit.claim_kind == "GOAL"]
     assert len(goals) == 1
     assert goals[0].polarity == -1
+
+
+class LifecycleDB:
+    def __init__(self):
+        self.executed = []
+
+    async def execute(self, sql, *args):
+        self.executed.append((sql, args))
+
+    async def fetch(self, sql, *args):
+        if "character_goal_evidence" in sql and "GROUP BY" in sql:
+            return [{"goal_id": GOAL_ID, "relation": "progress", "count": 2}]
+        if "character_cognitive_thread" in sql:
+            return [{"goal_id": GOAL_ID, "status": "working", "pressure": 3,
+                     "crossing_count": 4, "current_question": "What next?", "updated_at": None}]
+        if "DISTINCT ON (goal_id)" in sql:
+            return [{"goal_id": GOAL_ID, "relation": "progress",
+                     "evidence_type": "cognitive_operation", "confidence": .65, "meta": {}}]
+        return []
+
+
+@pytest.mark.asyncio
+async def test_goal_cognitive_state_projects_thread_and_evidence():
+    db = LifecycleDB()
+    service = CharacterGoalService(db)
+    states = await service.cognitive_states(
+        INSTANCE_ID, [CognitiveGoal(GOAL_ID, "Find the exit")]
+    )
+    state = states[GOAL_ID]
+    assert state["progress_count"] == 2
+    assert state["thread_status"] == "working"
+    assert state["pressure"] == 3
+    assert state["crossing_count"] == 4
+    assert state["latest_evidence"]["relation"] == "progress"
+
+
+@pytest.mark.asyncio
+async def test_goal_invalidation_advances_runtime_and_dirties_hud():
+    db = LifecycleDB()
+    service = CharacterGoalService(db)
+    await service._invalidate(INSTANCE_ID)
+    sql = "\n".join(statement for statement, _ in db.executed)
+    assert "state_version=state_version+1" in sql
+    assert "character_hud_readiness" in sql
+    assert "status='dirty'" in sql
+
+
+def test_goal_completion_uses_goal_service_not_direct_status_update():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "agent" / "cognitive_lifecycle.py").read_text(encoding="utf-8")
+    block = source[source.index("async def complete_goal"):source.index("async def reconcile_goal_threads")]
+    assert "self.goals.finish(" in block
+    assert "SET status='completed'" not in block
+
+
+def test_planning_hud_consumes_goal_lifecycle_projection():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "hud" / "internal_frame.py").read_text(encoding="utf-8")
+    assert 'worker_profile == "planning"' in source
+    assert '"GOAL STATE:"' in source
+    assert 'lifecycle.get("crossing_count")' in source
