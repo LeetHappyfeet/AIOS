@@ -9,7 +9,7 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from .actions import ActionRegistry, ActionSpec
 from .lifecycle import CharacterAgencyStore
-from .goals import CharacterGoalService
+from aios_app.epistemic.goals import CharacterGoalService
 
 
 def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
