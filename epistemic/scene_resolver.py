@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
@@ -95,7 +97,13 @@ class CharacterSceneResolver:
         last=None
         if transition:
             value=transition["after_value"]
-            last=value if isinstance(value,dict) else {"text":str(value)}
+            if isinstance(value,(str,bytes,bytearray)):
+                try:
+                    decoded=json.loads(value)
+                except (json.JSONDecodeError,UnicodeDecodeError,TypeError):
+                    decoded=None
+                value=decoded if isinstance(decoded,dict) else value
+            last=dict(value) if isinstance(value,dict) else {"text":str(value)}
             if transition["source_node_id"]:
                 last={**last,"source_node_id":str(transition["source_node_id"])}
 
