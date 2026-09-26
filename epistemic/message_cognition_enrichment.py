@@ -7,19 +7,11 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService
+from aios_app.epistemic.message_cognition import cognition_topic_key
 from aios_app.inference import InferenceBroker, InferenceRequest, InferenceUnavailable
 
 
 _ALLOWED_KINDS={"GOAL","BELIEF","STATE","RELATIONSHIP","RULE","EVENT"}
-_TOKEN_RE=re.compile(r"[a-z0-9_'-]+",re.I)
-
-
-def _topic_key(text: str, character_id: str, kind: str) -> str:
-    stop={"the","and","that","this","with","from","have","will","would","could","should","into","about"}
-    words=[x.lower() for x in _TOKEN_RE.findall(text) if len(x)>=3 and x.lower() not in stop]
-    return ":".join([kind.lower(),character_id.lower(),*words[:4]])[:240]
-
-
 class MessageCognitionEnricher:
     """Bounded LLM adjudication for semantic units missed by the cheap parser.
 
@@ -49,9 +41,13 @@ class MessageCognitionEnricher:
             "commitment, plan, chosen objective, or persistent desire belonging to the character; "
             "requests for another person to act are not the character's goal unless the character "
             "is explicitly trying to cause that outcome. Distinguish BELIEF, STATE, RELATIONSHIP, "
-            "RULE, EVENT, GOAL, or NONE. Return {\\\"units\\\":[{\\\"kind\\\":...,"
+            "RULE, EVENT, GOAL, or NONE. For GOAL only, also classify intent_type as "
+            "desire|objective|plan|commitment|immediate_intention and horizon as "
+            "immediate|scene|session|persistent, and provide objective as a concise "
+            "content phrase. Return {\\\"units\\\":[{\\\"kind\\\":...,"
             "\\\"text\\\":...,\\\"polarity\\\":1|-1,\\\"confidence\\\":0..1,"
-            "\\\"source_index\\\":0..N}]}. At most 4 units.\n"
+            "\\\"source_index\\\":0..N,\\\"intent_type\\\":...,\\\"horizon\\\":...,"
+            "\\\"objective\\\":...}]}. At most 4 units.\n"
             f"Character: {row['character_id']}\nSpeaker: {row['speaker_id']}\n"
             "Excerpts:\n"+ "\n".join(f"[{i}] {s}" for i,s in enumerate(sentences))
         )
@@ -82,7 +78,17 @@ class MessageCognitionEnricher:
                     continue
                 if source_index<0 or source_index>=len(sentences):
                     continue
-                topic=_topic_key(text,str(row["character_id"]),kind)
+                topic=cognition_topic_key(
+                    text, character_id=str(row["character_id"]),
+                    owner=str(row["character_id"]), kind=kind)
+                intent_type=str(item.get("intent_type") or "").lower() if kind=="GOAL" else ""
+                horizon=str(item.get("horizon") or "").lower() if kind=="GOAL" else ""
+                objective=" ".join(str(item.get("objective") or "").split())[:300] if kind=="GOAL" else ""
+                if kind=="GOAL":
+                    if intent_type not in {"desire","objective","plan","commitment","immediate_intention"}:
+                        continue
+                    if horizon not in {"immediate","scene","session","persistent"} or not objective:
+                        continue
                 unit=await self.db.execute_returning_row(
                     """INSERT INTO aios.message_cognitive_unit(
                          commit_id,ordinal,claim_kind,text,topic_key,polarity,
@@ -96,15 +102,18 @@ class MessageCognitionEnricher:
                     json.dumps({"character_owned":True,"semantic_owner":str(row["character_id"]),
                                 "source":"bounded_inference","source_index":source_index,
                                 "source_text":sentences[source_index],
-                                "inference_request_id":str(result.request_id)}))
+                                "inference_request_id":str(result.request_id),
+                                "intent_type":intent_type or None,"horizon":horizon or None,
+                                "objective":objective or None}))
                 if not unit:
                     continue
                 admitted+=1
-                if kind=="GOAL":
+                if kind=="GOAL" and horizon not in {"immediate"}:
                     await CharacterGoalService(self.db).reconcile_evidence(
                         instance_id=instance_id,text=text,topic_key=topic,polarity=polarity,
                         source_node_id=node_id,source_unit_id=unit["unit_id"],
-                        confidence=confidence,salience=.86)
+                        confidence=confidence,salience=.86,intent_type=intent_type,
+                        horizon=horizon,objective=objective)
 
         await self.db.execute(
             """UPDATE aios.message_cognitive_commit
