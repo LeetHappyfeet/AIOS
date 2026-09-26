@@ -50,19 +50,24 @@ class CognitiveLifecycleReconciler:
             relation="completion_candidate",evidence_id=evidence_id,
             source_node_id=source_node_id,confidence=confidence,meta=meta,
         )
-        row=await self.db.execute_returning_row(
+        try:
+            await self.goals.finish(
+                instance_id=instance_id, goal_id=goal_id, status="completed"
+            )
+        except LookupError:
+            await self.reconcile_goal_threads(instance_id=instance_id,goal_id=goal_id)
+            return False
+        await self.db.execute(
             """UPDATE aios.character_agent_goal
-               SET status='completed',completed_at=now(),updated_at=now(),
-                   meta=meta || $3::jsonb
-               WHERE goal_id=$1 AND instance_id=$2 AND status='active'
-               RETURNING goal_id""",
-            goal_id,instance_id,
+               SET meta=meta || $3::jsonb,updated_at=now()
+               WHERE goal_id=$1 AND instance_id=$2""",
+            goal_id, instance_id,
             json.dumps({"resolution_kind":resolution_kind,
                         "completion_confidence":max(0.0,min(1.0,float(confidence)))},
                        default=str),
         )
         await self.reconcile_goal_threads(instance_id=instance_id,goal_id=goal_id)
-        return bool(row)
+        return True
 
     async def reconcile_goal_threads(self, *, instance_id: UUID, goal_id: UUID) -> None:
         goal=await self.db.fetchrow(
