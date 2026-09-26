@@ -912,11 +912,11 @@ class WorldRuntimeService:
                     location_entity_id=target_entity_id,
                     source_kind="runtime",
                     source_ref=str(instance_id),
+                    dag_node_id=node_id,
                     meta={
                         **payload,
                         "runtime_instance_id": str(instance_id),
                         "controller_type": controller_type,
-                        "dag_node_id": str(node_id),
                     },
                 )
 
