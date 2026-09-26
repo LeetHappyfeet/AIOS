@@ -15,7 +15,7 @@ MAX_UNITS = 12
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+", re.I)
 _NEGATION_RE = re.compile(
-    r"\\b(?:not|never|no|no\\s+longer|cannot|can't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|don't|doesn't|didn't|won't)\\b",
+    r"\b(?:not|never|no|no\s+longer|cannot|can't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|don't|doesn't|didn't|won't)\b",
     re.I,
 )
 _QUESTION_RE = re.compile(r"\?\s*$")
@@ -26,10 +26,10 @@ _CAUSAL_DESIRE_RE = re.compile(
 
 _SUBJECT = r"(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
 _GOAL_RE = re.compile(
-    rf"\\b{_SUBJECT}\\s+(?:(?:do(?:es)?\\s+not|don't|doesn't|no\\s+longer)\\s+)?"
+    rf"\b{_SUBJECT}\s+(?:(?:do(?:es)?\s+not|don't|doesn't|no\s+longer)\s+)?"
     rf"(?P<verb>want(?:s|ed)?|intend(?:s|ed)?|plan(?:s|ned)?|need(?:s|ed)?|"
     rf"seek(?:s|ed)?|decide(?:s|d)?|resolve(?:s|d)?|prepare(?:s|d)?)"
-    r"\\s+(?P<object>(?:to\\s+)?[^.!?]{2,220})",
+    r"\s+(?P<object>(?:to\s+)?[^.!?]{2,220})",
     re.I,
 )
 _MEMORY_RE = re.compile(
