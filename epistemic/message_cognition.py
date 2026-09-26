@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.epistemic.goals import CharacterGoalService
 
 INTERPRETER_VERSION = "message-cognition-v3"
 MAX_UNITS = 12
@@ -418,6 +419,17 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
             con, instance_id=instance_id, unit_id=unit_row["unit_id"], claim_kind=unit.claim_kind,
             topic_key=unit.topic_key, polarity=unit.polarity,
         )
+        if unit.claim_kind == "GOAL" and bool(unit.meta.get("character_owned")):
+            await CharacterGoalService(con).reconcile_evidence(
+                instance_id=instance_id,
+                text=unit.text,
+                topic_key=unit.topic_key,
+                polarity=unit.polarity,
+                source_node_id=node_id,
+                source_unit_id=unit_row["unit_id"],
+                confidence=unit.confidence,
+                salience=unit.salience,
+            )
     await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
     return True
 
