@@ -87,3 +87,31 @@ def test_goal_backfill_is_bounded_and_character_owned():
     assert "character_owned" in source
     assert "recency_rank <= 3" in source
     assert "semantic_topic_key" in source
+
+
+def test_goal_withdrawal_is_parsed_as_negative_goal_evidence():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "I don't want to leave anymore.",
+        character_id="Renamon",
+        speaker_id="Renamon",
+        speaker_role="assistant",
+        viewpoint_id="Renamon",
+    )
+    goals = [unit for unit in units if unit.claim_kind == "GOAL"]
+    assert len(goals) == 1
+    assert goals[0].polarity == -1
+
+
+def test_no_longer_goal_is_parsed_as_negative_goal_evidence():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "I no longer want to leave.",
+        character_id="Renamon",
+        speaker_id="Renamon",
+        speaker_role="assistant",
+        viewpoint_id="Renamon",
+    )
+    goals = [unit for unit in units if unit.claim_kind == "GOAL"]
+    assert len(goals) == 1
+    assert goals[0].polarity == -1
