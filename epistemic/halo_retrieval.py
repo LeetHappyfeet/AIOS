@@ -144,6 +144,19 @@ class TopologyRetriever(BaseTopologyRetriever):
         finally:
             _ACTIVE_WORLD_DOMAIN.reset(token)
 
+        # If character topology missed its generation budget, do not compound
+        # the miss with optional public-world I/O. CognitiveContext already has
+        # the bounded direct-character path running concurrently; return control
+        # to it immediately. A later prepared/cache cycle can enrich with world
+        # knowledge when the accelerators recover.
+        if self.topology_degraded and not char_result:
+            logger.info(
+                "Federated halo mode=%s domain=%s skipped world after topology budget miss",
+                mode,
+                domain,
+            )
+            return []
+
         world_result: list[dict[str, Any]] = []
         try:
             # World augmentation is domain-scoped, not mode-scoped. Fetch a
