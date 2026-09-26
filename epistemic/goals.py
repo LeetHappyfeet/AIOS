@@ -91,6 +91,69 @@ class CharacterGoalService:
         )
         return ResolvedGoalSet(goals)
 
+    async def cognitive_states(
+        self, instance_id: UUID, goals: tuple[CognitiveGoal, ...] | list[CognitiveGoal]
+    ) -> dict[UUID, dict[str, Any]]:
+        """Bounded deterministic lifecycle projection for active goals."""
+        ids = [goal.goal_id for goal in goals if goal.goal_id is not None]
+        if not ids:
+            return {}
+        evidence = await self.db.fetch(
+            """SELECT goal_id,relation,count(*) AS count,
+                      max(created_at) AS latest_at
+               FROM aios.character_goal_evidence
+               WHERE instance_id=$1 AND goal_id=ANY($2::uuid[])
+               GROUP BY goal_id,relation""",
+            instance_id, ids,
+        )
+        threads = await self.db.fetch(
+            """SELECT goal_id,status,pressure,crossing_count,current_question,updated_at
+               FROM aios.character_cognitive_thread
+               WHERE instance_id=$1 AND goal_id=ANY($2::uuid[])
+               ORDER BY goal_id,updated_at DESC""",
+            instance_id, ids,
+        )
+        latest = await self.db.fetch(
+            """SELECT DISTINCT ON (goal_id) goal_id,relation,evidence_type,confidence,meta
+               FROM aios.character_goal_evidence
+               WHERE instance_id=$1 AND goal_id=ANY($2::uuid[])
+               ORDER BY goal_id,created_at DESC,evidence_id DESC NULLS LAST""",
+            instance_id, ids,
+        )
+        out = {goal_id: {
+            "thread_status": None, "pressure": 0, "crossing_count": 0,
+            "progress_count": 0, "blocker_count": 0,
+            "completion_candidate_count": 0, "contradiction_count": 0,
+            "withdrawal_count": 0, "latest_evidence": None,
+        } for goal_id in ids}
+        for row in evidence:
+            state = out.get(row["goal_id"])
+            if state is not None:
+                key = f"{str(row['relation'])}_count"
+                if key in state:
+                    state[key] = int(row["count"] or 0)
+        seen: set[UUID] = set()
+        for row in threads:
+            goal_id = row["goal_id"]
+            if goal_id in seen or goal_id not in out:
+                continue
+            seen.add(goal_id)
+            out[goal_id].update({
+                "thread_status": str(row["status"]),
+                "pressure": int(row["pressure"] or 0),
+                "crossing_count": int(row["crossing_count"] or 0),
+                "current_question": row["current_question"],
+            })
+        for row in latest:
+            if row["goal_id"] in out:
+                out[row["goal_id"]]["latest_evidence"] = {
+                    "relation": str(row["relation"]),
+                    "evidence_type": str(row["evidence_type"]),
+                    "confidence": float(row["confidence"] or 0),
+                    "meta": self._json_object(row["meta"]),
+                }
+        return out
+
     async def create(
         self,
         *,
@@ -115,7 +178,9 @@ class CharacterGoalService:
             instance_id, source_task_id, source_node_id, root_task_id, source_action_id,
             clean, int(priority), json.dumps(dict(meta or {})),
         )
-        return self._goal(row)
+        goal = self._goal(row)
+        await self._invalidate(instance_id)
+        return goal
 
     async def update(
         self,
@@ -138,7 +203,9 @@ class CharacterGoalService:
         )
         if not row:
             raise LookupError("goal not found")
-        return self._goal(row)
+        goal = self._goal(row)
+        await self._invalidate(instance_id)
+        return goal
 
     async def finish(
         self,
@@ -158,7 +225,10 @@ class CharacterGoalService:
         )
         if not row:
             raise LookupError("active goal not found")
-        return self._goal(row)
+        goal = self._goal(row)
+        await self._reconcile_terminal_threads(instance_id, goal_id, status)
+        await self._invalidate(instance_id)
+        return goal
 
     async def reconcile_evidence(
         self,
@@ -210,7 +280,14 @@ class CharacterGoalService:
                     active["goal_id"], instance_id,
                     json.dumps({**evidence_meta, "resolution_kind": "negated"}),
                 )
-                return self._goal(row) if row else None
+                if not row:
+                    return None
+                goal = self._goal(row)
+                await self._reconcile_terminal_threads(
+                    instance_id, goal.goal_id, "cancelled", resolution_kind="negated"
+                )
+                await self._invalidate(instance_id)
+                return goal
             return None
 
         if active:
@@ -223,7 +300,9 @@ class CharacterGoalService:
                 active["goal_id"], instance_id, clean, source_node_id,
                 json.dumps(evidence_meta),
             )
-            return self._goal(row)
+            goal = self._goal(row)
+            await self._invalidate(instance_id)
+            return goal
 
         # A terminal row means this topic already had an explicit lifecycle.
         # Do not resurrect it merely because old/recomputed evidence reappears.
@@ -235,6 +314,37 @@ class CharacterGoalService:
             priority=self._evidence_priority(salience),
             source_node_id=source_node_id,
             meta=evidence_meta,
+        )
+
+    async def _reconcile_terminal_threads(
+        self, instance_id: UUID, goal_id: UUID | None, status: str,
+        *, resolution_kind: str | None = None,
+    ) -> None:
+        if goal_id is None or status not in {"completed", "cancelled"}:
+            return
+        reason = resolution_kind or ("cancelled" if status == "cancelled" else "goal_completed")
+        await self.db.execute(
+            """UPDATE aios.character_cognitive_thread
+               SET status='resolved',resolved_at=COALESCE(resolved_at,now()),
+                   pressure=0,meta=meta || $3::jsonb,updated_at=now()
+               WHERE instance_id=$1 AND goal_id=$2 AND status<>'resolved'""",
+            instance_id, goal_id,
+            json.dumps({"resolution_kind": reason, "resolved_by": "goal_lifecycle"}),
+        )
+
+    async def _invalidate(self, instance_id: UUID) -> None:
+        """Make executive-state mutations visible even without DAG movement."""
+        await self.db.execute(
+            """UPDATE aios.character_runtime_state
+               SET state_version=state_version+1,updated_at=now()
+               WHERE instance_id=$1""",
+            instance_id,
+        )
+        await self.db.execute(
+            """UPDATE aios.character_hud_readiness
+               SET status='dirty',dirty_since=COALESCE(dirty_since,now()),updated_at=now()
+               WHERE instance_id=$1""",
+            instance_id,
         )
 
     @staticmethod
