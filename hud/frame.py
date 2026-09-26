@@ -252,10 +252,10 @@ class HUDAssembler:
         semantic_goals = list(cognitive_snapshot.goals)
         semantic_rules = list(cognitive_snapshot.rules)
 
-        goal_items = [
-            {"text": str(goal), "source": "runtime", "tier": 0}
-            for goal in attention.goals
-        ] + semantic_goals
+        # Managed goals are the authority for current intention. Semantic GOAL
+        # propositions remain epistemic evidence and are not promoted into the
+        # ACTIVE GOALS surface merely because they were recalled.
+        goal_items = [goal.hud_item() for goal in attention.goals]
         rule_items = rules + [
             {**item, "source": "character_knowledge"}
             for item in semantic_rules
