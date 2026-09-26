@@ -165,6 +165,7 @@ class CharacterGoalService:
         root_task_id: UUID | None = None,
         source_action_id: UUID | None = None,
         meta: Mapping[str, Any] | None = None,
+        refresh_scene: bool = True,
     ) -> CognitiveGoal:
         clean = " ".join(str(text).split())
         if not clean:
@@ -180,7 +181,8 @@ class CharacterGoalService:
         )
         goal = self._goal(row)
         await self._invalidate(instance_id)
-        await self._refresh_scene(instance_id)
+        if refresh_scene:
+            await self._refresh_scene(instance_id)
         return goal
 
     async def update(
@@ -244,6 +246,7 @@ class CharacterGoalService:
         source_unit_id: UUID | None = None,
         confidence: float | None = None,
         salience: float | None = None,
+        refresh_scene: bool = True,
     ) -> CognitiveGoal | None:
         """Project character-owned GOAL evidence into managed intention state.
 
@@ -290,6 +293,8 @@ class CharacterGoalService:
                     instance_id, goal.goal_id, "cancelled", resolution_kind="negated"
                 )
                 await self._invalidate(instance_id)
+                if refresh_scene:
+                    await self._refresh_scene(instance_id)
                 return goal
             return None
 
@@ -305,6 +310,8 @@ class CharacterGoalService:
             )
             goal = self._goal(row)
             await self._invalidate(instance_id)
+            if refresh_scene:
+                await self._refresh_scene(instance_id)
             return goal
 
         # A terminal row means this topic already had an explicit lifecycle.
@@ -317,6 +324,7 @@ class CharacterGoalService:
             priority=self._evidence_priority(salience),
             source_node_id=source_node_id,
             meta=evidence_meta,
+            refresh_scene=refresh_scene,
         )
 
     async def _reconcile_terminal_threads(
