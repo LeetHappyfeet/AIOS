@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -10,12 +9,14 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from .actions import ActionRegistry, ActionSpec
 from .lifecycle import CharacterAgencyStore
+from .goals import CharacterGoalService
 
 
 def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
     agency = CharacterAgencyStore(db)
     contexts = HUDContextResolver(db)
     cognition = CognitiveContextService(db)
+    goals = CharacterGoalService(db)
 
     async def memory_search(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         query = str(args["query"]).strip()
@@ -55,37 +56,43 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
 
     async def goal_create(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         parent_task, source_node, root_task, _ = await _origin(instance_id)
-        row = await db.execute_returning_row(
-            """INSERT INTO aios.character_agent_goal(
-                   instance_id,source_task_id,source_node_id,root_task_id,goal_text,priority,meta)
-               VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING goal_id,status""",
-            instance_id, parent_task, source_node, root_task,
-            str(args["goal"]).strip(), int(args.get("priority",100)),
-            json.dumps({"created_by":"cognitive_action"}),
+        goal = await goals.create(
+            instance_id=instance_id,
+            text=str(args["goal"]),
+            priority=int(args.get("priority", 100)),
+            source_task_id=parent_task,
+            source_node_id=source_node,
+            root_task_id=root_task,
+            meta={"created_by": "cognitive_action"},
         )
-        return {"goal_id":str(row["goal_id"]),"status":row["status"],"goal":str(args["goal"])}
+        return {
+            "goal_id": str(goal.goal_id),
+            "status": goal.status,
+            "goal": goal.text,
+            "priority": goal.priority,
+        }
 
     async def goal_update(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
-        goal_id=UUID(str(args["goal_id"]))
-        row=await db.execute_returning_row(
-            """UPDATE aios.character_agent_goal SET goal_text=COALESCE($3,goal_text),
-               priority=COALESCE($4,priority),updated_at=now()
-               WHERE goal_id=$1 AND instance_id=$2 RETURNING goal_id,goal_text,status,priority""",
-            goal_id,instance_id,args.get("goal"),args.get("priority"),
+        goal = await goals.update(
+            instance_id=instance_id,
+            goal_id=UUID(str(args["goal_id"])),
+            text=args.get("goal"),
+            priority=args.get("priority"),
         )
-        if not row: raise LookupError("goal not found")
-        return dict(row)
+        return {
+            "goal_id": str(goal.goal_id),
+            "goal_text": goal.text,
+            "status": goal.status,
+            "priority": goal.priority,
+        }
 
     async def goal_finish(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
-        goal_id=UUID(str(args["goal_id"])); status=str(args.get("status","completed"))
-        if status not in {"completed","cancelled"}: raise ValueError("invalid terminal goal status")
-        row=await db.execute_returning_row(
-            """UPDATE aios.character_agent_goal SET status=$3,completed_at=now(),updated_at=now()
-               WHERE goal_id=$1 AND instance_id=$2 AND status='active' RETURNING goal_id,status""",
-            goal_id,instance_id,status,
+        goal = await goals.finish(
+            instance_id=instance_id,
+            goal_id=UUID(str(args["goal_id"])),
+            status=str(args.get("status", "completed")),
         )
-        if not row: raise LookupError("active goal not found")
-        return {"goal_id":str(row["goal_id"]),"status":row["status"]}
+        return {"goal_id": str(goal.goal_id), "status": goal.status}
 
     async def task_create(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         task_type=str(args.get("task_type") or "executive")
