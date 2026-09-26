@@ -944,6 +944,11 @@ class WorldRuntimeService:
             if not updated:
                 raise RuntimeConflict("state changed while action was being committed")
 
+            # Runtime/DAG and causal projection are committed before scene
+            # projection. HUD reads the resulting snapshot and never writes it.
+            from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+            await CharacterSceneProjector(self.db).refresh(instance_id)
+
             return {
                 "ok": True,
                 "world_event_id": (
