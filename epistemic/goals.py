@@ -290,7 +290,6 @@ class CharacterGoalService:
                     instance_id, goal.goal_id, "cancelled", resolution_kind="negated"
                 )
                 await self._invalidate(instance_id)
-        await self._refresh_scene(instance_id)
                 return goal
             return None
 
@@ -306,7 +305,6 @@ class CharacterGoalService:
             )
             goal = self._goal(row)
             await self._invalidate(instance_id)
-        await self._refresh_scene(instance_id)
             return goal
 
         # A terminal row means this topic already had an explicit lifecycle.
