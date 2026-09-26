@@ -31,12 +31,11 @@ class TopologyRetriever(BaseTopologyRetriever):
     def __init__(self, db: Any):
         super().__init__(db)
         self._halo_cache: dict[tuple[str, str], tuple[str, tuple[str, ...]]] = {}
-        self._world_cycle_cache: dict[str, list[dict[str, Any]]] = {}
+        self._world_cycle_cache: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         self.world = WorldPropositionRetriever(db)
 
     def begin_retrieval_cycle(self) -> None:
         super().begin_retrieval_cycle()
-        self._world_cycle_cache.clear()
 
     async def _dag_halo(self, context: HUDContext) -> tuple[str, tuple[str, ...]]:
         timeline_id = context.source_timeline_id or context.timeline_id
@@ -163,7 +162,14 @@ class TopologyRetriever(BaseTopologyRetriever):
             # superset once for history/general during this prepared HUD cycle,
             # then partition it by claim kind locally. This avoids repeating
             # Qdrant + SQL fallback for memory/event and belief/goal/rule.
-            domain_rows = self._world_cycle_cache.get(domain)
+            world_cache_key = (
+                str(context.instance_id),
+                str(context.source_head_node_id or context.head_node_id or ""),
+                domain,
+                focus_text,
+                tuple(str(goal) for goal in goals),
+            )
+            domain_rows = self._world_cycle_cache.get(world_cache_key)
             if domain_rows is None:
                 projection = await build_character_world_query(
                     self.db, context, focus_text=focus_text, halo_text=halo_text, goals=goals,
@@ -172,7 +178,9 @@ class TopologyRetriever(BaseTopologyRetriever):
                     context, scorer, query_text=projection.query_text, domain=domain,
                     claim_kinds=(), limit=max(60, effective_limit),
                 )
-                self._world_cycle_cache[domain] = domain_rows
+                self._world_cycle_cache[world_cache_key] = domain_rows
+                if len(self._world_cycle_cache) > 16:
+                    self._world_cycle_cache.pop(next(iter(self._world_cycle_cache)))
             allowed_kinds = set(policy.claim_kinds if policy else ())
             world_result = [
                 item for item in domain_rows
