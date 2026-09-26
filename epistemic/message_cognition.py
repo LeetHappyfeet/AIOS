@@ -9,7 +9,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService
 
-INTERPRETER_VERSION = "message-cognition-v3"
+INTERPRETER_VERSION = "message-cognition-v5"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
