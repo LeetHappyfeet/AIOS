@@ -15,6 +15,10 @@ from aios_app.epistemic.retrieval_policy import CognitiveRetrievalPolicy
 class _FakeRetriever:
     def __init__(self):
         self.calls: list[str] = []
+        self.cycles = 0
+
+    def begin_retrieval_cycle(self):
+        self.cycles += 1
 
     async def retrieve_character_knowledge(
         self,
@@ -114,6 +118,7 @@ async def test_prepare_retrieval_reuses_exact_source_head_cache():
 
     assert first is second
     assert fake.calls == ["memory", "belief", "goal", "event", "rule"]
+    assert fake.cycles == 1
 
 
 @pytest.mark.asyncio
