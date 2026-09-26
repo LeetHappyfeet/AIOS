@@ -180,6 +180,7 @@ class CharacterGoalService:
         )
         goal = self._goal(row)
         await self._invalidate(instance_id)
+        await self._refresh_scene(instance_id)
         return goal
 
     async def update(
@@ -205,6 +206,7 @@ class CharacterGoalService:
             raise LookupError("goal not found")
         goal = self._goal(row)
         await self._invalidate(instance_id)
+        await self._refresh_scene(instance_id)
         return goal
 
     async def finish(
@@ -228,6 +230,7 @@ class CharacterGoalService:
         goal = self._goal(row)
         await self._reconcile_terminal_threads(instance_id, goal_id, status)
         await self._invalidate(instance_id)
+        await self._refresh_scene(instance_id)
         return goal
 
     async def reconcile_evidence(
@@ -287,6 +290,7 @@ class CharacterGoalService:
                     instance_id, goal.goal_id, "cancelled", resolution_kind="negated"
                 )
                 await self._invalidate(instance_id)
+        await self._refresh_scene(instance_id)
                 return goal
             return None
 
@@ -302,6 +306,7 @@ class CharacterGoalService:
             )
             goal = self._goal(row)
             await self._invalidate(instance_id)
+        await self._refresh_scene(instance_id)
             return goal
 
         # A terminal row means this topic already had an explicit lifecycle.
@@ -331,6 +336,11 @@ class CharacterGoalService:
             instance_id, goal_id,
             json.dumps({"resolution_kind": reason, "resolved_by": "goal_lifecycle"}),
         )
+
+    async def _refresh_scene(self, instance_id: UUID) -> None:
+        # Goal lifecycle owns intention; scene projection consumes it.
+        from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+        await CharacterSceneProjector(self.db).refresh(instance_id)
 
     async def _invalidate(self, instance_id: UUID) -> None:
         """Make executive-state mutations visible even without DAG movement."""
