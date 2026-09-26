@@ -51,8 +51,17 @@ class CharacterGoalService:
     an independent cognition authority.
     """
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Any):
+        # Database and an acquired asyncpg connection both satisfy the small
+        # query surface used here. Supporting the latter lets goal admission
+        # share the message-cognition transaction atomically.
         self.db = db
+
+    async def _returning(self, sql: str, *args: Any) -> Any:
+        helper = getattr(self.db, "execute_returning_row", None)
+        if helper is not None:
+            return await helper(sql, *args)
+        return await self.db.fetchrow(sql, *args)
 
     async def resolve_active(
         self,
@@ -97,7 +106,7 @@ class CharacterGoalService:
         clean = " ".join(str(text).split())
         if not clean:
             raise ValueError("goal text cannot be empty")
-        row = await self.db.execute_returning_row(
+        row = await self._returning(
             """INSERT INTO aios.character_agent_goal(
                    instance_id,source_task_id,source_node_id,root_task_id,source_action_id,
                    goal_text,priority,meta)
@@ -119,7 +128,7 @@ class CharacterGoalService:
         clean = None if text is None else " ".join(str(text).split())
         if clean == "":
             raise ValueError("goal text cannot be empty")
-        row = await self.db.execute_returning_row(
+        row = await self._returning(
             """UPDATE aios.character_agent_goal
                SET goal_text=COALESCE($3,goal_text),
                    priority=COALESCE($4,priority),updated_at=now()
@@ -140,7 +149,7 @@ class CharacterGoalService:
     ) -> CognitiveGoal:
         if status not in {"completed", "cancelled"}:
             raise ValueError("invalid terminal goal status")
-        row = await self.db.execute_returning_row(
+        row = await self._returning(
             """UPDATE aios.character_agent_goal
                SET status=$3,completed_at=now(),updated_at=now()
                WHERE goal_id=$1 AND instance_id=$2 AND status='active'
