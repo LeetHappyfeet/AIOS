@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
 from aios_app.db import Database
+from aios_app.agent.goals import CharacterGoalService, CognitiveGoal
 from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
@@ -43,7 +44,7 @@ class CognitiveAttentionInputs:
     focus_text: str
     plugin_focus_text: str
     retrieval_focus_text: str
-    goals: list[Any]
+    goals: list[CognitiveGoal]
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,7 @@ class CognitiveContextService:
     def __init__(self, db: Database, *, retrieval_policy: CognitiveRetrievalPolicy | None = None):
         self.db = db
         self.retriever = TopologyRetriever(db)
+        self.goals = CharacterGoalService(db)
         self.research = CharacterResearchService(db)
         self.corpus_learning = CorpusLearningService(db)
         self.corpus_reinforcement = CorpusReinforcementService(db)
@@ -266,7 +268,11 @@ class CognitiveContextService:
             str(focus_text).strip() if focus_text is not None and str(focus_text).strip()
             else event_focus_text
         )
-        goals = list(_json_value(raw_state.get("goals"), []))
+        goal_set = await self.goals.resolve_active(
+            context.instance_id,
+            legacy_goals=raw_state.get("goals"),
+        )
+        goals = list(goal_set.active)
         plugin_focus_text = " ".join(
             str(signal.get("focus_text") or "")
             for signal in sorted(
