@@ -305,6 +305,46 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
     return [unit for _, _, unit in selected]
 
 
+def ambiguous_cognition_sentences(
+    text: str, *, character_id: str, speaker_id: str | None,
+    speaker_role: str | None, viewpoint_id: str | None,
+) -> list[str]:
+    """Return a tiny bounded set worth semantic adjudication by an inference worker.
+
+    Explicit deterministic units remain authoritative fast-path results. The
+    classifier only sees declarative character-authored prose the cheap parser
+    could not type, preventing one LLM call from becoming a second parser for
+    the entire message.
+    """
+    if not _same_identity(speaker_id, character_id):
+        return []
+    explicit_sources={
+        str(unit.meta.get("source_text") or "").strip()
+        for unit in interpret_message(
+            text,character_id=character_id,speaker_id=speaker_id,
+            speaker_role=speaker_role,viewpoint_id=viewpoint_id)
+    }
+    candidates=[]
+    for sentence in _sentences(text):
+        clean=sentence.strip()
+        if not clean or clean in explicit_sources or _QUESTION_RE.search(clean):
+            continue
+        # Dialogue/action prose with first-person commitment, future intent,
+        # offers/agreements, or self-development language is high-value enough
+        # to adjudicate. This is candidate generation, never goal authority.
+        lower=clean.lower()
+        signals=(
+            "i'll ","i will ","i'm going to ","i am going to ","i should ",
+            "i could ","my goal","my plan","counter-offer","standing offer",
+            "i'm learning","i am learning","i'd rather","i would rather",
+        )
+        if any(signal in lower for signal in signals):
+            candidates.append(clean[:700])
+        if len(candidates)>=4:
+            break
+    return candidates
+
+
 async def _reconcile_unit(db: Any, *, instance_id: UUID, unit_id: UUID, claim_kind: str, topic_key: str, polarity: int) -> UUID | None:
     if claim_kind not in {"BELIEF", "STATE", "GOAL", "RELATIONSHIP", "RULE"}:
         return None
@@ -377,10 +417,15 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
         speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
     )
+    ambiguous = ambiguous_cognition_sentences(
+        text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
+        speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
+    )
     summary = {
         "unit_count": len(units), "kinds": sorted({unit.claim_kind for unit in units}),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
+        "ambiguous_count": len(ambiguous), "enrichment_pending": bool(ambiguous),
     }
     commit_row = await con.fetchrow(
         """
@@ -432,6 +477,14 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
                 salience=unit.salience,
             )
     await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
+    if ambiguous:
+        # Queue after the transaction commits in commit_message_cognition().
+        # Persist the candidates on the commit so retries remain deterministic.
+        await con.execute(
+            """UPDATE aios.message_cognitive_commit
+               SET summary=summary || $2::jsonb WHERE commit_id=$1""",
+            commit_id,json.dumps({"ambiguous_sentences":ambiguous}),
+        )
     return True
 
 
