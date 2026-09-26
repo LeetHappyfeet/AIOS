@@ -66,6 +66,30 @@ class CognitiveOpportunityService:
             self.subject_demand.resolve(primary_subject,list(snapshot.knowledge))
             if primary_subject else None
         )
+        goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
+        for goal in goals[:3]:
+            if not goal.goal_id:
+                continue
+            goal_subject=await self.goal_subjects.project(instance_id=instance_id,goal=goal)
+            if goal_subject is None:
+                continue
+            demand=await self.goal_demand.resolve(
+                instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge))
+            goal_subject_demands[goal.goal_id]=(goal_subject,demand)
+            if demand["next_source"]=="corpus":
+                gap=max(0.0,1.0-float(demand["internal_coverage"]))
+                proposals.append(self._p(
+                    "knowledge_gap",f"Find knowledge needed for my goal: {goal.text}",
+                    "corpus.search",
+                    {"query":demand["query"],"focus":goal_subject.retrieval_text,
+                     "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id)},
+                    source_node_id or context.source_head_node_id,context,
+                    relevance=.72,goal_affinity=.85,knowledge_gap=gap,novelty=.65,recency=1,
+                    evidence=[{"kind":"goal_knowledge_demand","goal_id":str(goal.goal_id),
+                               "internal_coverage":demand["internal_coverage"],
+                               "coverage_source":demand["coverage_source"]}],
+                    key=f"goal-research:{goal.goal_id}",
+                    subject_id=goal_subject.subject_id))
 
         # Established topology recall is already character-relative and ranked.
         for rank,item in enumerate(snapshot.recalled_memories[:3]):
