@@ -30,6 +30,15 @@ class DeterministicIngress:
     def __init__(self, kernel: CausalIntegrityKernel):
         self.kernel = kernel
 
+    async def _commit(self, candidate: CausalCandidate, *, expected_state_version: Optional[int] = None) -> dict[str, Any]:
+        result = await self.kernel.require_commit(candidate, expected_state_version=expected_state_version)
+        from aios_app.world.projection_consequences import WorldProjectionCoordinator
+        await WorldProjectionCoordinator(self.kernel.db).world_state_changed(
+            world_id=candidate.world_id,timeline_id=candidate.timeline_id,
+            domain_id=candidate.domain_id,entity_id=candidate.entity_id,
+            before=result.get("before"),after=result.get("after"))
+        return result
+
     @staticmethod
     def _source_kind(source_kind: str) -> str:
         value = str(source_kind).strip().lower()
@@ -68,7 +77,7 @@ class DeterministicIngress:
         else:
             envelope = value
 
-        return await self.kernel.require_commit(
+        return await self._commit(
             CausalCandidate(
                 candidate_id=candidate_id,
                 world_id=world_id,
@@ -112,7 +121,7 @@ class DeterministicIngress:
             event_type = "set_location"
             authority_kind = "deterministic_system"
 
-        return await self.kernel.require_commit(
+        return await self._commit(
             CausalCandidate(
                 candidate_id=candidate_id,
                 world_id=world_id,
