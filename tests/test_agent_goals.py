@@ -71,3 +71,19 @@ async def test_legacy_goal_dict_accepts_text_field():
         legacy_goals=[{"text": "Learn game control"}],
     )
     assert [goal.text for goal in goals.active] == ["Learn game control"]
+
+
+def test_goal_reconciler_is_wired_to_message_cognition():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "epistemic" / "message_cognition.py").read_text(encoding="utf-8")
+    assert 'unit.claim_kind == "GOAL"' in source
+    assert 'unit.meta.get("character_owned")' in source
+    assert "reconcile_evidence(" in source
+
+
+def test_goal_backfill_is_bounded_and_character_owned():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "migrations" / "current" / "20260925_01_goal_convergence.sql").read_text(encoding="utf-8")
+    assert "character_owned" in source
+    assert "recency_rank <= 3" in source
+    assert "semantic_topic_key" in source
