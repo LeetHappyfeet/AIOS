@@ -19,7 +19,8 @@ class CognitiveThreadService:
         payload=self._mapping(opportunity.get("operation_payload"))
         goal_id=self._uuid(payload.get("goal_id"))
         subject_key = (
-            f"subject:{subject_id}" if subject_id
+            f"goal:{goal_id}" if goal_id
+            else f"subject:{subject_id}" if subject_id
             else str(opportunity.get("supersession_key") or opportunity["opportunity_id"])
         )
         strength = max(0.0, min(1.0, float(opportunity.get("priority_score") or 0.0) / 10.0))
