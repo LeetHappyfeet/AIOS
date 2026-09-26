@@ -122,6 +122,24 @@ class CognitiveLifecycleReconciler:
                     source_node_id=operation.get("source_node_id"),confidence=.8,
                     meta={"label":result.get("label")},
                 )
+            elif (terminal_status=="succeeded"
+                  and str(operation.get("operation_type"))=="planning.review"
+                  and result.get("kind")=="choice"
+                  and int(result.get("option_index",-1))==4):
+                await self.record_goal_evidence(
+                    instance_id=operation["instance_id"],goal_id=goal_id,
+                    evidence_type="bounded_goal_review",relation="withdrawal",
+                    evidence_id=str(operation["operation_id"]),
+                    source_node_id=operation.get("source_node_id"),confidence=.8,
+                    meta={"label":result.get("label")},
+                )
+                try:
+                    await self.goals.finish(
+                        instance_id=operation["instance_id"],goal_id=goal_id,status="cancelled")
+                except LookupError:
+                    pass
+                await self.reconcile_goal_threads(
+                    instance_id=operation["instance_id"],goal_id=goal_id)
 
         if not thread_id:
             return
