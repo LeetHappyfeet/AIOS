@@ -35,8 +35,15 @@ class CharacterSceneResolver:
         self.contexts=HUDContextResolver(db)
         self.goals=CharacterGoalService(db)
 
-    async def resolve(self, instance_id: UUID) -> tuple[Any,ResolvedScene]:
+    async def resolve(
+        self, instance_id: UUID, *, source_head_node_id: UUID | None = None
+    ) -> tuple[Any,ResolvedScene]:
         context=await self.contexts.resolve(instance_id)
+        if source_head_node_id is not None and context.source_head_node_id != source_head_node_id:
+            raise LookupError(
+                f"Source cursor moved while projecting scene for {instance_id}: "
+                f"expected {source_head_node_id}, current {context.source_head_node_id}"
+            )
         location=None
         if context.location_entity_id:
             row=await self.db.fetchrow(
@@ -88,24 +95,21 @@ class CharacterSceneResolver:
                          "task_type":str(task["task_type"]),"status":str(task["status"]),
                          "text":str(task["objective"])}
 
-        transition=await self.db.fetchrow(
-            """SELECT source_node_id,after_value,created_at
-               FROM aios.character_scene_transition
-               WHERE instance_id=$1 AND slot_key='last_significant_change'
-                 AND status='active'
-               ORDER BY created_at DESC LIMIT 1""",instance_id)
         last=None
-        if transition:
-            value=transition["after_value"]
-            if isinstance(value,(str,bytes,bytearray)):
-                try:
-                    decoded=json.loads(value)
-                except (json.JSONDecodeError,UnicodeDecodeError,TypeError):
-                    decoded=None
-                value=decoded if isinstance(decoded,dict) else value
-            last=dict(value) if isinstance(value,dict) else {"text":str(value)}
-            if transition["source_node_id"]:
-                last={**last,"source_node_id":str(transition["source_node_id"])}
+        if context.source_head_node_id:
+            source=await self.db.fetchrow(
+                """SELECT node_id,message_text,speaker_id,speaker_role::text AS speaker_role,event_id
+                   FROM aios.dag_node WHERE node_id=$1""",
+                context.source_head_node_id)
+            if source and str(source["message_text"] or "").strip():
+                last={
+                    "text":str(source["message_text"]).strip(),
+                    "source_node_id":str(source["node_id"]),
+                    "event_id":source["event_id"],
+                    "speaker_id":source["speaker_id"],
+                    "speaker_role":source["speaker_role"],
+                    "source":"dag_node",
+                }
 
         evidence=tuple(dict.fromkeys(v for v in
             (context.source_head_node_id,context.head_node_id) if v))
@@ -118,8 +122,12 @@ class CharacterSceneProjector:
         self.resolver=CharacterSceneResolver(db)
         self.store=CharacterSceneStateStore(db)
 
-    async def refresh(self,instance_id:UUID)->dict[str,Any]:
-        context,scene=await self.resolver.resolve(instance_id)
+    async def refresh(
+        self, instance_id: UUID, *, source_head_node_id: UUID | None = None
+    )->dict[str,Any]:
+        context,scene=await self.resolver.resolve(
+            instance_id, source_head_node_id=source_head_node_id
+        )
         return await self.store.materialize(
             instance_id=instance_id,runtime_timeline_id=context.timeline_id,
             runtime_head_node_id=context.head_node_id,
