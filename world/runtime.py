@@ -905,26 +905,19 @@ class WorldRuntimeService:
 
             causal_result = None
             if action_type == "move":
-                causal_result = await self.causal.require_commit(
-                    CausalCandidate(
-                        world_id=state["world_id"],
-                        timeline_id=state["timeline_id"],
-                        dag_node_id=node_id,
-                        domain_id="world.location",
-                        event_type="move",
-                        entity_id=state["entity_id"],
-                        target_entity_id=target_entity_id,
-                        state_key="location_entity_id",
-                        value=str(target_entity_id),
-                        source_kind="runtime",
-                        source_ref=str(instance_id),
-                        authority_kind="runtime_command",
-                        parameters={
-                            **payload,
-                            "runtime_instance_id": str(instance_id),
-                            "controller_type": controller_type,
-                        },
-                    )
+                causal_result = await DeterministicIngress(self.causal).commit_location(
+                    world_id=state["world_id"],
+                    timeline_id=state["timeline_id"],
+                    entity_id=state["entity_id"],
+                    location_entity_id=target_entity_id,
+                    source_kind="runtime",
+                    source_ref=str(instance_id),
+                    meta={
+                        **payload,
+                        "runtime_instance_id": str(instance_id),
+                        "controller_type": controller_type,
+                        "dag_node_id": str(node_id),
+                    },
                 )
 
             updated = await self.db.execute_returning_row(
@@ -943,11 +936,6 @@ class WorldRuntimeService:
             )
             if not updated:
                 raise RuntimeConflict("state changed while action was being committed")
-
-            # Runtime/DAG and causal projection are committed before scene
-            # projection. HUD reads the resulting snapshot and never writes it.
-            from aios_app.epistemic.scene_resolver import CharacterSceneProjector
-            await CharacterSceneProjector(self.db).refresh(instance_id)
 
             return {
                 "ok": True,
