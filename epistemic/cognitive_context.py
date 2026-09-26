@@ -389,31 +389,49 @@ class CognitiveContextService:
             context, focus_text=focus_text, goals=goals
         )
 
-        topology_memories = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="memory", focus_text=focus_text, goals=goals,
-            max_hops=policy.effective_memory_hops,
-            limit=policy.memory_limit,
-        )
-        topology_beliefs = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="belief", focus_text=focus_text, goals=goals,
-            max_hops=policy.belief_hops,
-            limit=policy.semantic_retrieval_limit,
-        )
-        topology_goals = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="goal", focus_text=focus_text, goals=goals,
-            max_hops=policy.goal_hops,
-            limit=min(policy.semantic_retrieval_limit, 30),
-        )
-        topology_events = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="event", focus_text=focus_text, goals=goals,
-            max_hops=policy.event_hops,
-            limit=min(policy.semantic_retrieval_limit, 40),
-        )
-        topology_rules = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="rule", focus_text=focus_text, goals=goals,
-            max_hops=policy.rule_hops,
-            limit=min(policy.semantic_retrieval_limit, 30),
-        )
+        # Start the bounded direct-character path at the same time as topology.
+        # It is authoritative character knowledge, not merely an emergency query,
+        # and gives generation a ready fail-open result if optional semantic
+        # acceleration misses its latency budget.
+        flat_task = asyncio.create_task(self._flat_character_knowledge(context, scorer))
+        begin_cycle = getattr(self.retriever, "begin_retrieval_cycle", None)
+        if begin_cycle is not None:
+            begin_cycle()
+
+        try:
+            topology_memories = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="memory", focus_text=focus_text, goals=goals,
+                max_hops=policy.effective_memory_hops,
+                limit=policy.memory_limit,
+            )
+            topology_beliefs = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="belief", focus_text=focus_text, goals=goals,
+                max_hops=policy.belief_hops,
+                limit=policy.semantic_retrieval_limit,
+            )
+            topology_goals = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="goal", focus_text=focus_text, goals=goals,
+                max_hops=policy.goal_hops,
+                limit=min(policy.semantic_retrieval_limit, 30),
+            )
+            topology_events = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="event", focus_text=focus_text, goals=goals,
+                max_hops=policy.event_hops,
+                limit=min(policy.semantic_retrieval_limit, 40),
+            )
+            topology_rules = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="rule", focus_text=focus_text, goals=goals,
+                max_hops=policy.rule_hops,
+                limit=min(policy.semantic_retrieval_limit, 30),
+            )
+        except BaseException:
+            if not flat_task.done():
+                flat_task.cancel()
+            try:
+                await flat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise
 
         topology_knowledge = (
             topology_memories + topology_beliefs + topology_goals + topology_events + topology_rules
@@ -425,11 +443,16 @@ class CognitiveContextService:
             "event": not topology_events,
             "rule": not topology_rules,
         }
-        legacy_knowledge = (
-            await self._flat_character_knowledge(context, scorer)
-            if any(missing_modes.values())
-            else []
-        )
+        if any(missing_modes.values()):
+            legacy_knowledge = await flat_task
+        else:
+            # Do not leave speculative work detached from the request.
+            if not flat_task.done():
+                flat_task.cancel()
+            try:
+                legacy_knowledge = await flat_task
+            except asyncio.CancelledError:
+                legacy_knowledge = []
         snapshot = PreparedRetrievalSnapshot(
             topology_knowledge=topology_knowledge,
             legacy_knowledge=legacy_knowledge,
