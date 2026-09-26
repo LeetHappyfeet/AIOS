@@ -390,6 +390,11 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
             """SELECT summary FROM aios.message_cognitive_commit
                WHERE instance_id=$1 AND node_id=$2""",instance_id,node_id)
         summary = CharacterGoalService._json_object(row["summary"]) if row else {}
+        if "GOAL" in summary.get("kinds", []):
+            # Goal reconciliation above runs on the transaction connection.
+            # Scene projection must happen only after commit, using Database.
+            from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+            await CharacterSceneProjector(db).refresh(instance_id)
         if summary.get("ambiguous_sentences") and summary.get("enrichment_pending"):
             from aios_app.pipeline.jobs import enqueue_job
             await enqueue_job(
@@ -487,6 +492,7 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
                 source_unit_id=unit_row["unit_id"],
                 confidence=unit.confidence,
                 salience=unit.salience,
+                refresh_scene=False,
             )
     await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
     if ambiguous:
