@@ -27,6 +27,12 @@ def _clip(value: Any, chars: int) -> str:
     return text[:chars].rstrip()
 
 
+def _scene_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return _clip(value.get("text") or value.get("label") or "", 300)
+    return _clip(value, 300)
+
+
 def _item_text(item: Mapping[str, Any]) -> str:
     return _clip(
         item.get("text")
@@ -111,7 +117,7 @@ class InternalHUDAssembler:
             else None
         ) or scene.get("last_significant_change")
         if profile.include_scene and scene_change:
-            lines.extend(["CURRENT:", _clip(scene_change, 300)])
+            lines.extend(["CURRENT:", _scene_text(scene_change)])
 
         if clue_lines:
             lines.append("CLUES:")
