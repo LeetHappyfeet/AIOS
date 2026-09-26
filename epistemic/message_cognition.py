@@ -9,7 +9,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService
 
-INTERPRETER_VERSION = "message-cognition-v5"
+INTERPRETER_VERSION = "message-cognition-v6"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -179,6 +179,17 @@ def _clean_object(value: str) -> str:
     return text[:220].rstrip()
 
 
+def _goal_semantics(candidate: ParsedCandidate) -> tuple[str, str]:
+    predicate = candidate.predicate.lower().strip()
+    if predicate.startswith(("want", "need", "seek")):
+        return "desire", "session"
+    if predicate.startswith(("plan", "prepare", "intend")):
+        return "plan", "session"
+    if predicate.startswith(("decide", "resolve")):
+        return "objective", "session"
+    return "objective", "session"
+
+
 def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
     subject = _canonical_subject(owner, candidate.subject_text)
     obj = _clean_object(candidate.object_text)
@@ -190,9 +201,11 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
             return f"{subject} is {obj}."
         return f"{subject} {predicate} {obj}."
     if candidate.kind == "GOAL":
-        if predicate.startswith(("decide", "resolve", "prepare")):
-            return f"{subject} intends {obj}."
-        return f"{subject} {predicate} {obj}."
+        # Goal text is a presentation of semantic intent, not a grammatical
+        # rewrite of the source sentence. This avoids "I want" -> "Renamon want".
+        intent_type, _ = _goal_semantics(candidate)
+        verb = "wants" if intent_type == "desire" else "intends"
+        return f"{subject} {verb} {obj}."
     if candidate.kind in {"RULE", "STATE"}:
         return f"{subject} {predicate} {obj}."
     return f"{subject}: {obj}." if candidate.subject_text else f"{obj}."
@@ -226,13 +239,14 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
     if match and _STATE_TERMS_RE.search(match.group("object")):
         return ParsedCandidate("STATE", match.group("subject"), match.group("verb"), match.group("object"), 0.86, "bounded_state_predicate")
     if _EVENT_RE.search(sentence):
-        words = _WORD_RE.findall(sentence)
-        subject = words[0] if words else None
-        return ParsedCandidate("EVENT", subject, "event", sentence, 0.70, "event_predicate")
+        # Sentence position is not entity resolution. Narrative prose such as
+        # "Beneath..." or "The collar..." must remain owner-unresolved rather
+        # than promoting the first token to a semantic subject.
+        return ParsedCandidate("EVENT", None, "event", sentence, 0.70, "event_predicate")
     return None
 
 
-def _topic_key(text: str, *, character_id: str, owner: str | None, kind: str) -> str:
+def cognition_topic_key(text: str, *, character_id: str, owner: str | None, kind: str) -> str:
     tokens = [token for token in _WORD_RE.findall(text.lower()) if len(token) >= 3 and token not in _STOPWORDS and token not in {"not", "never", "cannot", "can't"}]
     preferred: list[str] = [kind.lower()]
     for value in (owner, character_id):
@@ -278,13 +292,21 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
             continue
         polarity = -1 if _NEGATION_RE.search(sentence) else 1
         canonical = _canonical_text(candidate, owner=owner)
-        topic_key = _topic_key(canonical, character_id=character_id, owner=owner, kind=candidate.kind)
+        topic_key = cognition_topic_key(canonical, character_id=character_id, owner=owner, kind=candidate.kind)
         semantic_key = (candidate.kind, topic_key, polarity)
         if semantic_key in seen_semantics:
             continue
         seen_semantics.add(semantic_key)
         salience = _score_candidate(candidate, character_owned=character_owned, index=index, total=len(sentences))
         confidence = max(0.50, min(0.99, candidate.confidence))
+        goal_meta = {}
+        if candidate.kind == "GOAL":
+            intent_type, horizon = _goal_semantics(candidate)
+            goal_meta = {
+                "intent_type": intent_type,
+                "horizon": horizon,
+                "objective": _clean_object(candidate.object_text),
+            }
         unit = CognitiveUnit(
             text=canonical, claim_kind=candidate.kind, topic_key=topic_key, polarity=polarity,
             salience=salience, confidence=confidence,
@@ -296,6 +318,7 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
                 "predicate": candidate.predicate.lower(), "object": _clean_object(candidate.object_text),
                 "parse_reason": candidate.reason, "persistence": _PERSISTENCE[candidate.kind],
                 "parse_confidence": confidence, "epistemic_confidence": 0.72 if character_owned else 0.58,
+                **goal_meta,
             },
         )
         ranked.append((salience, index, unit))
@@ -492,6 +515,9 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
                 source_unit_id=unit_row["unit_id"],
                 confidence=unit.confidence,
                 salience=unit.salience,
+                intent_type=unit.meta.get("intent_type"),
+                horizon=unit.meta.get("horizon"),
+                objective=unit.meta.get("objective"),
                 refresh_scene=False,
             )
     await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
