@@ -160,6 +160,90 @@ class CharacterGoalService:
             raise LookupError("active goal not found")
         return self._goal(row)
 
+    async def reconcile_evidence(
+        self,
+        *,
+        instance_id: UUID,
+        text: str,
+        topic_key: str,
+        polarity: int,
+        source_node_id: UUID | None,
+        source_unit_id: UUID | None = None,
+        confidence: float | None = None,
+        salience: float | None = None,
+    ) -> CognitiveGoal | None:
+        """Project character-owned GOAL evidence into managed intention state.
+
+        topic_key is the stable bridge between epistemic evidence and executive
+        state. Positive evidence creates/refreshes one active managed goal.
+        Negative evidence cancels the active goal for that topic. Historical
+        rows are retained and are never silently reactivated.
+        """
+        topic = str(topic_key or "").strip()
+        clean = " ".join(str(text or "").split())
+        if not topic or not clean:
+            return None
+        rows = await self.db.fetch(
+            """SELECT goal_id,goal_text,status,priority,meta
+               FROM aios.character_agent_goal
+               WHERE instance_id=$1
+                 AND meta->>'semantic_topic_key'=$2
+               ORDER BY created_at DESC, goal_id DESC""",
+            instance_id, topic,
+        )
+        active = next((row for row in rows if str(row["status"]) == "active"), None)
+        evidence_meta = {
+            "semantic_topic_key": topic,
+            "source": "message_cognition",
+            "source_unit_id": str(source_unit_id) if source_unit_id else None,
+            "confidence": confidence,
+            "salience": salience,
+        }
+        if polarity < 0:
+            if active:
+                row = await self._returning(
+                    """UPDATE aios.character_agent_goal
+                       SET status='cancelled',completed_at=now(),updated_at=now(),
+                           meta=meta || $3::jsonb
+                       WHERE goal_id=$1 AND instance_id=$2 AND status='active'
+                       RETURNING goal_id,goal_text,status,priority,meta""",
+                    active["goal_id"], instance_id,
+                    json.dumps({**evidence_meta, "resolution_kind": "negated"}),
+                )
+                return self._goal(row) if row else None
+            return None
+
+        if active:
+            row = await self._returning(
+                """UPDATE aios.character_agent_goal
+                   SET goal_text=$3,source_node_id=COALESCE($4,source_node_id),
+                       updated_at=now(),meta=meta || $5::jsonb
+                   WHERE goal_id=$1 AND instance_id=$2
+                   RETURNING goal_id,goal_text,status,priority,meta""",
+                active["goal_id"], instance_id, clean, source_node_id,
+                json.dumps(evidence_meta),
+            )
+            return self._goal(row)
+
+        # A terminal row means this topic already had an explicit lifecycle.
+        # Do not resurrect it merely because old/recomputed evidence reappears.
+        if rows:
+            return None
+        return await self.create(
+            instance_id=instance_id,
+            text=clean,
+            priority=self._evidence_priority(salience),
+            source_node_id=source_node_id,
+            meta=evidence_meta,
+        )
+
+    @staticmethod
+    def _evidence_priority(salience: float | None) -> int:
+        if salience is None:
+            return 100
+        bounded = max(0.0, min(1.0, float(salience)))
+        return max(10, min(100, int(round(100 - bounded * 70))))
+
     async def _import_legacy(self, instance_id: UUID, raw: Any) -> None:
         values = self._json_list(raw)
         if not values:
