@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -24,6 +25,9 @@ SEMANTIC_SEED_WAIT_SECONDS = 0.25
 TOPOLOGY_SQL_TIMEOUT_SECONDS = 2.0
 MAX_FOCUS_TERMS = 12
 MAX_TOPOLOGY_SEEDS = 64
+_TOPOLOGY_DEGRADED: ContextVar[bool] = ContextVar(
+    "aios_topology_retrieval_degraded", default=False
+)
 
 
 def _json_rows(value: Any) -> list[dict[str, Any]]:
@@ -349,18 +353,14 @@ class TopologyRetriever:
             tuple[str, str, tuple[str, ...]], dict[str, float]
         ] = AsyncSingleFlight()
         self._semantic_seed_deferred: set[tuple[str, str, tuple[str, ...]]] = set()
-        # Generation-critical retrieval gets one topology timeout budget per
-        # prepared HUD cycle. Once the graph path misses that budget, callers
-        # should fail open to bounded direct character knowledge rather than
-        # serially spending the same timeout for every cognition mode.
-        self._topology_degraded = False
-
     def begin_retrieval_cycle(self) -> None:
-        self._topology_degraded = False
+        # ContextVar keeps concurrent HUD preparations isolated even though the
+        # service shares one retriever instance.
+        _TOPOLOGY_DEGRADED.set(False)
 
     @property
     def topology_degraded(self) -> bool:
-        return self._topology_degraded
+        return _TOPOLOGY_DEGRADED.get()
 
     async def _query_semantic_seed_propositions(
         self,
@@ -817,8 +817,8 @@ class TopologyRetriever:
         semantic_ms = (time.perf_counter() - semantic_started) * 1000.0
 
         topology_started = time.perf_counter()
-        topology_fallback = self._topology_degraded
-        if self._topology_degraded:
+        topology_fallback = self.topology_degraded
+        if self.topology_degraded:
             # A previous mode in this prepared retrieval cycle already proved
             # that topology cannot satisfy the generation latency budget.
             rows = []
@@ -838,7 +838,7 @@ class TopologyRetriever:
                 )
             except asyncio.TimeoutError:
                 topology_fallback = True
-                self._topology_degraded = True
+                _TOPOLOGY_DEGRADED.set(True)
                 logger.warning(
                     "HUD topology retrieval mode=%s exceeded %.1fs; "
                     "failing open for this retrieval cycle",
