@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
 from aios_app.db import Database
-from aios_app.agent.goals import CharacterGoalService, CognitiveGoal
+from aios_app.epistemic.goals import CharacterGoalService, CognitiveGoal
 from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
