@@ -11,7 +11,7 @@ from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
-from aios_app.agent.cognitive_subjects import CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver
+from aios_app.agent.cognitive_subjects import (\n    CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,\n    GoalSubjectProjector, GoalKnowledgeDemandResolver,\n)
 
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
@@ -35,7 +35,7 @@ class CognitiveOpportunityService:
         self.cognition=CognitiveContextService(db)
         self.demand=KnowledgeDemandResolver(minimum_terms=1,coverage_threshold=.60)
         self.subjects=CognitiveSubjectBuilder(db)
-        self.subject_demand=SubjectKnowledgeDemandResolver()
+        self.subject_demand=SubjectKnowledgeDemandResolver()\n        self.goal_subjects=GoalSubjectProjector(db)\n        self.goal_demand=GoalKnowledgeDemandResolver(db)
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                        limit:int=8) -> OpportunityBatch:
@@ -123,15 +123,20 @@ class CognitiveOpportunityService:
             affinity=min(1,.25*overlap)
             if affinity>.0 or len(goals)==1:
                 goal_id=str(goal.goal_id) if goal.goal_id else None
+                goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
+                goal_subject=goal_subject_entry[0] if goal_subject_entry else None
+                goal_demand=goal_subject_entry[1] if goal_subject_entry else None
                 proposals.append(self._p(
                     "goal_review",f"Consider whether what just happened changes my goal: {g}",
                     "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
-                    "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {}},
+                    "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
+                    "knowledge_demand":goal_demand or {}},
                     source_node_id or context.source_head_node_id,context,
                     relevance=.45+affinity*.35,goal_affinity=max(.35,affinity),recency=1,
                     evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g}],
                     key=f"goal:{goal_id or g.lower()[:100]}",
-                    subject_id=primary_subject.subject_id if primary_subject else None))
+                    subject_id=goal_subject.subject_id if goal_subject else
+                               (primary_subject.subject_id if primary_subject else None)))
 
         # Scene transitions are explicit deterministic evidence for immediate/reflection needs.
         if context.source_head_node_id:
