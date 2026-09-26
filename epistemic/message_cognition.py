@@ -246,8 +246,12 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
     return None
 
 
-def cognition_topic_key(text: str, *, character_id: str, owner: str | None, kind: str) -> str:
-    tokens = [token for token in _WORD_RE.findall(text.lower()) if len(token) >= 3 and token not in _STOPWORDS and token not in {"not", "never", "cannot", "can't"}]
+def cognition_topic_key(
+    text: str, *, character_id: str, owner: str | None, kind: str,
+    objective: str | None = None,
+) -> str:
+    semantic_text = objective if kind.upper() == "GOAL" and objective else text
+    tokens = [token for token in _WORD_RE.findall(semantic_text.lower()) if len(token) >= 3 and token not in _STOPWORDS and token not in {"not", "never", "cannot", "can't", "want", "wants", "wanted", "intend", "intends", "intended"}]
     preferred: list[str] = [kind.lower()]
     for value in (owner, character_id):
         for token in _identity_aliases(value):
@@ -292,7 +296,11 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
             continue
         polarity = -1 if _NEGATION_RE.search(sentence) else 1
         canonical = _canonical_text(candidate, owner=owner)
-        topic_key = cognition_topic_key(canonical, character_id=character_id, owner=owner, kind=candidate.kind)
+        objective = _clean_object(candidate.object_text) if candidate.kind == "GOAL" else None
+        topic_key = cognition_topic_key(
+            canonical, character_id=character_id, owner=owner, kind=candidate.kind,
+            objective=objective,
+        )
         semantic_key = (candidate.kind, topic_key, polarity)
         if semantic_key in seen_semantics:
             continue
@@ -305,7 +313,7 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
             goal_meta = {
                 "intent_type": intent_type,
                 "horizon": horizon,
-                "objective": _clean_object(candidate.object_text),
+                "objective": objective,
             }
         unit = CognitiveUnit(
             text=canonical, claim_kind=candidate.kind, topic_key=topic_key, polarity=polarity,
