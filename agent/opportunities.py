@@ -117,16 +117,18 @@ class CognitiveOpportunityService:
 
         goal_words=set(re.findall(r"[a-z0-9']+",focus.lower()))
         for goal in goals[:3]:
-            g=_clip(goal,160)
+            g=_clip(goal.text,160)
             overlap=len(goal_words & set(re.findall(r"[a-z0-9']+",g.lower())))
             affinity=min(1,.25*overlap)
             if affinity>.0 or len(goals)==1:
+                goal_id=str(goal.goal_id) if goal.goal_id else None
                 proposals.append(self._p(
                     "goal_review",f"Consider whether what just happened changes my goal: {g}",
-                    "planning.review",{"goal":g,"focus":focus},
+                    "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus},
                     source_node_id or context.source_head_node_id,context,
                     relevance=.45+affinity*.35,goal_affinity=max(.35,affinity),recency=1,
-                    evidence=[{"kind":"active_goal","text":g}],key=f"goal:{g.lower()[:100]}",
+                    evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g}],
+                    key=f"goal:{goal_id or g.lower()[:100]}",
                     subject_id=primary_subject.subject_id if primary_subject else None))
 
         # Scene transitions are explicit deterministic evidence for immediate/reflection needs.
