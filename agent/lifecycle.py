@@ -268,7 +268,9 @@ class CharacterAgencyStore:
                 f"Task {task_id} changed concurrently from {current.status}"
                 + (f" to {latest.status}" if latest else "")
             )
-        return CognitiveTask.from_row(row)
+        task = CognitiveTask.from_row(row)
+        await self._refresh_scene(task.instance_id)
+        return task
 
     async def create_action(
         self,
@@ -408,7 +410,14 @@ class CharacterAgencyStore:
                 f"Action {action_id} changed concurrently from {current.status}"
                 + (f" to {latest.status}" if latest else "")
             )
-        return ActionRecord.from_row(row)
+        action = ActionRecord.from_row(row)
+        await self._refresh_scene(action.instance_id)
+        return action
+
+    async def _refresh_scene(self, instance_id: UUID) -> None:
+        # Local import keeps the agency lifecycle independent of HUD modules.
+        from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+        await CharacterSceneProjector(self.db).refresh(instance_id)
 
     async def actions_for_task(self, task_id: UUID) -> list[ActionRecord]:
         rows = await self.db.fetch(

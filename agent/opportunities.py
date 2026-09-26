@@ -11,7 +11,10 @@ from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
-from aios_app.agent.cognitive_subjects import CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver
+from aios_app.agent.cognitive_subjects import (
+    CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,
+    GoalSubjectProjector, GoalKnowledgeDemandResolver,
+)
 
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
@@ -36,6 +39,8 @@ class CognitiveOpportunityService:
         self.demand=KnowledgeDemandResolver(minimum_terms=1,coverage_threshold=.60)
         self.subjects=CognitiveSubjectBuilder(db)
         self.subject_demand=SubjectKnowledgeDemandResolver()
+        self.goal_subjects=GoalSubjectProjector(db)
+        self.goal_demand=GoalKnowledgeDemandResolver(db)
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                        limit:int=8) -> OpportunityBatch:
@@ -56,6 +61,7 @@ class CognitiveOpportunityService:
         snapshot=await self.cognition.resolve_knowledge(context,None,attention)
         focus=_clip(attention.focus_text,360)
         goals=list(attention.goals)
+        goal_states=await self.cognition.goals.cognitive_states(instance_id, goals)
         proposals:list[dict[str,Any]]=[]
         subjects=await self.subjects.build(
             instance_id=instance_id,focus_text=focus,knowledge=list(snapshot.knowledge),
@@ -65,6 +71,30 @@ class CognitiveOpportunityService:
             self.subject_demand.resolve(primary_subject,list(snapshot.knowledge))
             if primary_subject else None
         )
+        goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
+        for goal in goals[:3]:
+            if not goal.goal_id:
+                continue
+            goal_subject=await self.goal_subjects.project(instance_id=instance_id,goal=goal)
+            if goal_subject is None:
+                continue
+            demand=await self.goal_demand.resolve(
+                instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge))
+            goal_subject_demands[goal.goal_id]=(goal_subject,demand)
+            if demand["next_source"]=="corpus":
+                gap=max(0.0,1.0-float(demand["internal_coverage"]))
+                proposals.append(self._p(
+                    "knowledge_gap",f"Find knowledge needed for my goal: {goal.text}",
+                    "corpus.search",
+                    {"query":demand["query"],"focus":goal_subject.retrieval_text,
+                     "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id)},
+                    source_node_id or context.source_head_node_id,context,
+                    relevance=.72,goal_affinity=.85,knowledge_gap=gap,novelty=.65,recency=1,
+                    evidence=[{"kind":"goal_knowledge_demand","goal_id":str(goal.goal_id),
+                               "internal_coverage":demand["internal_coverage"],
+                               "coverage_source":demand["coverage_source"]}],
+                    key=f"goal-research:{goal.goal_id}",
+                    subject_id=goal_subject.subject_id))
 
         # Established topology recall is already character-relative and ranked.
         for rank,item in enumerate(snapshot.recalled_memories[:3]):
@@ -117,17 +147,25 @@ class CognitiveOpportunityService:
 
         goal_words=set(re.findall(r"[a-z0-9']+",focus.lower()))
         for goal in goals[:3]:
-            g=_clip(goal,160)
+            g=_clip(goal.text,160)
             overlap=len(goal_words & set(re.findall(r"[a-z0-9']+",g.lower())))
             affinity=min(1,.25*overlap)
             if affinity>.0 or len(goals)==1:
+                goal_id=str(goal.goal_id) if goal.goal_id else None
+                goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
+                goal_subject=goal_subject_entry[0] if goal_subject_entry else None
+                goal_demand=goal_subject_entry[1] if goal_subject_entry else None
                 proposals.append(self._p(
                     "goal_review",f"Consider whether what just happened changes my goal: {g}",
-                    "planning.review",{"goal":g,"focus":focus},
+                    "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
+                    "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
+                    "knowledge_demand":goal_demand or {}},
                     source_node_id or context.source_head_node_id,context,
                     relevance=.45+affinity*.35,goal_affinity=max(.35,affinity),recency=1,
-                    evidence=[{"kind":"active_goal","text":g}],key=f"goal:{g.lower()[:100]}",
-                    subject_id=primary_subject.subject_id if primary_subject else None))
+                    evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g}],
+                    key=f"goal:{goal_id or g.lower()[:100]}",
+                    subject_id=goal_subject.subject_id if goal_subject else
+                               (primary_subject.subject_id if primary_subject else None)))
 
         # Scene transitions are explicit deterministic evidence for immediate/reflection needs.
         if context.source_head_node_id:

@@ -57,6 +57,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "agent_wake": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
     "cognitive_operation": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
     "internal_cognition_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
+    "message_cognition_enrichment": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
 }
 
 
@@ -69,7 +70,7 @@ def job_spec(job_type: str) -> JobSpec:
 
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
-    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference"}:
+    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "message_cognition_enrichment"}:
         return SchedulingLane.LIVE
     # LIVE here means fresh semantic enrichment, not a generation barrier. The
     # message_cognitive_commit is the only generation-critical semantic path.

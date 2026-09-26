@@ -27,6 +27,12 @@ def _clip(value: Any, chars: int) -> str:
     return text[:chars].rstrip()
 
 
+def _scene_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return _clip(value.get("text") or value.get("label") or "", 300)
+    return _clip(value, 300)
+
+
 def _item_text(item: Mapping[str, Any]) -> str:
     return _clip(
         item.get("text")
@@ -111,7 +117,7 @@ class InternalHUDAssembler:
             else None
         ) or scene.get("last_significant_change")
         if profile.include_scene and scene_change:
-            lines.extend(["CURRENT:", _clip(scene_change, 300)])
+            lines.extend(["CURRENT:", _scene_text(scene_change)])
 
         if clue_lines:
             lines.append("CLUES:")
@@ -129,7 +135,32 @@ class InternalHUDAssembler:
         if profile.include_beliefs:
             add_items("KNOWN / BELIEVED", frame.get("beliefs") or [], profile.belief_items)
         if profile.include_goals:
-            add_items("ACTIVE GOAL", frame.get("goals") or [], profile.goal_items)
+            goals = list(frame.get("goals") or [])[:max(0, profile.goal_items)]
+            add_items("ACTIVE GOAL", goals, profile.goal_items)
+            # Planning workers get a tiny deterministic lifecycle digest. Other
+            # workers keep the old text-only goal surface.
+            if worker_profile == "planning" and goals:
+                lifecycle = goals[0].get("lifecycle") or {}
+                bits = []
+                crossings = int(lifecycle.get("crossing_count") or 0)
+                progress = int(lifecycle.get("progress_count") or 0)
+                blockers = int(lifecycle.get("blocker_count") or 0)
+                candidates = int(lifecycle.get("completion_candidate_count") or 0)
+                if crossings:
+                    bits.append(f"crossings={crossings}")
+                if progress:
+                    bits.append(f"progress={progress}")
+                if blockers:
+                    bits.append(f"blockers={blockers}")
+                if candidates:
+                    bits.append(f"completion_candidates={candidates}")
+                if lifecycle.get("thread_status"):
+                    bits.append(f"thread={lifecycle['thread_status']}")
+                latest = lifecycle.get("latest_evidence") or {}
+                if latest.get("relation"):
+                    bits.append(f"latest={latest['relation']}")
+                if bits:
+                    lines.extend(["GOAL STATE:", "; ".join(bits)])
 
         choice_lines = ["CHOOSE ONE:"]
         for item in candidates:

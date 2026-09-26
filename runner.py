@@ -33,6 +33,8 @@ from aios_app.rdf.world_liminal_classifier_runner import classify_liminal_claims
 from aios_app.rdf.epistemic_writer import project_normalized_observation
 from aios_app.epistemic.normalizer import normalize_claim_once
 from aios_app.epistemic.context_resolver import resolve_claim_context
+from aios_app.causal.kernel import CausalIntegrityKernel
+from aios_app.causal.semantic_bridge import admit_location_claim
 from aios_app.epistemic.narratives import assign_narratives_once
 from aios_app.epistemic.episodes import materialize_event_occurrences_once, derive_semantic_episodes_once
 from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
@@ -234,7 +236,13 @@ async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> Non
         )
         return
     fuseki = FusekiClient(settings.fuseki_base_url)
-    await resolve_claim_context(db, fuseki, claim_id=claim_id)
+    context = await resolve_claim_context(db, fuseki, claim_id=claim_id)
+    # Context resolution is the authority boundary: only explicitly world-scoped
+    # resolved movement may proceed from semantic evidence into causal reality.
+    if context and context.world_id and context.timeline_id:
+        await admit_location_claim(
+            db,CausalIntegrityKernel(db),claim_id=claim_id,
+            world_id=context.world_id,timeline_id=context.timeline_id)
 
 
 JOB_HANDLERS.update(

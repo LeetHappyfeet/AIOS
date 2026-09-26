@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -10,12 +9,14 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from .actions import ActionRegistry, ActionSpec
 from .lifecycle import CharacterAgencyStore
+from aios_app.epistemic.goals import CharacterGoalService
 
 
 def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
     agency = CharacterAgencyStore(db)
     contexts = HUDContextResolver(db)
     cognition = CognitiveContextService(db)
+    goals = CharacterGoalService(db)
 
     async def memory_search(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         query = str(args["query"]).strip()
@@ -29,12 +30,10 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
         limit = max(1, min(int(args.get("limit", 8)), 20))
         candidates = list(snapshot.recalled_memories) + list(snapshot.beliefs) + list(snapshot.goals)
         return {"query": query, "matches": [
-            {
-                "text": item.get("text"), "claim_kind": item.get("claim_kind"),
-                "proposition_id": str(item.get("proposition_id") or ""),
-                "source_node_id": str(item.get("source_node_id") or ""),
-                "confidence": item.get("effective_confidence", item.get("confidence")),
-            }
+            {"text": item.get("text"), "claim_kind": item.get("claim_kind"),
+             "proposition_id": str(item.get("proposition_id") or ""),
+             "source_node_id": str(item.get("source_node_id") or ""),
+             "confidence": item.get("effective_confidence", item.get("confidence"))}
             for item in candidates[:limit]
         ]}
 
@@ -44,60 +43,51 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
                       COALESCE(t.root_task_id,t.task_id) AS root_task_id
                FROM aios.character_agent_runtime ar
                LEFT JOIN aios.character_cognitive_task t ON t.task_id=ar.active_task_id
-               WHERE ar.instance_id=$1""", instance_id,
-        )
-        return (
-            row["active_task_id"] if row else None,
-            row["source_node_id"] if row else None,
-            row["root_task_id"] if row else None,
-            None,
-        )
+               WHERE ar.instance_id=$1""", instance_id)
+        return (row["active_task_id"] if row else None,
+                row["source_node_id"] if row else None,
+                row["root_task_id"] if row else None,None)
 
     async def goal_create(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         parent_task, source_node, root_task, _ = await _origin(instance_id)
-        row = await db.execute_returning_row(
-            """INSERT INTO aios.character_agent_goal(
-                   instance_id,source_task_id,source_node_id,root_task_id,goal_text,priority,meta)
-               VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING goal_id,status""",
-            instance_id, parent_task, source_node, root_task,
-            str(args["goal"]).strip(), int(args.get("priority",100)),
-            json.dumps({"created_by":"cognitive_action"}),
-        )
-        return {"goal_id":str(row["goal_id"]),"status":row["status"],"goal":str(args["goal"])}
+        goal = await goals.create(
+            instance_id=instance_id,text=str(args["goal"]),
+            priority=int(args.get("priority",100)),source_task_id=parent_task,
+            source_node_id=source_node,root_task_id=root_task,
+            meta={"created_by":"cognitive_action"})
+        return {"goal_id":str(goal.goal_id),"status":goal.status,
+                "goal":goal.text,"priority":goal.priority}
 
     async def goal_update(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
-        goal_id=UUID(str(args["goal_id"]))
-        row=await db.execute_returning_row(
-            """UPDATE aios.character_agent_goal SET goal_text=COALESCE($3,goal_text),
-               priority=COALESCE($4,priority),updated_at=now()
-               WHERE goal_id=$1 AND instance_id=$2 RETURNING goal_id,goal_text,status,priority""",
-            goal_id,instance_id,args.get("goal"),args.get("priority"),
-        )
-        if not row: raise LookupError("goal not found")
-        return dict(row)
+        goal = await goals.update(
+            instance_id=instance_id,goal_id=UUID(str(args["goal_id"])),
+            text=args.get("goal"),priority=args.get("priority"))
+        return {"goal_id":str(goal.goal_id),"goal_text":goal.text,
+                "status":goal.status,"priority":goal.priority}
 
     async def goal_finish(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
-        goal_id=UUID(str(args["goal_id"])); status=str(args.get("status","completed"))
-        if status not in {"completed","cancelled"}: raise ValueError("invalid terminal goal status")
-        row=await db.execute_returning_row(
-            """UPDATE aios.character_agent_goal SET status=$3,completed_at=now(),updated_at=now()
-               WHERE goal_id=$1 AND instance_id=$2 AND status='active' RETURNING goal_id,status""",
-            goal_id,instance_id,status,
-        )
-        if not row: raise LookupError("active goal not found")
-        return {"goal_id":str(row["goal_id"]),"status":row["status"]}
+        goal_id=UUID(str(args["goal_id"]))
+        status=str(args.get("status","completed"))
+        goal = await goals.finish(instance_id=instance_id,goal_id=goal_id,status=status)
+        from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
+        lifecycle=CognitiveLifecycleReconciler(db)
+        await lifecycle.record_goal_evidence(
+            instance_id=instance_id,goal_id=goal_id,evidence_type="explicit_goal_action",
+            relation="completion_candidate" if status=="completed" else "withdrawal",
+            confidence=1.0,meta={"status":status})
+        await lifecycle.reconcile_goal_threads(instance_id=instance_id,goal_id=goal_id)
+        return {"goal_id":str(goal.goal_id),"status":goal.status}
 
     async def task_create(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         task_type=str(args.get("task_type") or "executive")
         parent_task, source_node, root_task, _ = await _origin(instance_id)
         task=await agency.create_task(
-            instance_id=instance_id, task_type=task_type, objective=str(args["objective"]),
-            retrieval_focus=args.get("retrieval_focus"), priority=int(args.get("priority",100)),
-            parent_task_id=parent_task, trigger_type="cognitive_delegation",
-            source_node_id=source_node, root_task_id=root_task,
+            instance_id=instance_id,task_type=task_type,objective=str(args["objective"]),
+            retrieval_focus=args.get("retrieval_focus"),priority=int(args.get("priority",100)),
+            parent_task_id=parent_task,trigger_type="cognitive_delegation",
+            source_node_id=source_node,root_task_id=root_task,
             execution_mode=str(args.get("execution_mode","auto")),
-            meta={"created_by":"cognitive_action","await_parent":True},
-        )
+            meta={"created_by":"cognitive_action","await_parent":True})
         return {"task_id":str(task.task_id),"task_type":task.task_type,"status":task.status}
 
     async def task_defer(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -110,12 +100,11 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
     async def delegate(kind: str, instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         parent_task, source_node, root_task, _ = await _origin(instance_id)
         task=await agency.create_task(
-            instance_id=instance_id, task_type=kind, objective=str(args["objective"]),
-            retrieval_focus=args.get("focus"), priority=int(args.get("priority",100)),
-            parent_task_id=parent_task, trigger_type="cognitive_delegation",
-            source_node_id=source_node, root_task_id=root_task, execution_mode="auto",
-            meta={"created_by":"cognitive_action","specialization":kind,"await_parent":True},
-        )
+            instance_id=instance_id,task_type=kind,objective=str(args["objective"]),
+            retrieval_focus=args.get("focus"),priority=int(args.get("priority",100)),
+            parent_task_id=parent_task,trigger_type="cognitive_delegation",
+            source_node_id=source_node,root_task_id=root_task,execution_mode="auto",
+            meta={"created_by":"cognitive_action","specialization":kind,"await_parent":True})
         return {"task_id":str(task.task_id),"task_type":kind,"status":task.status}
 
     registry.register(ActionSpec("memory.search",{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"additionalProperties":False},"read_only",frozenset({"executive","research","planning","reflection"}),memory_search,"return_to_cognition"))

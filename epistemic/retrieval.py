@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -22,9 +23,11 @@ logger = logging.getLogger("aios.hud.retrieval")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
 SEMANTIC_SEED_WAIT_SECONDS = 0.25
 TOPOLOGY_SQL_TIMEOUT_SECONDS = 2.0
-TOPOLOGY_FALLBACK_TIMEOUT_SECONDS = 1.0
 MAX_FOCUS_TERMS = 12
 MAX_TOPOLOGY_SEEDS = 64
+_TOPOLOGY_DEGRADED: ContextVar[bool] = ContextVar(
+    "aios_topology_retrieval_degraded", default=False
+)
 
 
 def _json_rows(value: Any) -> list[dict[str, Any]]:
@@ -350,6 +353,14 @@ class TopologyRetriever:
             tuple[str, str, tuple[str, ...]], dict[str, float]
         ] = AsyncSingleFlight()
         self._semantic_seed_deferred: set[tuple[str, str, tuple[str, ...]]] = set()
+    def begin_retrieval_cycle(self) -> None:
+        # ContextVar keeps concurrent HUD preparations isolated even though the
+        # service shares one retriever instance.
+        _TOPOLOGY_DEGRADED.set(False)
+
+    @property
+    def topology_degraded(self) -> bool:
+        return _TOPOLOGY_DEGRADED.get()
 
     async def _query_semantic_seed_propositions(
         self,
@@ -806,27 +817,12 @@ class TopologyRetriever:
         semantic_ms = (time.perf_counter() - semantic_started) * 1000.0
 
         topology_started = time.perf_counter()
-        topology_fallback = False
-        try:
-            rows = await self._fetch_rows(
-                scope_key=scope_key,
-                lineage_ids=lineage_ids,
-                lineage_keys=lineage_keys,
-                instance_id=str(context.instance_id),
-                terms=terms,
-                semantic_seed_ids=list(semantic_seed_scores),
-                hops=hops,
-                policy=policy,
-                row_limit=row_limit,
-                timeout=TOPOLOGY_SQL_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            topology_fallback = True
-            logger.warning(
-                "HUD topology retrieval mode=%s exceeded %.1fs; retrying seed-only fallback",
-                mode,
-                TOPOLOGY_SQL_TIMEOUT_SECONDS,
-            )
+        topology_fallback = self.topology_degraded
+        if self.topology_degraded:
+            # A previous mode in this prepared retrieval cycle already proved
+            # that topology cannot satisfy the generation latency budget.
+            rows = []
+        else:
             try:
                 rows = await self._fetch_rows(
                     scope_key=scope_key,
@@ -835,16 +831,19 @@ class TopologyRetriever:
                     instance_id=str(context.instance_id),
                     terms=terms,
                     semantic_seed_ids=list(semantic_seed_scores),
-                    hops=0,
+                    hops=hops,
                     policy=policy,
                     row_limit=row_limit,
-                    timeout=TOPOLOGY_FALLBACK_TIMEOUT_SECONDS,
+                    timeout=TOPOLOGY_SQL_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
+                topology_fallback = True
+                _TOPOLOGY_DEGRADED.set(True)
                 logger.warning(
-                    "HUD topology seed-only fallback mode=%s exceeded %.1fs; returning no rows",
+                    "HUD topology retrieval mode=%s exceeded %.1fs; "
+                    "failing open for this retrieval cycle",
                     mode,
-                    TOPOLOGY_FALLBACK_TIMEOUT_SECONDS,
+                    TOPOLOGY_SQL_TIMEOUT_SECONDS,
                 )
                 rows = []
         topology_ms = (time.perf_counter() - topology_started) * 1000.0

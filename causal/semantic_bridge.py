@@ -173,3 +173,59 @@ async def _resolve_unique_world_entity(
         # deterministic subject/target just to make a candidate fit.
         return None
     return rows[0]["entity_id"]
+
+
+async def admit_location_claim(
+    db: Database,
+    kernel: CausalIntegrityKernel,
+    *,
+    claim_id: UUID,
+    world_id: UUID,
+    timeline_id: UUID,
+) -> Optional[dict]:
+    """Admit only explicitly world-scoped, resolved spatial transitions.
+
+    Character/speaker/source/narrative uncertainty remains epistemic. Semantic
+    confidence is deliberately not an authority signal. Ordinary endpoint
+    assertions are evaluated but never promoted here; only explicit movement
+    predicates can propose a /world transition.
+    """
+    policy = await db.fetchrow(
+        """SELECT ccr.epistemic_scope,ccr.claim_kind,ccr.predicate_family,
+                  ccr.world_id,ccr.timeline_id,
+                  COALESCE(sf.predicate_canonical,cc.predicate) AS predicate,
+                  sf.resolution_status
+           FROM aios.claim_candidate cc
+           JOIN aios.claim_context_resolution ccr ON ccr.claim_id=cc.claim_id
+           JOIN aios.claim_semantic_frame_projection sfp ON sfp.claim_id=cc.claim_id
+           JOIN aios.claim_semantic_frame sf ON sf.frame_id=sfp.primary_frame_id
+           WHERE cc.claim_id=$1""",claim_id)
+    if not policy:
+        return None
+    scope=str(policy["epistemic_scope"] or "").lower()
+    predicate=str(policy["predicate"] or "").strip().lower().replace(" ","_")
+    resolution=str(policy["resolution_status"] or "").lower()
+    if scope != "world":
+        return None
+    if policy["world_id"] and policy["world_id"] != world_id:
+        return None
+    if policy["timeline_id"] and policy["timeline_id"] != timeline_id:
+        return None
+    if predicate not in _EXPLICIT_MOVEMENT:
+        return None
+    if resolution and resolution not in {"resolved","exact","linked"}:
+        return None
+
+    candidate=await compile_location_candidate(
+        db,claim_id=claim_id,world_id=world_id,timeline_id=timeline_id,
+        allow_latent_transition=False)
+    if candidate is None:
+        return None
+    result=await kernel.commit(candidate)
+    if result.get("committed"):
+        from aios_app.world.projection_consequences import WorldProjectionCoordinator
+        await WorldProjectionCoordinator(db).world_state_changed(
+            world_id=world_id,timeline_id=timeline_id,
+            domain_id=candidate.domain_id,entity_id=candidate.entity_id,
+            before=result.get("before"),after=result.get("after"))
+    return result

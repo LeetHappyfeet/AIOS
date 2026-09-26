@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
 
 from aios_app.db import Database
+from aios_app.epistemic.goals import CharacterGoalService, CognitiveGoal
 from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
@@ -43,7 +45,7 @@ class CognitiveAttentionInputs:
     focus_text: str
     plugin_focus_text: str
     retrieval_focus_text: str
-    goals: list[Any]
+    goals: list[CognitiveGoal]
 
 
 @dataclass(frozen=True)
@@ -179,6 +181,7 @@ class CognitiveContextService:
     def __init__(self, db: Database, *, retrieval_policy: CognitiveRetrievalPolicy | None = None):
         self.db = db
         self.retriever = TopologyRetriever(db)
+        self.goals = CharacterGoalService(db)
         self.research = CharacterResearchService(db)
         self.corpus_learning = CorpusLearningService(db)
         self.corpus_reinforcement = CorpusReinforcementService(db)
@@ -266,7 +269,11 @@ class CognitiveContextService:
             str(focus_text).strip() if focus_text is not None and str(focus_text).strip()
             else event_focus_text
         )
-        goals = list(_json_value(raw_state.get("goals"), []))
+        goal_set = await self.goals.resolve_active(
+            context.instance_id,
+            legacy_goals=raw_state.get("goals"),
+        )
+        goals = list(goal_set.active)
         plugin_focus_text = " ".join(
             str(signal.get("focus_text") or "")
             for signal in sorted(
@@ -383,31 +390,49 @@ class CognitiveContextService:
             context, focus_text=focus_text, goals=goals
         )
 
-        topology_memories = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="memory", focus_text=focus_text, goals=goals,
-            max_hops=policy.effective_memory_hops,
-            limit=policy.memory_limit,
-        )
-        topology_beliefs = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="belief", focus_text=focus_text, goals=goals,
-            max_hops=policy.belief_hops,
-            limit=policy.semantic_retrieval_limit,
-        )
-        topology_goals = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="goal", focus_text=focus_text, goals=goals,
-            max_hops=policy.goal_hops,
-            limit=min(policy.semantic_retrieval_limit, 30),
-        )
-        topology_events = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="event", focus_text=focus_text, goals=goals,
-            max_hops=policy.event_hops,
-            limit=min(policy.semantic_retrieval_limit, 40),
-        )
-        topology_rules = await self.retriever.retrieve_character_knowledge(
-            context, scorer, mode="rule", focus_text=focus_text, goals=goals,
-            max_hops=policy.rule_hops,
-            limit=min(policy.semantic_retrieval_limit, 30),
-        )
+        # Start the bounded direct-character path at the same time as topology.
+        # It is authoritative character knowledge, not merely an emergency query,
+        # and gives generation a ready fail-open result if optional semantic
+        # acceleration misses its latency budget.
+        flat_task = asyncio.create_task(self._flat_character_knowledge(context, scorer))
+        begin_cycle = getattr(self.retriever, "begin_retrieval_cycle", None)
+        if begin_cycle is not None:
+            begin_cycle()
+
+        try:
+            topology_memories = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="memory", focus_text=focus_text, goals=goals,
+                max_hops=policy.effective_memory_hops,
+                limit=policy.memory_limit,
+            )
+            topology_beliefs = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="belief", focus_text=focus_text, goals=goals,
+                max_hops=policy.belief_hops,
+                limit=policy.semantic_retrieval_limit,
+            )
+            topology_goals = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="goal", focus_text=focus_text, goals=goals,
+                max_hops=policy.goal_hops,
+                limit=min(policy.semantic_retrieval_limit, 30),
+            )
+            topology_events = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="event", focus_text=focus_text, goals=goals,
+                max_hops=policy.event_hops,
+                limit=min(policy.semantic_retrieval_limit, 40),
+            )
+            topology_rules = await self.retriever.retrieve_character_knowledge(
+                context, scorer, mode="rule", focus_text=focus_text, goals=goals,
+                max_hops=policy.rule_hops,
+                limit=min(policy.semantic_retrieval_limit, 30),
+            )
+        except BaseException:
+            if not flat_task.done():
+                flat_task.cancel()
+            try:
+                await flat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise
 
         topology_knowledge = (
             topology_memories + topology_beliefs + topology_goals + topology_events + topology_rules
@@ -419,11 +444,19 @@ class CognitiveContextService:
             "event": not topology_events,
             "rule": not topology_rules,
         }
-        legacy_knowledge = (
-            await self._flat_character_knowledge(context, scorer)
-            if any(missing_modes.values())
-            else []
-        )
+        if any(missing_modes.values()):
+            legacy_knowledge = await flat_task
+        else:
+            # Do not leave speculative work detached from the request. If the
+            # topology path is complete, failure of an unused speculative
+            # fallback must not fail cognition.
+            if not flat_task.done():
+                flat_task.cancel()
+            try:
+                await flat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            legacy_knowledge = []
         snapshot = PreparedRetrievalSnapshot(
             topology_knowledge=topology_knowledge,
             legacy_knowledge=legacy_knowledge,
