@@ -255,7 +255,15 @@ class HUDAssembler:
         # Managed goals are the authority for current intention. Semantic GOAL
         # propositions remain epistemic evidence and are not promoted into the
         # ACTIVE GOALS surface merely because they were recalled.
-        goal_items = [goal.hud_item() for goal in attention.goals]
+        goal_states = await self.cognition.goals.cognitive_states(
+            context.instance_id, attention.goals
+        )
+        goal_items = []
+        for goal in attention.goals:
+            item = goal.hud_item()
+            if goal.goal_id is not None:
+                item["lifecycle"] = goal_states.get(goal.goal_id, {})
+            goal_items.append(item)
         rule_items = rules + [
             {**item, "source": "character_knowledge"}
             for item in semantic_rules
