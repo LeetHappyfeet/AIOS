@@ -109,6 +109,7 @@ class DeterministicIngress:
         expected_state_version: Optional[int] = None,
         candidate_id: Optional[UUID] = None,
         meta: Optional[dict[str, Any]] = None,
+        dag_node_id: Optional[UUID] = None,
     ) -> dict[str, Any]:
         source_kind = self._source_kind(source_kind)
         if source_kind in {"sensor", "device"}:
@@ -130,6 +131,7 @@ class DeterministicIngress:
                 event_type=event_type,
                 entity_id=entity_id,
                 target_entity_id=location_entity_id,
+                dag_node_id=dag_node_id,
                 state_key="location_entity_id",
                 value=str(location_entity_id),
                 occurred_at=occurred_at,
