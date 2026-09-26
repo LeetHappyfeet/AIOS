@@ -11,7 +11,10 @@ from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
-from aios_app.agent.cognitive_subjects import (\n    CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,\n    GoalSubjectProjector, GoalKnowledgeDemandResolver,\n)
+from aios_app.agent.cognitive_subjects import (
+    CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,
+    GoalSubjectProjector, GoalKnowledgeDemandResolver,
+)
 
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
@@ -35,7 +38,9 @@ class CognitiveOpportunityService:
         self.cognition=CognitiveContextService(db)
         self.demand=KnowledgeDemandResolver(minimum_terms=1,coverage_threshold=.60)
         self.subjects=CognitiveSubjectBuilder(db)
-        self.subject_demand=SubjectKnowledgeDemandResolver()\n        self.goal_subjects=GoalSubjectProjector(db)\n        self.goal_demand=GoalKnowledgeDemandResolver(db)
+        self.subject_demand=SubjectKnowledgeDemandResolver()
+        self.goal_subjects=GoalSubjectProjector(db)
+        self.goal_demand=GoalKnowledgeDemandResolver(db)
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                        limit:int=8) -> OpportunityBatch:
