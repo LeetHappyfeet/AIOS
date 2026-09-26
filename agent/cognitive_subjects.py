@@ -301,6 +301,112 @@ class CognitiveSubjectBuilder:
         )
 
 
+class GoalSubjectProjector:
+    """Persist an active managed goal as an explicit character cognitive subject."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def project(self, *, instance_id: UUID, goal: Any) -> CognitiveSubject | None:
+        goal_id = _uuid_or_none(getattr(goal, "goal_id", None))
+        text = _clip(getattr(goal, "text", ""), 220)
+        if goal_id is None or not text:
+            return None
+        topic = _norm((getattr(goal, "meta", {}) or {}).get("semantic_topic_key"))
+        key = f"goal:{goal_id}"
+        terms = tuple(research_terms(topic or text, limit=12))
+        row = await self.db.execute_returning_row(
+            """INSERT INTO aios.character_cognitive_subject(
+                   instance_id,goal_id,canonical_key,subject_type,entity_keys,topic_key,
+                   question_type,question,display_label,confidence,uncertainty,salience,status,meta)
+               VALUES($1,$2,$3,'goal_knowledge',$4::jsonb,$5,'knowledge_demand',$6,$7,1.0,0.0,$8,
+                      'established',$9::jsonb)
+               ON CONFLICT(instance_id,canonical_key) DO UPDATE SET
+                   goal_id=EXCLUDED.goal_id,entity_keys=EXCLUDED.entity_keys,
+                   topic_key=COALESCE(EXCLUDED.topic_key,aios.character_cognitive_subject.topic_key),
+                   question=EXCLUDED.question,display_label=EXCLUDED.display_label,
+                   salience=GREATEST(aios.character_cognitive_subject.salience,EXCLUDED.salience),
+                   status='established',last_seen_at=now(),updated_at=now(),
+                   meta=aios.character_cognitive_subject.meta || EXCLUDED.meta
+               RETURNING *""",
+            instance_id, goal_id, key, json.dumps(list(terms)), topic or None,
+            f"What knowledge would help satisfy this goal: {text}?", text,
+            max(.25, min(1.0, (110 - int(getattr(goal, "priority", 100))) / 100.0)),
+            json.dumps({"source": "managed_goal", "goal_id": str(goal_id)}),
+        )
+        return CognitiveSubjectBuilder._from_row(row)
+
+
+class GoalKnowledgeDemandResolver:
+    """Resolve a goal's knowledge demand from authoritative character topology.
+
+    SQL semantic topology is authoritative; Fuseki /char is its derived RDF view.
+    Lexical subject coverage is used only when no character topology is available.
+    """
+
+    def __init__(self, db: Database):
+        self.db = db
+        self.fallback = SubjectKnowledgeDemandResolver()
+
+    async def resolve(
+        self, *, instance_id: UUID, subject: CognitiveSubject,
+        known: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        terms = research_terms(subject.retrieval_text, limit=24)
+        rows = await self.db.fetch(
+            """SELECT DISTINCT n.topology_node_id,n.node_type,n.node_key,n.label,
+                              n.proposition_id,n.significance
+               FROM aios.semantic_topology_node n
+               WHERE n.scope_kind='character'
+                 AND n.character_instance_id=$1
+                 AND n.node_type IN
+                     ('PROPOSITION','TOPIC','CONCEPT','SEMANTIC_PIVOT','BELIEF_STATE',
+                      'EPISTEMIC_TRANSITION')
+                 AND (
+                     cardinality($2::text[])=0
+                     OR EXISTS (
+                         SELECT 1 FROM unnest($2::text[]) term
+                         WHERE lower(COALESCE(n.label,'') || ' ' || COALESCE(n.node_key,''))
+                               LIKE '%' || lower(term) || '%'
+                     )
+                 )
+               ORDER BY n.significance DESC
+               LIMIT 12""",
+            instance_id, list(terms),
+        )
+        if not rows:
+            result = self.fallback.resolve(subject, known)
+            return {**result, "coverage_source": "lexical_fallback", "topology": []}
+
+        propositions = {str(row["proposition_id"]) for row in rows if row["proposition_id"]}
+        structural = {
+            str(row["topology_node_id"]) for row in rows
+            if str(row["node_type"]) not in {"EPISTEMIC_TRANSITION"}
+        }
+        # Three distinct proposition/structural receipts are enough to stop
+        # automatic research. This is a routing threshold, not proof that the
+        # managed goal itself is complete.
+        evidence_units = len(propositions) + max(0, len(structural) - len(propositions))
+        coverage = min(1.0, evidence_units / 3.0)
+        next_source = "none" if coverage >= .67 else "memory"
+        query = " ".join(dict.fromkeys(terms[:12])).strip() or subject.display_label
+        return {
+            "internal_coverage": coverage,
+            "matching": [],
+            "next_source": next_source,
+            "query": query,
+            "question": subject.question,
+            "coverage_source": "character_topology",
+            "topology": [
+                {"topology_node_id": str(row["topology_node_id"]),
+                 "node_type": str(row["node_type"]),
+                 "proposition_id": str(row["proposition_id"]) if row["proposition_id"] else None,
+                 "label": row["label"], "significance": float(row["significance"] or 0)}
+                for row in rows[:6]
+            ],
+        }
+
+
 class SubjectKnowledgeDemandResolver:
     """Choose internal recall before corpus lookup for a structured subject."""
 
