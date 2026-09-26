@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 
-from aios_app.agent.goals import CharacterGoalService, CognitiveGoal, ResolvedGoalSet
+from aios_app.epistemic.goals import CharacterGoalService, CognitiveGoal, ResolvedGoalSet
 
 
 INSTANCE_ID = UUID("00000000-0000-0000-0000-000000000001")
