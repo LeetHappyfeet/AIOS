@@ -382,9 +382,21 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                 lock_key,
             )
-            return await _commit_message_cognition_locked(
+            committed = await _commit_message_cognition_locked(
                 con, instance_id=instance_id, node_id=node_id
             )
+    if committed:
+        row = await db.fetchrow(
+            """SELECT summary FROM aios.message_cognitive_commit
+               WHERE instance_id=$1 AND node_id=$2""",instance_id,node_id)
+        summary = CharacterGoalService._json_object(row["summary"]) if row else {}
+        if summary.get("ambiguous_sentences") and summary.get("enrichment_pending"):
+            from aios_app.pipeline.jobs import enqueue_job
+            await enqueue_job(
+                db,job_type="message_cognition_enrichment",
+                payload={"instance_id":str(instance_id),"node_id":str(node_id)},
+                priority=35)
+    return committed
 
 
 async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_id: UUID) -> bool:
