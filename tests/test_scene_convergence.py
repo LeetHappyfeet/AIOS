@@ -31,3 +31,39 @@ async def test_scene_v2_current_is_read_only():
 
 def test_scene_projection_version_is_v2():
     assert PROJECTION_VERSION=="character-scene-v2"
+
+
+class SequenceReadDB:
+    def __init__(self, rows):
+        self.rows=list(rows)
+        self.calls=[]
+    async def fetchrow(self,sql,*args):
+        self.calls.append((sql,args))
+        return self.rows.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_scene_current_inherits_only_v2_source_ancestor():
+    sid=uuid4()
+    db=SequenceReadDB([
+        None,
+        {"snapshot_id":sid,"scene_state":{"location":{"display_name":"car"}},
+         "projection_version":PROJECTION_VERSION},
+    ])
+    state=await CharacterSceneStateStore(db).current(
+        instance_id=uuid4(),runtime_timeline_id=uuid4(),runtime_head_node_id=uuid4(),
+        source_timeline_id=uuid4(),source_head_node_id=uuid4())
+    assert state["snapshot_id"]==sid
+    assert state["projection_status"]=="inherited"
+    assert "WITH RECURSIVE ancestors" in db.calls[1][0]
+    assert "character-scene-v1" not in db.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_scene_current_never_falls_back_to_arbitrary_v1():
+    db=SequenceReadDB([None,None])
+    state=await CharacterSceneStateStore(db).current(
+        instance_id=uuid4(),runtime_timeline_id=uuid4(),runtime_head_node_id=uuid4(),
+        source_timeline_id=uuid4(),source_head_node_id=uuid4())
+    assert state=={}
+    assert all("character-scene-v1" not in sql for sql,_ in db.calls)
