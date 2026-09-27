@@ -66,7 +66,7 @@ class CognitiveOpportunityService:
                  AND source_head_node_id IS NOT DISTINCT FROM $3
                ORDER BY updated_at DESC LIMIT 1""",
             instance_id,context.source_timeline_id,context.source_head_node_id)
-        current_scene=CharacterGoalService._json_object(scene_row["scene_state"]) if scene_row else {}
+        current_scene=self._json_object(scene_row["scene_state"]) if scene_row else {}
         focus=_clip(attention.focus_text,360)
         goals=list(attention.goals)
         goal_states=await self.cognition.goals.cognitive_states(instance_id, goals)
@@ -276,6 +276,18 @@ class CognitiveOpportunityService:
                 json.dumps(p["evidence"]),p.get("subject_id"))
             if row: stored.append(dict(row))
         return OpportunityBatch(instance_id,tuple(stored))
+
+    @staticmethod
+    def _json_object(value: Any) -> dict[str,Any]:
+        if isinstance(value,dict):
+            return dict(value)
+        if isinstance(value,(str,bytes,bytearray)):
+            try:
+                decoded=json.loads(value)
+            except (TypeError,ValueError,json.JSONDecodeError,UnicodeDecodeError):
+                return {}
+            return dict(decoded) if isinstance(decoded,dict) else {}
+        return {}
 
     def _p(self,typ,label,op,payload,node,context,*,novelty=0,relevance=0,urgency=0,
            uncertainty=0,goal_affinity=0,memory_affinity=0,knowledge_gap=0,recency=0,
