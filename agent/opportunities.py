@@ -72,7 +72,7 @@ class CognitiveOpportunityService:
             if primary_subject else None
         )
         goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
-        for goal in goals[:3]:
+        for goal in goals:
             if not goal.goal_id:
                 continue
             goal_subject=await self.goal_subjects.project(instance_id=instance_id,goal=goal)
