@@ -222,8 +222,20 @@ class CognitiveOpportunityService:
                     subject_id=primary_subject.subject_id if primary_subject else None))
 
         proposals.sort(key=lambda x:x["priority_score"],reverse=True)
+        budget=max(1,min(limit,16))
+        # Goal lifecycle has a reserved downstream slot, so preserve one review
+        # through this upstream proposal budget as well. Otherwise high-scoring
+        # recall/research/scene proposals can truncate every goal review before
+        # OpportunityRouter ever has a chance to reserve one.
+        due_review=next(
+            (p for p in proposals if p["opportunity_type"]=="goal_review"),None)
+        if due_review is not None:
+            non_reviews=[p for p in proposals if p is not due_review]
+            budgeted=non_reviews[:max(0,budget-1)] + [due_review]
+        else:
+            budgeted=proposals[:budget]
         stored=[]
-        for p in proposals[:max(1,min(limit,16))]:
+        for p in budgeted:
             row=await self.db.execute_returning_row(
                 """INSERT INTO aios.character_cognitive_opportunity(
                    instance_id,opportunity_type,natural_language,operation_type,operation_payload,
