@@ -103,6 +103,12 @@ def test_text_renderer_uses_canonical_hud_sections():
             }
         ],
         "actions": ["speak", "inspect"],
+        "toolkit": [
+            {"key": "memory_lookup", "guidance": "one subject/question; a few memories"},
+            {"key": "world_lookup", "guidance": "one subject/question; a few facts"},
+            {"key": "research", "guidance": "one focused question; brief findings"},
+            {"key": "action", "guidance": "one concrete action; necessary details only"},
+        ],
     }
 
     text = render_hud_text(frame)
@@ -112,6 +118,12 @@ def test_text_renderer_uses_canonical_hud_sections():
     assert "KNOWLEDGE / BELIEFS:" in text
     assert "conflicts with: The door is open." in text
     assert "AVAILABLE ACTIONS: speak, inspect" in text
+    assert "AIOS TOOLKIT:" in text
+    assert "When context is insufficient, request one narrow operation." in text
+    assert "MEMORY LOOKUP — one subject/question; a few memories" in text
+    assert "WORLD LOOKUP — one subject/question; a few facts" in text
+    assert "RESEARCH — one focused question; brief findings" in text
+    assert "ACTION — one concrete action; necessary details only" in text
     assert "Stay inside this HUD's epistemic and branch boundaries." in text
 
 
