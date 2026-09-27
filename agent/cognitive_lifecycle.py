@@ -131,20 +131,21 @@ class CognitiveLifecycleReconciler:
                   and str(operation.get("operation_type"))=="planning.review"
                   and result.get("kind")=="choice"
                   and int(result.get("option_index",-1))==4):
+                # Lack of present relevance is not withdrawal. Park the goal
+                # outside executive attention while retaining durable history;
+                # fresh positive semantic evidence may reactivate it later.
                 await self.record_goal_evidence(
                     instance_id=operation["instance_id"],goal_id=goal_id,
                     evidence_type="bounded_goal_review",relation="withdrawal",
                     evidence_id=str(operation["operation_id"]),
-                    source_node_id=operation.get("source_node_id"),confidence=.8,
-                    meta={"label":result.get("label")},
+                    source_node_id=operation.get("source_node_id"),confidence=.65,
+                    meta={"label":result.get("label"),"lifecycle_effect":"dormant"},
                 )
                 try:
                     await self.goals.finish(
-                        instance_id=operation["instance_id"],goal_id=goal_id,status="cancelled")
+                        instance_id=operation["instance_id"],goal_id=goal_id,status="dormant")
                 except LookupError:
                     pass
-                await self.reconcile_goal_threads(
-                    instance_id=operation["instance_id"],goal_id=goal_id)
 
         if not thread_id:
             return
