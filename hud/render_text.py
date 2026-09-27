@@ -219,5 +219,26 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     actions = frame.get("actions") or []
     if actions:
         lines.append("\nAVAILABLE ACTIONS: " + ", ".join(str(action) for action in actions))
+    toolkit = frame.get("toolkit") or []
+    if toolkit:
+        lines.append("\nAIOS TOOLKIT:")
+        lines.append("When context is insufficient, request one narrow operation.")
+        labels = {
+            "memory_lookup": "MEMORY LOOKUP",
+            "world_lookup": "WORLD LOOKUP",
+            "research": "RESEARCH",
+            "action": "ACTION",
+        }
+        for item in toolkit:
+            if isinstance(item, Mapping):
+                key = str(item.get("key") or "").strip()
+                guidance = str(item.get("guidance") or "").strip()
+            else:
+                key = str(item).strip()
+                guidance = ""
+            if not key:
+                continue
+            label = labels.get(key, key.replace("_", " ").upper())
+            lines.append(f"- {label} — {guidance}" if guidance else f"- {label}")
     lines.append("\nStay inside this HUD's epistemic and branch boundaries.")
     return "\n".join(lines)
