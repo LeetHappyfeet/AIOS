@@ -17,6 +17,9 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
+HUD_VERSION = "hud-v2"
+
+
 @dataclass(frozen=True)
 class HUDBudget:
     """Approximate token caps. These are selection budgets, not tokenizer guarantees."""
@@ -397,7 +400,7 @@ class HUDAssembler:
                 {"key": "action", "guidance": "one concrete action; necessary details only"},
             ],
             "hud": {
-                "version": "hud-v1",
+                "version": HUD_VERSION,
                 "profile_id": hud_profile.profile_id,
                 "profile_name": hud_profile.profile_name,
                 "selection": "pre-resolved-cognition/entity-centered/deterministic",
