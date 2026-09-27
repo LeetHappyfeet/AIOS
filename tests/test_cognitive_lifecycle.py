@@ -88,3 +88,29 @@ async def test_bounded_goal_review_can_validate_completion():
     assert db.goal_status=="completed"
     thread_updates=[sql for sql,_ in db.executed if "UPDATE aios.character_cognitive_thread" in sql]
     assert any("status='resolved'" in sql for sql in thread_updates)
+
+
+@pytest.mark.asyncio
+async def test_irrelevant_goal_review_parks_goal_as_dormant():
+    db=FakeDB()
+    lifecycle=CognitiveLifecycleReconciler(db)
+
+    original_finish=lifecycle.goals.finish
+    async def finish(*,instance_id,goal_id,status="completed"):
+        assert status=="dormant"
+        db.goal_status="dormant"
+        return type("Goal",(),{"goal_id":goal_id,"status":"dormant"})()
+    lifecycle.goals.finish=finish
+
+    await lifecycle.reconcile_operation(
+        operation={"operation_id":uuid4(),"instance_id":db.instance_id,
+                   "thread_id":uuid4(),"operation_type":"planning.review",
+                   "input":{"goal_id":str(db.goal_id)},"source_node_id":None},
+        result={"kind":"choice","option_index":4,
+                "label":"This goal does not deserve active attention right now."},
+        terminal_status="succeeded",
+    )
+    assert db.goal_status=="dormant"
+    evidence=[args for sql,args in db.executed
+              if "INSERT INTO aios.character_goal_evidence" in sql]
+    assert any(args[3]=="withdrawal" for args in evidence)
