@@ -21,7 +21,7 @@ class ActionSpec:
     side_effect_class: str
     allowed_worker_classes: frozenset[str]
     handler: ActionHandler
-    result_mode: str = "terminal"
+    result_mode: str = "final"
     capability_class: str = "action"
     description: str = ""
 
