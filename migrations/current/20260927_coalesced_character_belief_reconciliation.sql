@@ -80,9 +80,12 @@ BEGIN
     WHERE proposition_id=v_proposition_id;
 
     PERFORM aios.mark_character_belief_dirty_descendants(v_instance_id, v_atom_id);
-    RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
+    IF TG_OP='DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
 END;
-$$;
+$;
 
 CREATE OR REPLACE FUNCTION aios.refresh_belief_from_admission()
 RETURNS trigger
@@ -103,9 +106,12 @@ BEGIN
     WHERE kae.acquisition_id=v_acquisition_id;
 
     PERFORM aios.mark_character_belief_dirty_descendants(v_instance_id, v_atom_id);
-    RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
+    IF TG_OP='DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
 END;
-$$;
+$;
 
 CREATE OR REPLACE FUNCTION aios.refresh_belief_from_acquisition_topology()
 RETURNS trigger
