@@ -57,7 +57,7 @@ _SECOND_PERSON_RE = re.compile(r"\b(?:you|your|yours|yourself)\b", re.IGNORECASE
 _SELF_KNOWLEDGE_PATTERNS = (
     re.compile(r"\b(?:what|which)\s+(?:do|would|did)\s+you\s+(?:like|prefer|want|choose|pick|wear|use|keep|own)\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+would\s+you\b.{0,80}\b(?:wear|wearing|choose|choosing|pick|picking)\b", re.IGNORECASE),
-    re.compile(r"\b(?:do|did|have)\s+you\s+(?:ever\s+)?(?:like|prefer|want|choose|pick|wear|use|keep|own|have|visit|meet|remember|experience)\b", re.IGNORECASE),
+    re.compile(r"\b(?:do|did|have)\s+you\s+(?:ever\s+)?(?:like|prefer|want|choose|pick|wear|use|keep|own|have|visit|meet|remember|experience|go|been|see|saw|read|buy|bought|try|tried)\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+(?:is|was|are|were)\s+your\s+(?:favorite|favourite|preference|opinion|memory|experience|relationship|history)\b", re.IGNORECASE),
     re.compile(r"\bhow\s+do\s+you\s+(?:feel|think)\s+about\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+do\s+you\s+remember\b", re.IGNORECASE),
@@ -95,13 +95,12 @@ def resolve_retrieval_demand(focus_text: str, *, character_id: str) -> Retrieval
     if not clause:
         return RetrievalDemand("general", raw, "empty_focus")
 
-    if any(pattern.search(clause) for pattern in _EXTERNAL_KNOWLEDGE_PATTERNS):
-        return RetrievalDemand("general", raw, "external_knowledge_question")
-
     self_memory = bool(_SECOND_PERSON_RE.search(clause)) and any(
         pattern.search(clause) for pattern in _SELF_KNOWLEDGE_PATTERNS
     )
     if not self_memory:
+        if any(pattern.search(clause) for pattern in _EXTERNAL_KNOWLEDGE_PATTERNS):
+            return RetrievalDemand("general", raw, "external_knowledge_question")
         return RetrievalDemand("general", raw, "no_high_confidence_self_signal")
 
     terms = tuple(
