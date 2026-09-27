@@ -248,29 +248,38 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
         description="Search authorized public /world knowledge without granting character ownership.",
     ))
     registry.register(ActionSpec(
-        "state.inspect",
-        {"type":"object","properties":{
+        name="state.inspect",
+        schema={"type":"object","properties":{
             "subject":{"type":"string","enum":["runtime","scene","task","goals"]}},
          "additionalProperties":False},
-        "read_only",frozenset({"executive","research","planning","reflection","communication"}),
-        state_inspect,"return_to_cognition","lookup",
-        "Inspect bounded current AIOS state without expanding the HUD.",
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive","research","planning","reflection","communication"}),
+        handler=state_inspect,
+        result_mode="return_to_cognition",
+        capability_class="lookup",
+        description="Inspect bounded current AIOS state without expanding the HUD.",
     ))
     registry.register(ActionSpec(
-        "research.search",
-        {"type":"object","required":["query"],"properties":{
+        name="research.search",
+        schema={"type":"object","required":["query"],"properties":{
             "query":{"type":"string"},"source":{"type":"string","enum":["auto","corpus"]},
             "limit":{"type":"integer"}},"additionalProperties":False},
-        "read_only",frozenset({"executive","research","planning"}),
-        research_search,"return_to_cognition","research",
-        "Search permitted research providers; results remain temporary references.",
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive","research","planning"}),
+        handler=research_search,
+        result_mode="return_to_cognition",
+        capability_class="research",
+        description="Search permitted research providers; results remain temporary references.",
     ))
     registry.register(ActionSpec(
-        "source.read",
-        {"type":"object","required":["research_id","section_id"],"properties":{
+        name="source.read",
+        schema={"type":"object","required":["research_id","section_id"],"properties":{
             "research_id":{"type":"string"},"section_id":{"type":"string"}},
          "additionalProperties":False},
-        "read_only",frozenset({"executive","research","planning"}),
-        source_read,"return_to_cognition","research",
-        "Read a source previously exposed by this character's scoped research event.",
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive","research","planning"}),
+        handler=source_read,
+        result_mode="return_to_cognition",
+        capability_class="research",
+        description="Read a source previously exposed by this character's scoped research event.",
     ))
