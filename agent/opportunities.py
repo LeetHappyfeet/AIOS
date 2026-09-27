@@ -185,6 +185,12 @@ class CognitiveOpportunityService:
                 "goal_review",f"Consider whether what just happened changes my goal: {g}",
                 "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
                 "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
+                "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),
+                "current_scene":{
+                    "location":snapshot.scene.get("location") if hasattr(snapshot,"scene") else None,
+                    "immediate_goal":snapshot.scene.get("immediate_goal") if hasattr(snapshot,"scene") else None,
+                    "pending_work":snapshot.scene.get("pending_work") if hasattr(snapshot,"scene") else None,
+                },
                 "knowledge_demand":goal_demand or {}},
                 source_node_id or context.source_head_node_id,context,
                 relevance=.45+affinity*.35,
