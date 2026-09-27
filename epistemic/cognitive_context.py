@@ -22,6 +22,7 @@ from aios_app.epistemic.research import (
     SemanticCorpusReinforcementService,
     SemanticKnowledgeCoverageService,
     KnowledgeDemandResolver,
+    resolve_retrieval_demand,
 )
 from aios_app.epistemic.retrieval_policy import (
     CognitiveRetrievalPolicy,
@@ -46,6 +47,8 @@ class CognitiveAttentionInputs:
     plugin_focus_text: str
     retrieval_focus_text: str
     goals: list[CognitiveGoal]
+    knowledge_route: str = "general"
+    demand_reason: str = "unclassified"
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,8 @@ def automatic_corpus_research_allowed(
         None,
     )
     if not focus_row:
+        return False
+    if attention.knowledge_route == "character":
         return False
     speaker_id = str(focus_row.get("speaker_id") or "").strip()
     speaker_role = str(focus_row.get("speaker_role") or "").strip().lower()
@@ -283,8 +288,20 @@ class CognitiveContextService:
             )
             if signal.get("focus_text")
         )
+        demand = resolve_retrieval_demand(
+            resolved_focus_text,
+            character_id=context.character_id,
+        )
+        # High-confidence self/history/preference questions retrieve against a
+        # compact demand rather than the entire surrounding dialogue turn.
+        # The raw focus remains available above for presentation/provenance.
+        retrieval_base = (
+            demand.focus_text
+            if demand.route == "character"
+            else resolved_focus_text
+        )
         retrieval_focus_text = " ".join(
-            part for part in (resolved_focus_text, plugin_focus_text) if part
+            part for part in (retrieval_base, plugin_focus_text) if part
         )
         return CognitiveAttentionInputs(
             recent_newest=recent_newest,
@@ -293,6 +310,8 @@ class CognitiveContextService:
             plugin_focus_text=plugin_focus_text,
             retrieval_focus_text=retrieval_focus_text,
             goals=goals,
+            knowledge_route=demand.route,
+            demand_reason=demand.reason,
         )
 
     def _prepared_retrieval_key(
@@ -718,6 +737,8 @@ class CognitiveContextService:
             "coverage": corpus_demand.coverage,
             "reason": corpus_demand.reason,
             "automatic_lookup_allowed": allow_automatic_corpus,
+            "knowledge_route": attention.knowledge_route,
+            "demand_reason": attention.demand_reason,
         }
 
         anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
