@@ -152,10 +152,14 @@ class CognitiveOpportunityService:
         # because older goals sort ahead of them.
         review_rows=await self.db.fetch(
             """SELECT g.goal_id,
-                      max(e.created_at) FILTER
-                        (WHERE e.evidence_type='bounded_goal_review') AS last_reviewed_at
+                      max(o.completed_at) FILTER (
+                        WHERE o.operation_type='planning.review'
+                          AND o.status='succeeded'
+                      ) AS last_reviewed_at
                FROM aios.character_agent_goal g
-               LEFT JOIN aios.character_goal_evidence e ON e.goal_id=g.goal_id
+               LEFT JOIN aios.character_cognitive_operation o
+                 ON o.instance_id=g.instance_id
+                AND o.input->>'goal_id'=g.goal_id::text
                WHERE g.instance_id=$1 AND g.status='active'
                GROUP BY g.goal_id""",
             instance_id)
