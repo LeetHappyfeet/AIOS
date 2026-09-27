@@ -171,7 +171,7 @@ class CognitiveOpportunityService:
             starvation=1.0 if reviewed is None else 0.0
             review_candidates.append((starvation,affinity,reviewed,index,goal,g))
         review_candidates.sort(
-            key=lambda x:(-x[0],-x[1],x[2] is not None,x[2] or context.created_at,x[3]))
+            key=lambda x:(-x[0],-x[1],x[2] is not None,x[2],x[3]))
         for starvation,affinity,reviewed,index,goal,g in review_candidates[:3]:
             goal_id=str(goal.goal_id) if goal.goal_id else None
             goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
