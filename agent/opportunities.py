@@ -146,26 +146,50 @@ class CognitiveOpportunityService:
                         key=f"research:{subject.lower()[:100]}"))
 
         goal_words=set(re.findall(r"[a-z0-9']+",focus.lower()))
-        for goal in goals[:3]:
+        # Review is budgeted, not eligibility-limited. Rank every active goal
+        # by current affinity plus review starvation, then spend at most three
+        # review slots. This prevents goals 4-N from becoming immortal merely
+        # because older goals sort ahead of them.
+        review_rows=await self.db.fetch(
+            """SELECT g.goal_id,
+                      max(e.created_at) FILTER
+                        (WHERE e.evidence_type='bounded_goal_review') AS last_reviewed_at
+               FROM aios.character_agent_goal g
+               LEFT JOIN aios.character_goal_evidence e ON e.goal_id=g.goal_id
+               WHERE g.instance_id=$1 AND g.status='active'
+               GROUP BY g.goal_id""",
+            instance_id)
+        last_reviewed={row["goal_id"]:row["last_reviewed_at"] for row in review_rows}
+        review_candidates=[]
+        for index,goal in enumerate(goals):
             g=_clip(goal.text,160)
             overlap=len(goal_words & set(re.findall(r"[a-z0-9']+",g.lower())))
             affinity=min(1,.25*overlap)
-            if affinity>.0 or len(goals)==1:
-                goal_id=str(goal.goal_id) if goal.goal_id else None
-                goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
-                goal_subject=goal_subject_entry[0] if goal_subject_entry else None
-                goal_demand=goal_subject_entry[1] if goal_subject_entry else None
-                proposals.append(self._p(
-                    "goal_review",f"Consider whether what just happened changes my goal: {g}",
-                    "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
-                    "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
-                    "knowledge_demand":goal_demand or {}},
-                    source_node_id or context.source_head_node_id,context,
-                    relevance=.45+affinity*.35,goal_affinity=max(.35,affinity),recency=1,
-                    evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g}],
-                    key=f"goal:{goal_id or g.lower()[:100]}",
-                    subject_id=goal_subject.subject_id if goal_subject else
-                               (primary_subject.subject_id if primary_subject else None)))
+            reviewed=last_reviewed.get(goal.goal_id)
+            # Never-reviewed goals outrank already-reviewed zero-affinity goals;
+            # otherwise older reviews rotate forward deterministically.
+            starvation=1.0 if reviewed is None else 0.0
+            review_candidates.append((starvation,affinity,reviewed,index,goal,g))
+        review_candidates.sort(
+            key=lambda x:(-x[0],-x[1],x[2] is not None,x[2] or context.created_at,x[3]))
+        for starvation,affinity,reviewed,index,goal,g in review_candidates[:3]:
+            goal_id=str(goal.goal_id) if goal.goal_id else None
+            goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
+            goal_subject=goal_subject_entry[0] if goal_subject_entry else None
+            goal_demand=goal_subject_entry[1] if goal_subject_entry else None
+            proposals.append(self._p(
+                "goal_review",f"Consider whether what just happened changes my goal: {g}",
+                "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
+                "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
+                "knowledge_demand":goal_demand or {}},
+                source_node_id or context.source_head_node_id,context,
+                relevance=.45+affinity*.35,
+                goal_affinity=max(.35,affinity)+(.15 if starvation else 0),recency=1,
+                evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g,
+                           "last_reviewed_at":str(reviewed) if reviewed else None}],
+                key=f"goal:{goal_id or g.lower()[:100]}",
+                subject_id=goal_subject.subject_id if goal_subject else
+                           (primary_subject.subject_id if primary_subject else None)))
 
         # Scene transitions are explicit deterministic evidence for immediate/reflection needs.
         if context.source_head_node_id:
