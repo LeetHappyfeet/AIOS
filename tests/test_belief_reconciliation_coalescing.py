@@ -53,3 +53,9 @@ def test_reconciliation_stage_uses_reconciliation_pool():
     assert '"reconcile_character_beliefs": JobSpec(ResourceClass.RECONCILIATION' in registry
     assert 'Stage("reconcile_character_beliefs", "reconcile_character_beliefs"' in supervisor
     assert '"reconcile_character_beliefs": handle_reconcile_character_beliefs' in runner
+
+
+def test_migration_function_bodies_have_balanced_dollar_quotes():
+    sql = MIGRATION.read_text(encoding="utf-8")
+    assert "\n$;\n" not in sql
+    assert sql.count("AS $$") == sql.count("$$;")
