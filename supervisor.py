@@ -158,6 +158,18 @@ STAGES: List[Stage] = [
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_world_assertion_topology' AND pj.status IN ('queued','running') AND pj.payload->>'assertion_id'=a.assertion_id::text)
         ORDER BY a.created_at LIMIT $1
     """, assertion_id_payload, 50, 32, True),
+    Stage("reconcile_character_beliefs", "reconcile_character_beliefs", """
+        SELECT 1
+        WHERE EXISTS (
+            SELECT 1 FROM aios.character_belief_reconciliation_dirty
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='reconcile_character_beliefs'
+              AND pj.status IN ('queued','running')
+          )
+        LIMIT $1
+    """, empty_payload, 55, 1, True),
     Stage("resolve_generated_facts", "resolve_generated_facts", """
         SELECT 1 WHERE EXISTS (SELECT 1 FROM aios.world_proposition_assertion a WHERE a.source_kind='generated_fill' AND a.epistemic_status='provisional')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='resolve_generated_facts' AND pj.status IN ('queued','running')) LIMIT $1
