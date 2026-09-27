@@ -257,6 +257,16 @@ class CharacterSceneStateStore:
                 PROJECTION_VERSION,
             )
 
+        # Objective goal completion is allowed only through explicit
+        # structured contracts. Free-text goals remain review-driven.
+        from aios_app.epistemic.goal_scene_reconciliation import SceneGoalReconciler
+        await SceneGoalReconciler(self.db).reconcile(
+            instance_id=instance_id,
+            scene=normalized,
+            source_node_id=source_head_node_id or runtime_head_node_id,
+            snapshot_id=snapshot_id,
+        )
+
         return {
             "snapshot_id": snapshot_id,
             "projection_version": row["projection_version"],
