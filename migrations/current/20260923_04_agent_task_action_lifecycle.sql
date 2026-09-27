@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS aios.character_action (
     arguments jsonb NOT NULL DEFAULT '{}'::jsonb,
     status text NOT NULL DEFAULT 'proposed'
         CHECK (status IN (
-            'proposed','validated','queued','running',
+            'proposed','validated','waiting','queued','running',
             'succeeded','failed','rejected','cancelled','timed_out'
         )),
     side_effect_class text NOT NULL DEFAULT 'read_only'

@@ -90,3 +90,28 @@ async def test_source_read_returns_reference_not_durable_knowledge():
     assert result["durable_knowledge"] is False
     assert result["research_id"] == str(research_id)
     assert result["section_id"] == str(section_id)
+
+
+def test_action_spec_defaults_to_local_execution():
+    import inspect
+    from aios_app.agent.actions import ActionSpec
+    assert inspect.signature(ActionSpec).parameters["execution_mode"].default == "local"
+
+
+def test_worker_capability_metadata_exposes_execution_mode():
+    from aios_app.agent.actions import ActionRegistry, ActionSpec
+
+    registry = ActionRegistry()
+    registry.register(ActionSpec(
+        name="compute.exec",
+        schema={"type": "object"},
+        side_effect_class="external_sensitive",
+        allowed_worker_classes=frozenset({"executive"}),
+        handler=None,
+        execution_mode="worker",
+        result_mode="asynchronous",
+        capability_class="compute",
+    ))
+    capability = registry.capabilities_for("executive")["compute.exec"]
+    assert capability["execution_mode"] == "worker"
+    assert capability["result_mode"] == "asynchronous"

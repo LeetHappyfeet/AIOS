@@ -20,7 +20,8 @@ class ActionSpec:
     schema: dict[str, Any]
     side_effect_class: str
     allowed_worker_classes: frozenset[str]
-    handler: ActionHandler
+    handler: ActionHandler | None
+    execution_mode: str = "local"
     result_mode: str = "final"
     capability_class: str = "action"
     description: str = ""
@@ -53,6 +54,7 @@ class ActionRegistry:
                 "description": spec.description,
                 "side_effect_class": spec.side_effect_class,
                 "result_mode": spec.result_mode,
+                "execution_mode": spec.execution_mode,
                 "schema": spec.schema,
             }
             for name, spec in self._specs.items()
@@ -102,10 +104,21 @@ class ActionDispatcher:
             return await self.store.transition_action(action_id, "waiting")
 
         await self.db.execute(
-            "UPDATE aios.character_action SET result_mode=$2 WHERE action_id=$1",
-            action_id, spec.result_mode,
+            """UPDATE aios.character_action
+               SET result_mode=$2, execution_mode=$3
+               WHERE action_id=$1""",
+            action_id, spec.result_mode, spec.execution_mode,
         )
-        action = await self.store.transition_action(action_id, "validated")
+        if action.status == "waiting":
+            action = await self.store.transition_action(action_id, "validated")
+        elif action.status == "proposed":
+            action = await self.store.transition_action(action_id, "validated")
+        if spec.execution_mode == "worker":
+            return await self.store.transition_action(action_id, "queued")
+        if spec.handler is None:
+            return await self.store.transition_action(
+                action_id, "failed", error="local action has no handler"
+            )
         action = await self.store.transition_action(action_id, "running")
         try:
             result = await spec.handler(action.instance_id, action.arguments)

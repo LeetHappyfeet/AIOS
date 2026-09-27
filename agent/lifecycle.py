@@ -21,8 +21,9 @@ TASK_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 ACTION_TRANSITIONS: dict[str, frozenset[str]] = {
-    "proposed": frozenset({"validated", "rejected", "cancelled"}),
-    "validated": frozenset({"queued", "running", "rejected", "cancelled"}),
+    "proposed": frozenset({"validated", "waiting", "rejected", "cancelled"}),
+    "validated": frozenset({"queued", "running", "waiting", "rejected", "cancelled"}),
+    "waiting": frozenset({"validated", "rejected", "cancelled"}),
     "queued": frozenset({"running", "cancelled", "timed_out"}),
     "running": frozenset({"succeeded", "failed", "cancelled", "timed_out"}),
     "succeeded": frozenset(),
@@ -122,6 +123,9 @@ class ActionRecord:
     error: Optional[str]
     rejection_reason: Optional[str]
     result_mode: str
+    execution_mode: str
+    assigned_worker_id: Optional[UUID]
+    lease_expires_at: Any
     meta: dict[str, Any]
 
     @classmethod
@@ -142,6 +146,9 @@ class ActionRecord:
             error=row["error"],
             rejection_reason=row["rejection_reason"],
             result_mode=str(row.get("result_mode", "final")),
+            execution_mode=str(row.get("execution_mode", "local")),
+            assigned_worker_id=row.get("assigned_worker_id"),
+            lease_expires_at=row.get("lease_expires_at"),
             meta=dict(_decode(row["meta"]) or {}),
         )
 
