@@ -128,6 +128,7 @@ class TopologyRetriever(BaseTopologyRetriever):
         self, context: HUDContext, scorer: HUDRelevanceScorer, *, mode: str,
         focus_text: str = "", goals: Iterable[Any] = (), max_hops: Optional[int] = None,
         limit: Optional[int] = None, world_domain: Optional[str] = None,
+        include_world: bool = True,
     ) -> list[dict[str, Any]]:
         halo_text, halo_node_ids = await self._dag_halo(context)
         expanded_focus = " ".join(part for part in (halo_text, focus_text) if part).strip()
@@ -142,6 +143,16 @@ class TopologyRetriever(BaseTopologyRetriever):
             )
         finally:
             _ACTIVE_WORLD_DOMAIN.reset(token)
+
+        if not include_world:
+            for item in char_result:
+                item.setdefault("retrieval_scope", "character")
+                item.setdefault("retrieval_reason", "owned")
+            logger.info(
+                "Federated halo mode=%s domain=%s world augmentation suppressed by demand route char=%d",
+                mode, domain, len(char_result),
+            )
+            return char_result[:effective_limit]
 
         # If character topology missed its generation budget, do not compound
         # the miss with optional public-world I/O. CognitiveContext already has
