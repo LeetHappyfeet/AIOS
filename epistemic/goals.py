@@ -170,6 +170,11 @@ class CharacterGoalService:
         clean = " ".join(str(text).split())
         if not clean:
             raise ValueError("goal text cannot be empty")
+        goal_meta = dict(meta or {})
+        if "origin_scene" not in goal_meta:
+            origin_scene = await self._origin_scene(instance_id, source_node_id)
+            if origin_scene:
+                goal_meta["origin_scene"] = origin_scene
         row = await self._returning(
             """INSERT INTO aios.character_agent_goal(
                    instance_id,source_task_id,source_node_id,root_task_id,source_action_id,
@@ -177,7 +182,7 @@ class CharacterGoalService:
                VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
                RETURNING goal_id,goal_text,status,priority,meta""",
             instance_id, source_task_id, source_node_id, root_task_id, source_action_id,
-            clean, int(priority), json.dumps(dict(meta or {})),
+            clean, int(priority), json.dumps(goal_meta),
         )
         goal = self._goal(row)
         await self._invalidate(instance_id)
@@ -382,6 +387,32 @@ class CharacterGoalService:
             instance_id, goal_id,
             json.dumps({"resolution_kind": reason, "resolved_by": "goal_lifecycle"}),
         )
+
+    async def _origin_scene(
+        self, instance_id: UUID, source_node_id: UUID | None
+    ) -> dict[str, Any]:
+        """Capture bounded branch-local scene provenance for lifecycle review."""
+        if source_node_id is None:
+            return {}
+        row = await self.db.fetchrow(
+            """SELECT snapshot_id,source_timeline_id,source_head_node_id,scene_state
+               FROM aios.character_scene_snapshot
+               WHERE instance_id=$1 AND source_head_node_id=$2
+               ORDER BY updated_at DESC LIMIT 1""",
+            instance_id, source_node_id)
+        if not row:
+            return {"source_node_id": str(source_node_id)}
+        scene=self._json_object(row["scene_state"])
+        return {
+            "snapshot_id": str(row["snapshot_id"]),
+            "source_node_id": str(row["source_head_node_id"] or source_node_id),
+            "source_timeline_id": str(row["source_timeline_id"]) if row["source_timeline_id"] else None,
+            "location": scene.get("location"),
+            "present_entities": scene.get("present_entities") or [],
+            "immediate_goal": scene.get("immediate_goal"),
+            "pending_work": scene.get("pending_work"),
+            "last_significant_change": scene.get("last_significant_change"),
+        }
 
     async def _refresh_scene(self, instance_id: UUID) -> None:
         # Goal lifecycle owns intention; scene projection consumes it.
