@@ -387,6 +387,15 @@ class HUDAssembler:
                     if action.get("key")
                 ],
             ],
+            # Public, compact affordances for the HUD consumer. These describe
+            # requests a human or host LLM may make of AIOS; worker-only tools
+            # and their schemas remain private to the agent capability layer.
+            "toolkit": [
+                {"key": "memory_lookup", "guidance": "one subject/question; a few memories"},
+                {"key": "world_lookup", "guidance": "one subject/question; a few facts"},
+                {"key": "research", "guidance": "one focused question; brief findings"},
+                {"key": "action", "guidance": "one concrete action; necessary details only"},
+            ],
             "hud": {
                 "version": "hud-v1",
                 "profile_id": hud_profile.profile_id,
