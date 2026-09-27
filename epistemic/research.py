@@ -52,20 +52,20 @@ class RetrievalDemand:
     reason: str
 
 
-_DEMAND_SENTENCE_RE = re.compile(r"[^.!?\\n]+[.!?]?")
-_SECOND_PERSON_RE = re.compile(r"\\b(?:you|your|yours|yourself)\\b", re.IGNORECASE)
+_DEMAND_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]?")
+_SECOND_PERSON_RE = re.compile(r"\b(?:you|your|yours|yourself)\b", re.IGNORECASE)
 _SELF_KNOWLEDGE_PATTERNS = (
-    re.compile(r"\\b(?:what|which)\\s+(?:do|would|did)\\s+you\\s+(?:like|prefer|want|choose|pick|wear|use|keep|own)\\b", re.IGNORECASE),
-    re.compile(r"\\bwhat\\s+would\\s+you\\b.{0,80}\\b(?:wear|wearing|choose|choosing|pick|picking)\\b", re.IGNORECASE),
-    re.compile(r"\\b(?:do|did|have)\\s+you\\s+(?:ever\\s+)?(?:like|prefer|want|choose|pick|wear|use|keep|own|have|visit|meet|remember|experience)\\b", re.IGNORECASE),
-    re.compile(r"\\bwhat\\s+(?:is|was|are|were)\\s+your\\s+(?:favorite|favourite|preference|opinion|memory|experience|relationship|history)\\b", re.IGNORECASE),
-    re.compile(r"\\bhow\\s+do\\s+you\\s+(?:feel|think)\\s+about\\b", re.IGNORECASE),
-    re.compile(r"\\bwhat\\s+do\\s+you\\s+remember\\b", re.IGNORECASE),
+    re.compile(r"\b(?:what|which)\s+(?:do|would|did)\s+you\s+(?:like|prefer|want|choose|pick|wear|use|keep|own)\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+would\s+you\b.{0,80}\b(?:wear|wearing|choose|choosing|pick|picking)\b", re.IGNORECASE),
+    re.compile(r"\b(?:do|did|have)\s+you\s+(?:ever\s+)?(?:like|prefer|want|choose|pick|wear|use|keep|own|have|visit|meet|remember|experience)\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+(?:is|was|are|were)\s+your\s+(?:favorite|favourite|preference|opinion|memory|experience|relationship|history)\b", re.IGNORECASE),
+    re.compile(r"\bhow\s+do\s+you\s+(?:feel|think)\s+about\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+you\s+remember\b", re.IGNORECASE),
 )
 _EXTERNAL_KNOWLEDGE_PATTERNS = (
-    re.compile(r"\\b(?:do\\s+you\\s+know|what\\s+do\\s+you\\s+know)\\s+(?:about\\s+)?", re.IGNORECASE),
-    re.compile(r"\\b(?:what|who|where|when|why)\\s+(?:is|are|was|were)\\b", re.IGNORECASE),
-    re.compile(r"\\b(?:explain|define|tell\\s+me\\s+about)\\b", re.IGNORECASE),
+    re.compile(r"\b(?:do\s+you\s+know|what\s+do\s+you\s+know)\s+(?:about\s+)?", re.IGNORECASE),
+    re.compile(r"\b(?:what|who|where|when|why)\s+(?:is|are|was|were)\b", re.IGNORECASE),
+    re.compile(r"\b(?:explain|define|tell\s+me\s+about)\b", re.IGNORECASE),
 )
 _DEMAND_NOISE = frozenset({
     "i", "me", "my", "mine", "you", "your", "yours", "yourself",
