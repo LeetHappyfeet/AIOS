@@ -155,6 +155,8 @@ class CognitiveLifecycleReconciler:
                                         "resolution_operation_id":str(operation["operation_id"]),
                                         "resolution_source_node_id":str(operation.get("source_node_id") or ""),
                                     }))
+                                await self.reconcile_goal_threads(
+                                    instance_id=operation["instance_id"],goal_id=goal_id)
                         except LookupError:
                             pass
             elif operation_type != "planning.review":
