@@ -78,10 +78,10 @@ class CognitiveOperationEngine:
                 f"This changes how I understand the situation: {subject}.",
                 "I do not have enough evidence to decide what it means."],
             "planning.review":[
-                "The goal remains unresolved.",
+                "The goal remains unresolved and its opportunity is still open.",
                 "I made progress, but the goal remains active.",
                 "The available evidence satisfies this goal.",
-                "The goal is currently blocked."],
+                "The original opportunity to complete this goal has passed without satisfaction."],
             "executive.review":[
                 "This deserves immediate attention.",
                 "I should wait for more information.",
@@ -93,7 +93,7 @@ class CognitiveOperationEngine:
                      "operation_id":str(op["operation_id"]),"option_index":i,
                      "freshness_policy":choice_freshness}
                     for i,(k,label) in enumerate(zip("ABCD",labels))]
-        fifth=("This goal does not deserve active attention right now."
+        fifth=("I still could pursue this goal, but it does not deserve active attention right now."
                if str(op["operation_type"])=="planning.review"
                else "Stop considering this for now.")
         candidates.append({"key":"E","label":fifth,
