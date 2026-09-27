@@ -109,10 +109,10 @@ class CognitiveLifecycleReconciler:
                 # semantic outcome is the only source of goal evidence.
                 option_index=int(result.get("option_index",-1))
                 relation_by_option={
-                    0: None,                    # unresolved
+                    0: None,                    # unresolved/open
                     1: "progress",
                     2: "completion_candidate",
-                    3: "blocker",
+                    3: "contradiction",          # opportunity passed unsatisfied
                     4: "withdrawal",
                 }
                 relation=relation_by_option.get(option_index)
@@ -126,20 +126,35 @@ class CognitiveLifecycleReconciler:
                         meta={"label":result.get("label"),"option_index":option_index},
                     )
                 elif relation is not None:
+                    lifecycle_effect=(
+                        "opportunity_missed" if option_index==3
+                        else "dormant" if option_index==4 else None)
                     await self.record_goal_evidence(
                         instance_id=operation["instance_id"],goal_id=goal_id,
                         evidence_type="bounded_goal_review",relation=relation,
                         evidence_id=str(operation["operation_id"]),
                         source_node_id=operation.get("source_node_id"),
-                        confidence=.7 if option_index in {1,3} else .65,
+                        confidence=.8 if option_index==3 else (.7 if option_index==1 else .65),
                         meta={"label":result.get("label"),"option_index":option_index,
-                              **({"lifecycle_effect":"dormant"} if option_index==4 else {})},
+                              **({"lifecycle_effect":lifecycle_effect} if lifecycle_effect else {})},
                     )
-                    if option_index == 4:
+                    if option_index in {3,4}:
+                        terminal_status="cancelled" if option_index==3 else "dormant"
                         try:
                             await self.goals.finish(
                                 instance_id=operation["instance_id"],
-                                goal_id=goal_id,status="dormant")
+                                goal_id=goal_id,status=terminal_status)
+                            if option_index==3:
+                                await self.db.execute(
+                                    """UPDATE aios.character_agent_goal
+                                       SET meta=meta || $3::jsonb,updated_at=now()
+                                       WHERE goal_id=$1 AND instance_id=$2""",
+                                    goal_id,operation["instance_id"],
+                                    json.dumps({
+                                        "resolution_kind":"opportunity_missed",
+                                        "resolution_operation_id":str(operation["operation_id"]),
+                                        "resolution_source_node_id":str(operation.get("source_node_id") or ""),
+                                    }))
                         except LookupError:
                             pass
             elif operation_type != "planning.review":
