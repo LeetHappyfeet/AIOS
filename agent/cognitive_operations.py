@@ -30,6 +30,11 @@ class CognitiveOperationEngine:
             opportunity.get("source_node_id"), opportunity.get("freshness_policy") or "contextual",
         )
         operation_id=row["operation_id"]
+        if thread_id:
+            await self.db.execute(
+                """UPDATE aios.character_cognitive_thread
+                   SET status='working',updated_at=now()
+                   WHERE thread_id=$1 AND status IN ('open','working')""",thread_id)
         await enqueue_job(self.db,job_type="cognitive_operation",
             payload={"instance_id":str(opportunity["instance_id"]),"operation_id":str(operation_id)},
             priority=priority)
@@ -73,10 +78,10 @@ class CognitiveOperationEngine:
                 f"This changes how I understand the situation: {subject}.",
                 "I do not have enough evidence to decide what it means."],
             "planning.review":[
-                "My current goal still makes sense.",
-                "I should reconsider the current goal before proceeding.",
-                "This creates a new prerequisite or blocker.",
-                "I do not need to change the plan yet."],
+                "The goal remains unresolved and its opportunity is still open.",
+                "I made progress, but the goal remains active.",
+                "The available evidence satisfies this goal.",
+                "The original opportunity to complete this goal has passed without satisfaction."],
             "executive.review":[
                 "This deserves immediate attention.",
                 "I should wait for more information.",
@@ -88,7 +93,10 @@ class CognitiveOperationEngine:
                      "operation_id":str(op["operation_id"]),"option_index":i,
                      "freshness_policy":choice_freshness}
                     for i,(k,label) in enumerate(zip("ABCD",labels))]
-        candidates.append({"key":"E","label":"Stop considering this for now.",
+        fifth=("I still could pursue this goal, but it does not deserve active attention right now."
+               if str(op["operation_type"])=="planning.review"
+               else "Stop considering this for now.")
+        candidates.append({"key":"E","label":fifth,
                            "operation":"operation_choice","operation_id":str(op["operation_id"]),
                            "option_index":4,"freshness_policy":choice_freshness})
         faculty_profile={
@@ -127,16 +135,16 @@ class CognitiveOperationEngine:
         ):
             await self._stale(op,"strict operation context advanced while inference was running")
             return False
+        result={"kind":"choice","option_index":selected.get("option_index"),
+                "label":selected.get("label")}
         changed=await self.db.execute_returning_row(
             """UPDATE aios.character_cognitive_operation
                SET status='succeeded',result=$2::jsonb,completed_at=now(),updated_at=now()
                WHERE operation_id=$1 AND status='waiting_inference' RETURNING operation_id""",
-            operation_id,json.dumps({"kind":"choice","option_index":selected.get("option_index"),
-                                     "label":selected.get("label")},default=str))
+            operation_id,json.dumps(result,default=str))
         if not changed:
             return False
-        await self._finish_side_effects(op,{"kind":"choice","option_index":selected.get("option_index"),
-                                            "label":selected.get("label")})
+        await self._finish_side_effects(op,result)
         return True
 
     async def _stale(self, op: Mapping[str,Any], reason: str) -> None:
@@ -148,6 +156,7 @@ class CognitiveOperationEngine:
             op["operation_id"],json.dumps({"reason":reason}))
         if changed:
             await self._terminal_side_effects(op,status="stale",result={"reason":reason})
+            await self._rearm_failed_episode(op)
 
     async def _fail(self, op: Mapping[str,Any], exc: Exception) -> None:
         result={"error":str(exc)[:1000],"error_type":type(exc).__name__}
@@ -159,6 +168,36 @@ class CognitiveOperationEngine:
             op["operation_id"],json.dumps(result))
         if changed:
             await self._terminal_side_effects(op,status="failed",result=result)
+            await self._rearm_failed_episode(op)
+
+    async def _rearm_failed_episode(self, op: Mapping[str,Any]) -> None:
+        """Retry only unacknowledged host-delta work, never arbitrary cognition."""
+        source_node_id=op.get("source_node_id")
+        if not source_node_id:
+            return
+        runtime=await self.db.fetchrow(
+            """SELECT pending_cognitive_source_node_id,pending_cognitive_event_count,
+                      cognitive_batch_size
+               FROM aios.character_agent_runtime WHERE instance_id=$1""",
+            op["instance_id"])
+        if not runtime:
+            return
+        # A newer host delta may already have superseded this operation. Only
+        # retry the exact still-pending episode and only while it remains due.
+        if (runtime["pending_cognitive_source_node_id"] != source_node_id
+                or int(runtime["pending_cognitive_event_count"]) <
+                   int(runtime["cognitive_batch_size"])):
+            return
+        previous=await self.db.fetchval(
+            """SELECT COALESCE(max((payload->>'retry_attempt')::int),0)
+               FROM aios.character_wake_event
+               WHERE instance_id=$1 AND event_type='COGNITIVE_DELTA_READY'
+                 AND source_id=$2 AND payload ? 'retry_attempt'""",
+            op["instance_id"],str(source_node_id))
+        from aios_app.agent.runtime import AgentRuntimeStore
+        await AgentRuntimeStore(self.db).rearm_cognitive_delta(
+            instance_id=op["instance_id"],source_node_id=source_node_id,
+            retry_attempt=int(previous or 0)+1,max_attempts=3)
 
     async def _terminal_side_effects(
         self, op: Mapping[str,Any], *, status: str, result: Mapping[str,Any]
@@ -169,14 +208,9 @@ class CognitiveOperationEngine:
                    SET status='suppressed',resolved_at=now(),updated_at=now()
                    WHERE opportunity_id=$1 AND status IN ('pending','offered','selected')""",
                 op["opportunity_id"])
-        if op.get("thread_id"):
-            await self.db.execute(
-                """UPDATE aios.character_cognitive_thread
-                   SET status='open',meta=meta || $2::jsonb,updated_at=now()
-                   WHERE thread_id=$1""",
-                op["thread_id"],
-                json.dumps({"last_terminal_operation":{
-                    "status":status,"result":dict(result)}},default=str))
+        from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
+        await CognitiveLifecycleReconciler(self.db).reconcile_operation(
+            operation=op,result=result,terminal_status=status)
 
     async def _finish(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
         changed=await self.db.execute_returning_row(
@@ -189,9 +223,6 @@ class CognitiveOperationEngine:
         await self._finish_side_effects(op,result)
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
-        # A routed host episode is complete only when its selected operation
-        # succeeds. This advances the cognition cursor without losing newer
-        # pending source experience.
         if op.get("source_node_id"):
             from aios_app.agent.admission import AutonomyAdmissionService
             await AutonomyAdmissionService(self.db).mark_episode_succeeded(
@@ -200,16 +231,12 @@ class CognitiveOperationEngine:
             await self.db.execute(
                 """UPDATE aios.character_cognitive_opportunity SET status='executed',
                    resolved_at=now(),updated_at=now() WHERE opportunity_id=$1""",op["opportunity_id"])
-        if op.get("thread_id"):
-            await self.db.execute(
-                """UPDATE aios.character_cognitive_thread SET status='open',
-                   pressure=GREATEST(0,pressure-1),meta=meta || $2::jsonb,updated_at=now()
-                   WHERE thread_id=$1""",op["thread_id"],
-                json.dumps({"last_result":result},default=str))
+        from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
+        await CognitiveLifecycleReconciler(self.db).reconcile_operation(
+            operation=op,result=result,terminal_status="succeeded")
 
     @staticmethod
     def _mapping(value: Any) -> dict[str, Any]:
-        """Normalize a JSONB object, including legacy double-encoded object rows."""
         current=value
         for _ in range(2):
             if isinstance(current,Mapping):

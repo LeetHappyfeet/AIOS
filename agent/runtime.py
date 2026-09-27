@@ -61,6 +61,40 @@ class AgentRuntimeStore:
         )
         return wake_id
 
+    async def rearm_cognitive_delta(
+        self, *, instance_id: UUID, source_node_id: UUID,
+        retry_attempt: int, max_attempts: int = 3,
+    ) -> UUID | None:
+        """Re-arm an unacknowledged host cognition episode with bounded backoff."""
+        attempt = max(1, int(retry_attempt))
+        if attempt > max(1, int(max_attempts)):
+            return None
+        await self.ensure(instance_id)
+        row = await self.db.execute_returning_row(
+            """
+            INSERT INTO aios.character_wake_event (
+                instance_id,event_type,source_type,source_id,payload,
+                priority,dedupe_key,available_at
+            )
+            VALUES($1,'COGNITIVE_DELTA_READY','dag_node',$2,$3::jsonb,150,$4,
+                   now() + (LEAST(60, power(2,$5)::int) * interval '1 second'))
+            ON CONFLICT (instance_id,dedupe_key) DO NOTHING
+            RETURNING wake_id
+            """,
+            instance_id, str(source_node_id),
+            json.dumps({"source_through_node_id":str(source_node_id),
+                        "host_cognition":True,"retry_attempt":attempt}, default=str),
+            f"cognitive-delta-retry:{source_node_id}:{attempt}", attempt,
+        )
+        if not row:
+            return None
+        await self.db.execute(
+            """UPDATE aios.character_agent_runtime
+               SET state=CASE WHEN state='paused' THEN state ELSE 'ready' END,
+                   last_wake_at=now(),updated_at=now()
+               WHERE instance_id=$1""", instance_id)
+        return row["wake_id"]
+
     async def claim_next(self, instance_id: UUID) -> dict[str, Any] | None:
         await self.ensure(instance_id)
         row = await self.db.execute_returning_row(

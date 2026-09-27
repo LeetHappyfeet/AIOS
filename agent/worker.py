@@ -251,7 +251,7 @@ class CharacterWorker:
                             event_type=("ACTION_COMPLETED" if action.status == "succeeded" else "ACTION_FAILED"),
                             source_type="action", source_id=str(action.action_id),
                             payload={"task_id": str(task.task_id), "status": action.status},
-                            dedupe_key=f"action-terminal:{action.action_id}:{action.status}",
+                            dedupe_key=f"action-final:{action.action_id}:{action.status}",
                         )
 
                 asynchronous_children = [

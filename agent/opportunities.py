@@ -11,7 +11,10 @@ from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
-from aios_app.agent.cognitive_subjects import CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver
+from aios_app.agent.cognitive_subjects import (
+    CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,
+    GoalSubjectProjector, GoalKnowledgeDemandResolver,
+)
 
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
@@ -36,6 +39,8 @@ class CognitiveOpportunityService:
         self.demand=KnowledgeDemandResolver(minimum_terms=1,coverage_threshold=.60)
         self.subjects=CognitiveSubjectBuilder(db)
         self.subject_demand=SubjectKnowledgeDemandResolver()
+        self.goal_subjects=GoalSubjectProjector(db)
+        self.goal_demand=GoalKnowledgeDemandResolver(db)
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                        limit:int=8) -> OpportunityBatch:
@@ -54,8 +59,17 @@ class CognitiveOpportunityService:
         attention=await self.cognition.resolve_attention_inputs(
             context,raw,{},recent_limit=6,focus_text=delta_focus)
         snapshot=await self.cognition.resolve_knowledge(context,None,attention)
+        scene_row=await self.db.fetchrow(
+            """SELECT scene_state FROM aios.character_scene_snapshot
+               WHERE instance_id=$1
+                 AND source_timeline_id IS NOT DISTINCT FROM $2
+                 AND source_head_node_id IS NOT DISTINCT FROM $3
+               ORDER BY updated_at DESC LIMIT 1""",
+            instance_id,context.source_timeline_id,context.source_head_node_id)
+        current_scene=self._json_object(scene_row["scene_state"]) if scene_row else {}
         focus=_clip(attention.focus_text,360)
         goals=list(attention.goals)
+        goal_states=await self.cognition.goals.cognitive_states(instance_id, goals)
         proposals:list[dict[str,Any]]=[]
         subjects=await self.subjects.build(
             instance_id=instance_id,focus_text=focus,knowledge=list(snapshot.knowledge),
@@ -65,6 +79,30 @@ class CognitiveOpportunityService:
             self.subject_demand.resolve(primary_subject,list(snapshot.knowledge))
             if primary_subject else None
         )
+        goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
+        for goal in goals:
+            if not goal.goal_id:
+                continue
+            goal_subject=await self.goal_subjects.project(instance_id=instance_id,goal=goal)
+            if goal_subject is None:
+                continue
+            demand=await self.goal_demand.resolve(
+                instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge))
+            goal_subject_demands[goal.goal_id]=(goal_subject,demand)
+            if demand["next_source"]=="corpus":
+                gap=max(0.0,1.0-float(demand["internal_coverage"]))
+                proposals.append(self._p(
+                    "knowledge_gap",f"Find knowledge needed for my goal: {goal.text}",
+                    "corpus.search",
+                    {"query":demand["query"],"focus":goal_subject.retrieval_text,
+                     "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id)},
+                    source_node_id or context.source_head_node_id,context,
+                    relevance=.72,goal_affinity=.85,knowledge_gap=gap,novelty=.65,recency=1,
+                    evidence=[{"kind":"goal_knowledge_demand","goal_id":str(goal.goal_id),
+                               "internal_coverage":demand["internal_coverage"],
+                               "coverage_source":demand["coverage_source"]}],
+                    key=f"goal-research:{goal.goal_id}",
+                    subject_id=goal_subject.subject_id))
 
         # Established topology recall is already character-relative and ranked.
         for rank,item in enumerate(snapshot.recalled_memories[:3]):
@@ -116,18 +154,62 @@ class CognitiveOpportunityService:
                         key=f"research:{subject.lower()[:100]}"))
 
         goal_words=set(re.findall(r"[a-z0-9']+",focus.lower()))
-        for goal in goals[:3]:
-            g=_clip(goal,160)
+        # Review is budgeted, not eligibility-limited. Rank every active goal
+        # by current affinity plus review starvation, then spend at most three
+        # review slots. This prevents goals 4-N from becoming immortal merely
+        # because older goals sort ahead of them.
+        review_rows=await self.db.fetch(
+            """SELECT g.goal_id,
+                      max(o.completed_at) FILTER (
+                        WHERE o.operation_type='planning.review'
+                          AND o.status='succeeded'
+                      ) AS last_reviewed_at
+               FROM aios.character_agent_goal g
+               LEFT JOIN aios.character_cognitive_operation o
+                 ON o.instance_id=g.instance_id
+                AND o.input->>'goal_id'=g.goal_id::text
+               WHERE g.instance_id=$1 AND g.status='active'
+               GROUP BY g.goal_id""",
+            instance_id)
+        last_reviewed={row["goal_id"]:row["last_reviewed_at"] for row in review_rows}
+        review_candidates=[]
+        for index,goal in enumerate(goals):
+            g=_clip(goal.text,160)
             overlap=len(goal_words & set(re.findall(r"[a-z0-9']+",g.lower())))
             affinity=min(1,.25*overlap)
-            if affinity>.0 or len(goals)==1:
-                proposals.append(self._p(
-                    "goal_review",f"Consider whether what just happened changes my goal: {g}",
-                    "planning.review",{"goal":g,"focus":focus},
-                    source_node_id or context.source_head_node_id,context,
-                    relevance=.45+affinity*.35,goal_affinity=max(.35,affinity),recency=1,
-                    evidence=[{"kind":"active_goal","text":g}],key=f"goal:{g.lower()[:100]}",
-                    subject_id=primary_subject.subject_id if primary_subject else None))
+            reviewed=last_reviewed.get(goal.goal_id)
+            # Never-reviewed goals outrank already-reviewed zero-affinity goals;
+            # otherwise older reviews rotate forward deterministically.
+            starvation=1.0 if reviewed is None else 0.0
+            review_candidates.append((starvation,affinity,reviewed,index,goal,g))
+        review_candidates.sort(
+            key=lambda x:(-x[0],-x[1],x[2] is not None,x[2],x[3]))
+        for starvation,affinity,reviewed,index,goal,g in review_candidates[:3]:
+            goal_id=str(goal.goal_id) if goal.goal_id else None
+            goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
+            goal_subject=goal_subject_entry[0] if goal_subject_entry else None
+            goal_demand=goal_subject_entry[1] if goal_subject_entry else None
+            proposals.append(self._p(
+                "goal_review",f"Consider whether what just happened changes my goal: {g}",
+                "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
+                "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
+                "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),
+                "current_scene":{
+                    "location":current_scene.get("location"),
+                    "present_entities":current_scene.get("present_entities") or [],
+                    "immediate_goal":current_scene.get("immediate_goal"),
+                    "pending_work":current_scene.get("pending_work"),
+                    "last_significant_change":current_scene.get("last_significant_change"),
+                },
+                "knowledge_demand":goal_demand or {}},
+                source_node_id or context.source_head_node_id,context,
+                relevance=.45+affinity*.35,
+                goal_affinity=max(.35,affinity)+(.15 if starvation else 0),recency=1,
+                evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g,
+                           "last_reviewed_at":str(reviewed) if reviewed else None}],
+                key=f"goal:{goal_id or g.lower()[:100]}",
+                subject_id=goal_subject.subject_id if goal_subject else
+                           (primary_subject.subject_id if primary_subject else None)))
 
         # Scene transitions are explicit deterministic evidence for immediate/reflection needs.
         if context.source_head_node_id:
@@ -156,8 +238,20 @@ class CognitiveOpportunityService:
                     subject_id=primary_subject.subject_id if primary_subject else None))
 
         proposals.sort(key=lambda x:x["priority_score"],reverse=True)
+        budget=max(1,min(limit,16))
+        # Goal lifecycle has a reserved downstream slot, so preserve one review
+        # through this upstream proposal budget as well. Otherwise high-scoring
+        # recall/research/scene proposals can truncate every goal review before
+        # OpportunityRouter ever has a chance to reserve one.
+        due_review=next(
+            (p for p in proposals if p["opportunity_type"]=="goal_review"),None)
+        if due_review is not None:
+            non_reviews=[p for p in proposals if p is not due_review]
+            budgeted=non_reviews[:max(0,budget-1)] + [due_review]
+        else:
+            budgeted=proposals[:budget]
         stored=[]
-        for p in proposals[:max(1,min(limit,16))]:
+        for p in budgeted:
             row=await self.db.execute_returning_row(
                 """INSERT INTO aios.character_cognitive_opportunity(
                    instance_id,opportunity_type,natural_language,operation_type,operation_payload,
@@ -182,6 +276,18 @@ class CognitiveOpportunityService:
                 json.dumps(p["evidence"]),p.get("subject_id"))
             if row: stored.append(dict(row))
         return OpportunityBatch(instance_id,tuple(stored))
+
+    @staticmethod
+    def _json_object(value: Any) -> dict[str,Any]:
+        if isinstance(value,dict):
+            return dict(value)
+        if isinstance(value,(str,bytes,bytearray)):
+            try:
+                decoded=json.loads(value)
+            except (TypeError,ValueError,json.JSONDecodeError,UnicodeDecodeError):
+                return {}
+            return dict(decoded) if isinstance(decoded,dict) else {}
+        return {}
 
     def _p(self,typ,label,op,payload,node,context,*,novelty=0,relevance=0,urgency=0,
            uncertainty=0,goal_affinity=0,memory_affinity=0,knowledge_gap=0,recency=0,

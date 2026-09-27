@@ -10,7 +10,6 @@ from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
-from aios_app.hud.recent_events import project_scene_change
 from aios_app.hud.profile import get_profile as get_hud_profile, get_profile_by_name
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
@@ -252,10 +251,18 @@ class HUDAssembler:
         semantic_goals = list(cognitive_snapshot.goals)
         semantic_rules = list(cognitive_snapshot.rules)
 
-        goal_items = [
-            {"text": str(goal), "source": "runtime", "tier": 0}
-            for goal in attention.goals
-        ] + semantic_goals
+        # Managed goals are the authority for current intention. Semantic GOAL
+        # propositions remain epistemic evidence and are not promoted into the
+        # ACTIVE GOALS surface merely because they were recalled.
+        goal_states = await self.cognition.goals.cognitive_states(
+            context.instance_id, attention.goals
+        )
+        goal_items = []
+        for goal in attention.goals:
+            item = goal.hud_item()
+            if goal.goal_id is not None:
+                item["lifecycle"] = goal_states.get(goal.goal_id, {})
+            goal_items.append(item)
         rule_items = rules + [
             {**item, "source": "character_knowledge"}
             for item in semantic_rules
@@ -305,56 +312,16 @@ class HUDAssembler:
             ),
         )
 
-        # Materialize a compact, branch-safe working scene at the exact runtime
-        # and source DAG coordinates used for this HUD.  Scene ownership is the
-        # character instance; cognitive lineage is deliberately not consulted.
-        active_tasks = _json_value(raw_state.get("active_tasks"), [])
-        pending_action = str(active_tasks[0]) if active_tasks else None
-        immediate_goal = (
-            str(goal_items[0].get("text"))
-            if goal_items and goal_items[0].get("text")
-            else None
-        )
-        last_change = None
-        evidence_nodes: list[UUID] = []
-        # RECENT EVENTS is relevance-ranked for rendering, so its first item is
-        # not guaranteed to be the newest source event. Scene chronology must
-        # follow the source-DAG/current-event ordering instead.
-        if cognitive_snapshot.current_events:
-            last = cognitive_snapshot.current_events[0]
-            # Persist a semantic scene projection, never an unbounded source
-            # transcript. The source event remains available as evidence and in
-            # RECENT EVENTS when no semantic projection has caught up yet.
-            last_change = project_scene_change(
-                cognitive_snapshot.current_events,
-                max_chars=max(160, min(640, section_caps["scene"] * 2)),
-            )
-            node_value = last.get("node_id") or last.get("source_node_id")
-            if node_value:
-                try:
-                    evidence_nodes.append(UUID(str(node_value)))
-                except (TypeError, ValueError):
-                    pass
-        if context.source_head_node_id:
-            evidence_nodes.append(context.source_head_node_id)
-        if context.head_node_id:
-            evidence_nodes.append(context.head_node_id)
-
-        working_scene = await self.scene_state.materialize(
+        # Scene state is projected by CharacterSceneProjector at mutation/event
+        # boundaries. HUD assembly is deliberately read-only. The actors/objects
+        # above remain relevance-ranked presentation context and are never
+        # persisted as physical scene membership.
+        working_scene = await self.scene_state.current(
             instance_id=context.instance_id,
             runtime_timeline_id=context.timeline_id,
             runtime_head_node_id=context.head_node_id,
             source_timeline_id=context.source_timeline_id,
             source_head_node_id=context.source_head_node_id,
-            scene={
-                "location": scene.get("location"),
-                "present_entities": scene.get("actors") or [],
-                "relevant_objects": scene.get("objects") or [],
-                "immediate_goal": immediate_goal,
-                "pending_action": pending_action,
-                "last_significant_change": last_change,
-            },
-            evidence_node_ids=evidence_nodes,
         )
         scene["working_state"] = working_scene
 

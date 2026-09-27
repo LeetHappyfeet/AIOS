@@ -158,6 +158,18 @@ STAGES: List[Stage] = [
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_world_assertion_topology' AND pj.status IN ('queued','running') AND pj.payload->>'assertion_id'=a.assertion_id::text)
         ORDER BY a.created_at LIMIT $1
     """, assertion_id_payload, 50, 32, True),
+    Stage("reconcile_character_beliefs", "reconcile_character_beliefs", """
+        SELECT 1
+        WHERE EXISTS (
+            SELECT 1 FROM aios.character_belief_reconciliation_dirty
+        )
+          AND NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job pj
+            WHERE pj.job_type='reconcile_character_beliefs'
+              AND pj.status IN ('queued','running')
+          )
+        LIMIT $1
+    """, empty_payload, 55, 1, True),
     Stage("resolve_generated_facts", "resolve_generated_facts", """
         SELECT 1 WHERE EXISTS (SELECT 1 FROM aios.world_proposition_assertion a WHERE a.source_kind='generated_fill' AND a.epistemic_status='provisional')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='resolve_generated_facts' AND pj.status IN ('queued','running')) LIMIT $1
@@ -193,7 +205,7 @@ STAGES: List[Stage] = [
           /* ADMISSION_BARRIER */
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.claim_id=o.claim_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
-        ORDER BY o.observed_at LIMIT $1
+        ORDER BY o.observed_at DESC LIMIT $1
     """), claim_id_payload, 90, 64),
     Stage("derive_semantic_episodes", "derive_semantic_episodes", """
         SELECT 1
@@ -264,7 +276,11 @@ async def run_supervisor() -> None:
             try:
                 from aios_app.agent.autonomy import AutonomyScheduler
                 from aios_app.agent.runtime import AgentRuntimeStore
+                from aios_app.agent.temporal import TemporalTriggerStore
+                temporal = TemporalTriggerStore(db)
+                await temporal.reset_stale_firing()
                 await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)
+                await temporal.emit_due(limit=100)
                 await AutonomyScheduler(db).schedule_ready(limit=100)
                 # Disposable micro-HUD work opportunistically consumes free
                 # donated inference capacity and never survives its receipt.

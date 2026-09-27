@@ -20,8 +20,11 @@ class ActionSpec:
     schema: dict[str, Any]
     side_effect_class: str
     allowed_worker_classes: frozenset[str]
-    handler: ActionHandler
-    result_mode: str = "terminal"
+    handler: ActionHandler | None
+    execution_mode: str = "local"
+    result_mode: str = "final"
+    capability_class: str = "action"
+    description: str = ""
 
 
 class ActionRegistry:
@@ -37,8 +40,24 @@ class ActionRegistry:
         return self._specs.get(name)
 
     def schemas_for(self, worker_class: str) -> dict[str, dict[str, Any]]:
+        """Inference-compatible schema map retained for the broker."""
         return {
             name: spec.schema for name, spec in self._specs.items()
+            if not spec.allowed_worker_classes or worker_class in spec.allowed_worker_classes
+        }
+
+    def capabilities_for(self, worker_class: str) -> dict[str, dict[str, Any]]:
+        """Prompt-facing metadata without changing the inference wire format."""
+        return {
+            name: {
+                "class": spec.capability_class,
+                "description": spec.description,
+                "side_effect_class": spec.side_effect_class,
+                "result_mode": spec.result_mode,
+                "execution_mode": spec.execution_mode,
+                "schema": spec.schema,
+            }
+            for name, spec in self._specs.items()
             if not spec.allowed_worker_classes or worker_class in spec.allowed_worker_classes
         }
 
@@ -85,10 +104,21 @@ class ActionDispatcher:
             return await self.store.transition_action(action_id, "waiting")
 
         await self.db.execute(
-            "UPDATE aios.character_action SET result_mode=$2 WHERE action_id=$1",
-            action_id, spec.result_mode,
+            """UPDATE aios.character_action
+               SET result_mode=$2, execution_mode=$3
+               WHERE action_id=$1""",
+            action_id, spec.result_mode, spec.execution_mode,
         )
-        action = await self.store.transition_action(action_id, "validated")
+        if action.status == "waiting":
+            action = await self.store.transition_action(action_id, "validated")
+        elif action.status == "proposed":
+            action = await self.store.transition_action(action_id, "validated")
+        if spec.execution_mode == "worker":
+            return await self.store.transition_action(action_id, "queued")
+        if spec.handler is None:
+            return await self.store.transition_action(
+                action_id, "failed", error="local action has no handler"
+            )
         action = await self.store.transition_action(action_id, "running")
         try:
             result = await spec.handler(action.instance_id, action.arguments)
@@ -152,38 +182,30 @@ def default_action_registry(db: Database) -> ActionRegistry:
 
     registry.register(ActionSpec(
         name="corpus.search",
-        schema={
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer"},
-            },
-            "additionalProperties": False,
-        },
+        schema={"type":"object","required":["query"],"properties":{
+            "query":{"type":"string"},"limit":{"type":"integer"}},"additionalProperties":False},
         side_effect_class="read_only",
         allowed_worker_classes=frozenset({"executive","research","planning"}),
         handler=corpus_search,
+        capability_class="research",
+        description="Legacy corpus-specific research search.",
     ))
-    from .adapters import register_external_actions, register_interagent_actions
-    from .cognitive_actions import register_cognitive_actions
-
     registry.register(ActionSpec(
         name="corpus.acquire",
-        schema={
-            "type": "object",
-            "required": ["section_ids"],
-            "properties": {
-                "section_ids": {"type": "array"},
-                "mode": {"type": "string"},
-            },
-            "additionalProperties": False,
-        },
+        schema={"type":"object","required":["section_ids"],"properties":{
+            "section_ids":{"type":"array"},"mode":{"type":"string"}},"additionalProperties":False},
         side_effect_class="internal_write",
         allowed_worker_classes=frozenset({"executive","research"}),
         handler=corpus_acquire,
+        capability_class="research",
+        description="Explicitly acquire selected corpus evidence into durable character knowledge.",
     ))
+
+    from .adapters import register_external_actions, register_interagent_actions
+    from .cognitive_actions import register_cognitive_actions
+    from .capabilities import register_agent_capabilities
     register_cognitive_actions(db, registry)
+    register_agent_capabilities(db, registry)
     register_external_actions(db, registry)
     register_interagent_actions(db, registry)
     return registry

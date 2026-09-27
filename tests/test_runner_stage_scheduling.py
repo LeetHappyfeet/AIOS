@@ -38,9 +38,10 @@ def test_context_worker_reserves_resolver_stage():
     assert _reservation_returns()[0] == ["resolve_claim_context"]
 
 
-def test_materialization_worker_reserves_normalization_capacity():
+def test_materialization_worker_reserves_downstream_live_capacity():
     assert _reservation_returns()[1] == [
         "normalize_proposition",
+        "materialize_event_occurrences",
         "project_character_knowledge",
     ]
 
@@ -60,3 +61,47 @@ def test_claim_api_supports_stage_filtering():
 def test_character_projector_priority_is_applied_at_enqueue_time():
     assert _effective_priority("project_character_knowledge", 40) == 30
     assert _effective_priority("normalize_proposition", 35) == 35
+
+
+def test_reserved_claims_age_before_priority():
+    source = Path("pipeline/jobs.py").read_text(encoding="utf-8")
+    assert "q.created_at <= now() - interval '5 minutes'" in source
+    assert "WHEN $6::text[] IS NOT NULL" in source
+
+
+def test_rebalance_knows_event_materialization_priority():
+    source = Path("pipeline/jobs.py").read_text(encoding="utf-8")
+    assert "WHEN 'materialize_event_occurrences' THEN 38" in source
+
+
+
+def test_structural_worker_has_weighted_serial_batch_plan():
+    source = Path("runner.py").read_text(encoding="utf-8")
+    assert '("derive_character_acquisition_topology", 16)' in source
+    assert '("derive_claim_topology", 4)' in source
+    assert '("derive_semantic_episodes", 1)' in source
+    assert "await _execute_claimed_job(" in source
+
+
+def test_structural_lane_is_owned_by_worker_two():
+    tree = ast.parse(Path("runner.py").read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_semantic_lane_order"
+    )
+    source = ast.get_source_segment(
+        Path("runner.py").read_text(encoding="utf-8"), function
+    )
+    assert "return [live], [live, default]" in source
+    assert "return [structural], [structural]" in source
+    assert "return [background], [background, default]" in source
+
+
+def test_ordinary_claim_topology_prefers_recent_observations():
+    source = Path("supervisor.py").read_text(encoding="utf-8")
+    stage = source.split(
+        'Stage("derive_claim_topology", "derive_claim_topology"', 1
+    )[1].split(
+        'Stage("derive_semantic_episodes"', 1
+    )[0]
+    assert "ORDER BY o.observed_at DESC LIMIT $1" in stage

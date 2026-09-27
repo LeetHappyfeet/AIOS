@@ -46,6 +46,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "derive_character_acquisition_topology": JobSpec(ResourceClass.SEMANTIC, "acquisition_scope", True, isolate_blocking=True),
     "derive_world_assertion_topology": JobSpec(ResourceClass.SEMANTIC, "assertion_scope", True, isolate_blocking=True),
     "project_semantic_scope": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
+    "reconcile_character_beliefs": JobSpec(ResourceClass.RECONCILIATION, "global", True),
     "resolve_generated_facts": JobSpec(ResourceClass.RECONCILIATION, "global", True),
     "rdf_epistemic_project": JobSpec(ResourceClass.RDF, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
     "rdf_liminal_promote": JobSpec(ResourceClass.RDF, "section_id", True, isolate_blocking=True, requires_rdf_slot=True),
@@ -57,6 +58,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "agent_wake": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
     "cognitive_operation": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
     "internal_cognition_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
+    "message_cognition_enrichment": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
 }
 
 
@@ -69,7 +71,7 @@ def job_spec(job_type: str) -> JobSpec:
 
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
-    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference"}:
+    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "message_cognition_enrichment"}:
         return SchedulingLane.LIVE
     # LIVE here means fresh semantic enrichment, not a generation barrier. The
     # message_cognitive_commit is the only generation-critical semantic path.

@@ -197,10 +197,19 @@ async def source_node_retrieval_ready(
     row = await db.fetchrow(
         """
         SELECT 1
-        FROM aios.message_cognitive_commit
-        WHERE instance_id=$1
-          AND node_id=$2
-          AND interpreter_version=$3
+        FROM aios.message_cognitive_commit c
+        JOIN aios.character_runtime_state rs ON rs.instance_id=c.instance_id
+        JOIN aios.character_scene_snapshot s
+          ON s.instance_id=c.instance_id
+         AND s.projection_version='character-scene-v2'
+         AND s.runtime_timeline_id=rs.timeline_id
+         AND s.runtime_head_node_id IS NOT DISTINCT FROM rs.head_node_id
+         AND s.source_timeline_id IS NOT DISTINCT FROM rs.source_timeline_id
+         AND s.source_head_node_id=c.node_id
+        WHERE c.instance_id=$1
+          AND c.node_id=$2
+          AND c.interpreter_version=$3
+          AND rs.source_head_node_id=$2
         """,
         instance_id,
         node_id,
@@ -351,6 +360,18 @@ async def enqueue_live_turn_work(
         node_id=node_id,
     )
     if committed:
+        # Every accepted source turn is a scene boundary, even when cognition
+        # found no GOAL. Address the projection to the node this worker handled
+        # so a later source advance cannot silently materialize the wrong head.
+        from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+        try:
+            await CharacterSceneProjector(db).refresh(
+                instance_id, source_head_node_id=node_id
+            )
+        except LookupError:
+            # The source cursor advanced while this work was running. The newer
+            # live turn owns scene projection; do not write stale coordinates.
+            return 0
         return 0
 
     created = await _enqueue_live_job(

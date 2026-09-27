@@ -16,23 +16,30 @@ class CognitiveThreadService:
     async def cross(self, opportunity: Mapping[str, Any]) -> UUID:
         instance_id = UUID(str(opportunity["instance_id"]))
         subject_id = opportunity.get("subject_id")
+        payload=self._mapping(opportunity.get("operation_payload"))
+        goal_id=self._uuid(payload.get("goal_id"))
         subject_key = (
-            f"subject:{subject_id}" if subject_id
+            f"goal:{goal_id}" if goal_id
+            else f"subject:{subject_id}" if subject_id
             else str(opportunity.get("supersession_key") or opportunity["opportunity_id"])
         )
         strength = max(0.0, min(1.0, float(opportunity.get("priority_score") or 0.0) / 10.0))
         row = await self.db.execute_returning_row(
             """INSERT INTO aios.character_cognitive_thread(
                    instance_id,subject_key,pressure,current_question,source_timeline_id,
-                   last_source_node_id,last_state_version,crossing_count,meta,subject_id)
-               VALUES($1,$2,0,$3,$4,$5,$6,0,$7::jsonb,$8)
+                   last_source_node_id,last_state_version,crossing_count,meta,subject_id,goal_id)
+               VALUES($1,$2,0,$3,$4,$5,$6,0,$7::jsonb,$8,$9)
                ON CONFLICT(instance_id,subject_key) DO UPDATE SET
                    status=CASE WHEN aios.character_cognitive_thread.status='resolved'
                                THEN 'open' ELSE aios.character_cognitive_thread.status END,
+                   resolved_at=CASE WHEN aios.character_cognitive_thread.status='resolved'
+                                    THEN NULL ELSE aios.character_cognitive_thread.resolved_at END,
                    current_question=EXCLUDED.current_question,
                    source_timeline_id=EXCLUDED.source_timeline_id,
                    last_source_node_id=EXCLUDED.last_source_node_id,
                    last_state_version=EXCLUDED.last_state_version,
+                   subject_id=COALESCE(EXCLUDED.subject_id,aios.character_cognitive_thread.subject_id),
+                   goal_id=COALESCE(EXCLUDED.goal_id,aios.character_cognitive_thread.goal_id),
                    updated_at=now()
                RETURNING thread_id""",
             instance_id, subject_key,
@@ -40,7 +47,7 @@ class CognitiveThreadService:
             opportunity.get("source_timeline_id"), opportunity.get("source_node_id"),
             opportunity.get("source_state_version"),
             json.dumps({"last_operation_type": opportunity.get("operation_type")}, default=str),
-            subject_id,
+            subject_id,goal_id,
         )
         thread_id = row["thread_id"]
         crossing=await self.db.execute_returning_row(
@@ -60,3 +67,22 @@ class CognitiveThreadService:
                        last_crossed_at=now(),updated_at=now()
                    WHERE thread_id=$1""",thread_id,strength)
         return thread_id
+
+    @staticmethod
+    def _mapping(value: Any) -> dict[str,Any]:
+        if isinstance(value,Mapping):
+            return dict(value)
+        if isinstance(value,str):
+            try:
+                decoded=json.loads(value)
+            except (TypeError,ValueError,json.JSONDecodeError):
+                return {}
+            return dict(decoded) if isinstance(decoded,Mapping) else {}
+        return {}
+
+    @staticmethod
+    def _uuid(value: Any) -> UUID | None:
+        try:
+            return UUID(str(value)) if value else None
+        except (TypeError,ValueError,AttributeError):
+            return None

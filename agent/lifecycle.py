@@ -21,8 +21,9 @@ TASK_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 ACTION_TRANSITIONS: dict[str, frozenset[str]] = {
-    "proposed": frozenset({"validated", "rejected", "cancelled"}),
-    "validated": frozenset({"queued", "running", "rejected", "cancelled"}),
+    "proposed": frozenset({"validated", "waiting", "rejected", "cancelled"}),
+    "validated": frozenset({"queued", "running", "waiting", "rejected", "cancelled"}),
+    "waiting": frozenset({"validated", "rejected", "cancelled"}),
     "queued": frozenset({"running", "cancelled", "timed_out"}),
     "running": frozenset({"succeeded", "failed", "cancelled", "timed_out"}),
     "succeeded": frozenset(),
@@ -122,6 +123,9 @@ class ActionRecord:
     error: Optional[str]
     rejection_reason: Optional[str]
     result_mode: str
+    execution_mode: str
+    assigned_worker_id: Optional[UUID]
+    lease_expires_at: Any
     meta: dict[str, Any]
 
     @classmethod
@@ -141,7 +145,10 @@ class ActionRecord:
             result=_decode(row["result"]),
             error=row["error"],
             rejection_reason=row["rejection_reason"],
-            result_mode=str(row.get("result_mode", "terminal")),
+            result_mode=str(row.get("result_mode", "final")),
+            execution_mode=str(row.get("execution_mode", "local")),
+            assigned_worker_id=row.get("assigned_worker_id"),
+            lease_expires_at=row.get("lease_expires_at"),
             meta=dict(_decode(row["meta"]) or {}),
         )
 
@@ -268,7 +275,9 @@ class CharacterAgencyStore:
                 f"Task {task_id} changed concurrently from {current.status}"
                 + (f" to {latest.status}" if latest else "")
             )
-        return CognitiveTask.from_row(row)
+        task = CognitiveTask.from_row(row)
+        await self._refresh_scene(task.instance_id)
+        return task
 
     async def create_action(
         self,
@@ -408,7 +417,14 @@ class CharacterAgencyStore:
                 f"Action {action_id} changed concurrently from {current.status}"
                 + (f" to {latest.status}" if latest else "")
             )
-        return ActionRecord.from_row(row)
+        action = ActionRecord.from_row(row)
+        await self._refresh_scene(action.instance_id)
+        return action
+
+    async def _refresh_scene(self, instance_id: UUID) -> None:
+        # Local import keeps the agency lifecycle independent of HUD modules.
+        from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+        await CharacterSceneProjector(self.db).refresh(instance_id)
 
     async def actions_for_task(self, task_id: UUID) -> list[ActionRecord]:
         rows = await self.db.fetch(

@@ -7,14 +7,15 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.epistemic.goals import CharacterGoalService
 
-INTERPRETER_VERSION = "message-cognition-v3"
+INTERPRETER_VERSION = "message-cognition-v6"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+", re.I)
 _NEGATION_RE = re.compile(
-    r"\b(?:not|never|no|cannot|can't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|doesn't|didn't|won't)\b",
+    r"\b(?:not|never|no|no\s+longer|cannot|can't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|don't|doesn't|didn't|won't)\b",
     re.I,
 )
 _QUESTION_RE = re.compile(r"\?\s*$")
@@ -25,7 +26,8 @@ _CAUSAL_DESIRE_RE = re.compile(
 
 _SUBJECT = r"(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
 _GOAL_RE = re.compile(
-    rf"\b{_SUBJECT}\s+(?P<verb>want(?:s|ed)?|intend(?:s|ed)?|plan(?:s|ned)?|need(?:s|ed)?|"
+    rf"\b{_SUBJECT}\s+(?:(?:do(?:es)?\s+not|don't|doesn't|no\s+longer)\s+)?"
+    rf"(?P<verb>want(?:s|ed)?|intend(?:s|ed)?|plan(?:s|ned)?|need(?:s|ed)?|"
     rf"seek(?:s|ed)?|decide(?:s|d)?|resolve(?:s|d)?|prepare(?:s|d)?)"
     r"\s+(?P<object>(?:to\s+)?[^.!?]{2,220})",
     re.I,
@@ -177,6 +179,17 @@ def _clean_object(value: str) -> str:
     return text[:220].rstrip()
 
 
+def _goal_semantics(candidate: ParsedCandidate) -> tuple[str, str]:
+    predicate = candidate.predicate.lower().strip()
+    if predicate.startswith(("want", "need", "seek")):
+        return "desire", "session"
+    if predicate.startswith(("plan", "prepare", "intend")):
+        return "plan", "session"
+    if predicate.startswith(("decide", "resolve")):
+        return "objective", "session"
+    return "objective", "session"
+
+
 def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
     subject = _canonical_subject(owner, candidate.subject_text)
     obj = _clean_object(candidate.object_text)
@@ -188,9 +201,11 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
             return f"{subject} is {obj}."
         return f"{subject} {predicate} {obj}."
     if candidate.kind == "GOAL":
-        if predicate.startswith(("decide", "resolve", "prepare")):
-            return f"{subject} intends {obj}."
-        return f"{subject} {predicate} {obj}."
+        # Goal text is a presentation of semantic intent, not a grammatical
+        # rewrite of the source sentence. This avoids "I want" -> "Renamon want".
+        intent_type, _ = _goal_semantics(candidate)
+        verb = "wants" if intent_type == "desire" else "intends"
+        return f"{subject} {verb} {obj}."
     if candidate.kind in {"RULE", "STATE"}:
         return f"{subject} {predicate} {obj}."
     return f"{subject}: {obj}." if candidate.subject_text else f"{obj}."
@@ -224,14 +239,19 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
     if match and _STATE_TERMS_RE.search(match.group("object")):
         return ParsedCandidate("STATE", match.group("subject"), match.group("verb"), match.group("object"), 0.86, "bounded_state_predicate")
     if _EVENT_RE.search(sentence):
-        words = _WORD_RE.findall(sentence)
-        subject = words[0] if words else None
-        return ParsedCandidate("EVENT", subject, "event", sentence, 0.70, "event_predicate")
+        # Sentence position is not entity resolution. Narrative prose such as
+        # "Beneath..." or "The collar..." must remain owner-unresolved rather
+        # than promoting the first token to a semantic subject.
+        return ParsedCandidate("EVENT", None, "event", sentence, 0.70, "event_predicate")
     return None
 
 
-def _topic_key(text: str, *, character_id: str, owner: str | None, kind: str) -> str:
-    tokens = [token for token in _WORD_RE.findall(text.lower()) if len(token) >= 3 and token not in _STOPWORDS and token not in {"not", "never", "cannot", "can't"}]
+def cognition_topic_key(
+    text: str, *, character_id: str, owner: str | None, kind: str,
+    objective: str | None = None,
+) -> str:
+    semantic_text = objective if kind.upper() == "GOAL" and objective else text
+    tokens = [token for token in _WORD_RE.findall(semantic_text.lower()) if len(token) >= 3 and token not in _STOPWORDS and token not in {"not", "never", "cannot", "can't", "want", "wants", "wanted", "intend", "intends", "intended"}]
     preferred: list[str] = [kind.lower()]
     for value in (owner, character_id):
         for token in _identity_aliases(value):
@@ -276,13 +296,25 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
             continue
         polarity = -1 if _NEGATION_RE.search(sentence) else 1
         canonical = _canonical_text(candidate, owner=owner)
-        topic_key = _topic_key(canonical, character_id=character_id, owner=owner, kind=candidate.kind)
+        objective = _clean_object(candidate.object_text) if candidate.kind == "GOAL" else None
+        topic_key = cognition_topic_key(
+            canonical, character_id=character_id, owner=owner, kind=candidate.kind,
+            objective=objective,
+        )
         semantic_key = (candidate.kind, topic_key, polarity)
         if semantic_key in seen_semantics:
             continue
         seen_semantics.add(semantic_key)
         salience = _score_candidate(candidate, character_owned=character_owned, index=index, total=len(sentences))
         confidence = max(0.50, min(0.99, candidate.confidence))
+        goal_meta = {}
+        if candidate.kind == "GOAL":
+            intent_type, horizon = _goal_semantics(candidate)
+            goal_meta = {
+                "intent_type": intent_type,
+                "horizon": horizon,
+                "objective": objective,
+            }
         unit = CognitiveUnit(
             text=canonical, claim_kind=candidate.kind, topic_key=topic_key, polarity=polarity,
             salience=salience, confidence=confidence,
@@ -294,6 +326,7 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
                 "predicate": candidate.predicate.lower(), "object": _clean_object(candidate.object_text),
                 "parse_reason": candidate.reason, "persistence": _PERSISTENCE[candidate.kind],
                 "parse_confidence": confidence, "epistemic_confidence": 0.72 if character_owned else 0.58,
+                **goal_meta,
             },
         )
         ranked.append((salience, index, unit))
@@ -301,6 +334,46 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
     selected = ranked[:MAX_UNITS]
     selected.sort(key=lambda value: value[1])
     return [unit for _, _, unit in selected]
+
+
+def ambiguous_cognition_sentences(
+    text: str, *, character_id: str, speaker_id: str | None,
+    speaker_role: str | None, viewpoint_id: str | None,
+) -> list[str]:
+    """Return a tiny bounded set worth semantic adjudication by an inference worker.
+
+    Explicit deterministic units remain authoritative fast-path results. The
+    classifier only sees declarative character-authored prose the cheap parser
+    could not type, preventing one LLM call from becoming a second parser for
+    the entire message.
+    """
+    if not _same_identity(speaker_id, character_id):
+        return []
+    explicit_sources={
+        str(unit.meta.get("source_text") or "").strip()
+        for unit in interpret_message(
+            text,character_id=character_id,speaker_id=speaker_id,
+            speaker_role=speaker_role,viewpoint_id=viewpoint_id)
+    }
+    candidates=[]
+    for sentence in _sentences(text):
+        clean=sentence.strip()
+        if not clean or clean in explicit_sources or _QUESTION_RE.search(clean):
+            continue
+        # Dialogue/action prose with first-person commitment, future intent,
+        # offers/agreements, or self-development language is high-value enough
+        # to adjudicate. This is candidate generation, never goal authority.
+        lower=clean.lower()
+        signals=(
+            "i'll ","i will ","i'm going to ","i am going to ","i should ",
+            "i could ","my goal","my plan","counter-offer","standing offer",
+            "i'm learning","i am learning","i'd rather","i would rather",
+        )
+        if any(signal in lower for signal in signals):
+            candidates.append(clean[:700])
+        if len(candidates)>=4:
+            break
+    return candidates
 
 
 async def _reconcile_unit(db: Any, *, instance_id: UUID, unit_id: UUID, claim_kind: str, topic_key: str, polarity: int) -> UUID | None:
@@ -340,9 +413,26 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                 lock_key,
             )
-            return await _commit_message_cognition_locked(
+            committed = await _commit_message_cognition_locked(
                 con, instance_id=instance_id, node_id=node_id
             )
+    if committed:
+        row = await db.fetchrow(
+            """SELECT summary FROM aios.message_cognitive_commit
+               WHERE instance_id=$1 AND node_id=$2""",instance_id,node_id)
+        summary = CharacterGoalService._json_object(row["summary"]) if row else {}
+        if "GOAL" in summary.get("kinds", []):
+            # Goal reconciliation above runs on the transaction connection.
+            # Scene projection must happen only after commit, using Database.
+            from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+            await CharacterSceneProjector(db).refresh(instance_id)
+        if summary.get("ambiguous_sentences") and summary.get("enrichment_pending"):
+            from aios_app.pipeline.jobs import enqueue_job
+            await enqueue_job(
+                db,job_type="message_cognition_enrichment",
+                payload={"instance_id":str(instance_id),"node_id":str(node_id)},
+                priority=35)
+    return committed
 
 
 async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_id: UUID) -> bool:
@@ -375,10 +465,15 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
         speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
     )
+    ambiguous = ambiguous_cognition_sentences(
+        text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
+        speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
+    )
     summary = {
         "unit_count": len(units), "kinds": sorted({unit.claim_kind for unit in units}),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
+        "ambiguous_count": len(ambiguous), "enrichment_pending": bool(ambiguous),
     }
     commit_row = await con.fetchrow(
         """
@@ -418,7 +513,30 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
             con, instance_id=instance_id, unit_id=unit_row["unit_id"], claim_kind=unit.claim_kind,
             topic_key=unit.topic_key, polarity=unit.polarity,
         )
+        if unit.claim_kind == "GOAL" and bool(unit.meta.get("character_owned")):
+            await CharacterGoalService(con).reconcile_evidence(
+                instance_id=instance_id,
+                text=unit.text,
+                topic_key=unit.topic_key,
+                polarity=unit.polarity,
+                source_node_id=node_id,
+                source_unit_id=unit_row["unit_id"],
+                confidence=unit.confidence,
+                salience=unit.salience,
+                intent_type=unit.meta.get("intent_type"),
+                horizon=unit.meta.get("horizon"),
+                objective=unit.meta.get("objective"),
+                refresh_scene=False,
+            )
     await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
+    if ambiguous:
+        # Queue after the transaction commits in commit_message_cognition().
+        # Persist the candidates on the commit so retries remain deterministic.
+        await con.execute(
+            """UPDATE aios.message_cognitive_commit
+               SET summary=summary || $2::jsonb WHERE commit_id=$1""",
+            commit_id,json.dumps({"ambiguous_sentences":ambiguous}),
+        )
     return True
 
 

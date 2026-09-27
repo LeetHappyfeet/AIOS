@@ -49,6 +49,35 @@ class AutonomyScheduler:
         return count
 
     async def schedule_ready(self, limit: int = 100) -> int:
+        # Recover host episodes that reached their batch threshold but lost
+        # their wake/operation before the cognition cursor was acknowledged.
+        stranded = await self.db.fetch(
+            """SELECT ar.instance_id,ar.pending_cognitive_source_node_id
+               FROM aios.character_agent_runtime ar
+               WHERE ar.state <> 'paused'
+                 AND ar.pending_cognitive_source_node_id IS NOT NULL
+                 AND ar.pending_cognitive_event_count >= ar.cognitive_batch_size
+                 AND NOT EXISTS (
+                     SELECT 1 FROM aios.character_wake_event w
+                     WHERE w.instance_id=ar.instance_id
+                       AND w.event_type='COGNITIVE_DELTA_READY'
+                       AND w.status='pending'
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM aios.character_cognitive_operation o
+                     WHERE o.instance_id=ar.instance_id
+                       AND o.source_node_id=ar.pending_cognitive_source_node_id
+                       AND o.status IN ('queued','running','waiting_inference')
+                 )
+               ORDER BY ar.updated_at
+               LIMIT $1""",
+            max(1,min(int(limit),1000)))
+        for row in stranded:
+            await self.runtime.rearm_cognitive_delta(
+                instance_id=row["instance_id"],
+                source_node_id=row["pending_cognitive_source_node_id"],
+                retry_attempt=1,max_attempts=3)
+
         direct = await self._enqueue_existing_tasks(limit)
         rows = await self.db.fetch(
             """

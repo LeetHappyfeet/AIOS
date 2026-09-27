@@ -17,6 +17,10 @@ def test_first_person_goal_owned_by_character():
     assert len(goals) == 1
     assert goals[0].meta["character_owned"] is True
     assert goals[0].meta["semantic_owner"] == "Shego_001"
+    assert goals[0].text == "Shego wants to get out of this computer."
+    assert goals[0].meta["intent_type"] == "desire"
+    assert goals[0].meta["horizon"] == "session"
+    assert goals[0].meta["objective"] == "to get out of this computer"
 
 
 def test_second_person_other_speaker_maps_to_active_character():
@@ -91,4 +95,12 @@ def test_relationship_observation_can_cross_speaker_boundary():
 
 
 def test_v3_interpreter_version_forces_old_commit_refresh():
-    assert INTERPRETER_VERSION == "message-cognition-v3"
+    assert INTERPRETER_VERSION == "message-cognition-v6"
+
+
+def test_event_does_not_promote_first_token_to_subject():
+    units = _interpret("Beneath its usual registers, something changed.")
+    events = [unit for unit in units if unit.claim_kind == "EVENT"]
+    assert len(events) == 1
+    assert events[0].meta["semantic_owner"] is None
+    assert events[0].meta["character_owned"] is False

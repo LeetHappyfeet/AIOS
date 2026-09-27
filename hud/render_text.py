@@ -58,6 +58,12 @@ def _knowledge_annotation(item: Mapping[str, Any]) -> str:
     return " [" + "; ".join(bits) + "]"
 
 
+def _scene_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return str(value.get("text") or value.get("label") or "").strip()
+    return str(value or "").strip()
+
+
 def render_hud_text(frame: Mapping[str, Any]) -> str:
     """Deterministically render the canonical HUD JSON into an LLM-facing surface."""
     identity = frame.get("identity") or {}
@@ -106,12 +112,15 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"- {_name(obj)}")
     working_scene = scene.get("working_state") or {}
     scene_lines = []
-    if working_scene.get("immediate_goal"):
-        scene_lines.append(f"Immediate goal: {working_scene['immediate_goal']}")
-    if working_scene.get("pending_action"):
-        scene_lines.append(f"Pending action: {working_scene['pending_action']}")
-    if working_scene.get("last_significant_change"):
-        scene_lines.append(f"Last change: {working_scene['last_significant_change']}")
+    immediate_goal = working_scene.get("immediate_goal")
+    pending_work = working_scene.get("pending_work") or working_scene.get("pending_action")
+    last_change = working_scene.get("last_significant_change")
+    if _scene_text(immediate_goal):
+        scene_lines.append(f"Immediate goal: {_scene_text(immediate_goal)}")
+    if _scene_text(pending_work):
+        scene_lines.append(f"Pending work: {_scene_text(pending_work)}")
+    if _scene_text(last_change):
+        scene_lines.append(f"Last change: {_scene_text(last_change)}")
     if scene_lines:
         lines.append("\nCURRENT SCENE:")
         lines.extend(f"- {value}" for value in scene_lines)
@@ -162,13 +171,19 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"- {prefix}{item.get('text', '')}")
 
     goals = frame.get("goals") or []
-    immediate_goal_key = normalized_text(str(working_scene.get("immediate_goal") or ""))
+    immediate_goal_id = (
+        str(immediate_goal.get("goal_id") or "") if isinstance(immediate_goal, Mapping) else ""
+    )
+    immediate_goal_key = normalized_text(_scene_text(immediate_goal))
     rendered_goals = []
     for goal in goals:
         text = goal.get("text") if isinstance(goal, dict) else str(goal)
-        # Keep the canonical goal in the frame, but do not spend prompt tokens
-        # repeating the CURRENT SCENE immediate goal verbatim.
-        if immediate_goal_key and normalized_text(str(text)) == immediate_goal_key:
+        goal_id = str(goal.get("goal_id") or "") if isinstance(goal, dict) else ""
+        # Goal identity is authoritative; normalized text remains compatibility
+        # fallback for legacy scene snapshots without goal_id.
+        if immediate_goal_id and goal_id == immediate_goal_id:
+            continue
+        if not immediate_goal_id and immediate_goal_key and normalized_text(str(text)) == immediate_goal_key:
             continue
         rendered_goals.append((goal, text))
     if rendered_goals:

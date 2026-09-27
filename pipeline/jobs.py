@@ -95,7 +95,7 @@ async def _partition_key_for_enqueue(
         )
         return str(row["scope_key"]) if row else f"assertion:{assertion_id}"
 
-    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference"} and payload.get("instance_id"):
+    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "message_cognition_enrichment"} and payload.get("instance_id"):
         return f"instance:{payload['instance_id']}"
 
     for key in ("world_id", "character_id", "section_id", "node_id"):
@@ -217,8 +217,10 @@ async def fetch_next_job(
     """Atomically lease the next runnable job for one execution class.
 
     `job_types` provides a narrow stage reservation inside a resource/lane pool.
-    This is used by semantic workers so context resolution cannot monopolize all
-    LIVE workers and starve proposition normalization/materialization.
+    Reserved selections age queued work ahead of ordinary priority after five
+    minutes so one continuously replenished stage cannot starve another. This is
+    used by semantic workers so context resolution cannot monopolize all LIVE
+    workers and starve proposition normalization/materialization.
     """
 
     if resource_class == "NLP":
@@ -252,6 +254,11 @@ async def fetch_next_job(
                     )
               )
             ORDER BY
+                CASE
+                    WHEN $6::text[] IS NOT NULL
+                     AND q.created_at <= now() - interval '5 minutes'
+                    THEN 0 ELSE 1
+                END ASC,
                 CASE
                     WHEN $1::text = 'RDF'
                      AND q.scheduling_lane = 'BACKGROUND'
@@ -407,8 +414,10 @@ async def rebalance_queued_priorities(db: Database) -> int:
                     WHEN 'resolve_claim_context' THEN 30
                     WHEN 'project_character_knowledge' THEN 30
                     WHEN 'normalize_proposition' THEN 35
+                    WHEN 'materialize_event_occurrences' THEN 38
                     WHEN 'derive_character_acquisition_topology' THEN 40
                     WHEN 'derive_world_assertion_topology' THEN 45
+                    WHEN 'reconcile_character_beliefs' THEN 55
                     WHEN 'resolve_generated_facts' THEN 60
                     WHEN 'rdf_epistemic_project' THEN 75
                     WHEN 'derive_claim_topology' THEN

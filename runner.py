@@ -33,9 +33,12 @@ from aios_app.rdf.world_liminal_classifier_runner import classify_liminal_claims
 from aios_app.rdf.epistemic_writer import project_normalized_observation
 from aios_app.epistemic.normalizer import normalize_claim_once
 from aios_app.epistemic.context_resolver import resolve_claim_context
+from aios_app.causal.kernel import CausalIntegrityKernel
+from aios_app.causal.semantic_bridge import admit_location_claim
 from aios_app.epistemic.narratives import assign_narratives_once
 from aios_app.epistemic.episodes import materialize_event_occurrences_once, derive_semantic_episodes_once
 from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
+from aios_app.epistemic.belief_reconciliation import reconcile_dirty_character_beliefs
 from aios_app.epistemic.generated import resolve_generated_facts_once
 from aios_app.epistemic.topology import derive_claim_topology, derive_world_assertion_topology, derive_character_acquisition_topology
 from aios_app.world.topology import project_world_topology
@@ -191,6 +194,10 @@ async def handle_resolve_generated_facts(db: Database, job: Dict[str, Any]) -> N
     await resolve_generated_facts_once(db, limit=200)
 
 
+async def handle_reconcile_character_beliefs(db: Database, job: Dict[str, Any]) -> None:
+    await reconcile_dirty_character_beliefs(db, limit=16)
+
+
 # -------------------------------------------------
 # RDF handlers
 # -------------------------------------------------
@@ -234,7 +241,13 @@ async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> Non
         )
         return
     fuseki = FusekiClient(settings.fuseki_base_url)
-    await resolve_claim_context(db, fuseki, claim_id=claim_id)
+    context = await resolve_claim_context(db, fuseki, claim_id=claim_id)
+    # Context resolution is the authority boundary: only explicitly world-scoped
+    # resolved movement may proceed from semantic evidence into causal reality.
+    if context and context.world_id and context.timeline_id:
+        await admit_location_claim(
+            db,CausalIntegrityKernel(db),claim_id=claim_id,
+            world_id=context.world_id,timeline_id=context.timeline_id)
 
 
 JOB_HANDLERS.update(
@@ -257,6 +270,7 @@ JOB_HANDLERS.update(
         "assign_narratives": handle_assign_narratives,
         "project_character_knowledge": handle_project_character_knowledge,
         "resolve_generated_facts": handle_resolve_generated_facts,
+        "reconcile_character_beliefs": handle_reconcile_character_beliefs,
     }
 )
 
@@ -533,10 +547,19 @@ def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
     default = SchedulingLane.DEFAULT.value
 
     if worker_index in (0, 1):
-        return [live], [live, structural, default, background]
+        return [live], [live, default]
     if worker_index == 2:
-        return [structural], [structural, live, default, background]
-    return [background], [background, structural, live, default]
+        # Structural topology is intentionally single-writer at the worker
+        # level. Do not let LIVE/BACKGROUND workers fall into this lane.
+        return [structural], [structural]
+    return [background], [background, default]
+
+
+STRUCTURAL_BATCH_PLAN: tuple[tuple[str, int], ...] = (
+    ("derive_character_acquisition_topology", 16),
+    ("derive_claim_topology", 4),
+    ("derive_semantic_episodes", 1),
+)
 
 
 def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
@@ -552,7 +575,11 @@ def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
     if worker_index == 0:
         return ["resolve_claim_context"]
     if worker_index == 1:
-        return ["normalize_proposition", "project_character_knowledge"]
+        return [
+            "normalize_proposition",
+            "materialize_event_occurrences",
+            "project_character_knowledge",
+        ]
     return None
 
 
@@ -612,6 +639,45 @@ async def _claim_for_worker(
         return job
 
 
+async def _run_structural_semantic_batch_cycle(
+    db: Database,
+    *,
+    worker_id: str,
+    rdf_gate: asyncio.Semaphore,
+    claim_gate: asyncio.Lock,
+) -> int:
+    """Run one serial weighted cycle on the dedicated STRUCTURAL worker.
+
+    The worker, not global job priority, owns inter-stage fairness. Each stage
+    receives a bounded quantum, newest/priority ordering remains local to that
+    stage, and every job completes before the next one is claimed.
+    """
+    completed = 0
+    structural = [SchedulingLane.STRUCTURAL.value]
+    for job_type, quantum in STRUCTURAL_BATCH_PLAN:
+        for _ in range(quantum):
+            async with claim_gate:
+                job = await fetch_next_job(
+                    db,
+                    worker_id=worker_id,
+                    resource_class=ResourceClass.SEMANTIC.value,
+                    lease_seconds=settings.pipeline_lease_seconds,
+                    scheduling_lanes=structural,
+                    prefer_uncontended=True,
+                    job_types=[job_type],
+                )
+            if not job:
+                break
+            await _execute_claimed_job(
+                db,
+                job=job,
+                worker_id=worker_id,
+                rdf_gate=rdf_gate,
+            )
+            completed += 1
+    return completed
+
+
 async def _resource_worker(
     db: Database,
     *,
@@ -626,6 +692,17 @@ async def _resource_worker(
         f"{resource_class.value}:{worker_index}"
     )
     while True:
+        if resource_class == ResourceClass.SEMANTIC and worker_index == 2:
+            completed = await _run_structural_semantic_batch_cycle(
+                db,
+                worker_id=worker_id,
+                rdf_gate=rdf_gate,
+                claim_gate=claim_gate,
+            )
+            if completed == 0:
+                await asyncio.sleep(poll_interval)
+            continue
+
         job = await _claim_for_worker(
             db,
             worker_id=worker_id,
