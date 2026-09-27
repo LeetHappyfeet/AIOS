@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -11,6 +12,7 @@ from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
 from aios_app.epistemic.research import CharacterResearchService
 from .actions import ActionRegistry, ActionSpec
+from .temporal import TemporalTriggerStore
 
 
 class ResearchRouter:
@@ -83,6 +85,7 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
     scenes = CharacterSceneStateStore(db)
     research = ResearchRouter(db)
     world = WorldPropositionRetriever(db)
+    temporal = TemporalTriggerStore(db)
 
     async def knowledge_lookup(
         instance_id: UUID, args: Mapping[str, Any],
@@ -205,6 +208,38 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
             },
         }
 
+    async def timer_set(
+        instance_id: UUID, args: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        duration = args.get("duration_seconds")
+        due_raw = args.get("due_at")
+        due = datetime.fromisoformat(str(due_raw).replace("Z", "+00:00")) if due_raw else None
+        return await temporal.create_timer(
+            instance_id=instance_id,
+            reason=str(args.get("reason") or ""),
+            duration_seconds=int(duration) if duration is not None else None,
+            due_at=due,
+            priority=int(args.get("priority", 100)),
+            dedupe_key=str(args["dedupe_key"]) if args.get("dedupe_key") else None,
+        )
+
+    async def timer_cancel(
+        instance_id: UUID, args: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return await temporal.cancel(
+            instance_id=instance_id, trigger_id=UUID(str(args["trigger_id"])),
+        )
+
+    async def timer_list(
+        instance_id: UUID, args: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        timers = await temporal.list(
+            instance_id=instance_id,
+            include_terminal=bool(args.get("include_terminal", False)),
+            limit=int(args.get("limit", 32)),
+        )
+        return {"timers": timers, "count": len(timers)}
+
     async def research_search(
         instance_id: UUID, args: Mapping[str, Any],
     ) -> Mapping[str, Any]:
@@ -258,6 +293,46 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
         result_mode="return_to_cognition",
         capability_class="lookup",
         description="Inspect bounded current AIOS state without expanding the HUD.",
+    ))
+    registry.register(ActionSpec(
+        name="timer.set",
+        schema={"type":"object","required":["reason"],"properties":{
+            "reason":{"type":"string"},
+            "duration_seconds":{"type":"integer","minimum":1},
+            "due_at":{"type":"string"},
+            "priority":{"type":"integer"},
+            "dedupe_key":{"type":"string"}},
+            "oneOf":[{"required":["duration_seconds"]},{"required":["due_at"]}],
+            "additionalProperties":False},
+        side_effect_class="internal_write",
+        allowed_worker_classes=frozenset({"executive","planning","reflection"}),
+        handler=timer_set,
+        result_mode="return_to_cognition",
+        capability_class="time",
+        description="Set a durable wall-clock timer that later emits a TIMER_DUE wake.",
+    ))
+    registry.register(ActionSpec(
+        name="timer.cancel",
+        schema={"type":"object","required":["trigger_id"],"properties":{
+            "trigger_id":{"type":"string"}},"additionalProperties":False},
+        side_effect_class="internal_write",
+        allowed_worker_classes=frozenset({"executive","planning","reflection"}),
+        handler=timer_cancel,
+        result_mode="return_to_cognition",
+        capability_class="time",
+        description="Cancel a scheduled timer owned by this character.",
+    ))
+    registry.register(ActionSpec(
+        name="timer.list",
+        schema={"type":"object","properties":{
+            "include_terminal":{"type":"boolean"},"limit":{"type":"integer"}},
+            "additionalProperties":False},
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive","planning","reflection"}),
+        handler=timer_list,
+        result_mode="return_to_cognition",
+        capability_class="time",
+        description="Inspect this character's durable timers.",
     ))
     registry.register(ActionSpec(
         name="research.search",
