@@ -156,6 +156,7 @@ class CognitiveOperationEngine:
             op["operation_id"],json.dumps({"reason":reason}))
         if changed:
             await self._terminal_side_effects(op,status="stale",result={"reason":reason})
+            await self._rearm_failed_episode(op)
 
     async def _fail(self, op: Mapping[str,Any], exc: Exception) -> None:
         result={"error":str(exc)[:1000],"error_type":type(exc).__name__}
@@ -167,6 +168,36 @@ class CognitiveOperationEngine:
             op["operation_id"],json.dumps(result))
         if changed:
             await self._terminal_side_effects(op,status="failed",result=result)
+            await self._rearm_failed_episode(op)
+
+    async def _rearm_failed_episode(self, op: Mapping[str,Any]) -> None:
+        """Retry only unacknowledged host-delta work, never arbitrary cognition."""
+        source_node_id=op.get("source_node_id")
+        if not source_node_id:
+            return
+        runtime=await self.db.fetchrow(
+            """SELECT pending_cognitive_source_node_id,pending_cognitive_event_count,
+                      cognitive_batch_size
+               FROM aios.character_agent_runtime WHERE instance_id=$1""",
+            op["instance_id"])
+        if not runtime:
+            return
+        # A newer host delta may already have superseded this operation. Only
+        # retry the exact still-pending episode and only while it remains due.
+        if (runtime["pending_cognitive_source_node_id"] != source_node_id
+                or int(runtime["pending_cognitive_event_count"]) <
+                   int(runtime["cognitive_batch_size"])):
+            return
+        previous=await self.db.fetchval(
+            """SELECT COALESCE(max((payload->>'retry_attempt')::int),0)
+               FROM aios.character_wake_event
+               WHERE instance_id=$1 AND event_type='COGNITIVE_DELTA_READY'
+                 AND source_id=$2 AND payload ? 'retry_attempt'""",
+            op["instance_id"],str(source_node_id))
+        from aios_app.agent.runtime import AgentRuntimeStore
+        await AgentRuntimeStore(self.db).rearm_cognitive_delta(
+            instance_id=op["instance_id"],source_node_id=source_node_id,
+            retry_attempt=int(previous or 0)+1,max_attempts=3)
 
     async def _terminal_side_effects(
         self, op: Mapping[str,Any], *, status: str, result: Mapping[str,Any]
