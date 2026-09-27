@@ -145,15 +145,15 @@ class InternalHUDAssembler:
                 crossings = int(lifecycle.get("crossing_count") or 0)
                 progress = int(lifecycle.get("progress_count") or 0)
                 blockers = int(lifecycle.get("blocker_count") or 0)
-                candidates = int(lifecycle.get("completion_candidate_count") or 0)
+                completion_candidates = int(lifecycle.get("completion_candidate_count") or 0)
                 if crossings:
                     bits.append(f"crossings={crossings}")
                 if progress:
                     bits.append(f"progress={progress}")
                 if blockers:
                     bits.append(f"blockers={blockers}")
-                if candidates:
-                    bits.append(f"completion_candidates={candidates}")
+                if completion_candidates:
+                    bits.append(f"completion_candidates={completion_candidates}")
                 if lifecycle.get("thread_status"):
                     bits.append(f"thread={lifecycle['thread_status']}")
                 latest = lifecycle.get("latest_evidence") or {}
