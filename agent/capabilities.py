@@ -8,6 +8,7 @@ from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
+from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
 from aios_app.epistemic.research import CharacterResearchService
 from .actions import ActionRegistry, ActionSpec
 
@@ -81,6 +82,7 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
     cognition = CognitiveContextService(db)
     scenes = CharacterSceneStateStore(db)
     research = ResearchRouter(db)
+    world = WorldPropositionRetriever(db)
 
     async def knowledge_lookup(
         instance_id: UUID, args: Mapping[str, Any],
@@ -89,26 +91,14 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
         if not query:
             raise ValueError("knowledge lookup query is empty")
         context = await contexts.resolve(instance_id)
-        raw = await db.fetchrow(
-            "SELECT * FROM aios.character_runtime_state WHERE instance_id=$1", instance_id
-        )
-        attention = await cognition.resolve_attention_inputs(
-            context, dict(raw or {}), {}, recent_limit=12, focus_text=query,
-        )
-        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=attention.goals)
-        snapshot = await cognition.resolve_knowledge(context, scorer, attention)
-        kinds = {str(v).upper() for v in (args.get("kinds") or []) if str(v).strip()}
+        kinds = tuple(str(v).upper() for v in (args.get("kinds") or []) if str(v).strip())
         limit = max(1, min(int(args.get("limit", 10)), 30))
-        candidates = (
-            list(snapshot.recalled_memories) + list(snapshot.beliefs)
-            + list(snapshot.goals) + list(snapshot.rules) + list(snapshot.current_events)
+        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
+        candidates = await cognition.lookup_character_knowledge(
+            context, scorer, claim_kinds=kinds, limit=limit,
         )
-        matches = []
-        for item in candidates:
-            kind = str(item.get("claim_kind") or item.get("kind") or "").upper()
-            if kinds and kind not in kinds:
-                continue
-            matches.append({
+        matches = [
+            {
                 "text": item.get("text"),
                 "claim_kind": item.get("claim_kind"),
                 "subject": item.get("subject_norm"),
@@ -117,10 +107,52 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
                 "proposition_id": str(item.get("proposition_id") or ""),
                 "source_node_id": str(item.get("source_node_id") or ""),
                 "confidence": item.get("effective_confidence", item.get("confidence")),
-            })
-            if len(matches) >= limit:
-                break
-        return {"query": query, "matches": matches, "match_count": len(matches)}
+                "epistemic_status": item.get("epistemic_status"),
+                "retrieval_scope": "character",
+            }
+            for item in candidates
+        ]
+        return {
+            "query": query, "scope": "character",
+            "matches": matches, "match_count": len(matches),
+        }
+
+    async def world_lookup(
+        instance_id: UUID, args: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        query = str(args["query"]).strip()
+        if not query:
+            raise ValueError("world lookup query is empty")
+        context = await contexts.resolve(instance_id)
+        domain = str(args.get("domain") or "general")
+        kinds = tuple(str(v).upper() for v in (args.get("kinds") or []) if str(v).strip())
+        limit = max(1, min(int(args.get("limit", 10)), 30))
+        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
+        rows = await world.retrieve(
+            context, scorer, query_text=query, domain=domain,
+            claim_kinds=kinds, limit=limit,
+        )
+        matches = [
+            {
+                "text": item.get("text"),
+                "claim_kind": item.get("claim_kind"),
+                "subject": item.get("subject_norm"),
+                "predicate": item.get("predicate_norm"),
+                "object": item.get("object_norm"),
+                "proposition_id": str(item.get("proposition_id") or ""),
+                "source_node_id": str(item.get("source_node_id") or ""),
+                "source_world_id": str(item.get("source_world_id") or ""),
+                "epistemic_status": item.get("epistemic_status"),
+                "retrieval_scope": "world",
+                "world_domain": item.get("world_domain"),
+            }
+            for item in rows
+        ]
+        return {
+            "query": query, "scope": "world", "domain": domain,
+            "matches": matches, "match_count": len(matches),
+            "durable_character_knowledge": False,
+        }
 
     async def state_inspect(
         instance_id: UUID, args: Mapping[str, Any],
@@ -191,13 +223,29 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
         )
 
     registry.register(ActionSpec(
-        "knowledge.lookup",
-        {"type":"object","required":["query"],"properties":{
+        name="knowledge.lookup",
+        schema={"type":"object","required":["query"],"properties":{
             "query":{"type":"string"},"limit":{"type":"integer"},
             "kinds":{"type":"array","items":{"type":"string"}}},"additionalProperties":False},
-        "read_only",frozenset({"executive","research","planning","reflection"}),
-        knowledge_lookup,"return_to_cognition","lookup",
-        "Search established character knowledge through the normal epistemic retrieval layer.",
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive","research","planning","reflection"}),
+        handler=knowledge_lookup,
+        result_mode="return_to_cognition",
+        capability_class="lookup",
+        description="Search durable character-owned /char knowledge only.",
+    ))
+    registry.register(ActionSpec(
+        name="world.lookup",
+        schema={"type":"object","required":["query"],"properties":{
+            "query":{"type":"string"},"domain":{"type":"string"},
+            "limit":{"type":"integer"},
+            "kinds":{"type":"array","items":{"type":"string"}}},"additionalProperties":False},
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive","research","planning","reflection"}),
+        handler=world_lookup,
+        result_mode="return_to_cognition",
+        capability_class="lookup",
+        description="Search authorized public /world knowledge without granting character ownership.",
     ))
     registry.register(ActionSpec(
         "state.inspect",
