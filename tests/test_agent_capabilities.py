@@ -17,6 +17,7 @@ def test_default_registry_exposes_new_capability_layer():
     assert research["research.search"]["class"] == "research"
     assert research["source.read"]["class"] == "research"
     assert research["research.search"]["result_mode"] == "return_to_cognition"
+    assert research["corpus.acquire"]["result_mode"] == "final"
 
     communication = registry.capabilities_for("communication")
     assert "state.inspect" in communication
