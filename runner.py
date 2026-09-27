@@ -38,6 +38,7 @@ from aios_app.causal.semantic_bridge import admit_location_claim
 from aios_app.epistemic.narratives import assign_narratives_once
 from aios_app.epistemic.episodes import materialize_event_occurrences_once, derive_semantic_episodes_once
 from aios_app.epistemic.knowledge import project_knowledge_acquisitions_once
+from aios_app.epistemic.belief_reconciliation import reconcile_dirty_character_beliefs
 from aios_app.epistemic.generated import resolve_generated_facts_once
 from aios_app.epistemic.topology import derive_claim_topology, derive_world_assertion_topology, derive_character_acquisition_topology
 from aios_app.world.topology import project_world_topology
@@ -193,6 +194,10 @@ async def handle_resolve_generated_facts(db: Database, job: Dict[str, Any]) -> N
     await resolve_generated_facts_once(db, limit=200)
 
 
+async def handle_reconcile_character_beliefs(db: Database, job: Dict[str, Any]) -> None:
+    await reconcile_dirty_character_beliefs(db, limit=16)
+
+
 # -------------------------------------------------
 # RDF handlers
 # -------------------------------------------------
@@ -265,6 +270,7 @@ JOB_HANDLERS.update(
         "assign_narratives": handle_assign_narratives,
         "project_character_knowledge": handle_project_character_knowledge,
         "resolve_generated_facts": handle_resolve_generated_facts,
+        "reconcile_character_beliefs": handle_reconcile_character_beliefs,
     }
 )
 
