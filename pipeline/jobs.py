@@ -417,6 +417,7 @@ async def rebalance_queued_priorities(db: Database) -> int:
                     WHEN 'materialize_event_occurrences' THEN 38
                     WHEN 'derive_character_acquisition_topology' THEN 40
                     WHEN 'derive_world_assertion_topology' THEN 45
+                    WHEN 'reconcile_character_beliefs' THEN 55
                     WHEN 'resolve_generated_facts' THEN 60
                     WHEN 'rdf_epistemic_project' THEN 75
                     WHEN 'derive_claim_topology' THEN
