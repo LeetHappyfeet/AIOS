@@ -560,7 +560,11 @@ def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
     if worker_index == 0:
         return ["resolve_claim_context"]
     if worker_index == 1:
-        return ["normalize_proposition", "project_character_knowledge"]
+        return [
+            "normalize_proposition",
+            "materialize_event_occurrences",
+            "project_character_knowledge",
+        ]
     return None
 
 
