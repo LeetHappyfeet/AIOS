@@ -116,6 +116,50 @@ async def reconcile_instance_beliefs(
     return len(rows)
 
 
+async def reconcile_dirty_character_beliefs(
+    db: Database,
+    *,
+    limit: int = 16,
+) -> int:
+    """Reconcile a bounded snapshot of coalesced character-belief invalidations.
+
+    Dirty rows are versioned. A row is deleted only when no trigger dirtied the
+    same coordinate while reconciliation was running, so concurrent evidence
+    cannot be lost behind a completed pass.
+    """
+
+    rows = await db.fetch(
+        """
+        SELECT instance_id, atom_id, dirty_version
+        FROM aios.character_belief_reconciliation_dirty
+        ORDER BY dirty_at, instance_id, atom_id
+        LIMIT $1
+        """,
+        max(1, min(int(limit), 128)),
+    )
+
+    processed = 0
+    for row in rows:
+        await reconcile_character_belief_atom(
+            db,
+            instance_id=row["instance_id"],
+            atom_id=row["atom_id"],
+        )
+        await db.execute(
+            """
+            DELETE FROM aios.character_belief_reconciliation_dirty
+            WHERE instance_id=$1
+              AND atom_id=$2
+              AND dirty_version=$3
+            """,
+            row["instance_id"],
+            row["atom_id"],
+            row["dirty_version"],
+        )
+        processed += 1
+    return processed
+
+
 async def get_character_belief_states(
     db: Database,
     *,
