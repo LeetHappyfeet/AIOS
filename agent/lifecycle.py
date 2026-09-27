@@ -141,7 +141,7 @@ class ActionRecord:
             result=_decode(row["result"]),
             error=row["error"],
             rejection_reason=row["rejection_reason"],
-            result_mode=str(row.get("result_mode", "terminal")),
+            result_mode=str(row.get("result_mode", "final")),
             meta=dict(_decode(row["meta"]) or {}),
         )
 
