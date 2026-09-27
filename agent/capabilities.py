@@ -96,7 +96,7 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
             raise ValueError("knowledge lookup query is empty")
         context = await contexts.resolve(instance_id)
         kinds = tuple(str(v).upper() for v in (args.get("kinds") or []) if str(v).strip())
-        # Research workers run iterative tool loops, so keep their ordinary\n        # memory search surface deliberately small. Other cognitive workers\n        # retain the broader lookup budget.\n        limit = max(1, min(int(args.get("limit", 5)), 8))\n        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
+        # Research workers run iterative tool loops, so keep their ordinary\n        # memory search surface deliberately small. Other cognitive workers\n        # retain the broader lookup budget. _worker_class is trusted internal\n        # dispatcher context and is never exposed in the action schema.\n        is_research = str(args.get("_worker_class") or "") == "research"\n        default_limit = 5 if is_research else 10\n        hard_limit = 8 if is_research else 30\n        limit = max(1, min(int(args.get("limit", default_limit)), hard_limit))\n        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
         candidates = await cognition.lookup_character_knowledge(
             context, scorer, claim_kinds=kinds, limit=limit,
         )
