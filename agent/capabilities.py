@@ -11,6 +11,7 @@ from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
 from aios_app.epistemic.research import CharacterResearchService
+from aios_app.epistemic.hypothesis_validation import notify_evidence_change
 from .actions import ActionRegistry, ActionSpec
 from .temporal import TemporalTriggerStore
 
@@ -95,8 +96,7 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
             raise ValueError("knowledge lookup query is empty")
         context = await contexts.resolve(instance_id)
         kinds = tuple(str(v).upper() for v in (args.get("kinds") or []) if str(v).strip())
-        limit = max(1, min(int(args.get("limit", 10)), 30))
-        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
+        # Research workers run iterative tool loops, so keep their ordinary\n        # memory search surface deliberately small. Other cognitive workers\n        # retain the broader lookup budget.\n        limit = max(1, min(int(args.get("limit", 5)), 8))\n        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
         candidates = await cognition.lookup_character_knowledge(
             context, scorer, claim_kinds=kinds, limit=limit,
         )
