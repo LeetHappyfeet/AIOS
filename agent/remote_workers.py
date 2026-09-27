@@ -50,6 +50,15 @@ class RemoteWorkerStore:
 
     async def claim(self, worker_id: UUID, *, lease_seconds: int = 120) -> ActionRecord | None:
         lease_seconds = max(30, min(int(lease_seconds), 3600))
+        # Reclaim abandoned work before selecting a new action. A stale worker
+        # cannot report completion after reassignment because ownership changes.
+        await self.db.execute(
+            """UPDATE aios.character_action
+               SET status='queued', assigned_worker_id=NULL, lease_expires_at=NULL,
+                   updated_at=now()
+               WHERE execution_mode='worker' AND status='running'
+                 AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()"""
+        )
         row = await self.db.execute_returning_row(
             """WITH worker AS (
                    SELECT worker_id,capabilities,max_concurrency
