@@ -218,11 +218,13 @@ class CharacterGoalService:
         goal_id: UUID,
         status: str = "completed",
     ) -> CognitiveGoal:
-        if status not in {"completed", "cancelled"}:
-            raise ValueError("invalid terminal goal status")
+        if status not in {"completed", "cancelled", "dormant"}:
+            raise ValueError("invalid goal status")
         row = await self._returning(
             """UPDATE aios.character_agent_goal
-               SET status=$3,completed_at=now(),updated_at=now()
+               SET status=$3,
+                   completed_at=CASE WHEN $3 IN ('completed','cancelled') THEN now() ELSE NULL END,
+                   updated_at=now()
                WHERE goal_id=$1 AND instance_id=$2 AND status='active'
                RETURNING goal_id,goal_text,status,priority,meta""",
             goal_id, instance_id, status,
@@ -230,7 +232,17 @@ class CharacterGoalService:
         if not row:
             raise LookupError("active goal not found")
         goal = self._goal(row)
-        await self._reconcile_terminal_threads(instance_id, goal_id, status)
+        if status in {"completed", "cancelled"}:
+            await self._reconcile_terminal_threads(instance_id, goal_id, status)
+        elif status == "dormant":
+            await self.db.execute(
+                """UPDATE aios.character_cognitive_thread
+                   SET status='resolved',resolved_at=COALESCE(resolved_at,now()),
+                       pressure=0,meta=meta || $3::jsonb,updated_at=now()
+                   WHERE instance_id=$1 AND goal_id=$2 AND status<>'resolved'""",
+                instance_id, goal_id,
+                json.dumps({"resolution_kind":"dormant","resolved_by":"goal_lifecycle"}),
+            )
         await self._invalidate(instance_id)
         await self._refresh_scene(instance_id)
         return goal
@@ -271,6 +283,7 @@ class CharacterGoalService:
             instance_id, topic,
         )
         active = next((row for row in rows if str(row["status"]) == "active"), None)
+        dormant = next((row for row in rows if str(row["status"]) == "dormant"), None)
         evidence_meta = {
             "semantic_topic_key": topic,
             "source": "message_cognition",
@@ -320,8 +333,27 @@ class CharacterGoalService:
                 await self._refresh_scene(instance_id)
             return goal
 
-        # A terminal row means this topic already had an explicit lifecycle.
-        # Do not resurrect it merely because old/recomputed evidence reappears.
+        if dormant:
+            row = await self._returning(
+                """UPDATE aios.character_agent_goal
+                   SET status='active',goal_text=$3,
+                       source_node_id=COALESCE($4,source_node_id),
+                       completed_at=NULL,updated_at=now(),
+                       meta=meta || $5::jsonb
+                   WHERE goal_id=$1 AND instance_id=$2 AND status='dormant'
+                   RETURNING goal_id,goal_text,status,priority,meta""",
+                dormant["goal_id"], instance_id, clean, source_node_id,
+                json.dumps({**evidence_meta, "reactivated_from": "dormant"}),
+            )
+            if row:
+                goal = self._goal(row)
+                await self._invalidate(instance_id)
+                if refresh_scene:
+                    await self._refresh_scene(instance_id)
+                return goal
+
+        # Completed/cancelled rows are terminal. Recomputed old evidence must
+        # never resurrect them.
         if rows:
             return None
         return await self.create(
