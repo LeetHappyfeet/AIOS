@@ -264,7 +264,11 @@ async def run_supervisor() -> None:
             try:
                 from aios_app.agent.autonomy import AutonomyScheduler
                 from aios_app.agent.runtime import AgentRuntimeStore
+                from aios_app.agent.temporal import TemporalTriggerStore
+                temporal = TemporalTriggerStore(db)
+                await temporal.reset_stale_firing()
                 await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)
+                await temporal.emit_due(limit=100)
                 await AutonomyScheduler(db).schedule_ready(limit=100)
                 # Disposable micro-HUD work opportunistically consumes free
                 # donated inference capacity and never survives its receipt.
