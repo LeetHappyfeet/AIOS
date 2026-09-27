@@ -38,9 +38,10 @@ def test_context_worker_reserves_resolver_stage():
     assert _reservation_returns()[0] == ["resolve_claim_context"]
 
 
-def test_materialization_worker_reserves_normalization_capacity():
+def test_materialization_worker_reserves_downstream_live_capacity():
     assert _reservation_returns()[1] == [
         "normalize_proposition",
+        "materialize_event_occurrences",
         "project_character_knowledge",
     ]
 
@@ -60,3 +61,14 @@ def test_claim_api_supports_stage_filtering():
 def test_character_projector_priority_is_applied_at_enqueue_time():
     assert _effective_priority("project_character_knowledge", 40) == 30
     assert _effective_priority("normalize_proposition", 35) == 35
+
+
+def test_reserved_claims_age_before_priority():
+    source = Path("pipeline/jobs.py").read_text(encoding="utf-8")
+    assert "q.created_at <= now() - interval '5 minutes'" in source
+    assert "WHEN $6::text[] IS NOT NULL" in source
+
+
+def test_rebalance_knows_event_materialization_priority():
+    source = Path("pipeline/jobs.py").read_text(encoding="utf-8")
+    assert "WHEN 'materialize_event_occurrences' THEN 38" in source
