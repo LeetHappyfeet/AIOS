@@ -751,6 +751,29 @@ class CognitiveContextService:
             invisible_anchor_count=invisible_anchor_count,
         )
 
+    async def lookup_character_knowledge(
+        self,
+        context: HUDContext,
+        scorer: RelevanceScorer | None,
+        *,
+        claim_kinds: Iterable[str] = (),
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Query durable /char knowledge only.
+
+        This intentionally bypasses federated halo/world retrieval, corpus-gap
+        detection, and automatic research/learning. It is the explicit answer
+        to "what does this character know?", not "what is visible in the world?".
+        """
+        rows = await self._flat_character_knowledge(context, scorer)
+        allowed = {str(kind).upper() for kind in claim_kinds if str(kind).strip()}
+        if allowed:
+            rows = [
+                item for item in rows
+                if str(item.get("claim_kind") or "BELIEF").upper() in allowed
+            ]
+        return rows[:max(1, min(int(limit), 50))]
+
     async def _flat_character_knowledge(
         self,
         context: HUDContext,
