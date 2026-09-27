@@ -205,7 +205,7 @@ STAGES: List[Stage] = [
           /* ADMISSION_BARRIER */
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.claim_id=o.claim_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
-        ORDER BY o.observed_at LIMIT $1
+        ORDER BY o.observed_at DESC LIMIT $1
     """), claim_id_payload, 90, 64),
     Stage("derive_semantic_episodes", "derive_semantic_episodes", """
         SELECT 1
