@@ -102,50 +102,59 @@ class CognitiveLifecycleReconciler:
                 "SELECT goal_id FROM aios.character_cognitive_thread WHERE thread_id=$1",thread_id)
             goal_id=row["goal_id"] if row else None
 
-        if goal_id is not None:
-            relation="progress" if terminal_status=="succeeded" else "blocker"
-            confidence=.65 if terminal_status=="succeeded" else .8
-            await self.record_goal_evidence(
-                instance_id=operation["instance_id"],goal_id=goal_id,
-                evidence_type="cognitive_operation",
-                relation=relation,evidence_id=str(operation["operation_id"]),
-                source_node_id=operation.get("source_node_id"),confidence=confidence,
-                meta={"operation_type":operation.get("operation_type"),
-                      "status":terminal_status,"result":dict(result)},
-            )
-            # The bounded goal-review classifier's C choice is the only
-            # inference outcome allowed to propose semantic completion.
-            if (terminal_status=="succeeded"
-                and str(operation.get("operation_type"))=="planning.review"
-                and result.get("kind")=="choice"
-                and int(result.get("option_index",-1))==2):
-                await self.complete_goal(
-                    instance_id=operation["instance_id"],goal_id=goal_id,
-                    resolution_kind="reviewed_satisfied",
-                    evidence_type="bounded_goal_review",
-                    evidence_id=str(operation["operation_id"]),
-                    source_node_id=operation.get("source_node_id"),confidence=.8,
-                    meta={"label":result.get("label")},
-                )
-            elif (terminal_status=="succeeded"
-                  and str(operation.get("operation_type"))=="planning.review"
-                  and result.get("kind")=="choice"
-                  and int(result.get("option_index",-1))==4):
-                # Lack of present relevance is not withdrawal. Park the goal
-                # outside executive attention while retaining durable history;
-                # fresh positive semantic evidence may reactivate it later.
+        if goal_id is not None and terminal_status == "succeeded":
+            operation_type=str(operation.get("operation_type") or "")
+            if operation_type == "planning.review" and result.get("kind") == "choice":
+                # A successful review is not itself progress. The selected
+                # semantic outcome is the only source of goal evidence.
+                option_index=int(result.get("option_index",-1))
+                relation_by_option={
+                    0: None,                    # unresolved
+                    1: "progress",
+                    2: "completion_candidate",
+                    3: "blocker",
+                    4: "withdrawal",
+                }
+                relation=relation_by_option.get(option_index)
+                if option_index == 2:
+                    await self.complete_goal(
+                        instance_id=operation["instance_id"],goal_id=goal_id,
+                        resolution_kind="reviewed_satisfied",
+                        evidence_type="bounded_goal_review",
+                        evidence_id=str(operation["operation_id"]),
+                        source_node_id=operation.get("source_node_id"),confidence=.8,
+                        meta={"label":result.get("label"),"option_index":option_index},
+                    )
+                elif relation is not None:
+                    await self.record_goal_evidence(
+                        instance_id=operation["instance_id"],goal_id=goal_id,
+                        evidence_type="bounded_goal_review",relation=relation,
+                        evidence_id=str(operation["operation_id"]),
+                        source_node_id=operation.get("source_node_id"),
+                        confidence=.7 if option_index in {1,3} else .65,
+                        meta={"label":result.get("label"),"option_index":option_index,
+                              **({"lifecycle_effect":"dormant"} if option_index==4 else {})},
+                    )
+                    if option_index == 4:
+                        try:
+                            await self.goals.finish(
+                                instance_id=operation["instance_id"],
+                                goal_id=goal_id,status="dormant")
+                        except LookupError:
+                            pass
+            elif operation_type != "planning.review":
+                # Successful non-review work can be evidence of progress.
                 await self.record_goal_evidence(
                     instance_id=operation["instance_id"],goal_id=goal_id,
-                    evidence_type="bounded_goal_review",relation="withdrawal",
+                    evidence_type="cognitive_operation",relation="progress",
                     evidence_id=str(operation["operation_id"]),
                     source_node_id=operation.get("source_node_id"),confidence=.65,
-                    meta={"label":result.get("label"),"lifecycle_effect":"dormant"},
+                    meta={"operation_type":operation_type,
+                          "status":terminal_status,"result":dict(result)},
                 )
-                try:
-                    await self.goals.finish(
-                        instance_id=operation["instance_id"],goal_id=goal_id,status="dormant")
-                except LookupError:
-                    pass
+        # Failed/stale machinery is operational telemetry, not evidence that
+        # the character's goal is blocked. It remains on the operation/thread
+        # receipt below without contaminating character_goal_evidence.
 
         if not thread_id:
             return
