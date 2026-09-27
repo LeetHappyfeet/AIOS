@@ -72,17 +72,40 @@ POLICIES = {
 
 
 def _focus_terms(*values: Any) -> list[str]:
+    """Select bounded lexical seeds without discarding the tail of long turns.
+
+    Identifier-shaped tokens are retained first because character/user handles
+    commonly contain underscores. Remaining capacity is sampled across the
+    complete input so conversational preambles cannot consume the entire seed
+    budget before a later subject or object mention is seen.
+    """
     seen: set[str] = set()
-    result: list[str] = []
+    tokens: list[str] = []
     for value in values:
         for word in _WORD_RE.findall(str(value or "").lower()):
             if len(word) < 3 or word in seen:
                 continue
             seen.add(word)
-            result.append(word)
-            if len(result) >= MAX_FOCUS_TERMS:
-                return result
-    return result
+            tokens.append(word)
+
+    if len(tokens) <= MAX_FOCUS_TERMS:
+        return tokens
+
+    priority = [word for word in tokens if "_" in word]
+    priority_set = set(priority)
+    ordinary = [word for word in tokens if word not in priority_set]
+    remaining = MAX_FOCUS_TERMS - min(len(priority), MAX_FOCUS_TERMS)
+    if remaining <= 0:
+        return priority[:MAX_FOCUS_TERMS]
+    if len(ordinary) <= remaining:
+        sampled = ordinary
+    else:
+        step = len(ordinary) / remaining
+        sampled = [
+            ordinary[min(int(index * step), len(ordinary) - 1)]
+            for index in range(remaining)
+        ]
+    return (priority + sampled)[:MAX_FOCUS_TERMS]
 
 
 _RETRIEVAL_SQL = """
@@ -100,12 +123,16 @@ eligible_nodes AS (
 seed_candidates AS (
     SELECT
         topology_node_id,
+        proposition_id,
+        node_type,
+        node_key,
         significance,
         CASE
             WHEN node_type='INSTANCE' AND node_key=$4 THEN 0
             WHEN cardinality($6::uuid[]) > 0
                  AND proposition_id = ANY($6::uuid[]) THEN 1
-            ELSE 2
+            WHEN proposition_id IS NULL THEN 2
+            ELSE 3
         END AS seed_rank
     FROM eligible_nodes
     WHERE (node_type='INSTANCE' AND node_key=$4)
@@ -123,9 +150,26 @@ seed_candidates AS (
             AND proposition_id = ANY($6::uuid[])
        )
 ),
+diverse_seed_candidates AS (
+    SELECT DISTINCT ON (
+        COALESCE(proposition_id::text, node_type || ':' || node_key)
+    )
+        topology_node_id,
+        proposition_id,
+        node_type,
+        node_key,
+        significance,
+        seed_rank
+    FROM seed_candidates
+    ORDER BY
+        COALESCE(proposition_id::text, node_type || ':' || node_key),
+        seed_rank,
+        significance DESC NULLS LAST,
+        topology_node_id
+),
 seeds AS (
     SELECT topology_node_id
-    FROM seed_candidates
+    FROM diverse_seed_candidates
     ORDER BY seed_rank, significance DESC NULLS LAST, topology_node_id
     LIMIT 64
 ),
