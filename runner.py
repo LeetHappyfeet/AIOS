@@ -547,10 +547,19 @@ def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
     default = SchedulingLane.DEFAULT.value
 
     if worker_index in (0, 1):
-        return [live], [live, structural, default, background]
+        return [live], [live, default]
     if worker_index == 2:
-        return [structural], [structural, live, default, background]
-    return [background], [background, structural, live, default]
+        # Structural topology is intentionally single-writer at the worker
+        # level. Do not let LIVE/BACKGROUND workers fall into this lane.
+        return [structural], [structural]
+    return [background], [background, default]
+
+
+STRUCTURAL_BATCH_PLAN: tuple[tuple[str, int], ...] = (
+    ("derive_character_acquisition_topology", 16),
+    ("derive_claim_topology", 4),
+    ("derive_semantic_episodes", 1),
+)
 
 
 def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
@@ -630,6 +639,45 @@ async def _claim_for_worker(
         return job
 
 
+async def _run_structural_semantic_batch_cycle(
+    db: Database,
+    *,
+    worker_id: str,
+    rdf_gate: asyncio.Semaphore,
+    claim_gate: asyncio.Lock,
+) -> int:
+    """Run one serial weighted cycle on the dedicated STRUCTURAL worker.
+
+    The worker, not global job priority, owns inter-stage fairness. Each stage
+    receives a bounded quantum, newest/priority ordering remains local to that
+    stage, and every job completes before the next one is claimed.
+    """
+    completed = 0
+    structural = [SchedulingLane.STRUCTURAL.value]
+    for job_type, quantum in STRUCTURAL_BATCH_PLAN:
+        for _ in range(quantum):
+            async with claim_gate:
+                job = await fetch_next_job(
+                    db,
+                    worker_id=worker_id,
+                    resource_class=ResourceClass.SEMANTIC.value,
+                    lease_seconds=settings.pipeline_lease_seconds,
+                    scheduling_lanes=structural,
+                    prefer_uncontended=True,
+                    job_types=[job_type],
+                )
+            if not job:
+                break
+            await _execute_claimed_job(
+                db,
+                job=job,
+                worker_id=worker_id,
+                rdf_gate=rdf_gate,
+            )
+            completed += 1
+    return completed
+
+
 async def _resource_worker(
     db: Database,
     *,
@@ -644,6 +692,17 @@ async def _resource_worker(
         f"{resource_class.value}:{worker_index}"
     )
     while True:
+        if resource_class == ResourceClass.SEMANTIC and worker_index == 2:
+            completed = await _run_structural_semantic_batch_cycle(
+                db,
+                worker_id=worker_id,
+                rdf_gate=rdf_gate,
+                claim_gate=claim_gate,
+            )
+            if completed == 0:
+                await asyncio.sleep(poll_interval)
+            continue
+
         job = await _claim_for_worker(
             db,
             worker_id=worker_id,
