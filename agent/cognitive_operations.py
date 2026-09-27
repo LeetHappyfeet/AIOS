@@ -93,7 +93,7 @@ class CognitiveOperationEngine:
                      "operation_id":str(op["operation_id"]),"option_index":i,
                      "freshness_policy":choice_freshness}
                     for i,(k,label) in enumerate(zip("ABCD",labels))]
-        fifth=("The goal was superseded or withdrawn."
+        fifth=("This goal does not deserve active attention right now."
                if str(op["operation_type"])=="planning.review"
                else "Stop considering this for now.")
         candidates.append({"key":"E","label":fifth,
