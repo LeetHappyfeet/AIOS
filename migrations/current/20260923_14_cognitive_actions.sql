@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS aios.character_agent_goal (
   source_task_id uuid NULL REFERENCES aios.character_cognitive_task(task_id) ON DELETE SET NULL,
   source_node_id uuid NULL REFERENCES aios.dag_node(node_id) ON DELETE SET NULL,
   goal_text text NOT NULL,
-  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','dormant','completed','cancelled')),
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','completed','cancelled')),
   priority integer NOT NULL DEFAULT 100,
   meta jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
