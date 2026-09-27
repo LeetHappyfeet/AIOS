@@ -56,4 +56,23 @@ class OpportunityRouter:
             [x["opportunity_id"] for x in selected])
         await enqueue_job(self.db,job_type="internal_cognition_inference",
             payload={"instance_id":str(instance_id),"transaction_id":str(tx)},priority=priority)
+
+        # Goal lifecycle maintenance has one reserved slot per admitted host
+        # cognition episode. It does not compete with the attention choice and
+        # never creates cognition on its own: this path only runs because a
+        # COGNITIVE_DELTA_READY episode was already admitted.
+        goal_review=next(
+            (row for row in sorted(rows,key=lambda x:float(x["priority_score"]),reverse=True)
+             if str(row["opportunity_type"])=="goal_review"),
+            None)
+        if goal_review is not None:
+            maintenance_thread=await self.threads.cross(goal_review)
+            from .cognitive_operations import CognitiveOperationEngine
+            await CognitiveOperationEngine(self.db).create_from_opportunity(
+                opportunity=goal_review,thread_id=maintenance_thread,priority=priority)
+            await self.db.execute(
+                """UPDATE aios.character_cognitive_opportunity
+                   SET status='selected',selected_at=COALESCE(selected_at,now()),updated_at=now()
+                   WHERE opportunity_id=$1 AND status IN ('pending','offered')""",
+                goal_review["opportunity_id"])
         return tx
