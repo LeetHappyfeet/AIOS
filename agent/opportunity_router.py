@@ -26,14 +26,22 @@ class OpportunityRouter:
         rows=[x for x in batch.opportunities
               if x["status"]=="pending" and x["valid_until"] is not None]
         if not rows: return None
+        ranked=sorted(rows,key=lambda x:float(x["priority_score"]),reverse=True)
+        # Reserve one due goal review for lifecycle maintenance. It is removed
+        # from the competitive attention transaction so the same opportunity
+        # can never be selected twice.
+        goal_review=next(
+            (row for row in ranked if str(row["opportunity_type"])=="goal_review"),None)
+        attention_rows=[row for row in ranked if row is not goal_review]
         # Avoid asking the character to choose among duplicate cognitive modes.
         selected=[]; seen=set()
-        for row in sorted(rows,key=lambda x:float(x["priority_score"]),reverse=True):
+        for row in attention_rows:
             key=str(row["opportunity_type"])
             if key in seen: continue
             seen.add(key); selected.append(row)
             if len(selected)>=4: break
-        if not selected: return None
+        if not selected and goal_review is None:
+            return None
         keys="ABCD"
         candidates=[]
         for key,row in zip(keys,selected):
@@ -46,7 +54,8 @@ class OpportunityRouter:
             })
         candidates.append({"key":"E","label":"None of these deserves my attention right now.",
                            "operation":"wait"})
-        priority=max(1,200-int(max(float(x["priority_score"]) for x in selected)*20))
+        scored=selected + ([goal_review] if goal_review is not None else [])
+        priority=max(1,200-int(max(float(x["priority_score"]) for x in scored)*20))
         tx=await self.transactions.create(
             instance_id=instance_id,candidates=candidates,priority=priority,ttl_seconds=300,
             opportunity_ids=[x["opportunity_id"] for x in selected])
@@ -61,10 +70,6 @@ class OpportunityRouter:
         # cognition episode. It does not compete with the attention choice and
         # never creates cognition on its own: this path only runs because a
         # COGNITIVE_DELTA_READY episode was already admitted.
-        goal_review=next(
-            (row for row in sorted(rows,key=lambda x:float(x["priority_score"]),reverse=True)
-             if str(row["opportunity_type"])=="goal_review"),
-            None)
         if goal_review is not None:
             maintenance_thread=await self.threads.cross(goal_review)
             from .cognitive_operations import CognitiveOperationEngine
