@@ -9,6 +9,7 @@ from aios_app.epistemic.research import (
     SemanticKnowledgeCoverageService,
     SemanticCorpusReinforcementService,
     research_terms,
+    resolve_retrieval_demand,
 )
 
 
@@ -20,6 +21,50 @@ def test_research_terms_are_deterministic_and_drop_function_words():
         "red",
         "rocks",
     )
+
+
+def test_retrieval_demand_routes_character_preference_question_to_memory():
+    demand = resolve_retrieval_demand(
+        (
+            "The boardwalk was busy and Mia kept talking about the stores. "
+            "If I gave you money and dropped you in a clothing store by yourself now, "
+            "what would you come out wearing?"
+        ),
+        character_id="Renamon",
+    )
+    assert demand.route == "character"
+    assert demand.reason == "character_self_knowledge"
+    assert demand.focus_text.startswith("Renamon ")
+    assert "clothing" in demand.focus_text
+    assert "wearing" in demand.focus_text
+    assert "boardwalk" not in demand.focus_text
+
+
+def test_retrieval_demand_keeps_external_knowledge_question_general():
+    demand = resolve_retrieval_demand(
+        "What do you know about hematite?",
+        character_id="Renamon",
+    )
+    assert demand.route == "general"
+    assert demand.reason == "external_knowledge_question"
+
+
+def test_character_routed_attention_blocks_automatic_corpus_lookup():
+    attention = CognitiveAttentionInputs(
+        recent_newest=[{
+            "speaker_id": "Mia",
+            "speaker_role": "character",
+            "message_text": "What would you choose to wear?",
+        }],
+        visible_source_node_ids=frozenset(),
+        focus_text="What would you choose to wear?",
+        plugin_focus_text="",
+        retrieval_focus_text="Renamon choose wear",
+        goals=[],
+        knowledge_route="character",
+        demand_reason="character_self_knowledge",
+    )
+    assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
 
 
 def test_knowledge_demand_detects_missing_concepts():
