@@ -13,6 +13,9 @@ def test_default_registry_exposes_new_capability_layer():
 
     research = registry.capabilities_for("research")
     assert research["knowledge.lookup"]["class"] == "lookup"
+    assert research["world.lookup"]["class"] == "lookup"
+    assert "/char" in research["knowledge.lookup"]["description"]
+    assert "/world" in research["world.lookup"]["description"]
     assert research["state.inspect"]["class"] == "lookup"
     assert research["research.search"]["class"] == "research"
     assert research["source.read"]["class"] == "research"
@@ -23,6 +26,7 @@ def test_default_registry_exposes_new_capability_layer():
     assert "state.inspect" in communication
     assert "research.search" not in communication
     assert "source.read" not in communication
+    assert "world.lookup" not in communication
 
 
 def test_inference_schema_contract_remains_plain_action_schemas():
@@ -115,3 +119,27 @@ def test_worker_capability_metadata_exposes_execution_mode():
     capability = registry.capabilities_for("executive")["compute.exec"]
     assert capability["execution_mode"] == "worker"
     assert capability["result_mode"] == "asynchronous"
+
+
+def test_character_and_world_lookup_are_distinct_handlers():
+    registry = default_action_registry(object())
+    character = registry.get("knowledge.lookup")
+    world = registry.get("world.lookup")
+
+    assert character is not None
+    assert world is not None
+    assert character.handler is not world.handler
+    assert character.side_effect_class == "read_only"
+    assert world.side_effect_class == "read_only"
+    assert character.result_mode == "return_to_cognition"
+    assert world.result_mode == "return_to_cognition"
+
+
+def test_world_lookup_exposes_domain_without_granting_access():
+    registry = default_action_registry(object())
+    spec = registry.get("world.lookup")
+
+    assert spec is not None
+    assert "domain" in spec.schema["properties"]
+    assert spec.capability_class == "lookup"
+    assert "ownership" in spec.description
