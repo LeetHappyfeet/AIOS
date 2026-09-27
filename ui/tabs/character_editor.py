@@ -65,10 +65,37 @@ def _mapping_rows(value: Any) -> list[list[Any]]:
     return [[str(key), val] for key, val in sorted(mapping.items())]
 
 
+def _table_rows(rows: Any) -> list[list[Any]]:
+    """Normalize editable Gradio Dataframe values to positional rows."""
+    if rows is None:
+        return []
+
+    # Gradio may return a pandas DataFrame unless the component explicitly
+    # requests type="array". Avoid importing pandas just for this boundary.
+    values = getattr(rows, "values", None)
+    if values is not None:
+        tolist = getattr(values, "tolist", None)
+        if callable(tolist):
+            rows = tolist()
+
+    if isinstance(rows, tuple):
+        rows = list(rows)
+    if not isinstance(rows, list):
+        raise ValueError(f"Unsupported table value type: {type(rows).__name__}")
+
+    normalized: list[list[Any]] = []
+    for row in rows:
+        if isinstance(row, tuple):
+            row = list(row)
+        if isinstance(row, list):
+            normalized.append(row)
+    return normalized
+
+
 def _rows_mapping(rows: Any) -> dict[str, float]:
     result: dict[str, float] = {}
-    for row in rows or []:
-        if not row or len(row) < 2:
+    for row in _table_rows(rows):
+        if len(row) < 2:
             continue
         key = str(row[0] or "").strip()
         if not key:
@@ -250,8 +277,8 @@ async def _domain_rows(character_id: str) -> list[list[Any]]:
 async def _save_domains(character_id: str, rows: Any) -> dict:
     domains = [
         str(row[0]).strip()
-        for row in (rows or [])
-        if row and len(row) >= 1 and str(row[0] or "").strip()
+        for row in _table_rows(rows)
+        if len(row) >= 1 and str(row[0] or "").strip()
         and (len(row) < 2 or bool(row[1]))
     ]
     return await CorpusAccessReconciler(db).set_character_domains(character_id, domains)
