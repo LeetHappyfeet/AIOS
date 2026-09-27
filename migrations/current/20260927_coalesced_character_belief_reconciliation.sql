@@ -85,7 +85,7 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$;
+$$;
 
 CREATE OR REPLACE FUNCTION aios.refresh_belief_from_admission()
 RETURNS trigger
@@ -111,7 +111,7 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$;
+$$;
 
 CREATE OR REPLACE FUNCTION aios.refresh_belief_from_acquisition_topology()
 RETURNS trigger
