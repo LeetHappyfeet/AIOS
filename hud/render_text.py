@@ -222,7 +222,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     toolkit = frame.get("toolkit") or []
     if toolkit:
         lines.append("\nAIOS TOOLKIT:")
-        lines.append("When context is insufficient, request one narrow operation.")
+        lines.append("For missing context or another relevant thread, request one narrow operation.")
         labels = {
             "memory_lookup": "MEMORY LOOKUP",
             "world_lookup": "WORLD LOOKUP",
