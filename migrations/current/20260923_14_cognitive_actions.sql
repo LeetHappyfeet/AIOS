@@ -1,8 +1,8 @@
 -- Internal cognitive state and action execution semantics.
 BEGIN;
 ALTER TABLE aios.character_action
-  ADD COLUMN IF NOT EXISTS result_mode text NOT NULL DEFAULT 'terminal'
-    CHECK (result_mode IN ('terminal','return_to_cognition','asynchronous','external'));
+  ADD COLUMN IF NOT EXISTS result_mode text NOT NULL DEFAULT 'final'
+    CHECK (result_mode IN ('final','return_to_cognition','asynchronous','external'));
 
 CREATE TABLE IF NOT EXISTS aios.character_agent_goal (
   goal_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
