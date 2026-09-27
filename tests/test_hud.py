@@ -119,7 +119,7 @@ def test_text_renderer_uses_canonical_hud_sections():
     assert "conflicts with: The door is open." in text
     assert "AVAILABLE ACTIONS: speak, inspect" in text
     assert "AIOS TOOLKIT:" in text
-    assert "When context is insufficient, request one narrow operation." in text
+    assert "For missing context or another relevant thread, request one narrow operation." in text
     assert "MEMORY LOOKUP — one subject/question; a few memories" in text
     assert "WORLD LOOKUP — one subject/question; a few facts" in text
     assert "RESEARCH — one focused question; brief findings" in text
