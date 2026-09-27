@@ -422,27 +422,32 @@ class CognitiveContextService:
             topology_memories = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="memory", focus_text=focus_text, goals=goals,
                 max_hops=policy.effective_memory_hops,
-                limit=policy.memory_limit,                include_world=attention.knowledge_route != "character",
+                limit=policy.memory_limit,
+                include_world=attention.knowledge_route != "character",
             )
             topology_beliefs = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="belief", focus_text=focus_text, goals=goals,
                 max_hops=policy.belief_hops,
-                limit=policy.semantic_retrieval_limit,                include_world=attention.knowledge_route != "character",
+                limit=policy.semantic_retrieval_limit,
+                include_world=attention.knowledge_route != "character",
             )
             topology_goals = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="goal", focus_text=focus_text, goals=goals,
                 max_hops=policy.goal_hops,
-                limit=min(policy.semantic_retrieval_limit, 30),                include_world=attention.knowledge_route != "character",
+                limit=min(policy.semantic_retrieval_limit, 30),
+                include_world=attention.knowledge_route != "character",
             )
             topology_events = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="event", focus_text=focus_text, goals=goals,
                 max_hops=policy.event_hops,
-                limit=min(policy.semantic_retrieval_limit, 40),                include_world=attention.knowledge_route != "character",
+                limit=min(policy.semantic_retrieval_limit, 40),
+                include_world=attention.knowledge_route != "character",
             )
             topology_rules = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="rule", focus_text=focus_text, goals=goals,
                 max_hops=policy.rule_hops,
-                limit=min(policy.semantic_retrieval_limit, 30),                include_world=attention.knowledge_route != "character",
+                limit=min(policy.semantic_retrieval_limit, 30),
+                include_world=attention.knowledge_route != "character",
             )
         except BaseException:
             if not flat_task.done():
