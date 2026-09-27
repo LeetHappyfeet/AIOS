@@ -43,6 +43,78 @@ class KnowledgeDemand:
     reason: str
 
 
+@dataclass(frozen=True)
+class RetrievalDemand:
+    """A conservative routing hint for generation-time knowledge retrieval."""
+
+    route: str
+    focus_text: str
+    reason: str
+
+
+_DEMAND_SENTENCE_RE = re.compile(r"[^.!?\\n]+[.!?]?")
+_SECOND_PERSON_RE = re.compile(r"\\b(?:you|your|yours|yourself)\\b", re.IGNORECASE)
+_SELF_KNOWLEDGE_PATTERNS = (
+    re.compile(r"\\b(?:what|which)\\s+(?:do|would|did)\\s+you\\s+(?:like|prefer|want|choose|pick|wear|use|keep|own)\\b", re.IGNORECASE),
+    re.compile(r"\\b(?:do|did|have)\\s+you\\s+(?:ever\\s+)?(?:like|prefer|want|choose|pick|wear|use|keep|own|have|visit|meet|remember|experience)\\b", re.IGNORECASE),
+    re.compile(r"\\bwhat\\s+(?:is|was|are|were)\\s+your\\s+(?:favorite|favourite|preference|opinion|memory|experience|relationship|history)\\b", re.IGNORECASE),
+    re.compile(r"\\bhow\\s+do\\s+you\\s+(?:feel|think)\\s+about\\b", re.IGNORECASE),
+    re.compile(r"\\bwhat\\s+do\\s+you\\s+remember\\b", re.IGNORECASE),
+)
+_EXTERNAL_KNOWLEDGE_PATTERNS = (
+    re.compile(r"\\b(?:do\\s+you\\s+know|what\\s+do\\s+you\\s+know)\\s+(?:about\\s+)?", re.IGNORECASE),
+    re.compile(r"\\b(?:what|who|where|when|why)\\s+(?:is|are|was|were)\\b", re.IGNORECASE),
+    re.compile(r"\\b(?:explain|define|tell\\s+me\\s+about)\\b", re.IGNORECASE),
+)
+_DEMAND_NOISE = frozenset({
+    "i", "me", "my", "mine", "you", "your", "yours", "yourself",
+    "do", "did", "does", "would", "could", "should", "can", "have", "has", "had",
+    "ever", "now", "then", "really", "just", "tell", "remember",
+})
+
+
+def _demand_clause(text: str) -> str:
+    """Prefer the last explicit question over surrounding scene/dialogue prose."""
+    clauses = [part.strip() for part in _DEMAND_SENTENCE_RE.findall(str(text or "")) if part.strip()]
+    questions = [part for part in clauses if part.endswith("?")]
+    if questions:
+        return questions[-1]
+    return clauses[-1] if clauses else str(text or "").strip()
+
+
+def resolve_retrieval_demand(focus_text: str, *, character_id: str) -> RetrievalDemand:
+    """Classify only high-confidence self-memory demands.
+
+    Ambiguous language deliberately remains general so this layer cannot
+    suppress ordinary world/corpus retrieval merely because a character is
+    addressed in conversation.
+    """
+    raw = str(focus_text or "").strip()
+    clause = _demand_clause(raw)
+    if not clause:
+        return RetrievalDemand("general", raw, "empty_focus")
+
+    if any(pattern.search(clause) for pattern in _EXTERNAL_KNOWLEDGE_PATTERNS):
+        return RetrievalDemand("general", raw, "external_knowledge_question")
+
+    self_memory = bool(_SECOND_PERSON_RE.search(clause)) and any(
+        pattern.search(clause) for pattern in _SELF_KNOWLEDGE_PATTERNS
+    )
+    if not self_memory:
+        return RetrievalDemand("general", raw, "no_high_confidence_self_signal")
+
+    terms = tuple(
+        term for term in research_terms(clause, limit=16)
+        if term not in _DEMAND_NOISE
+    )
+    compact = " ".join((str(character_id).strip(), *terms)).strip()
+    return RetrievalDemand(
+        "character",
+        compact or str(character_id).strip() or clause,
+        "character_self_knowledge",
+    )
+
+
 class KnowledgeDemandResolver:
     """Deterministic gate for deciding whether corpus lookup is warranted.
 
