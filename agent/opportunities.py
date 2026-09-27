@@ -59,6 +59,14 @@ class CognitiveOpportunityService:
         attention=await self.cognition.resolve_attention_inputs(
             context,raw,{},recent_limit=6,focus_text=delta_focus)
         snapshot=await self.cognition.resolve_knowledge(context,None,attention)
+        scene_row=await self.db.fetchrow(
+            """SELECT scene_state FROM aios.character_scene_snapshot
+               WHERE instance_id=$1
+                 AND source_timeline_id IS NOT DISTINCT FROM $2
+                 AND source_head_node_id IS NOT DISTINCT FROM $3
+               ORDER BY updated_at DESC LIMIT 1""",
+            instance_id,context.source_timeline_id,context.source_head_node_id)
+        current_scene=CharacterGoalService._json_object(scene_row["scene_state"]) if scene_row else {}
         focus=_clip(attention.focus_text,360)
         goals=list(attention.goals)
         goal_states=await self.cognition.goals.cognitive_states(instance_id, goals)
@@ -187,9 +195,11 @@ class CognitiveOpportunityService:
                 "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
                 "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),
                 "current_scene":{
-                    "location":snapshot.scene.get("location") if hasattr(snapshot,"scene") else None,
-                    "immediate_goal":snapshot.scene.get("immediate_goal") if hasattr(snapshot,"scene") else None,
-                    "pending_work":snapshot.scene.get("pending_work") if hasattr(snapshot,"scene") else None,
+                    "location":current_scene.get("location"),
+                    "present_entities":current_scene.get("present_entities") or [],
+                    "immediate_goal":current_scene.get("immediate_goal"),
+                    "pending_work":current_scene.get("pending_work"),
+                    "last_significant_change":current_scene.get("last_significant_change"),
                 },
                 "knowledge_demand":goal_demand or {}},
                 source_node_id or context.source_head_node_id,context,
