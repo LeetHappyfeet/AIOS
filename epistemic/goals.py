@@ -217,6 +217,7 @@ class CharacterGoalService:
         instance_id: UUID,
         goal_id: UUID,
         status: str = "completed",
+        refresh_scene: bool = True,
     ) -> CognitiveGoal:
         if status not in {"completed", "cancelled", "dormant"}:
             raise ValueError("invalid goal status")
@@ -244,7 +245,8 @@ class CharacterGoalService:
                 json.dumps({"resolution_kind":"dormant","resolved_by":"goal_lifecycle"}),
             )
         await self._invalidate(instance_id)
-        await self._refresh_scene(instance_id)
+        if refresh_scene:
+            await self._refresh_scene(instance_id)
         return goal
 
     async def reconcile_evidence(
