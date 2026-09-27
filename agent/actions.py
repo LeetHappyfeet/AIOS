@@ -121,7 +121,7 @@ class ActionDispatcher:
             )
         action = await self.store.transition_action(action_id, "running")
         try:
-            result = await spec.handler(action.instance_id, action.arguments)
+            handler_args = dict(action.arguments)\n            # Internal dispatch context is not part of the model-visible action\n            # schema or persisted arguments. Handlers may use it for per-worker\n            # budgets without trusting model-supplied metadata.\n            handler_args[\"_worker_class\"] = worker_class\n            result = await spec.handler(action.instance_id, handler_args)
         except Exception as exc:
             return await self.store.transition_action(
                 action_id, "failed", error=str(exc)[:2000]
