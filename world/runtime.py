@@ -12,7 +12,7 @@ from aios_app.causal import CausalIntegrityKernel, CausalRejected
 from aios_app.causal.types import CausalCandidate
 from aios_app.db import Database
 from aios_app.dag import get_or_create_timeline, add_node_and_edge
-from aios_app.hud.frame import HUDAssembler
+from aios_app.hud.frame import HUDAssembler, HUD_VERSION
 from aios_app.hud.render_text import render_hud_text
 from aios_app.hud.singleflight import AsyncSingleFlight
 from aios_app.epistemic.belief_reconciliation import reconcile_instance_beliefs
@@ -75,6 +75,21 @@ def _subjective_runtime_state(row: Dict[str, Any]) -> Dict[str, Any]:
         "world_key",
     }
     return {key: value for key, value in row.items() if key in keep}
+
+
+def _prepared_hud_version(ready: Dict[str, Any]) -> Optional[str]:
+    raw = ready.get("hud_json")
+    if raw is None:
+        return None
+    try:
+        frame = _json_object(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    hud = frame.get("hud")
+    if not isinstance(hud, dict):
+        return None
+    version = hud.get("version")
+    return str(version) if version else None
 
 
 def _sanitize_hud_frame(frame: Dict[str, Any]) -> Dict[str, Any]:
@@ -410,6 +425,7 @@ class WorldRuntimeService:
             and ready.get("prepared_source_node_id") == through_node_id
             and ready.get("prepared_state_version") == state.get("state_version")
             and ready.get("hud_json") is not None
+            and _prepared_hud_version(ready) == HUD_VERSION
         )
         if replay_cached:
             frame = _sanitize_hud_frame(_json_object(ready["hud_json"]))
@@ -451,6 +467,7 @@ class WorldRuntimeService:
             and ready.get("prepared_source_node_id") == target_node_id
             and ready.get("prepared_state_version") == state.get("state_version")
             and ready.get("hud_json") is not None
+            and _prepared_hud_version(ready) == HUD_VERSION
         )
         if exact_cached:
             frame = _sanitize_hud_frame(_json_object(ready["hud_json"]))
@@ -764,6 +781,7 @@ class WorldRuntimeService:
             frame.get("hud", {}).get("generation_ready")
             and ready.get("hud_text")
             and ready.get("prepared_state_version") == frame.get("presence", {}).get("state_version")
+            and _prepared_hud_version(ready) == HUD_VERSION
         ):
             return ready["hud_text"]
         return render_hud_text(frame)
