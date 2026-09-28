@@ -107,3 +107,21 @@ def test_rdf_projection_preserves_mutation_during_publish():
     assert "projected_version=GREATEST(projected_version,$4)" in projection
     assert "WHEN dirty_version <= $4 THEN 'ready' ELSE 'dirty'" in projection
     assert "rdf_change_cursor=GREATEST(rdf_change_cursor,$5)" in projection
+
+
+def test_character_epistemic_rdf_does_not_shadow_into_world():
+    writer = (ROOT / "rdf" / "epistemic_writer.py").read_text()
+    assert "character_owned = bool(character_id)" in writer
+    assert "if not character_owned:" in writer
+    assert "if not character_owned and not world_receipt:" in writer
+    assert "if character_owned and world_receipt:" in writer
+    assert "FILTER NOT EXISTS" in writer
+    assert "DELETE FROM aios.rdf_promotion_log" in writer
+
+
+def test_world_epistemic_projection_remains_for_objective_observations():
+    writer = (ROOT / "rdf" / "epistemic_writer.py").read_text()
+    assert 'GRAPH <{GRAPH_IRI}>' in writer
+    assert '<{obs_iri}> a world:Observation' in writer
+    assert 'world:observesProposition <{prop_iri}>' in writer
+    assert "if not character_owned and not world_receipt:" in writer
