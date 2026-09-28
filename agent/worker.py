@@ -115,8 +115,7 @@ class CharacterWorker:
                 instance_id=task.instance_id,
                 source_node_id=task.source_through_node_id or task.source_node_id,
                 source_task_id=task.task_id,
-                enqueue_inference=False,
-            )
+                enqueue_inference=False,\n                task=task,\n            )
             if tx_id is None:
                 result = {
                     "execution_mode": "bounded_choice",
@@ -149,6 +148,23 @@ class CharacterWorker:
                 raise RuntimeError(
                     f"bounded cognitive decision ended as {decision.status}"
                 )
+            # Selection is not completion. The selected cognitive operation
+            # owns continuation and will resume/complete this task when terminal.
+            materialized = await self.db.fetchrow(
+                "SELECT result FROM aios.internal_cognition_transaction WHERE transaction_id=$1",
+                tx_id,
+            )
+            tx_result = materialized["result"] if materialized else None
+            if isinstance(tx_result, str):
+                import json
+                tx_result = json.loads(tx_result)
+            mat = dict((tx_result or {}).get("materialized") or {}) if isinstance(tx_result, dict) else {}
+            if mat.get("kind") == "cognitive_operation" and mat.get("operation_id"):
+                await self.agency.transition_task(task_id, "waiting", result={
+                    **result, "waiting_on_operation_id": mat["operation_id"]
+                })
+                await self.runtime.finish_semantic_turn(task.instance_id, semantic=True)
+                return {**result, "status": "waiting", "operation_id": mat["operation_id"]}
             await self.agency.transition_task(task_id, "succeeded", result=result)
             await self._notify_parent(task, "succeeded", result)
             await self.runtime.finish_semantic_turn(task.instance_id, semantic=True)
