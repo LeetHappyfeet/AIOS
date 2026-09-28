@@ -21,7 +21,17 @@ class OpportunityRouter:
         self.threads=CognitiveThreadService(db)
 
     async def admit(self, *, instance_id:UUID, source_node_id:UUID|None=None,
-                    source_task_id:UUID|None=None, enqueue_inference:bool=True,\n                    task=None) -> UUID|None:\n        if task is not None:\n            from .task_opportunities import TaskOpportunityPlanner\n            task_rows=await TaskOpportunityPlanner(self.db).generate(task,limit=5)\n            class _Batch:\n                opportunities=tuple(task_rows)\n            batch=_Batch()\n        else:\n            batch=await self.opportunities.generate(\n                instance_id=instance_id,source_node_id=source_node_id,limit=8)
+                    source_task_id:UUID|None=None, enqueue_inference:bool=True,
+                    task=None) -> UUID|None:
+        if task is not None:
+            from .task_opportunities import TaskOpportunityPlanner
+            task_rows=await TaskOpportunityPlanner(self.db).generate(task,limit=5)
+            class _Batch:
+                opportunities=tuple(task_rows)
+            batch=_Batch()
+        else:
+            batch=await self.opportunities.generate(
+                instance_id=instance_id,source_node_id=source_node_id,limit=8)
         rows=[x for x in batch.opportunities
               if x["status"]=="pending" and x["valid_until"] is not None]
         if not rows: return None
@@ -57,7 +67,8 @@ class OpportunityRouter:
         priority=max(1,200-int(max(float(x["priority_score"]) for x in scored)*20))
         tx=await self.transactions.create(
             instance_id=instance_id,candidates=candidates,priority=priority,ttl_seconds=300,
-            opportunity_ids=[x["opportunity_id"] for x in selected],\n            source_task_id=source_task_id)
+            opportunity_ids=[x["opportunity_id"] for x in selected],
+            source_task_id=source_task_id)
         await self.db.execute(
             """UPDATE aios.character_cognitive_opportunity SET status='offered',updated_at=now()
                WHERE opportunity_id=ANY($1::uuid[]) AND status='pending'""",
@@ -74,7 +85,8 @@ class OpportunityRouter:
             maintenance_thread=await self.threads.cross(goal_review)
             from .cognitive_operations import CognitiveOperationEngine
             await CognitiveOperationEngine(self.db).create_from_opportunity(
-                opportunity=goal_review,thread_id=maintenance_thread,priority=priority,\n                source_task_id=source_task_id)
+                opportunity=goal_review,thread_id=maintenance_thread,priority=priority,
+                source_task_id=source_task_id)
             await self.db.execute(
                 """UPDATE aios.character_cognitive_opportunity
                    SET status='selected',selected_at=COALESCE(selected_at,now()),updated_at=now()
