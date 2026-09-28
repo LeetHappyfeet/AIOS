@@ -57,3 +57,12 @@ def test_agent_lookup_surface_exposes_structured_operations_without_sparql():
     assert "SPARQL" not in source
     assert "knowledge.lookup" in source
     assert "world.lookup" in source
+
+
+def test_structured_lookup_prefers_durable_coordinates_before_semantic_fallback():
+    structured = (ROOT / "epistemic" / "structured_retrieval.py").read_text()
+    capabilities = (ROOT / "agent" / "capabilities.py").read_text()
+    assert "class CoordinateResolver" in structured
+    assert "aios.character_cognitive_subject_evidence" in structured
+    assert 'if query and operation != "search"' in capabilities
+    assert 'operation == "search" or (not supplied_ids and not exact_ids)' in capabilities
