@@ -75,3 +75,35 @@ def test_rdf_observations_project_authority_membrane():
     refresh = source.index("await _project_observation_authority(")
     receipt_return = source.index("if world_receipt and (not character_id or char_receipt):")
     assert refresh < receipt_return
+
+
+def test_rdf_projection_is_scheduler_coalesced():
+    projection = (ROOT / "epistemic" / "topology_projection.py").read_text()
+    runner = (ROOT / "runner_v2.py").read_text()
+
+    assert "RDF_PROJECTION_QUIET_SECONDS = 30.0" in projection
+
+    mark_start = projection.index("async def mark_scope_dirty")
+    mark_end = projection.index("async def deferred_project_scope_rdf", mark_start)
+    mark_body = projection[mark_start:mark_end]
+    assert "enqueue_job(" not in mark_body
+    assert "UPDATE aios.pipeline_job" not in mark_body
+    assert "dirty_version=aios.semantic_scope_projection_state.dirty_version + 1" in mark_body
+
+    scheduler_start = projection.index("async def enqueue_dirty_scope_jobs")
+    scheduler_body = projection[scheduler_start:]
+    assert "dirty_version > s.projected_version" in scheduler_body
+    assert "pj.status IN ('queued','running')" in scheduler_body
+    assert "RDF_PROJECTION_QUIET_SECONDS" in scheduler_body
+    assert 'job_type="project_semantic_scope"' in scheduler_body
+
+    assert "RDF_PROJECTION_SCHEDULER_SECONDS = 5.0" in runner
+    assert "await asyncio.sleep(RDF_PROJECTION_SCHEDULER_SECONDS)" in runner
+
+
+def test_rdf_projection_preserves_mutation_during_publish():
+    projection = (ROOT / "epistemic" / "topology_projection.py").read_text()
+    assert "target_version = int(state[\"dirty_version\"] or 0)" in projection
+    assert "projected_version=GREATEST(projected_version,$4)" in projection
+    assert "WHEN dirty_version <= $4 THEN 'ready' ELSE 'dirty'" in projection
+    assert "rdf_change_cursor=GREATEST(rdf_change_cursor,$5)" in projection
