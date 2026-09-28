@@ -15,6 +15,7 @@ DATASET = "world"
 GRAPH_IRI = "urn:aios:world:epistemic"
 RECEIPT_PREDICATE = "world:observesProposition"
 BELIEF_RDF_VERSION = "character-belief-rdf-v2"
+EPISTEMIC_RDF_VERSION = "epistemic-authority-rdf-v1"
 BELIEF_RDF_BATCH_SIZE = 128
 
 
@@ -335,6 +336,83 @@ async def project_character_belief_state(
     return True
 
 
+def _authority_insert_lines(prefix: str, authority) -> list[str]:
+    """Render SQL authority admission as RDF-visible control-plane metadata."""
+    if not authority:
+        return []
+    lines = [
+        f"      {prefix}:originKind {_lit(authority['origin_kind'])} ;",
+        f"      {prefix}:epistemicMode {_lit(authority['epistemic_mode'])} ;",
+        f"      {prefix}:authorityState {_lit(authority['authority_state'])} ;",
+        f"      {prefix}:authorityRank \"{int(authority['authority_rank'])}\"^^xsd:integer ;",
+        f"      {prefix}:lineageKey {_lit(authority['lineage_key'])} ;",
+        f"      {prefix}:predicateClass {_lit(authority['predicate_class'])} ;",
+        f"      {prefix}:authorityPolicyVersion {_lit(authority['policy_version'])} ;",
+        f"      {prefix}:rdfProjectionVersion {_lit(EPISTEMIC_RDF_VERSION)} ;",
+    ]
+    for use in authority["authorized_uses"] or []:
+        lines.append(f"      {prefix}:authorizedUse {_lit(str(use))} ;")
+    return lines
+
+
+async def _project_observation_authority(
+    fuseki: FusekiClient,
+    *,
+    dataset: str,
+    graph_iri: str,
+    observation_iri: str,
+    prefix: str,
+    namespace: str,
+    authority,
+) -> None:
+    """Replace only authority predicates so old projection receipts can be upgraded."""
+    if not authority:
+        return
+
+    predicates = (
+        "originKind", "epistemicMode", "authorityState", "authorityRank",
+        "lineageKey", "predicateClass", "authorityPolicyVersion",
+        "authorizedUse", "rdfProjectionVersion",
+    )
+    deletes = "\n".join(
+        f"    <{observation_iri}> {prefix}:{predicate} ?old_{predicate} ."
+        for predicate in predicates
+    )
+    inserts = "\n".join(_authority_insert_lines(prefix, authority))
+    # _authority_insert_lines is semicolon-oriented; terminate the compact
+    # property list by replacing the final semicolon with a period.
+    inserts = inserts.rstrip()
+    if inserts.endswith(";"):
+        inserts = inserts[:-1] + " ."
+
+    sparql = f"""
+PREFIX {prefix}: <{namespace}>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+DELETE {{
+  GRAPH <{graph_iri}> {{
+{deletes}
+  }}
+}}
+WHERE {{
+  GRAPH <{graph_iri}> {{
+    VALUES ?subject {{ <{observation_iri}> }}
+    OPTIONAL {{ ?subject ?authorityPredicate ?authorityValue .
+      FILTER(?authorityPredicate IN ({
+        ", ".join(prefix + ":" + predicate for predicate in predicates)
+      }))
+    }}
+  }}
+}};
+INSERT DATA {{
+  GRAPH <{graph_iri}> {{
+    <{observation_iri}>
+{inserts}
+  }}
+}}
+""".strip()
+    fuseki.update(dataset, sparql)
+
+
 async def project_normalized_observation(
     db: Database,
     fuseki: FusekiClient,
@@ -383,6 +461,32 @@ async def project_normalized_observation(
         claim_id,
     )
 
+    authority = await db.fetchrow(
+        """
+        SELECT
+            kae.acquisition_id,
+            eaa.origin_kind,
+            eaa.epistemic_mode,
+            eaa.authority_state,
+            eaa.authority_rank,
+            eaa.lineage_key,
+            eaa.predicate_class,
+            eaa.authorized_uses,
+            eaa.policy_version
+        FROM aios.knowledge_acquisition_event kae
+        JOIN aios.epistemic_authority_admission eaa
+          ON eaa.acquisition_id=kae.acquisition_id
+        WHERE kae.claim_id=$1
+        ORDER BY
+            (kae.instance_id IS NOT DISTINCT FROM $2::uuid) DESC,
+            kae.created_at,
+            kae.acquisition_id
+        LIMIT 1
+        """,
+        claim_id,
+        row["character_instance_id"],
+    )
+
     world_receipt = await db.fetchrow(
         """
         SELECT 1 FROM aios.rdf_promotion_log
@@ -414,6 +518,38 @@ async def project_normalized_observation(
             char_graph,
         )
 
+    obs_iri = f"urn:aios:observation:{row['observation_id']}"
+    prop_iri = f"urn:aios:proposition:{row['proposition_id']}"
+    claim_iri = f"urn:aios:world:claim:{claim_id}"
+    char_owner_segment = quote(character_id, safe="") if character_id else None
+    char_obs_iri = (
+        f"urn:aios:char:{char_owner_segment}:observation:{row['observation_id']}"
+        if char_owner_segment else None
+    )
+
+    # Authority is mutable control-plane state while origin/lineage are immutable.
+    # Refresh it independently of the legacy projection receipt so existing RDF
+    # observations gain the authority membrane when they are next projected.
+    await _project_observation_authority(
+        fuseki,
+        dataset=DATASET,
+        graph_iri=GRAPH_IRI,
+        observation_iri=obs_iri,
+        prefix="world",
+        namespace="urn:aios:world#",
+        authority=authority,
+    )
+    if character_id and char_graph and char_obs_iri:
+        await _project_observation_authority(
+            fuseki,
+            dataset="char",
+            graph_iri=char_graph,
+            observation_iri=char_obs_iri,
+            prefix="char",
+            namespace="urn:aios:char#",
+            authority=authority,
+        )
+
     if world_receipt and (not character_id or char_receipt):
         # A retry may still have belief mutations waiting in the SQL outbox, but
         # if there are none project_character_belief_state performs zero RDF I/O.
@@ -424,10 +560,6 @@ async def project_normalized_observation(
                 instance_id=perceiver["instance_id"],
             )
         return True
-
-    obs_iri = f"urn:aios:observation:{row['observation_id']}"
-    prop_iri = f"urn:aios:proposition:{row['proposition_id']}"
-    claim_iri = f"urn:aios:world:claim:{claim_id}"
 
     optional = []
     if row["subject_norm"]:
@@ -460,6 +592,7 @@ INSERT DATA {{
       world:sourceDomain {_lit(row['source_domain'])} ;
       world:sourceKind {_lit(row['source_kind'])} ;
       world:observedAt "{row['observed_at'].isoformat()}"^^xsd:dateTime ;
+{chr(10).join(_authority_insert_lines("world", authority))}
       prov:wasDerivedFrom <{claim_iri}> .
   }}
 }}
@@ -470,9 +603,7 @@ INSERT DATA {{
 
     if character_id and not char_receipt:
         char_dataset = "char"
-        char_owner_segment = quote(character_id, safe="")
         char_graph = char_graph or f"urn:aios:char:{char_owner_segment}:epistemic"
-        char_obs_iri = f"urn:aios:char:{char_owner_segment}:observation:{row['observation_id']}"
         context_links = []
         if row["character_instance_id"]:
             context_links.append(
@@ -489,6 +620,7 @@ INSERT DATA {{
 PREFIX char:  <urn:aios:char#>
 PREFIX world: <urn:aios:world#>
 PREFIX prov:  <http://www.w3.org/ns/prov#>
+PREFIX xsd:   <http://www.w3.org/2001/XMLSchema#>
 
 INSERT DATA {{
   GRAPH <{char_graph}> {{
@@ -505,6 +637,7 @@ INSERT DATA {{
       char:claimKind {_lit(row["claim_kind"])} ;
       char:predicateFamily {_lit(row["predicate_family"])} ;
       char:identityRuleset {_lit(row["identity_ruleset"] or "character-id-v1")} ;
+{chr(10).join(_authority_insert_lines("char", authority))}
       char:observesProposition <{prop_iri}> ;
       prov:wasDerivedFrom <{obs_iri}> .
 
