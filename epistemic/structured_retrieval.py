@@ -247,6 +247,7 @@ class EpistemicComparisonService:
             char_side AS (
                 SELECT p.atom_id,
                        array_agg(DISTINCT cpk.proposition_id) AS char_proposition_ids,
+                       array_agg(DISTINCT p.polarity) AS char_polarities,
                        max(cpk.effective_confidence) AS char_confidence
                 FROM aios.character_proposition_knowledge cpk
                 JOIN aios.proposition p ON p.proposition_id=cpk.proposition_id
@@ -257,6 +258,7 @@ class EpistemicComparisonService:
             world_side AS (
                 SELECT p.atom_id,
                        array_agg(DISTINCT wa.proposition_id) AS world_proposition_ids,
+                       array_agg(DISTINCT p.polarity) AS world_polarities,
                        max(wa.confidence) AS world_confidence
                 FROM aios.world_proposition_assertion wa
                 JOIN aios.proposition p ON p.proposition_id=wa.proposition_id
@@ -265,10 +267,11 @@ class EpistemicComparisonService:
                   AND p.atom_id IN (SELECT atom_id FROM requested_atoms)
                 GROUP BY p.atom_id
             )
-            SELECT c.atom_id,c.char_proposition_ids,c.char_confidence,
-                   w.world_proposition_ids,w.world_confidence,
+            SELECT c.atom_id,c.char_proposition_ids,c.char_polarities,c.char_confidence,
+                   w.world_proposition_ids,w.world_polarities,w.world_confidence,
                    CASE WHEN w.atom_id IS NULL THEN 'unverified'
-                        ELSE 'corroborated' END AS comparison_state
+                        WHEN c.char_polarities && w.world_polarities THEN 'corroborated'
+                        ELSE 'contradicted' END AS comparison_state
             FROM char_side c
             LEFT JOIN world_side w USING(atom_id)
             ORDER BY c.atom_id
