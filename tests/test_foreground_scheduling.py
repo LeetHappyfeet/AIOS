@@ -90,3 +90,23 @@ def test_supervisor_remains_decomposition_repair_path():
     )[0]
     assert "claim_semantic_frame_projection" in frame_stage
     assert "pipeline_job" in frame_stage
+
+
+def test_source_semantic_pipeline_uses_producer_driven_handoffs():
+    section_worker = source("pipeline/dag_to_document_section_worker.py")
+    claim_worker = source("pipeline/worker.py")
+    runner = source("runner.py")
+
+    assert 'job_type="extract_claims"' in section_worker
+    assert 'job_type="decompose_claim_frames"' in claim_worker
+
+    decompose = runner.split("async def handle_decompose_claim_frames", 1)[1].split(
+        "async def handle_normalize_proposition", 1
+    )[0]
+    assert 'job_type="resolve_claim_context"' in decompose
+    assert '"admission_band": "producer"' in decompose
+
+    resolve = runner.split("async def handle_resolve_claim_context", 1)[1].split(
+        "JOB_HANDLERS.update", 1
+    )[0]
+    assert 'job_type="normalize_proposition"' in resolve
