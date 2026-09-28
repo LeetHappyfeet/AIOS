@@ -131,7 +131,7 @@ _QUESTION_RELATIONS = (
     ("preference", re.compile(
         r"\b(?:like|likes|liked|prefer|prefers|preferred|preference|favorite|favourite|"
         r"want|wants|wanted|care|cares|cared|interest|interests|interested|appeal|"
-        r"choose|chooses|chose|pick|picks|picked|wear|wears|wearing)\b", re.I
+        r"choose|chooses|chose|pick|picks|picked)\b", re.I
     )),
     ("memory", re.compile(r"\b(?:remember|remembers|recall|recalls|memory)\b", re.I)),
     ("experience", re.compile(
@@ -164,7 +164,21 @@ def question_semantics(
 
     relation = ""
     relation_words: set[str] = set()
+    hypothetical_wear = re.search(
+        r"\b(?:would|could|might)\b[^?]{0,100}\b(?:wear|wearing|choose|pick)\b",
+        sentence,
+        re.I,
+    )
+    if hypothetical_wear:
+        relation = "preference"
+        relation_words.update(
+            token.lower()
+            for token in _WORD_RE.findall(hypothetical_wear.group(0))
+            if token.lower() in {"wear", "wearing", "choose", "pick"}
+        )
     for candidate_relation, pattern in _QUESTION_RELATIONS:
+        if relation:
+            break
         matches = pattern.findall(sentence)
         if matches:
             relation = candidate_relation
