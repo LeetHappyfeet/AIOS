@@ -1,6 +1,34 @@
 -- Downstream epistemic authority enforcement.
 BEGIN;
 
+-- Human/user testimony may authorize acting on the current source episode.
+-- This does not make it canonical world truth; it only permits it to satisfy
+-- the action-precondition use at the dispatcher boundary.
+CREATE OR REPLACE FUNCTION aios.trg_expand_user_action_authority()
+RETURNS trigger LANGUAGE plpgsql AS $
+BEGIN
+    UPDATE aios.epistemic_authority_admission
+    SET authorized_uses = array_append(authorized_uses,'action_precondition'),
+        decision_reason = decision_reason || ':user_action_authority'
+    WHERE acquisition_id=NEW.acquisition_id
+      AND origin_kind='user_testimony'
+      AND NOT ('action_precondition'=ANY(authorized_uses));
+    RETURN NEW;
+END;
+$;
+
+DROP TRIGGER IF EXISTS trg_expand_user_action_authority ON aios.knowledge_acquisition_event;
+CREATE TRIGGER trg_expand_user_action_authority
+AFTER INSERT OR UPDATE OF proposition_id,claim_id,epistemic_status,confidence,meta
+ON aios.knowledge_acquisition_event
+FOR EACH ROW EXECUTE FUNCTION aios.trg_expand_user_action_authority();
+
+UPDATE aios.epistemic_authority_admission
+SET authorized_uses=array_append(authorized_uses,'action_precondition'),
+    decision_reason=decision_reason || ':user_action_authority'
+WHERE origin_kind='user_testimony'
+  AND NOT ('action_precondition'=ANY(authorized_uses));
+
 CREATE OR REPLACE FUNCTION aios.reconcile_character_belief_atom(
     p_instance_id uuid,
     p_atom_id uuid
