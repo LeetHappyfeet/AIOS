@@ -9,6 +9,7 @@ from aios_app.epistemic.research import (
     SemanticKnowledgeCoverageService,
     SemanticCorpusReinforcementService,
     research_terms,
+    assess_retrieval_evidence,
     resolve_retrieval_demand,
 )
 
@@ -38,6 +39,69 @@ def test_retrieval_demand_routes_character_preference_question_to_memory():
     assert "clothing" in demand.focus_text
     assert "wearing" in demand.focus_text
     assert "boardwalk" not in demand.focus_text
+
+
+def test_preference_demand_carries_answerability_semantics():
+    demand = resolve_retrieval_demand(
+        "Wait. Have you ever actually cared about sleeves before today?",
+        character_id="Renamon",
+    )
+    assert demand.route == "character"
+    assert demand.kind == "preference"
+    assert demand.topic_terms == ("cared", "sleeves")
+    assert demand.temporal_scope == "prior"
+
+
+def test_preference_topic_match_without_preference_relation_is_partial():
+    demand = resolve_retrieval_demand(
+        "Have you ever liked sleeves before today?",
+        character_id="Renamon",
+    )
+    status = assess_retrieval_evidence(demand, [{
+        "proposition_id": UUID("00000000-0000-0000-0000-000000000010"),
+        "claim_kind": "EVENT",
+        "subject_norm": "outfit",
+        "predicate_norm": "pull",
+        "object_norm": "sleeves",
+        "text": "the whole outfit a size up — and | pull | the sleeves",
+    }])
+    assert status is not None
+    assert status.status == "partial"
+    assert status.reason == "topic_related_relation_unestablished"
+
+
+def test_preference_relation_match_is_established():
+    demand = resolve_retrieval_demand(
+        "Have you ever liked sleeves before today?",
+        character_id="Renamon",
+    )
+    status = assess_retrieval_evidence(demand, [{
+        "proposition_id": UUID("00000000-0000-0000-0000-000000000011"),
+        "claim_kind": "BELIEF",
+        "subject_norm": "renamon",
+        "predicate_norm": "like",
+        "object_norm": "sleeves",
+        "text": "renamon | like | sleeves",
+    }])
+    assert status is not None
+    assert status.status == "established"
+
+
+def test_preference_without_topic_evidence_is_unestablished():
+    demand = resolve_retrieval_demand(
+        "Have you ever liked sleeves before today?",
+        character_id="Renamon",
+    )
+    status = assess_retrieval_evidence(demand, [{
+        "proposition_id": UUID("00000000-0000-0000-0000-000000000012"),
+        "claim_kind": "BELIEF",
+        "subject_norm": "renamon",
+        "predicate_norm": "like",
+        "object_norm": "libraries",
+        "text": "renamon | like | libraries",
+    }])
+    assert status is not None
+    assert status.status == "unestablished"
 
 
 def test_retrieval_demand_keeps_external_knowledge_question_general():
