@@ -197,8 +197,8 @@ class StructuredKnowledgeRetriever:
         if direction not in {"before", "after"}:
             raise ValueError("history direction must be before or after")
         anchor = await self.db.fetchrow(
-            """SELECT created_at,event_time FROM aios.dag_node
-               WHERE node_id=$1 AND timeline_id=$2""",
+            """SELECT created_at,COALESCE(event_time,created_at) AS event_time
+               FROM aios.dag_node WHERE node_id=$1 AND timeline_id=$2""",
             anchor_node_id, timeline_id,
         )
         if not anchor:
@@ -209,12 +209,72 @@ class StructuredKnowledgeRetriever:
             f"""SELECT node_id,timeline_id,event_id,kind,speaker_id,speaker_role,
                        recipient,message_text,event_time,created_at
                 FROM aios.dag_node
-                WHERE timeline_id=$1 AND (event_time,created_at,node_id) {op}
+                WHERE timeline_id=$1
+                  AND (COALESCE(event_time,created_at),created_at,node_id) {op}
                       ($2,$3,$4)
-                ORDER BY event_time {order},created_at {order},node_id {order}
+                ORDER BY COALESCE(event_time,created_at) {order},
+                         created_at {order},node_id {order}
                 LIMIT $5""",
             timeline_id, anchor["event_time"], anchor["created_at"], anchor_node_id,
             max(1, min(int(limit), 50)),
         )
         return [{**dict(row), "retrieval_kind": "history", "direction": direction}
+                for row in rows]
+
+
+class EpistemicComparisonService:
+    """Compare /char ownership with admitted /world state without merging scopes."""
+
+    def __init__(self, db: Any):
+        self.db = db
+
+    async def compare(
+        self, *, instance_ids: Iterable[UUID], world_ids: Iterable[UUID],
+        proposition_ids: Iterable[UUID], limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        instances = list(instance_ids)
+        worlds = list(world_ids)
+        propositions = list(proposition_ids)
+        if not instances or not worlds or not propositions:
+            return []
+        rows = await self.db.fetch(
+            """
+            WITH requested_atoms AS (
+                SELECT DISTINCT atom_id
+                FROM aios.proposition
+                WHERE proposition_id=ANY($3::uuid[]) AND atom_id IS NOT NULL
+            ),
+            char_side AS (
+                SELECT p.atom_id,
+                       array_agg(DISTINCT cpk.proposition_id) AS char_proposition_ids,
+                       max(cpk.effective_confidence) AS char_confidence
+                FROM aios.character_proposition_knowledge cpk
+                JOIN aios.proposition p ON p.proposition_id=cpk.proposition_id
+                WHERE cpk.instance_id=ANY($1::uuid[])
+                  AND p.atom_id IN (SELECT atom_id FROM requested_atoms)
+                GROUP BY p.atom_id
+            ),
+            world_side AS (
+                SELECT p.atom_id,
+                       array_agg(DISTINCT wa.proposition_id) AS world_proposition_ids,
+                       max(wa.confidence) AS world_confidence
+                FROM aios.world_proposition_assertion wa
+                JOIN aios.proposition p ON p.proposition_id=wa.proposition_id
+                WHERE wa.world_id=ANY($2::uuid[])
+                  AND wa.superseded_by_assertion_id IS NULL
+                  AND p.atom_id IN (SELECT atom_id FROM requested_atoms)
+                GROUP BY p.atom_id
+            )
+            SELECT c.atom_id,c.char_proposition_ids,c.char_confidence,
+                   w.world_proposition_ids,w.world_confidence,
+                   CASE WHEN w.atom_id IS NULL THEN 'unverified'
+                        ELSE 'corroborated' END AS comparison_state
+            FROM char_side c
+            LEFT JOIN world_side w USING(atom_id)
+            ORDER BY c.atom_id
+            LIMIT $4
+            """,
+            instances, worlds, propositions, max(1, min(int(limit), 100)),
+        )
+        return [{**dict(row), "retrieval_kind": "epistemic_comparison"}
                 for row in rows]
