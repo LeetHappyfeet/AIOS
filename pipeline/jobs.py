@@ -105,6 +105,98 @@ async def _partition_key_for_enqueue(
     return None
 
 
+async def _foreground_context_for_enqueue(
+    db: Database,
+    *,
+    job_type: str,
+    payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Resolve a job back to a recent interactive source lineage.
+
+    Foregroundness is deliberately derived from immutable source coordinates,
+    not character activity flags. This prevents unrelated historical work for
+    an active character from being promoted.
+    """
+    if payload.get("live_instance_id"):
+        row = await db.fetchrow(
+            """
+            SELECT pfl.instance_id, pfl.head_node_id, pfl.expires_at
+            FROM aios.pipeline_foreground_lineage pfl
+            WHERE pfl.instance_id=$1::uuid AND pfl.expires_at > now()
+            """,
+            str(payload["live_instance_id"]),
+        )
+    elif payload.get("claim_id"):
+        row = await db.fetchrow(
+            """
+            SELECT pfl.instance_id, dn.node_id AS head_node_id, pfl.expires_at
+            FROM aios.claim_candidate cc
+            JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+            JOIN aios.document_section ds ON ds.section_id=es.section_id
+            JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+            JOIN aios.pipeline_foreground_lineage pfl
+              ON pfl.timeline_id=dn.timeline_id
+             AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+             AND pfl.expires_at > now()
+            WHERE cc.claim_id=$1::uuid
+            ORDER BY pfl.updated_at DESC LIMIT 1
+            """,
+            str(payload["claim_id"]),
+        )
+    elif payload.get("acquisition_id"):
+        row = await db.fetchrow(
+            """
+            SELECT pfl.instance_id, COALESCE(dn.node_id,pfl.head_node_id) AS head_node_id,
+                   pfl.expires_at
+            FROM aios.knowledge_acquisition_event kae
+            JOIN aios.pipeline_foreground_lineage pfl
+              ON pfl.instance_id=kae.instance_id AND pfl.expires_at > now()
+            LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+            LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+            LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+            LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+            WHERE kae.acquisition_id=$1::uuid
+              AND (dn.event_id IS NULL OR
+                   (dn.timeline_id=pfl.timeline_id AND
+                    dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id))
+            ORDER BY pfl.updated_at DESC LIMIT 1
+            """,
+            str(payload["acquisition_id"]),
+        )
+    elif payload.get("section_id"):
+        row = await db.fetchrow(
+            """
+            SELECT pfl.instance_id, dn.node_id AS head_node_id, pfl.expires_at
+            FROM aios.document_section ds
+            JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+            JOIN aios.pipeline_foreground_lineage pfl
+              ON pfl.timeline_id=dn.timeline_id
+             AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+             AND pfl.expires_at > now()
+            WHERE ds.section_id=$1::uuid
+            ORDER BY pfl.updated_at DESC LIMIT 1
+            """,
+            str(payload["section_id"]),
+        )
+    elif payload.get("node_id"):
+        row = await db.fetchrow(
+            """
+            SELECT pfl.instance_id, dn.node_id AS head_node_id, pfl.expires_at
+            FROM aios.dag_node dn
+            JOIN aios.pipeline_foreground_lineage pfl
+              ON pfl.timeline_id=dn.timeline_id
+             AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+             AND pfl.expires_at > now()
+            WHERE dn.node_id=$1::uuid
+            ORDER BY pfl.updated_at DESC LIMIT 1
+            """,
+            str(payload["node_id"]),
+        )
+    else:
+        row = None
+    return dict(row) if row else None
+
+
 def _effective_priority(job_type: str, requested: int) -> int:
     """Apply queue-critical priority invariants at enqueue time.
 
@@ -140,6 +232,9 @@ async def enqueue_job(
         payload=payload,
     )
     priority = _effective_priority(job_type, priority)
+    foreground = await _foreground_context_for_enqueue(
+        db, job_type=job_type, payload=payload
+    )
 
     row = await db.execute_returning_row(
         """
@@ -151,7 +246,10 @@ async def enqueue_job(
             status,
             resource_class,
             scheduling_lane,
-            partition_key
+            partition_key,
+            foreground_instance_id,
+            foreground_node_id,
+            foreground_until
         )
         VALUES (
             $1,
@@ -161,7 +259,10 @@ async def enqueue_job(
             'queued',
             $5,
             $6,
-            $7
+            $7,
+            $8,
+            $9,
+            $10
         )
         ON CONFLICT DO NOTHING
         RETURNING job_id
@@ -173,6 +274,9 @@ async def enqueue_job(
         job_spec(job_type).resource_class.value,
         lane,
         partition_key,
+        foreground.get("instance_id") if foreground else None,
+        foreground.get("head_node_id") if foreground else None,
+        foreground.get("expires_at") if foreground else None,
     )
 
     if not row:
@@ -255,6 +359,9 @@ async def fetch_next_job(
               )
             ORDER BY
                 CASE
+                    WHEN q.foreground_until > now() THEN 0 ELSE 1
+                END ASC,
+                CASE
                     WHEN $6::text[] IS NOT NULL
                      AND q.created_at <= now() - interval '5 minutes'
                     THEN 0 ELSE 1
@@ -292,6 +399,7 @@ async def fetch_next_job(
         WHERE pj.job_id = nj.job_id
         RETURNING pj.job_id, pj.job_type, pj.payload, pj.resource_class,
                   pj.scheduling_lane, pj.partition_key, pj.worker_id,
+                  pj.foreground_instance_id, pj.foreground_node_id, pj.foreground_until,
                   pj.claimed_at, pj.lease_expires_at
         """,
         resource_class,
