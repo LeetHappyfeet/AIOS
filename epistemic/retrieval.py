@@ -239,8 +239,19 @@ belief_owned AS (
         ck.retention_weight,
         ck.salience_weight,
         ck.effective_confidence,
+        auth.origin_kind, auth.epistemic_mode, auth.authority_state,
+        auth.authority_rank, auth.lineage_key, auth.authorized_uses,
         array_position($2::uuid[], ck.instance_id) AS instance_depth
     FROM aios.character_active_proposition_knowledge ck
+    LEFT JOIN LATERAL (
+        SELECT eaa.origin_kind,eaa.epistemic_mode,eaa.authority_state,
+               eaa.authority_rank,eaa.lineage_key,eaa.authorized_uses
+        FROM aios.knowledge_acquisition_event kae_auth
+        JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae_auth.acquisition_id
+        WHERE kae_auth.instance_id=ck.evidence_instance_id
+          AND kae_auth.proposition_id=ck.proposition_id
+        ORDER BY kae_auth.created_at DESC,kae_auth.acquisition_id DESC LIMIT 1
+    ) auth ON true
     WHERE ck.instance_id = ANY($2::uuid[])
       AND EXISTS (
           SELECT 1
@@ -282,12 +293,15 @@ episodic_owned AS (
         cpk.retention_weight,
         cpk.salience_weight,
         cpk.effective_confidence,
+        eaa.origin_kind, eaa.epistemic_mode, eaa.authority_state,
+        eaa.authority_rank, eaa.lineage_key, eaa.authorized_uses,
         array_position($2::uuid[], cpk.instance_id) AS instance_depth
     FROM aios.character_proposition_knowledge cpk
     JOIN aios.proposition p ON p.proposition_id=cpk.proposition_id
     JOIN aios.knowledge_acquisition_event kae
       ON kae.instance_id=cpk.instance_id
      AND kae.proposition_id=cpk.proposition_id
+    JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae.acquisition_id
     JOIN aios.observation obs ON obs.proposition_id=cpk.proposition_id
     JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
     LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
