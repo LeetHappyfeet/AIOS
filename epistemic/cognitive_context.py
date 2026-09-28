@@ -22,6 +22,8 @@ from aios_app.epistemic.research import (
     SemanticCorpusReinforcementService,
     SemanticKnowledgeCoverageService,
     KnowledgeDemandResolver,
+    RetrievalDemand,
+    assess_retrieval_evidence,
     resolve_retrieval_demand,
 )
 from aios_app.epistemic.retrieval_policy import (
@@ -49,6 +51,7 @@ class CognitiveAttentionInputs:
     goals: list[CognitiveGoal]
     knowledge_route: str = "general"
     demand_reason: str = "unclassified"
+    retrieval_demand: RetrievalDemand | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,7 @@ class CognitiveKnowledgeSnapshot:
     current_events: list[dict[str, Any]]
     corpus_references: list[dict[str, Any]]
     corpus_demand: dict[str, Any] | None
+    retrieval_evidence: dict[str, Any] | None
     recall_suppressed: dict[str, int]
     topology_retrieval: bool
     topology_partial_fallback: bool
@@ -312,6 +316,7 @@ class CognitiveContextService:
             goals=goals,
             knowledge_route=demand.route,
             demand_reason=demand.reason,
+            retrieval_demand=demand,
         )
 
     def _prepared_retrieval_key(
@@ -634,6 +639,16 @@ class CognitiveContextService:
             if count:
                 suppressed[reason] = suppressed.get(reason, 0) + count
 
+        retrieval_evidence = assess_retrieval_evidence(
+            attention.retrieval_demand
+            or RetrievalDemand(
+                attention.knowledge_route,
+                attention.retrieval_focus_text,
+                attention.demand_reason,
+            ),
+            knowledge,
+        )
+
         recalled_memories: list[dict[str, Any]] = []
         beliefs: list[dict[str, Any]] = []
         goals: list[dict[str, Any]] = []
@@ -768,6 +783,9 @@ class CognitiveContextService:
             current_events=list(attention.recent_newest),
             corpus_references=corpus_references,
             corpus_demand=corpus_demand_meta,
+            retrieval_evidence=(
+                retrieval_evidence.as_dict() if retrieval_evidence is not None else None
+            ),
             recall_suppressed=recall_suppressed,
             topology_retrieval=bool(topology_knowledge),
             topology_partial_fallback=bool(legacy_knowledge),
