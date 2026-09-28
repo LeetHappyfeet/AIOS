@@ -142,3 +142,21 @@ def test_question_semantics_remains_nonpersistent():
         speaker_role="user",
         viewpoint_id="Renamon",
     ) == []
+
+
+
+def test_question_semantics_distinguishes_wear_history_from_preference():
+    history = question_semantics(
+        "Have you ever worn sleeves before?",
+        character_id="Renamon",
+        speaker_id="Mia",
+    )
+    preference = question_semantics(
+        "What would you wear if you picked for yourself?",
+        character_id="Renamon",
+        speaker_id="Mia",
+    )
+    assert history is not None
+    assert history.relation == "experience"
+    assert preference is not None
+    assert preference.relation == "preference"
