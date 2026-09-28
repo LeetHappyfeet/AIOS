@@ -374,10 +374,6 @@ async def _project_observation_authority(
         "lineageKey", "predicateClass", "authorityPolicyVersion",
         "authorizedUse", "rdfProjectionVersion",
     )
-    deletes = "\n".join(
-        f"    <{observation_iri}> {prefix}:{predicate} ?old_{predicate} ."
-        for predicate in predicates
-    )
     inserts = "\n".join(_authority_insert_lines(prefix, authority))
     # _authority_insert_lines is semicolon-oriented; terminate the compact
     # property list by replacing the final semicolon with a period.
@@ -390,17 +386,16 @@ PREFIX {prefix}: <{namespace}>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 DELETE {{
   GRAPH <{graph_iri}> {{
-{deletes}
+    ?subject ?authorityPredicate ?authorityValue .
   }}
 }}
 WHERE {{
   GRAPH <{graph_iri}> {{
     VALUES ?subject {{ <{observation_iri}> }}
-    OPTIONAL {{ ?subject ?authorityPredicate ?authorityValue .
-      FILTER(?authorityPredicate IN ({
-        ", ".join(prefix + ":" + predicate for predicate in predicates)
-      }))
-    }}
+    ?subject ?authorityPredicate ?authorityValue .
+    FILTER(?authorityPredicate IN ({
+      ", ".join(prefix + ":" + predicate for predicate in predicates)
+    }))
   }}
 }};
 INSERT DATA {{
