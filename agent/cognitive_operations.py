@@ -17,18 +17,15 @@ class CognitiveOperationEngine:
         self.db = db
 
     async def create_from_opportunity(self, *, opportunity: Mapping[str, Any],
-                                      thread_id: UUID | None, priority: int = 100) -> UUID:
+                                      thread_id: UUID | None, priority: int = 100,\n                                      source_task_id: UUID | None = None) -> UUID:
         row = await self.db.execute_returning_row(
             """INSERT INTO aios.character_cognitive_operation(
-                   thread_id,instance_id,opportunity_id,operation_type,input,
-                   source_state_version,source_timeline_id,source_node_id,freshness_policy)
-               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9) RETURNING operation_id""",
+                   thread_id,instance_id,opportunity_id,operation_type,input,\n                   source_state_version,source_timeline_id,source_node_id,freshness_policy,source_task_id)\n               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10) RETURNING operation_id""",
             thread_id, opportunity["instance_id"], opportunity["opportunity_id"],
             opportunity["operation_type"],
             json.dumps(self._mapping(opportunity.get("operation_payload")), default=str),
             opportunity.get("source_state_version"), opportunity.get("source_timeline_id"),
-            opportunity.get("source_node_id"), opportunity.get("freshness_policy") or "contextual",
-        )
+            opportunity.get("source_node_id"), opportunity.get("freshness_policy") or "contextual",\n            source_task_id,\n        )
         operation_id=row["operation_id"]
         if thread_id:
             await self.db.execute(
