@@ -145,14 +145,23 @@ class AutonomyScheduler:
                 if parent.status == "running":
                     parent = await self.agency.transition_task(parent_id, "waiting")
                 await self.agency.transition_task(parent_id, "queued")
+                child_id=UUID(str(event["payload"]["task_id"]))
+                await self.db.execute(
+                    """INSERT INTO aios.character_cognitive_task_dependency(
+                           parent_task_id,child_task_id,status,result,completed_at)
+                       VALUES($1,$2,$3,$4::jsonb,now())
+                       ON CONFLICT(parent_task_id,child_task_id) DO UPDATE SET
+                         status=EXCLUDED.status,result=EXCLUDED.result,
+                         completed_at=EXCLUDED.completed_at""",
+                    parent_id,child_id,
+                    "succeeded" if str(event["event_type"])=="COGNITIVE_TASK_COMPLETED" else "failed",
+                    json.dumps(event["payload"],default=str),
+                )
                 await self.db.execute(
                     """UPDATE aios.character_cognitive_task
-                       SET retrieval_focus=COALESCE(retrieval_focus,'') || $2,
-                           trigger_type='cognitive_resume',
+                       SET trigger_type='cognitive_resume',
                            resume_count=resume_count+1, updated_at=now()
-                       WHERE task_id=$1""",
-                    parent_id,
-                    "\n\nDELEGATED COGNITION RESULT:\n" + json.dumps(event["payload"], default=str),
+                       WHERE task_id=$1""", parent_id
                 )
                 await self.db.execute(
                     """UPDATE aios.character_wake_event SET status='consumed',consumed_at=now()
