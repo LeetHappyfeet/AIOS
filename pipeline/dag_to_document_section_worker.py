@@ -6,6 +6,7 @@ import logging
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.pipeline.jobs import enqueue_job
 
 logger = logging.getLogger("aios.pipeline.dag_to_document_section")
 
@@ -85,6 +86,16 @@ async def run_worker(
 
     if not section:
         raise RuntimeError(f"Could not create or resolve document_section for {node_id}")
+
+    # Producer-driven handoff. The supervisor retains its broad section scan as
+    # an invariant-repair/backfill path, but normal source work should not wait
+    # for polling discovery before claim extraction becomes runnable.
+    await enqueue_job(
+        db,
+        job_type="extract_claims",
+        payload={"section_id": str(section["section_id"])},
+        priority=25,
+    )
 
     await db.execute(
         """
