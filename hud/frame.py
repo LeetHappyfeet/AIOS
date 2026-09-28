@@ -17,7 +17,7 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
-HUD_VERSION = "hud-v2"
+HUD_VERSION = "hud-v3"
 
 
 @dataclass(frozen=True)
@@ -345,6 +345,7 @@ class HUDAssembler:
                 "location_entity_id": context.location_entity_id,
             },
             "scene": scene,
+            "retrieval_evidence": cognitive_snapshot.retrieval_evidence,
             "state": {
                 "health": raw_state.get("health"),
                 "stamina": raw_state.get("stamina"),
