@@ -195,7 +195,12 @@ async def handle_resolve_generated_facts(db: Database, job: Dict[str, Any]) -> N
 
 
 async def handle_reconcile_character_beliefs(db: Database, job: Dict[str, Any]) -> None:
-    await reconcile_dirty_character_beliefs(db, limit=16)
+    live_instance_id = (job.get("payload") or {}).get("live_instance_id")
+    await reconcile_dirty_character_beliefs(
+        db,
+        limit=16,
+        instance_id=UUID(live_instance_id) if live_instance_id else None,
+    )
 
 
 # -------------------------------------------------
