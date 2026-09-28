@@ -13,6 +13,7 @@ from aios_app.epistemic.linguistic_projection import (
     sentence_docs,
 )
 from aios_app.epistemic.pivots import resolve_subject_pivot
+from aios_app.pipeline.jobs import enqueue_job
 
 logger = logging.getLogger("aios.pipeline.worker")
 
@@ -23,6 +24,7 @@ logger = logging.getLogger("aios.pipeline.worker")
 LIMINAL_WORLD_KEY = "liminal"
 WORKER_NAME = "claim_extractor"
 WORKER_VERSION = "v6-persisted-section-fanout"
+DECOMPOSE_PRIORITY = 27
 
 
 def _extract_spo_from_doc(doc) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -74,6 +76,53 @@ def parse_section_once(
     return _parsed_sentences_from_doc(parse_text(text))
 
 
+
+async def _ensure_decomposition_fanout(
+    db: Database,
+    *,
+    section_id: UUID,
+) -> int:
+    """Ensure every unprojected claim in a completed section has decomposition work.
+
+    Claim extraction is the producer of claim_candidate rows, so it owns the
+    normal handoff to semantic-frame decomposition. The supervisor keeps its
+    broad discovery scan as a repair/backfill path, not as the primary transport
+    between these stages.
+
+    enqueue_job() is deliberately used here rather than inserting pipeline_job
+    rows directly: it preserves resource/lane selection, timeline partitioning,
+    active-job deduplication, and foreground causal lineage propagation.
+    """
+    rows = await db.fetch(
+        """
+        SELECT cc.claim_id
+        FROM aios.claim_candidate cc
+        JOIN aios.extracted_sentence es
+          ON es.sentence_id=cc.sentence_id
+        WHERE es.section_id=$1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM aios.claim_semantic_frame_projection sfp
+              WHERE sfp.claim_id=cc.claim_id
+                AND sfp.decomposer_version='semantic-frame-v2'
+          )
+        ORDER BY es.sentence_index, cc.created_at, cc.claim_id
+        """,
+        section_id,
+    )
+
+    scheduled = 0
+    for item in rows:
+        job_id = await enqueue_job(
+            db,
+            job_type="decompose_claim_frames",
+            payload={"claim_id": str(item["claim_id"])},
+            priority=DECOMPOSE_PRIORITY,
+        )
+        if job_id is not None:
+            scheduled += 1
+    return scheduled
+
 # =================================================
 # Worker entrypoint
 # =================================================
@@ -120,8 +169,14 @@ async def run_claim_extraction_for_section(
     event_id = int(row["event_id"])
 
     if row["claims_extracted_at"] is not None:
+        scheduled = await _ensure_decomposition_fanout(db, section_id=section_id)
         await _mark_claim_stage_complete(db, event_id)
-        logger.debug("Section %s already completed; refreshed event latch", section_id)
+        logger.debug(
+            "Section %s already completed; refreshed event latch and scheduled %d "
+            "missing decomposition jobs",
+            section_id,
+            scheduled,
+        )
         return
 
     document_id: Optional[UUID] = row["document_id"]
@@ -312,14 +367,21 @@ async def run_claim_extraction_for_section(
         section_id,
     )
 
+    # Producer-driven handoff: claims must not depend on a later bounded
+    # supervisor scan to enter semantic decomposition. This also repairs retry
+    # sections containing claims that predate this invariant.
+    scheduled = await _ensure_decomposition_fanout(db, section_id=section_id)
+
     await _mark_claim_stage_complete(db, event_id)
 
     logger.info(
         "Section %s: persisted one linguistic parse, produced %d sentences, "
-        "inserted %d new claims; marked claim stage complete",
+        "inserted %d new claims, scheduled %d decomposition jobs; marked claim "
+        "stage complete",
         section_id,
         len(parsed_sentences),
         inserted,
+        scheduled,
     )
 
 
