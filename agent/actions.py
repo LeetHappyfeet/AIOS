@@ -25,6 +25,7 @@ class ActionSpec:
     result_mode: str = "final"
     capability_class: str = "action"
     description: str = ""
+    required_authority_use: str | None = None
 
 
 class ActionRegistry:
@@ -56,6 +57,7 @@ class ActionRegistry:
                 "result_mode": spec.result_mode,
                 "execution_mode": spec.execution_mode,
                 "schema": spec.schema,
+                "required_authority_use": spec.required_authority_use,
             }
             for name, spec in self._specs.items()
             if not spec.allowed_worker_classes or worker_class in spec.allowed_worker_classes
@@ -67,6 +69,28 @@ class ActionDispatcher:
         self.db = db
         self.registry = registry
         self.store = CharacterAgencyStore(db)
+
+    async def _authority_precondition_satisfied(
+        self, action: ActionRecord, required_use: str
+    ) -> bool:
+        """Execution-time authority gate for consequential actions."""
+        if action.task_id is None:
+            return False
+        row = await self.db.fetchrow(
+            """SELECT 1
+               FROM aios.character_cognitive_task task
+               JOIN aios.cognitive_evidence_instances(task.instance_id) eligible ON true
+               JOIN aios.knowledge_acquisition_event kae ON kae.instance_id=eligible.instance_id
+               JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae.acquisition_id
+               WHERE task.task_id=$1
+                 AND $2=ANY(eaa.authorized_uses)
+                 AND (task.source_node_id IS NULL
+                      OR kae.dag_node_id=task.source_node_id
+                      OR kae.dag_node_id=task.source_through_node_id)
+               LIMIT 1""",
+            action.task_id, required_use,
+        )
+        return row is not None
 
     async def dispatch(self, action_id: UUID, *, worker_class: str) -> ActionRecord:
         action = await self.store.get_action(action_id)
@@ -93,6 +117,12 @@ class ActionDispatcher:
             if not row or int(row["state_version"]) != int(action.expected_state_version):
                 return await self.store.transition_action(
                     action_id, "rejected", rejection_reason="stale_character_state"
+                )
+
+        if spec.required_authority_use:
+            if not await self._authority_precondition_satisfied(action, spec.required_authority_use):
+                return await self.store.transition_action(
+                    action_id, "rejected", rejection_reason="epistemic_precondition_unsatisfied"
                 )
 
         policy = ActionPolicyService(self.db)
