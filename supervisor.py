@@ -99,16 +99,75 @@ STAGES: List[Stage] = [
         ORDER BY n.event_id LIMIT $1
     """, section_id_payload, 25, 48, True),
     Stage("decompose_claim_frames", "decompose_claim_frames", """
-        SELECT cc.claim_id FROM aios.claim_candidate cc JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node dn ON dn.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-        WHERE ie.superseded_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM aios.claim_semantic_frame_projection sfp WHERE sfp.claim_id=cc.claim_id AND sfp.decomposer_version='semantic-frame-v2')
-          AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='decompose_claim_frames' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=cc.claim_id::text)
-        ORDER BY EXISTS (
-            SELECT 1 FROM aios.pipeline_foreground_lineage pfl
-            WHERE pfl.timeline_id=dn.timeline_id
-              AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
-              AND pfl.expires_at > now()
-        ) DESC, cc.created_at LIMIT $1
+        WITH eligible AS (
+          SELECT
+              cc.claim_id,
+              cc.created_at,
+              EXISTS (
+                  SELECT 1
+                  FROM aios.pipeline_foreground_lineage pfl
+                  WHERE pfl.timeline_id=dn.timeline_id
+                    AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+                    AND pfl.expires_at > now()
+              ) AS is_foreground
+          FROM aios.claim_candidate cc
+          JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+          JOIN aios.document_section ds ON ds.section_id=es.section_id
+          JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+          JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+          WHERE ie.superseded_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM aios.claim_semantic_frame_projection sfp
+                WHERE sfp.claim_id=cc.claim_id
+                  AND sfp.decomposer_version='semantic-frame-v2'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM aios.pipeline_job pj
+                WHERE pj.job_type='decompose_claim_frames'
+                  AND pj.status IN ('queued','running')
+                  AND pj.payload->>'claim_id'=cc.claim_id::text
+            )
+        ),
+        foreground AS (
+          SELECT claim_id,created_at,0 AS band_order
+          FROM eligible
+          WHERE is_foreground
+          ORDER BY created_at,claim_id
+          LIMIT $1
+        ),
+        quotas AS (
+          SELECT
+              floor(GREATEST($1-(SELECT count(*) FROM foreground),0)::numeric*0.75)::integer AS backlog_quota,
+              GREATEST($1-(SELECT count(*) FROM foreground),0)
+                - floor(GREATEST($1-(SELECT count(*) FROM foreground),0)::numeric*0.75)::integer AS fresh_quota
+        ),
+        backlog AS (
+          SELECT e.claim_id,e.created_at,1 AS band_order
+          FROM eligible e
+          WHERE NOT e.is_foreground
+            AND NOT EXISTS (SELECT 1 FROM foreground f WHERE f.claim_id=e.claim_id)
+          ORDER BY e.created_at,e.claim_id
+          LIMIT (SELECT backlog_quota FROM quotas)
+        ),
+        fresh AS (
+          SELECT e.claim_id,e.created_at,2 AS band_order
+          FROM eligible e
+          WHERE NOT e.is_foreground
+            AND NOT EXISTS (SELECT 1 FROM foreground f WHERE f.claim_id=e.claim_id)
+            AND NOT EXISTS (SELECT 1 FROM backlog b WHERE b.claim_id=e.claim_id)
+          ORDER BY e.created_at DESC,e.claim_id
+          LIMIT (SELECT fresh_quota FROM quotas)
+        )
+        SELECT claim_id
+        FROM (
+          SELECT claim_id,created_at,band_order FROM foreground
+          UNION ALL
+          SELECT claim_id,created_at,band_order FROM backlog
+          UNION ALL
+          SELECT claim_id,created_at,band_order FROM fresh
+        ) admitted
+        ORDER BY band_order,created_at,claim_id
+        LIMIT $1
     """, claim_id_payload, 27, 128, True),
     Stage("resolve_claim_context", "resolve_claim_context", """
         WITH eligible AS (
