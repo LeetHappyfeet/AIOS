@@ -111,10 +111,10 @@ def _demand_clause(text: str) -> str:
 
 _PREFERENCE_WORDS = frozenset({
     "like", "liked", "prefer", "preferred", "preference", "favorite", "favourite",
-    "want", "wanted", "choose", "chose", "chosen", "pick", "picked", "wear", "wearing",
+    "want", "wanted", "care", "cared", "choose", "chose", "chosen", "pick", "picked", "wear", "wearing",
 })
 _PREFERENCE_PREDICATES = frozenset({
-    "like", "prefer", "want", "choose", "pick", "favorite", "favourite",
+    "like", "prefer", "want", "care", "choose", "pick", "favorite", "favourite",
 })
 _EXPERIENCE_WORDS = frozenset({
     "visit", "visited", "meet", "met", "go", "went", "been", "see", "saw",
@@ -139,7 +139,7 @@ def _demand_semantics(clause: str) -> tuple[str, tuple[str, ...], str]:
         kind = "history"
     semantic_words = _PREFERENCE_WORDS | _MEMORY_WORDS | _EXPERIENCE_WORDS
     topics = tuple(term for term in terms if term not in semantic_words)
-    temporal = "prior" if re.search(r"\\b(?:before|ever|previously|used to|in the past)\\b", clause, re.IGNORECASE) else "unspecified"
+    temporal = "prior" if re.search(r"\b(?:before|ever|previously|used to|in the past)\b", clause, re.IGNORECASE) else "unspecified"
     return kind, topics, temporal
 
 
@@ -173,8 +173,11 @@ def assess_retrieval_evidence(
         related.append(item)
         predicate = str(item.get("predicate_norm") or "").strip().lower()
         predicate_terms = set(research_terms(predicate, limit=16))
+        subject_terms = set(research_terms(str(item.get("subject_norm") or ""), limit=16))
+        demand_subject_terms = set(research_terms(demand.subject, limit=16))
+        subject_matches = not demand_subject_terms or bool(subject_terms & demand_subject_terms)
         if demand.kind == "preference":
-            if predicate_terms & _PREFERENCE_PREDICATES:
+            if subject_matches and predicate_terms & _PREFERENCE_PREDICATES:
                 established.append(item)
         elif demand.kind in {"experience", "memory", "history"}:
             # Event/memory propositions with a topical match establish that the
