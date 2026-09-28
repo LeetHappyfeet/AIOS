@@ -62,3 +62,31 @@ def test_bound_participant_never_silently_falls_back():
     cursor = source("world/source_cursor.py")
     assert "conversation participant has no character instance binding" in cursor
     assert "but that instance has no runtime state" in cursor
+
+
+def test_claim_extraction_owns_semantic_decomposition_handoff():
+    worker = source("pipeline/worker.py")
+    assert "async def _ensure_decomposition_fanout" in worker
+    assert 'job_type="decompose_claim_frames"' in worker
+    assert "claim_semantic_frame_projection" in worker
+    assert "decomposer_version='semantic-frame-v2'" in worker
+    assert "await _ensure_decomposition_fanout(db, section_id=section_id)" in worker
+    assert "from aios_app.pipeline.jobs import enqueue_job" in worker
+
+
+def test_completed_claim_sections_repair_missing_decomposition_jobs():
+    worker = source("pipeline/worker.py")
+    completed = worker.split('if row["claims_extracted_at"] is not None:', 1)[1].split(
+        "document_id:", 1
+    )[0]
+    assert "_ensure_decomposition_fanout" in completed
+    assert "_mark_claim_stage_complete" in completed
+
+
+def test_supervisor_remains_decomposition_repair_path():
+    supervisor = source("supervisor.py")
+    frame_stage = supervisor.split('Stage("decompose_claim_frames"', 1)[1].split(
+        'Stage("resolve_claim_context"', 1
+    )[0]
+    assert "claim_semantic_frame_projection" in frame_stage
+    assert "pipeline_job" in frame_stage
