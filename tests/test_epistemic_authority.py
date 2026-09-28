@@ -48,3 +48,12 @@ def test_corpus_re_reads_share_lineage():
     root = Path(__file__).resolve().parents[1]
     corpus = (root / "corpus.py").read_text()
     assert '"evidence_correlation_key": f"corpus-section:{section_id}"' in corpus
+
+
+def test_sillytavern_character_turns_are_generated_cognition():
+    sql = (ROOT / "migrations/current/20260927_epistemic_authority_membrane.sql").read_text()
+    assert "lower(COALESCE(r.source_kind,''))='sillytavern_chat'" in sql
+    assert "lower(COALESCE(r.speaker_role::text,''))='character'" in sql
+    assert "THEN 'character_generation'" in sql
+    assert "v_origin IN ('model_generation','model_inference','character_generation')" in sql
+    assert "generated_cognition_has_no_historical_authority" in sql
