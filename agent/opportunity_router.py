@@ -20,7 +20,8 @@ class OpportunityRouter:
         self.transactions=InternalCognitionTransactions(db)
         self.threads=CognitiveThreadService(db)
 
-    async def admit(self, *, instance_id:UUID, source_node_id:UUID|None=None,\n                    source_task_id:UUID|None=None, enqueue_inference:bool=True) -> UUID|None:\n        if task is not None:\n            from .task_opportunities import TaskOpportunityPlanner\n            task_rows=await TaskOpportunityPlanner(self.db).generate(task,limit=5)\n            class _Batch:\n                opportunities=tuple(task_rows)\n            batch=_Batch()\n        else:\n            batch=await self.opportunities.generate(\n                instance_id=instance_id,source_node_id=source_node_id,limit=8)
+    async def admit(self, *, instance_id:UUID, source_node_id:UUID|None=None,
+                    source_task_id:UUID|None=None, enqueue_inference:bool=True,\n                    task=None) -> UUID|None:\n        if task is not None:\n            from .task_opportunities import TaskOpportunityPlanner\n            task_rows=await TaskOpportunityPlanner(self.db).generate(task,limit=5)\n            class _Batch:\n                opportunities=tuple(task_rows)\n            batch=_Batch()\n        else:\n            batch=await self.opportunities.generate(\n                instance_id=instance_id,source_node_id=source_node_id,limit=8)
         rows=[x for x in batch.opportunities
               if x["status"]=="pending" and x["valid_until"] is not None]
         if not rows: return None
