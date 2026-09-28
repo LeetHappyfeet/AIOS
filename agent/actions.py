@@ -40,15 +40,8 @@ class ActionRegistry:
     def get(self, name: str) -> ActionSpec | None:
         return self._specs.get(name)
 
-    def schemas_for(self, worker_class: str) -> dict[str, dict[str, Any]]:
-        """Inference-compatible schema map retained for the broker."""
-        return {
-            name: spec.schema for name, spec in self._specs.items()
-            if not spec.allowed_worker_classes or worker_class in spec.allowed_worker_classes
-        }
-
     def capabilities_for(self, worker_class: str) -> dict[str, dict[str, Any]]:
-        """Prompt-facing metadata without changing the inference wire format."""
+        """Operator/runtime capability metadata; not an inference prompt contract."""
         return {
             name: {
                 "class": spec.capability_class,
