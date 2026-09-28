@@ -120,6 +120,7 @@ async def reconcile_dirty_character_beliefs(
     db: Database,
     *,
     limit: int = 16,
+    instance_id: UUID | None = None,
 ) -> int:
     """Reconcile a bounded snapshot of coalesced character-belief invalidations.
 
@@ -132,10 +133,12 @@ async def reconcile_dirty_character_beliefs(
         """
         SELECT instance_id, atom_id, dirty_version
         FROM aios.character_belief_reconciliation_dirty
+        WHERE ($2::uuid IS NULL OR instance_id=$2)
         ORDER BY dirty_at, instance_id, atom_id
         LIMIT $1
         """,
         max(1, min(int(limit), 128)),
+        instance_id,
     )
 
     processed = 0
