@@ -10,6 +10,7 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
+from aios_app.epistemic.world_scope import build_retrieval_scope
 from aios_app.epistemic.structured_retrieval import StructuredKnowledgeRetriever
 from aios_app.epistemic.research import CharacterResearchService
 from aios_app.epistemic.hypothesis_validation import notify_evidence_change
@@ -208,18 +209,67 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
     async def world_lookup(
         instance_id: UUID, args: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        query = str(args["query"]).strip()
-        if not query:
-            raise ValueError("world lookup query is empty")
+        query = str(args.get("query") or "").strip()
+        operation = str(args.get("operation") or "search").strip().lower()
+        if not query and not args.get("proposition_ids"):
+            raise ValueError("world lookup requires query or proposition_ids")
         context = await contexts.resolve(instance_id)
         domain = str(args.get("domain") or "general")
         kinds = tuple(str(v).upper() for v in (args.get("kinds") or []) if str(v).strip())
         limit = max(1, min(int(args.get("limit", 10)), 30))
         scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
-        rows = await world.retrieve(
-            context, scorer, query_text=query, domain=domain,
-            claim_kinds=kinds, limit=limit,
-        )
+        rows = []
+        if query:
+            rows = await world.retrieve(
+                context, scorer, query_text=query, domain=domain,
+                claim_kinds=kinds, limit=max(limit, 8),
+            )
+        coordinate_ids = []
+        seen_ids = set()
+        for raw in list(args.get("proposition_ids") or ()) + [
+            item.get("proposition_id") for item in rows
+        ]:
+            if not raw or str(raw) in seen_ids:
+                continue
+            try:
+                coordinate_ids.append(UUID(str(raw)))
+                seen_ids.add(str(raw))
+            except (TypeError, ValueError):
+                continue
+            if len(coordinate_ids) >= 16:
+                break
+
+        if operation == "evidence":
+            scope = await build_retrieval_scope(db, world_id=context.world_id, domain=domain)
+            evidence = await structured.world_evidence(
+                world_ids=scope.all_world_ids, proposition_ids=coordinate_ids, limit=limit,
+            )
+            return {
+                "query": query, "scope": "world", "domain": domain, "operation": operation,
+                "coordinates": [str(v) for v in coordinate_ids],
+                "matches": evidence, "match_count": len(evidence),
+                "durable_character_knowledge": False,
+            }
+
+        if operation == "relation":
+            graph_rows = await structured.relation(
+                scope_key=f"world:{context.world_id}:asserted",
+                seed_proposition_ids=coordinate_ids,
+                seed_terms=(query,) if query else (),
+                relation_types=tuple(str(v) for v in (args.get("relations") or ())),
+                direction=str(args.get("direction") or "either"),
+                max_hops=int(args.get("max_hops", 1)), limit=limit,
+            )
+            return {
+                "query": query, "scope": "world", "domain": domain, "operation": operation,
+                "coordinates": [str(v) for v in coordinate_ids],
+                "matches": graph_rows, "match_count": len(graph_rows),
+                "durable_character_knowledge": False,
+            }
+
+        if operation != "search":
+            raise ValueError(f"unsupported world lookup operation {operation!r}")
+
         matches = [
             {
                 "text": item.get("text"),
@@ -234,10 +284,10 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
                 "retrieval_scope": "world",
                 "world_domain": item.get("world_domain"),
             }
-            for item in rows
+            for item in rows[:limit]
         ]
         return {
-            "query": query, "scope": "world", "domain": domain,
+            "query": query, "scope": "world", "domain": domain, "operation": operation,
             "matches": matches, "match_count": len(matches),
             "durable_character_knowledge": False,
         }
@@ -364,8 +414,13 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
     ))
     registry.register(ActionSpec(
         name="world.lookup",
-        schema={"type":"object","required":["query"],"properties":{
+        schema={"type":"object","properties":{
             "query":{"type":"string"},"domain":{"type":"string"},
+            "operation":{"type":"string","enum":["search","evidence","relation"]},
+            "proposition_ids":{"type":"array","items":{"type":"string"},"maxItems":16},
+            "relations":{"type":"array","items":{"type":"string"},"maxItems":16},
+            "direction":{"type":"string","enum":["outgoing","incoming","either"]},
+            "max_hops":{"type":"integer","minimum":1,"maximum":2},
             "limit":{"type":"integer"},
             "kinds":{"type":"array","items":{"type":"string"}}},"additionalProperties":False},
         side_effect_class="read_only",
@@ -373,7 +428,7 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
         handler=world_lookup,
         result_mode="return_to_cognition",
         capability_class="lookup",
-        description="Search authorized public /world knowledge without granting character ownership.",
+        description="Search or inspect bounded authorized /world knowledge, evidence, and relations without granting character ownership.",
     ))
     registry.register(ActionSpec(
         name="state.inspect",
