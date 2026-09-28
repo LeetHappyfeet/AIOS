@@ -88,8 +88,6 @@ class InternalCognitionTransactions:
             return TransactionResult(transaction_id,"stale",None,None,None)
 
         tx=dict(row); candidates=self._json(tx["candidates"],[])
-        output_schema={"type":"object","required":["choice"],"properties":{
-            "choice":{"type":"string"}},"additionalProperties":False}
         try:
             inference=await self.broker.infer(InferenceRequest(
                 instance_id=tx["instance_id"], task_id=tx["source_task_id"],
