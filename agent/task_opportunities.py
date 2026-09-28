@@ -21,13 +21,13 @@ class TaskOpportunityPlanner:
 
     async def generate(self, task: CognitiveTask, *, limit: int = 5) -> list[dict[str,Any]]:
         focus=(task.retrieval_focus or task.objective).strip()
-        rows=await self.opportunities.generate(
+        batch=await self.opportunities.generate(
             instance_id=task.instance_id,
             source_node_id=task.source_through_node_id or task.source_node_id,
             focus_override=focus,
             limit=max(limit,8),
         )
-        allowed={
+        rows=list(batch.opportunities)\n        allowed={
             "research":{"knowledge_gap","memory_recall","reflection"},
             "planning":{"goal_review","knowledge_gap","memory_recall","reflection"},
             "reflection":{"memory_recall","reflection","knowledge_gap"},
