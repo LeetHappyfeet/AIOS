@@ -310,6 +310,50 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
         )
         source_head_node_id = await _runtime_source_head(db, req, timeline_id)
 
+        # Recent interactive source work gets a short causal scheduling lease.
+        # Preserve the first event in an unexpired lease so unfinished work from
+        # the immediately preceding turn remains foreground when another turn
+        # arrives. The scheduler derives descendants from this source interval;
+        # foregroundness is urgency only and never changes epistemic authority.
+        if disposition is IngestEventDisposition.NEW and affected_instance_ids:
+            for instance_id in affected_instance_ids:
+                await db.execute(
+                    """
+                    INSERT INTO aios.pipeline_foreground_lineage (
+                        instance_id, character_id, timeline_id,
+                        first_event_id, head_event_id, head_node_id,
+                        activated_at, expires_at, reason, updated_at
+                    ) VALUES ($1,$2,$3,$4,$4,$5,now(),now()+interval '5 minutes',
+                              'interactive_ingest',now())
+                    ON CONFLICT (instance_id) DO UPDATE
+                    SET character_id=EXCLUDED.character_id,
+                        timeline_id=EXCLUDED.timeline_id,
+                        first_event_id=CASE
+                            WHEN aios.pipeline_foreground_lineage.expires_at > now()
+                             AND aios.pipeline_foreground_lineage.timeline_id=EXCLUDED.timeline_id
+                            THEN LEAST(aios.pipeline_foreground_lineage.first_event_id,
+                                       EXCLUDED.first_event_id)
+                            ELSE EXCLUDED.first_event_id
+                        END,
+                        head_event_id=EXCLUDED.head_event_id,
+                        head_node_id=EXCLUDED.head_node_id,
+                        activated_at=CASE
+                            WHEN aios.pipeline_foreground_lineage.expires_at > now()
+                             AND aios.pipeline_foreground_lineage.timeline_id=EXCLUDED.timeline_id
+                            THEN aios.pipeline_foreground_lineage.activated_at
+                            ELSE now()
+                        END,
+                        expires_at=EXCLUDED.expires_at,
+                        reason=EXCLUDED.reason,
+                        updated_at=now()
+                    """,
+                    instance_id,
+                    req.character_id,
+                    timeline_id,
+                    event_id,
+                    node_id,
+                )
+
         # A genuinely new perceived host experience contributes one cognitive
         # delta to every runtime that actually adopted the source coordinate.
         # Transport provenance (SillyTavern, API, email, etc.) is not cognition
