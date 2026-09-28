@@ -11,6 +11,8 @@ from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
+from aios_app.agent.prepared_operations import PreparedOperationBoundary
+from aios_app.agent.actions import default_action_registry
 from aios_app.agent.cognitive_subjects import (
     CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,
     GoalSubjectProjector, GoalKnowledgeDemandResolver,
@@ -52,6 +54,7 @@ class CognitiveOpportunityService:
         self.subject_demand=SubjectKnowledgeDemandResolver()
         self.goal_subjects=GoalSubjectProjector(db)
         self.goal_demand=GoalKnowledgeDemandResolver(db)
+        self.prepared=PreparedOperationBoundary(default_action_registry(db))
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                        limit:int=8) -> OpportunityBatch:
@@ -305,8 +308,22 @@ class CognitiveOpportunityService:
            evidence=(),key:str,freshness="contextual",subject_id:UUID|None=None):
         score=(1.7*urgency+1.35*goal_affinity+1.2*relevance+1.1*knowledge_gap+
                .9*memory_affinity+.65*novelty+.45*uncertainty+.55*recency)
-        return {"opportunity_type":typ,"natural_language":_clip(label,220),"operation_type":op,
-                "operation_payload":payload,"source_node_id":node,
+        worker_class={
+            "memory_recall":"reflection",
+            "knowledge_gap":"research",
+            "goal_review":"planning",
+            "reflection":"reflection",
+            "immediate":"executive",
+        }.get(str(typ),"executive")
+        prepared=self.prepared.prepare(
+            key="HOST", label=_clip(label,220), operation_type=str(op),
+            operation_payload=dict(payload or {}), worker_class=worker_class,
+            freshness_policy=freshness, source_node_id=node,
+            source_state_version=context.state_version,
+        )
+        return {"opportunity_type":typ,"natural_language":prepared.label,
+                "operation_type":prepared.operation_type,
+                "operation_payload":dict(prepared.operation_payload),"source_node_id":node,
                 "source_timeline_id":context.source_timeline_id,
                 "source_state_version":context.state_version,"novelty":novelty,
                 "relevance":relevance,"urgency":urgency,"uncertainty":uncertainty,
