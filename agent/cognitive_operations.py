@@ -232,6 +232,34 @@ class CognitiveOperationEngine:
         await CognitiveLifecycleReconciler(self.db).reconcile_operation(
             operation=op,result=result,terminal_status="succeeded")
 
+    async def _resume_source_task(self, op: Mapping[str,Any], *, status: str,
+                                  result: Mapping[str,Any]) -> None:
+        task_id=op.get("source_task_id")
+        if not task_id:
+            return
+        from .lifecycle import CharacterAgencyStore
+        agency=CharacterAgencyStore(self.db)
+        task=await agency.get_task(task_id)
+        if not task or task.status!="waiting":
+            return
+        receipt={"operation_id":str(op["operation_id"]),"operation_type":op["operation_type"],
+                 "status":status,"result":dict(result)}
+        if status=="succeeded":
+            await agency.transition_task(task_id,"succeeded",result=receipt)
+            event_type="COGNITIVE_TASK_COMPLETED"
+        else:
+            await agency.transition_task(task_id,"failed",error=str(result)[:1000])
+            event_type="COGNITIVE_TASK_FAILED"
+        if task.parent_task_id:
+            from .runtime import AgentRuntimeStore
+            await AgentRuntimeStore(self.db).wake(
+                instance_id=task.instance_id,event_type=event_type,
+                source_type="cognitive_task",source_id=str(task.task_id),
+                payload={"task_id":str(task.task_id),"parent_task_id":str(task.parent_task_id),
+                         "status":status,"result":receipt},
+                priority=max(1,task.priority-1),
+                dedupe_key=f"task:{task.task_id}:{status}")
+
     @staticmethod
     def _mapping(value: Any) -> dict[str, Any]:
         current=value
