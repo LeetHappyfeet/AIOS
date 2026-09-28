@@ -147,6 +147,24 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("\nACTIVE MEMORY:")
         for item in memories:
             lines.append(f"-{_knowledge_annotation(item)} {item.get('text', '')}")
+    retrieval_evidence = frame.get("retrieval_evidence") or {}
+    if retrieval_evidence.get("route") == "character":
+        status = str(retrieval_evidence.get("status") or "").strip().lower()
+        demand_kind = str(retrieval_evidence.get("demand_kind") or "memory").replace("_", " ")
+        if status == "established":
+            memory_status = f"Established character evidence found for this {demand_kind} question."
+        elif status == "partial":
+            memory_status = (
+                f"Related character memory found, but the requested {demand_kind} is not established."
+            )
+        elif status == "unestablished":
+            memory_status = f"No established character memory answers this {demand_kind} question."
+        else:
+            memory_status = ""
+        if memory_status:
+            lines.append("\nMEMORY STATUS:")
+            lines.append(f"- {memory_status}")
+
     beliefs = frame.get("beliefs") or []
     if beliefs:
         lines.append("\nKNOWLEDGE / BELIEFS:")
