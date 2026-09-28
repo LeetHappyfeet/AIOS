@@ -11,7 +11,7 @@ from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
 from aios_app.epistemic.world_scope import build_retrieval_scope
-from aios_app.epistemic.structured_retrieval import StructuredKnowledgeRetriever
+from aios_app.epistemic.structured_retrieval import StructuredKnowledgeRetriever, EpistemicComparisonService
 from aios_app.epistemic.research import CharacterResearchService
 from aios_app.epistemic.hypothesis_validation import notify_evidence_change
 from .actions import ActionRegistry, ActionSpec
@@ -89,6 +89,7 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
     research = ResearchRouter(db)
     world = WorldPropositionRetriever(db)
     structured = StructuredKnowledgeRetriever(db)
+    comparison = EpistemicComparisonService(db)
     temporal = TemporalTriggerStore(db)
 
     async def knowledge_lookup(
@@ -292,6 +293,49 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
             "durable_character_knowledge": False,
         }
 
+
+    async def epistemic_compare(
+        instance_id: UUID, args: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ValueError("epistemic comparison query is empty")
+        context = await contexts.resolve(instance_id)
+        limit = max(1, min(int(args.get("limit", 10)), 20))
+        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
+        char_rows = await cognition.lookup_character_knowledge(
+            context, scorer, claim_kinds=(), limit=max(limit, 8),
+        )
+        world_rows = await world.retrieve(
+            context, scorer, query_text=query,
+            domain=str(args.get("domain") or "general"), limit=max(limit, 8),
+        )
+        ids = []
+        seen = set()
+        for item in [*char_rows, *world_rows]:
+            raw = item.get("proposition_id")
+            if raw and str(raw) not in seen:
+                try:
+                    ids.append(UUID(str(raw)))
+                    seen.add(str(raw))
+                except (TypeError, ValueError):
+                    pass
+            if len(ids) >= 24:
+                break
+        scope = await build_retrieval_scope(
+            db, world_id=context.world_id, domain=str(args.get("domain") or "general"),
+        )
+        rows = await comparison.compare(
+            instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
+            world_ids=scope.all_world_ids, proposition_ids=ids, limit=limit,
+        )
+        return {
+            "query": query, "scope": "character_vs_world",
+            "matches": rows, "match_count": len(rows),
+            "note": "unverified means no admitted /world assertion for the same semantic atom; it does not mean false",
+        }
+
+
     async def state_inspect(
         instance_id: UUID, args: Mapping[str, Any],
     ) -> Mapping[str, Any]:
@@ -429,6 +473,18 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
         result_mode="return_to_cognition",
         capability_class="lookup",
         description="Search or inspect bounded authorized /world knowledge, evidence, and relations without granting character ownership.",
+    ))
+    registry.register(ActionSpec(
+        name="epistemic.compare",
+        schema={"type":"object","required":["query"],"properties":{
+            "query":{"type":"string"},"domain":{"type":"string"},
+            "limit":{"type":"integer"}},"additionalProperties":False},
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive","research","planning","reflection"}),
+        handler=epistemic_compare,
+        result_mode="return_to_cognition",
+        capability_class="lookup",
+        description="Compare character-owned /char knowledge with independently admitted /world state without merging the scopes.",
     ))
     registry.register(ActionSpec(
         name="state.inspect",
