@@ -58,6 +58,14 @@ def _knowledge_annotation(item: Mapping[str, Any]) -> str:
     return " [" + "; ".join(bits) + "]"
 
 
+def _epistemic_label(item: Mapping[str, Any]) -> str:
+    state = str(item.get("authority_state") or "").strip()
+    origin = str(item.get("origin_kind") or "").strip().replace("_", "-")
+    mode = str(item.get("epistemic_mode") or "").strip().replace("_", "-")
+    bits = [value for value in (state, origin, mode) if value]
+    return (" [" + " | ".join(bits) + "]") if bits else ""
+
+
 def _scene_text(value: Any) -> str:
     if isinstance(value, Mapping):
         return str(value.get("text") or value.get("label") or "").strip()
@@ -146,7 +154,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if memories:
         lines.append("\nACTIVE MEMORY:")
         for item in memories:
-            lines.append(f"-{_knowledge_annotation(item)} {item.get('text', '')}")
+            lines.append(f"-{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
     retrieval_evidence = frame.get("retrieval_evidence") or {}
     if retrieval_evidence.get("route") == "character":
         status = str(retrieval_evidence.get("status") or "").strip().lower()
@@ -172,7 +180,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             status = item.get("epistemic_status") or "known"
             confidence = item.get("effective_confidence")
             suffix = f" confidence={confidence:.2f}" if isinstance(confidence, (float, int)) else ""
-            lines.append(f"- [{status}{suffix}]{_knowledge_annotation(item)} {item.get('text', '')}")
+            lines.append(f"- [{status}{suffix}]{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
             for conflict in item.get("conflicts") or []:
                 lines.append(f"  ! conflicts with: {conflict.get('text', '')}")
     corpus_references = frame.get("corpus_references") or []
