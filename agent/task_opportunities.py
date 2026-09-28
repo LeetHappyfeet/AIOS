@@ -20,14 +20,17 @@ class TaskOpportunityPlanner:
         self.opportunities=CognitiveOpportunityService(db)
 
     async def generate(self, task: CognitiveTask, *, limit: int = 5) -> list[dict[str,Any]]:
-        focus=(task.retrieval_focus or task.objective).strip()
+        dependencies=await self.dependencies(task.task_id)
+        dependency_focus=' '.join(str(d.get('result') or '')[:240] for d in dependencies)
+        focus=' '.join(x for x in (task.retrieval_focus,task.objective,dependency_focus) if x).strip()
         batch=await self.opportunities.generate(
             instance_id=task.instance_id,
             source_node_id=task.source_through_node_id or task.source_node_id,
             focus_override=focus,
             limit=max(limit,8),
         )
-        rows=list(batch.opportunities)\n        allowed={
+        rows=list(batch.opportunities)
+        allowed={
             "research":{"knowledge_gap","memory_recall","reflection"},
             "planning":{"goal_review","knowledge_gap","memory_recall","reflection"},
             "reflection":{"memory_recall","reflection","knowledge_gap"},
