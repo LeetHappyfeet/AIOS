@@ -47,3 +47,18 @@ def test_foreground_discovery_precedes_old_nlp_backlog():
     frame_stage = supervisor.split('Stage("decompose_claim_frames"', 1)[1].split('Stage("resolve_claim_context"', 1)[0]
     assert "pipeline_foreground_lineage" in frame_stage
     assert ") DESC, cc.created_at LIMIT $1" in frame_stage
+
+
+def test_participant_binding_is_authoritative_for_source_cursor():
+    cursor = source("world/source_cursor.py")
+    assert "SELECT character_instance_id" in cursor
+    assert "bound_instance_id = (" in cursor
+    assert "WHERE rs.instance_id=$1" in cursor
+    assert "participant-aware timelines" in cursor
+    assert "Compatibility path for legacy single-character timelines" in cursor
+
+
+def test_bound_participant_never_silently_falls_back():
+    cursor = source("world/source_cursor.py")
+    assert "conversation participant has no character instance binding" in cursor
+    assert "but that instance has no runtime state" in cursor
