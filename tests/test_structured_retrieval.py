@@ -1,6 +1,6 @@
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1] / "aios_app" / "beta" / "aios_app"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_structured_retrieval_contract_separates_scope_and_query_kind():
