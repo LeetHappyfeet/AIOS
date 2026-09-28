@@ -13,7 +13,7 @@ from aios_app.epistemic.goals import CharacterGoalService, CognitiveGoal
 from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
-from aios_app.epistemic.message_cognition import current_message_cognition
+from aios_app.epistemic.message_cognition import current_message_cognition, question_semantics
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer, select_recalled_cognition
 from aios_app.epistemic.research import (
     CharacterResearchService,
@@ -292,10 +292,37 @@ class CognitiveContextService:
             )
             if signal.get("focus_text")
         )
-        demand = resolve_retrieval_demand(
+        focus_row = next(
+            (row for row in recent_newest if row.get("message_text")),
+            None,
+        )
+        question = question_semantics(
             resolved_focus_text,
             character_id=context.character_id,
+            speaker_id=(str(focus_row.get("speaker_id")) if focus_row and focus_row.get("speaker_id") else None),
         )
+        if question is not None:
+            compact_focus = " ".join(
+                (
+                    question.subject,
+                    question.relation,
+                    *question.topic_terms,
+                )
+            ).strip()
+            demand = RetrievalDemand(
+                route="character",
+                focus_text=compact_focus,
+                reason="structured_character_question",
+                kind=question.relation,
+                subject=question.subject,
+                topic_terms=question.topic_terms,
+                temporal_scope=question.temporal_scope,
+            )
+        else:
+            demand = resolve_retrieval_demand(
+                resolved_focus_text,
+                character_id=context.character_id,
+            )
         # High-confidence self/history/preference questions retrieve against a
         # compact demand rather than the entire surrounding dialogue turn.
         # The raw focus remains available above for presentation/provenance.
