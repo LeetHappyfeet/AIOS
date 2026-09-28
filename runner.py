@@ -13,6 +13,7 @@ from uuid import UUID
 from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.pipeline.jobs import (
+    enqueue_job,
     fetch_next_job,
     heartbeat_job,
     mark_done,
@@ -90,6 +91,14 @@ async def handle_decompose_claim_frames(db: Database, job: Dict[str, Any]) -> No
         logger.warning("Skipping stale decompose_claim_frames job for missing claim %s", claim_id)
         return
     await decompose_claim_frames(db, claim_id=claim_id)
+    # Producer-driven semantic handoff. Supervisor discovery remains the repair
+    # path if this enqueue is interrupted or legacy data predates the invariant.
+    await enqueue_job(
+        db,
+        job_type="resolve_claim_context",
+        payload={"claim_id": str(claim_id), "admission_band": "producer"},
+        priority=30,
+    )
 
 
 async def handle_normalize_proposition(db: Database, job: Dict[str, Any]) -> None:
@@ -253,6 +262,14 @@ async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> Non
         await admit_location_claim(
             db,CausalIntegrityKernel(db),claim_id=claim_id,
             world_id=context.world_id,timeline_id=context.timeline_id)
+
+    if context:
+        await enqueue_job(
+            db,
+            job_type="normalize_proposition",
+            payload={"claim_id": str(claim_id)},
+            priority=35,
+        )
 
 
 JOB_HANDLERS.update(
