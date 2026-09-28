@@ -46,7 +46,22 @@ def test_foreground_discovery_precedes_old_nlp_backlog():
     supervisor = source("supervisor.py")
     frame_stage = supervisor.split('Stage("decompose_claim_frames"', 1)[1].split('Stage("resolve_claim_context"', 1)[0]
     assert "pipeline_foreground_lineage" in frame_stage
-    assert ") DESC, cc.created_at LIMIT $1" in frame_stage
+    assert "foreground AS (" in frame_stage
+    assert "0 AS band_order" in frame_stage
+    assert "ORDER BY band_order,created_at,claim_id" in frame_stage
+
+
+def test_decomposition_discovery_reserves_old_and_fresh_capacity():
+    supervisor = source("supervisor.py")
+    frame_stage = supervisor.split('Stage("decompose_claim_frames"', 1)[1].split(
+        'Stage("resolve_claim_context"', 1
+    )[0]
+    assert "backlog_quota" in frame_stage
+    assert "fresh_quota" in frame_stage
+    assert "*0.75" in frame_stage
+    assert "ORDER BY e.created_at,e.claim_id" in frame_stage
+    assert "ORDER BY e.created_at DESC,e.claim_id" in frame_stage
+    assert "NOT EXISTS (SELECT 1 FROM backlog b WHERE b.claim_id=e.claim_id)" in frame_stage
 
 
 def test_participant_binding_is_authoritative_for_source_cursor():
