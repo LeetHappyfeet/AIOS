@@ -5,7 +5,7 @@ BEGIN;
 -- This does not make it canonical world truth; it only permits it to satisfy
 -- the action-precondition use at the dispatcher boundary.
 CREATE OR REPLACE FUNCTION aios.trg_expand_user_action_authority()
-RETURNS trigger LANGUAGE plpgsql AS $
+RETURNS trigger LANGUAGE plpgsql AS $auth$
 BEGIN
     UPDATE aios.epistemic_authority_admission
     SET authorized_uses = array_append(authorized_uses,'action_precondition'),
@@ -15,7 +15,7 @@ BEGIN
       AND NOT ('action_precondition'=ANY(authorized_uses));
     RETURN NEW;
 END;
-$;
+$auth$;
 
 DROP TRIGGER IF EXISTS trg_expand_user_action_authority ON aios.knowledge_acquisition_event;
 CREATE TRIGGER trg_expand_user_action_authority
