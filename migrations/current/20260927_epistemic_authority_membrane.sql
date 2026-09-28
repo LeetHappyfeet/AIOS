@@ -66,11 +66,6 @@ BEGIN
         WHEN lower(COALESCE(r.acquisition_mode,'')) IN ('read','read_document','research','import') THEN 'corpus_source'
         WHEN lower(COALESCE(r.acquisition_mode,''))='taught' THEN 'testimony'
         WHEN lower(COALESCE(r.source_kind,'')) IN ('sensor','simulator','deterministic_plugin') THEN 'deterministic_tool'
-        -- A character-authored SillyTavern turn is generated character cognition,
-        -- even when its surface form is a memory or narrated observation.
-        WHEN lower(COALESCE(r.source_kind,''))='sillytavern_chat'
-             AND lower(COALESCE(r.speaker_role::text,''))='character'
-             THEN 'character_generation'
         WHEN lower(COALESCE(r.speaker_role::text,''))='user' THEN 'user_testimony'
         WHEN lower(COALESCE(r.speaker_role::text,''))='assistant' THEN 'model_generation'
         WHEN lower(COALESCE(r.meta->>'source','')) LIKE 'context-resolver%' THEN 'model_inference'
