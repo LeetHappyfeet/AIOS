@@ -10,6 +10,7 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
+from aios_app.epistemic.structured_retrieval import StructuredKnowledgeRetriever
 from aios_app.epistemic.research import CharacterResearchService
 from aios_app.epistemic.hypothesis_validation import notify_evidence_change
 from .actions import ActionRegistry, ActionSpec
@@ -86,28 +87,98 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
     scenes = CharacterSceneStateStore(db)
     research = ResearchRouter(db)
     world = WorldPropositionRetriever(db)
+    structured = StructuredKnowledgeRetriever(db)
     temporal = TemporalTriggerStore(db)
 
     async def knowledge_lookup(
         instance_id: UUID, args: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        query = str(args["query"]).strip()
-        if not query:
-            raise ValueError("knowledge lookup query is empty")
+        query = str(args.get("query") or "").strip()
+        operation = str(args.get("operation") or "search").strip().lower()
+        if not query and operation != "history" and not args.get("proposition_ids"):
+            raise ValueError("knowledge lookup requires query or proposition_ids")
         context = await contexts.resolve(instance_id)
         kinds = tuple(str(v).upper() for v in (args.get("kinds") or []) if str(v).strip())
-        # Research workers run iterative tool loops, so keep their ordinary
-        # memory search surface deliberately small. Other cognitive workers
-        # retain the broader lookup budget. _worker_class is trusted internal
-        # dispatcher context and is never exposed in the action schema.
         is_research = str(args.get("_worker_class") or "") == "research"
         default_limit = 5 if is_research else 10
         hard_limit = 8 if is_research else 30
         limit = max(1, min(int(args.get("limit", default_limit)), hard_limit))
         scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
-        candidates = await cognition.lookup_character_knowledge(
-            context, scorer, claim_kinds=kinds, limit=limit,
-        )
+
+        # Ordinary search remains the existing /char path.  Structured
+        # operations use search only to discover proposition coordinates when
+        # the caller did not already supply stable IDs; fuzzy retrieval does
+        # not answer the structured question itself.
+        candidates = []
+        supplied_ids = []
+        for raw in args.get("proposition_ids") or ():
+            try:
+                supplied_ids.append(UUID(str(raw)))
+            except (TypeError, ValueError):
+                continue
+        if query:
+            candidates = await cognition.lookup_character_knowledge(
+                context, scorer, claim_kinds=kinds, limit=max(limit, 8),
+            )
+        coordinate_ids = list(supplied_ids)
+        seen_ids = {str(v) for v in coordinate_ids}
+        for item in candidates:
+            raw = item.get("proposition_id")
+            if raw and str(raw) not in seen_ids:
+                try:
+                    coordinate_ids.append(UUID(str(raw)))
+                    seen_ids.add(str(raw))
+                except (TypeError, ValueError):
+                    pass
+            if len(coordinate_ids) >= 16:
+                break
+
+        if operation == "evidence":
+            rows = await structured.character_evidence(
+                instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
+                proposition_ids=coordinate_ids,
+                authorized_use=str(args.get("authorized_use") or "reflection"),
+                limit=limit,
+            )
+            return {
+                "query": query, "scope": "character", "operation": operation,
+                "coordinates": [str(v) for v in coordinate_ids],
+                "matches": [dict(row) for row in rows], "match_count": len(rows),
+            }
+
+        if operation == "relation":
+            rows = await structured.relation(
+                scope_key=f"char:{context.character_id}",
+                instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
+                seed_proposition_ids=coordinate_ids,
+                seed_terms=(query,) if query else (),
+                relation_types=tuple(str(v) for v in (args.get("relations") or ())),
+                direction=str(args.get("direction") or "either"),
+                max_hops=int(args.get("max_hops", 1)),
+                limit=limit,
+            )
+            return {
+                "query": query, "scope": "character", "operation": operation,
+                "coordinates": [str(v) for v in coordinate_ids],
+                "matches": [dict(row) for row in rows], "match_count": len(rows),
+            }
+
+        if operation == "history":
+            anchor_raw = args.get("anchor_node_id")
+            anchor = UUID(str(anchor_raw)) if anchor_raw else context.head_node_id
+            if anchor is None:
+                return {"query": query, "scope": "character", "operation": operation,
+                        "matches": [], "match_count": 0}
+            rows = await structured.history(
+                timeline_id=context.timeline_id, anchor_node_id=anchor,
+                direction=str(args.get("direction") or "before"), limit=limit,
+            )
+            return {"query": query, "scope": "character", "operation": operation,
+                    "matches": [dict(row) for row in rows], "match_count": len(rows)}
+
+        if operation != "search":
+            raise ValueError(f"unsupported knowledge lookup operation {operation!r}")
+
         matches = [
             {
                 "text": item.get("text"),
@@ -127,10 +198,10 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
                 "authorized_uses": list(item.get("authorized_uses") or ()),
                 "retrieval_scope": "character",
             }
-            for item in candidates
+            for item in candidates[:limit]
         ]
         return {
-            "query": query, "scope": "character",
+            "query": query, "scope": "character", "operation": operation,
             "matches": matches, "match_count": len(matches),
         }
 
@@ -273,15 +344,23 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
 
     registry.register(ActionSpec(
         name="knowledge.lookup",
-        schema={"type":"object","required":["query"],"properties":{
-            "query":{"type":"string"},"limit":{"type":"integer"},
+        schema={"type":"object","properties":{
+            "query":{"type":"string"},
+            "operation":{"type":"string","enum":["search","evidence","relation","history"]},
+            "proposition_ids":{"type":"array","items":{"type":"string"},"maxItems":16},
+            "relations":{"type":"array","items":{"type":"string"},"maxItems":16},
+            "direction":{"type":"string","enum":["outgoing","incoming","either","before","after"]},
+            "max_hops":{"type":"integer","minimum":1,"maximum":2},
+            "anchor_node_id":{"type":"string"},
+            "authorized_use":{"type":"string","enum":["belief","reflection","planning","action_precondition"]},
+            "limit":{"type":"integer"},
             "kinds":{"type":"array","items":{"type":"string"}}},"additionalProperties":False},
         side_effect_class="read_only",
         allowed_worker_classes=frozenset({"executive","research","planning","reflection"}),
         handler=knowledge_lookup,
         result_mode="return_to_cognition",
         capability_class="lookup",
-        description="Search durable character-owned /char knowledge only.",
+        description="Search or inspect bounded durable character-owned /char knowledge, relations, evidence, and history.",
     ))
     registry.register(ActionSpec(
         name="world.lookup",
