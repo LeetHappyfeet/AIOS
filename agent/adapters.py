@@ -33,6 +33,7 @@ def register_external_actions(db: Database, registry: ActionRegistry) -> None:
             "workflow":{"type":"string"},"input":{"type":"object"},
             "integration_key":{"type":"string"}},"additionalProperties":False},
         "external_sensitive", frozenset({"executive","planning","communication"}), n8n_workflow,
+        required_authority_use="action_precondition",
     ))
     registry.register(ActionSpec(
         "email.draft",
@@ -48,6 +49,7 @@ def register_external_actions(db: Database, registry: ActionRegistry) -> None:
             "thread_id":{"type":"string"},"integration_key":{"type":"string"}},
          "additionalProperties":False},
         "external_sensitive", frozenset({"executive","communication"}), email_send,
+        required_authority_use="action_precondition",
     ))
 
 
@@ -74,4 +76,5 @@ def register_interagent_actions(db: Database, registry: ActionRegistry) -> None:
             "target_instance_id":{"type":"string"},"message":{"type":"string"},
             "message_id":{"type":"string"}},"additionalProperties":False},
         "internal_write", frozenset({"executive","communication"}), send_message,
+        required_authority_use="action_precondition",
     ))
