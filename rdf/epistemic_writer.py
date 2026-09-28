@@ -522,18 +522,24 @@ async def project_normalized_observation(
         if char_owner_segment else None
     )
 
-    # Authority is mutable control-plane state while origin/lineage are immutable.
-    # Refresh it independently of the legacy projection receipt so existing RDF
-    # observations gain the authority membrane when they are next projected.
-    await _project_observation_authority(
-        fuseki,
-        dataset=DATASET,
-        graph_iri=GRAPH_IRI,
-        observation_iri=obs_iri,
-        prefix="world",
-        namespace="urn:aios:world#",
-        authority=authority,
-    )
+    # /char and /world are epistemic ownership boundaries, not duplicate indexes.
+    # A character-owned acquisition is subjective/experienced knowledge and must
+    # not acquire a shadow world:Observation merely because it was normalized.
+    character_owned = bool(character_id)
+
+    if not character_owned:
+        # Authority is mutable control-plane state while origin/lineage are immutable.
+        # Refresh it independently of the legacy projection receipt so objective
+        # observations gain the authority membrane when they are next projected.
+        await _project_observation_authority(
+            fuseki,
+            dataset=DATASET,
+            graph_iri=GRAPH_IRI,
+            observation_iri=obs_iri,
+            prefix="world",
+            namespace="urn:aios:world#",
+            authority=authority,
+        )
     if character_id and char_graph and char_obs_iri:
         await _project_observation_authority(
             fuseki,
@@ -545,7 +551,42 @@ async def project_normalized_observation(
             authority=authority,
         )
 
-    if world_receipt and (not character_id or char_receipt):
+    if character_owned and world_receipt:
+        # Repair legacy normalized-observation shadows.  Delete only this
+        # character-owned observation and then remove its proposition resource
+        # iff no remaining objective observation references it.
+        cleanup = f"""
+PREFIX world: <urn:aios:world#>
+DELETE WHERE {{
+  GRAPH <{GRAPH_IRI}> {{ <{obs_iri}> ?p ?o . }}
+}};
+DELETE {{
+  GRAPH <{GRAPH_IRI}> {{ <{prop_iri}> ?p ?o . }}
+}}
+WHERE {{
+  GRAPH <{GRAPH_IRI}> {{
+    <{prop_iri}> ?p ?o .
+    FILTER NOT EXISTS {{
+      ?objective_observation world:observesProposition <{prop_iri}> .
+      FILTER(?objective_observation != <{obs_iri}>)
+    }}
+  }}
+}}
+""".strip()
+        fuseki.update(DATASET, cleanup)
+        await db.execute(
+            """
+            DELETE FROM aios.rdf_promotion_log
+            WHERE claim_id=$1
+              AND rdf_dataset=$2
+              AND rdf_graph=$3
+              AND rdf_predicate=$4
+            """,
+            claim_id, DATASET, GRAPH_IRI, RECEIPT_PREDICATE,
+        )
+        world_receipt = None
+
+    if (character_owned and char_receipt) or (not character_owned and world_receipt):
         # A retry may still have belief mutations waiting in the SQL outbox, but
         # if there are none project_character_belief_state performs zero RDF I/O.
         for perceiver in perceiver_rows:
@@ -593,7 +634,7 @@ INSERT DATA {{
 }}
 """.strip()
 
-    if not world_receipt:
+    if not character_owned and not world_receipt:
         fuseki.update(DATASET, sparql)
 
     if character_id and not char_receipt:
@@ -660,7 +701,7 @@ INSERT DATA {{
             '{"layer":"character-epistemic-v1","identity":"character_id"}',
         )
 
-    if not world_receipt:
+    if not character_owned and not world_receipt:
         await db.execute(
             """
             INSERT INTO aios.rdf_promotion_log (
