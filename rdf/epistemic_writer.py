@@ -408,6 +408,69 @@ INSERT DATA {{
     fuseki.update(dataset, sparql)
 
 
+async def compact_character_world_epistemic_shadows(
+    db: Database,
+    fuseki: FusekiClient,
+    *,
+    limit: int = 100,
+) -> int:
+    """Remove legacy /world:epistemic shadows for character-owned observations.
+
+    /char owns character-relative experience.  This repair is intentionally
+    receipt-driven and bounded so old deployments can converge without a large
+    Fuseki transaction.  Shared proposition resources are retained whenever any
+    remaining world observation still references them.
+    """
+    rows = await db.fetch(
+        """
+        SELECT rpl.claim_id, o.observation_id, o.proposition_id
+        FROM aios.rdf_promotion_log rpl
+        JOIN aios.observation o ON o.claim_id=rpl.claim_id
+        JOIN aios.claim_context_resolution ccr ON ccr.claim_id=rpl.claim_id
+        WHERE rpl.rdf_dataset=$1
+          AND rpl.rdf_graph=$2
+          AND rpl.rdf_predicate=$3
+          AND ccr.origin_character_id IS NOT NULL
+        ORDER BY rpl.promoted_at, rpl.claim_id
+        LIMIT $4
+        """,
+        DATASET, GRAPH_IRI, RECEIPT_PREDICATE, limit,
+    )
+    for row in rows:
+        obs_iri = f"urn:aios:observation:{row['observation_id']}"
+        prop_iri = f"urn:aios:proposition:{row['proposition_id']}"
+        sparql = f"""
+PREFIX world: <urn:aios:world#>
+DELETE WHERE {{
+  GRAPH <{GRAPH_IRI}> {{ <{obs_iri}> ?p ?o . }}
+}};
+DELETE {{
+  GRAPH <{GRAPH_IRI}> {{ <{prop_iri}> ?p ?o . }}
+}}
+WHERE {{
+  GRAPH <{GRAPH_IRI}> {{
+    <{prop_iri}> ?p ?o .
+    FILTER NOT EXISTS {{
+      ?objective_observation world:observesProposition <{prop_iri}> .
+      FILTER(?objective_observation != <{obs_iri}>)
+    }}
+  }}
+}}
+""".strip()
+        fuseki.update(DATASET, sparql)
+        await db.execute(
+            """
+            DELETE FROM aios.rdf_promotion_log
+            WHERE claim_id=$1
+              AND rdf_dataset=$2
+              AND rdf_graph=$3
+              AND rdf_predicate=$4
+            """,
+            row["claim_id"], DATASET, GRAPH_IRI, RECEIPT_PREDICATE,
+        )
+    return len(rows)
+
+
 async def project_normalized_observation(
     db: Database,
     fuseki: FusekiClient,
