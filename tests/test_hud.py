@@ -86,6 +86,14 @@ def test_text_renderer_uses_canonical_hud_sections():
                 ],
             }
         ],
+        "retrieval_evidence": {
+            "route": "character",
+            "status": "partial",
+            "demand_kind": "preference",
+            "topic_terms": ["sleeves"],
+            "supporting_ids": [],
+            "reason": "topic_related_relation_unestablished",
+        },
         "beliefs": [
             {
                 "text": "The door is locked.",
@@ -115,6 +123,8 @@ def test_text_renderer_uses_canonical_hud_sections():
 
     assert "ACTIVE MEMORY:" in text
     assert "[remembers; about basement; context: old house]" in text
+    assert "MEMORY STATUS:" in text
+    assert "Related character memory found, but the requested preference is not established." in text
     assert "KNOWLEDGE / BELIEFS:" in text
     assert "conflicts with: The door is open." in text
     assert "AVAILABLE ACTIONS: speak, inspect" in text
