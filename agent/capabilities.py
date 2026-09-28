@@ -11,7 +11,7 @@ from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
 from aios_app.epistemic.world_scope import build_retrieval_scope
-from aios_app.epistemic.structured_retrieval import StructuredKnowledgeRetriever, EpistemicComparisonService
+from aios_app.epistemic.structured_retrieval import StructuredKnowledgeRetriever, EpistemicComparisonService, CoordinateResolver
 from aios_app.epistemic.research import CharacterResearchService
 from aios_app.epistemic.hypothesis_validation import notify_evidence_change
 from .actions import ActionRegistry, ActionSpec
@@ -89,6 +89,7 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
     research = ResearchRouter(db)
     world = WorldPropositionRetriever(db)
     structured = StructuredKnowledgeRetriever(db)
+    coordinates = CoordinateResolver(db)
     comparison = EpistemicComparisonService(db)
     temporal = TemporalTriggerStore(db)
 
@@ -118,11 +119,20 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
                 supplied_ids.append(UUID(str(raw)))
             except (TypeError, ValueError):
                 continue
-        if query:
+        exact_ids = []
+        if query and operation != "search":
+            exact_ids = await coordinates.character_propositions(
+                instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
+                text=query, limit=16,
+            )
+        # Structured queries use durable cognitive-subject coordinates first.
+        # Fall back to ordinary semantic recall only when exact structure did not
+        # identify a usable proposition coordinate.
+        if query and (operation == "search" or (not supplied_ids and not exact_ids)):
             candidates = await cognition.lookup_character_knowledge(
                 context, scorer, claim_kinds=kinds, limit=max(limit, 8),
             )
-        coordinate_ids = list(supplied_ids)
+        coordinate_ids = list(supplied_ids) + list(exact_ids)
         seen_ids = {str(v) for v in coordinate_ids}
         for item in candidates:
             raw = item.get("proposition_id")
