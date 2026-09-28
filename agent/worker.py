@@ -4,7 +4,6 @@ from typing import Any
 from uuid import UUID
 
 from aios_app.db import Database
-from .actions import default_action_registry
 from .lifecycle import CharacterAgencyStore
 from .runtime import AgentRuntimeStore
 from .deterministic import DEFAULT_DETERMINISTIC_TASKS, DeterministicTaskRegistry
@@ -12,21 +11,11 @@ from .cognitive_delta import CognitiveDeltaService
 from .admission import AutonomyAdmissionService
 
 
-PROFILE_BY_WORKER = {
-    "executive": "agent.executive",
-    "research": "agent.research",
-    "planning": "agent.planning",
-    "reflection": "agent.reflection",
-    "communication": "agent.communication",
-}
-
-
 class CharacterWorker:
     def __init__(self, db: Database, deterministic: DeterministicTaskRegistry | None = None):
         self.db = db
         self.agency = CharacterAgencyStore(db)
         self.runtime = AgentRuntimeStore(db)
-        self.registry = default_action_registry(db)
         self.deterministic = deterministic or DEFAULT_DETERMINISTIC_TASKS
         self.deltas = CognitiveDeltaService(db)
         self.admission = AutonomyAdmissionService(db)
