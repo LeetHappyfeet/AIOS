@@ -115,7 +115,9 @@ class CharacterWorker:
                 instance_id=task.instance_id,
                 source_node_id=task.source_through_node_id or task.source_node_id,
                 source_task_id=task.task_id,
-                enqueue_inference=False,\n                task=task,\n            )
+                enqueue_inference=False,
+                task=task,
+            )
             if tx_id is None:
                 result = {
                     "execution_mode": "bounded_choice",
