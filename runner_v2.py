@@ -16,6 +16,8 @@ from aios_app.pipeline.jobs import enqueue_job
 
 logger = logging.getLogger("aios.pipeline.runner")
 
+RDF_PROJECTION_SCHEDULER_SECONDS = 5.0
+
 
 async def handle_project_semantic_scope(db: Database, job: Dict[str, Any]) -> None:
     scope_key = str((job.get("payload") or {}).get("scope_key") or "").strip()
@@ -623,7 +625,7 @@ async def _projection_scheduler_loop() -> None:
                     logger.debug("Queued %d coalesced semantic scope projections", created)
             except Exception:
                 logger.exception("Failed to schedule dirty semantic topology scopes")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(RDF_PROJECTION_SCHEDULER_SECONDS)
     finally:
         await db.close()
 
