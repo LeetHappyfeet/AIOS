@@ -96,7 +96,9 @@ class InternalCognitionTransactions:
                 worker_class="executive", prompt=tx["prompt_text"],
                 context_state_version=tx["source_state_version"],
                 hud_profile_name=tx["hud_profile_name"],
-                allowed_actions={}, output_schema=output_schema,
+                allowed_actions={}, output_schema=None,
+                choice_keys=tuple(str(x.get("key","")).upper() for x in candidates if x.get("key")),
+                max_tokens=8,
             ))
             raw=inference.response.raw
             if set(raw) != {"choice"} or not isinstance(raw.get("choice"),str):
