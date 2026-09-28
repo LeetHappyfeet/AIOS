@@ -20,8 +20,7 @@ class OpportunityRouter:
         self.transactions=InternalCognitionTransactions(db)
         self.threads=CognitiveThreadService(db)
 
-    async def admit(self, *, instance_id:UUID, source_node_id:UUID|None=None) -> UUID|None:
-        batch=await self.opportunities.generate(
+    async def admit(self, *, instance_id:UUID, source_node_id:UUID|None=None,\n                    source_task_id:UUID|None=None, enqueue_inference:bool=True) -> UUID|None:\n        batch=await self.opportunities.generate(
             instance_id=instance_id,source_node_id=source_node_id,limit=8)
         rows=[x for x in batch.opportunities
               if x["status"]=="pending" and x["valid_until"] is not None]
@@ -58,13 +57,14 @@ class OpportunityRouter:
         priority=max(1,200-int(max(float(x["priority_score"]) for x in scored)*20))
         tx=await self.transactions.create(
             instance_id=instance_id,candidates=candidates,priority=priority,ttl_seconds=300,
-            opportunity_ids=[x["opportunity_id"] for x in selected])
+            opportunity_ids=[x["opportunity_id"] for x in selected],\n            source_task_id=source_task_id)
         await self.db.execute(
             """UPDATE aios.character_cognitive_opportunity SET status='offered',updated_at=now()
                WHERE opportunity_id=ANY($1::uuid[]) AND status='pending'""",
             [x["opportunity_id"] for x in selected])
-        await enqueue_job(self.db,job_type="internal_cognition_inference",
-            payload={"instance_id":str(instance_id),"transaction_id":str(tx)},priority=priority)
+        if enqueue_inference:
+            await enqueue_job(self.db,job_type="internal_cognition_inference",
+                payload={"instance_id":str(instance_id),"transaction_id":str(tx)},priority=priority)
 
         # Goal lifecycle maintenance has one reserved slot per admitted host
         # cognition episode. It does not compete with the attention choice and
