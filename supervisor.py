@@ -35,6 +35,7 @@ def character_id_payload(row): return {"character_id": str(row["character_id"])}
 def world_id_payload(row): return {"world_id": str(row["world_id"])}
 def assertion_id_payload(row): return {"assertion_id": str(row["assertion_id"])}
 def acquisition_id_payload(row): return {"acquisition_id": str(row["acquisition_id"])}
+def live_instance_payload(row): return {"live_instance_id": str(row["live_instance_id"])}
 def empty_payload(_): return {}
 
 # Expansion stages use this contract after normalization:
@@ -142,9 +143,26 @@ STAGES: List[Stage] = [
         ORDER BY o.claim_id LIMIT $1
     """, claim_id_payload, 38, 96, True),
     Stage("project_character_knowledge", "project_character_knowledge", """
-        SELECT 1 WHERE EXISTS (SELECT 1 FROM aios.knowledge_acquisition_event kae LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id WHERE kae.processed_at IS NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL))
-          AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='project_character_knowledge' AND pj.status IN ('queued','running')) LIMIT $1
-    """, empty_payload, 40, 4, True),
+        SELECT DISTINCT kae.instance_id AS live_instance_id
+        FROM aios.knowledge_acquisition_event kae
+        LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+        LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+        LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        LEFT JOIN aios.pipeline_foreground_lineage pfl
+          ON pfl.instance_id=kae.instance_id AND pfl.expires_at > now()
+        WHERE kae.processed_at IS NULL
+          AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.pipeline_job pj
+              WHERE pj.job_type='project_character_knowledge'
+                AND pj.status IN ('queued','running')
+                AND pj.payload->>'live_instance_id'=kae.instance_id::text
+          )
+        ORDER BY (max(pfl.expires_at) IS NOT NULL) DESC, min(kae.created_at)
+        LIMIT $1
+    """, live_instance_payload, 40, 16, True),
     Stage("derive_character_acquisition_topology", "derive_character_acquisition_topology", """
         SELECT kae.acquisition_id FROM aios.knowledge_acquisition_event kae LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
@@ -159,17 +177,20 @@ STAGES: List[Stage] = [
         ORDER BY a.created_at LIMIT $1
     """, assertion_id_payload, 50, 32, True),
     Stage("reconcile_character_beliefs", "reconcile_character_beliefs", """
-        SELECT 1
-        WHERE EXISTS (
-            SELECT 1 FROM aios.character_belief_reconciliation_dirty
-        )
-          AND NOT EXISTS (
+        SELECT d.instance_id AS live_instance_id
+        FROM aios.character_belief_reconciliation_dirty d
+        LEFT JOIN aios.pipeline_foreground_lineage pfl
+          ON pfl.instance_id=d.instance_id AND pfl.expires_at > now()
+        WHERE NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
             WHERE pj.job_type='reconcile_character_beliefs'
               AND pj.status IN ('queued','running')
-          )
+              AND pj.payload->>'live_instance_id'=d.instance_id::text
+        )
+        GROUP BY d.instance_id
+        ORDER BY (max(pfl.expires_at) IS NOT NULL) DESC, min(d.dirty_at)
         LIMIT $1
-    """, empty_payload, 55, 1, True),
+    """, live_instance_payload, 55, 16, True),
     Stage("resolve_generated_facts", "resolve_generated_facts", """
         SELECT 1 WHERE EXISTS (SELECT 1 FROM aios.world_proposition_assertion a WHERE a.source_kind='generated_fill' AND a.epistemic_status='provisional')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='resolve_generated_facts' AND pj.status IN ('queued','running')) LIMIT $1
