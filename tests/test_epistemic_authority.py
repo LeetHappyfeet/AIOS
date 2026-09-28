@@ -26,3 +26,25 @@ def test_record_acquisition_accepts_explicit_provenance_contract():
     assert "epistemic_mode: Optional[str] = None" in source
     assert "origin_lineage_id: Optional[str] = None" in source
     assert 'acquisition_meta["origin_kind"] = origin_kind' in source
+
+
+def test_downstream_authority_enforcement_is_wired():
+    root = Path(__file__).resolve().parents[1]
+    retrieval = (root / "epistemic" / "retrieval.py").read_text()
+    actions = (root / "agent" / "actions.py").read_text()
+    render = (root / "hud" / "render_text.py").read_text()
+    migration = (root / "migrations" / "current" / "20260928_epistemic_authority_enforcement.sql").read_text()
+    assert "epistemic_authority_admission" in retrieval
+    assert "authorized_uses" in retrieval
+    assert "epistemic_precondition_unsatisfied" in actions
+    assert "required_authority_use" in actions
+    assert "_epistemic_label" in render
+    assert "COALESCE(eaa.lineage_key" in migration
+    assert "'belief'=ANY(eaa.authorized_uses)" in migration
+    assert "trg_expand_user_action_authority" in migration
+
+
+def test_corpus_re_reads_share_lineage():
+    root = Path(__file__).resolve().parents[1]
+    corpus = (root / "corpus.py").read_text()
+    assert '"evidence_correlation_key": f"corpus-section:{section_id}"' in corpus
