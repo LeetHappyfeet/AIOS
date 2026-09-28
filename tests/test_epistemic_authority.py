@@ -57,3 +57,21 @@ def test_sillytavern_character_turns_are_generated_cognition():
     assert "THEN 'character_generation'" in sql
     assert "v_origin IN ('model_generation','model_inference','character_generation')" in sql
     assert "generated_cognition_has_no_historical_authority" in sql
+
+
+def test_rdf_observations_project_authority_membrane():
+    source = (ROOT / "rdf" / "epistemic_writer.py").read_text()
+    assert "epistemic_authority_admission" in source
+    assert "world:authorityState" not in source  # rendered through the shared prefix helper
+    assert '"originKind", "epistemicMode", "authorityState", "authorityRank"' in source
+    assert '"lineageKey", "predicateClass", "authorityPolicyVersion"' in source
+    assert '"authorizedUse", "rdfProjectionVersion"' in source
+    assert '_project_observation_authority(' in source
+    assert 'prefix="world"' in source
+    assert 'prefix="char"' in source
+    assert 'EPISTEMIC_RDF_VERSION = "epistemic-authority-rdf-v1"' in source
+    # Authority refresh must happen before the legacy receipt early-return so
+    # previously projected observations can be upgraded on their next pass.
+    refresh = source.index("await _project_observation_authority(")
+    receipt_return = source.index("if world_receipt and (not character_id or char_receipt):")
+    assert refresh < receipt_return
