@@ -119,6 +119,12 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
                 "source_node_id": str(item.get("source_node_id") or ""),
                 "confidence": item.get("effective_confidence", item.get("confidence")),
                 "epistemic_status": item.get("epistemic_status"),
+                "origin_kind": item.get("origin_kind"),
+                "epistemic_mode": item.get("epistemic_mode"),
+                "authority_state": item.get("authority_state"),
+                "authority_rank": item.get("authority_rank"),
+                "lineage_key": item.get("lineage_key"),
+                "authorized_uses": list(item.get("authorized_uses") or ()),
                 "retrieval_scope": "character",
             }
             for item in candidates
