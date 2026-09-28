@@ -90,6 +90,34 @@ class StructuredKnowledgeRetriever:
         return [{**dict(row), "retrieval_scope": "character", "retrieval_kind": "evidence"}
                 for row in rows]
 
+    async def world_evidence(
+        self, *, world_ids: Iterable[UUID], proposition_ids: Iterable[UUID],
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        worlds = list(world_ids)
+        propositions = list(proposition_ids)
+        if not worlds or not propositions:
+            return []
+        rows = await self.db.fetch(
+            """
+            SELECT wa.assertion_id,wa.world_id,wa.proposition_id,wa.epistemic_status,
+                   wa.source_kind,wa.confidence,wa.reason,wa.created_at,wa.updated_at,
+                   p.canonical_text,p.subject_norm,p.predicate_norm,p.object_norm,
+                   p.polarity,p.modality
+            FROM aios.world_proposition_assertion wa
+            JOIN aios.proposition p ON p.proposition_id=wa.proposition_id
+            WHERE wa.world_id=ANY($1::uuid[])
+              AND wa.proposition_id=ANY($2::uuid[])
+              AND wa.superseded_by_assertion_id IS NULL
+            ORDER BY array_position($1::uuid[],wa.world_id),
+                     wa.updated_at DESC,wa.assertion_id
+            LIMIT $3
+            """,
+            worlds, propositions, max(1, min(int(limit), 100)),
+        )
+        return [{**dict(row), "retrieval_scope": "world", "retrieval_kind": "evidence"}
+                for row in rows]
+
     async def relation(
         self, *, scope_key: str, instance_ids: Iterable[UUID] = (),
         seed_proposition_ids: Iterable[UUID] = (), seed_terms: Iterable[str] = (),
