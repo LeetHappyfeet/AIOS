@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.hud.frame import HUDAssembler
-from aios_app.hud.render_text import render_hud_text
-from aios_app.inference import InferenceBroker, InferenceRequest
 from .actions import default_action_registry
 from .lifecycle import CharacterAgencyStore
 from .runtime import AgentRuntimeStore
@@ -31,8 +27,6 @@ class CharacterWorker:
         self.agency = CharacterAgencyStore(db)
         self.runtime = AgentRuntimeStore(db)
         self.registry = default_action_registry(db)
-        self.broker = InferenceBroker(db)
-        self.hud = HUDAssembler(db)
         self.deterministic = deterministic or DEFAULT_DETERMINISTIC_TASKS
         self.deltas = CognitiveDeltaService(db)
         self.admission = AutonomyAdmissionService(db)
@@ -114,9 +108,6 @@ class CharacterWorker:
                 await self.runtime.finish_semantic_turn(task.instance_id, semantic=False)
                 raise
 
-        profile = task.hud_profile_name or PROFILE_BY_WORKER.get(
-            worker_class, "agent.executive"
-        )
         await self.runtime.ensure(task.instance_id)
         await self.db.execute(
             """
