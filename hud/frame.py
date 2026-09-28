@@ -17,7 +17,7 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
-HUD_VERSION = "hud-v3"
+HUD_VERSION = "hud-v4"
 
 
 @dataclass(frozen=True)
