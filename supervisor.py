@@ -103,7 +103,12 @@ STAGES: List[Stage] = [
         WHERE ie.superseded_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM aios.claim_semantic_frame_projection sfp WHERE sfp.claim_id=cc.claim_id AND sfp.decomposer_version='semantic-frame-v2')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='decompose_claim_frames' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=cc.claim_id::text)
-        ORDER BY cc.created_at LIMIT $1
+        ORDER BY EXISTS (
+            SELECT 1 FROM aios.pipeline_foreground_lineage pfl
+            WHERE pfl.timeline_id=dn.timeline_id
+              AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+              AND pfl.expires_at > now()
+        ) DESC, cc.created_at LIMIT $1
     """, claim_id_payload, 27, 128, True),
     Stage("resolve_claim_context", "resolve_claim_context", """
         WITH eligible AS (
@@ -169,7 +174,14 @@ STAGES: List[Stage] = [
         WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.acquisition_id=kae.acquisition_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_character_acquisition_topology' AND pj.status IN ('queued','running') AND pj.payload->>'acquisition_id'=kae.acquisition_id::text)
-        ORDER BY kae.created_at LIMIT $1
+        ORDER BY EXISTS (
+            SELECT 1 FROM aios.pipeline_foreground_lineage pfl
+            WHERE pfl.instance_id=kae.instance_id
+              AND pfl.expires_at > now()
+              AND (dn.event_id IS NULL OR
+                   (dn.timeline_id=pfl.timeline_id AND
+                    dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id))
+        ) DESC, kae.created_at LIMIT $1
     """, acquisition_id_payload, 45, 48, True),
     Stage("derive_world_assertion_topology", "derive_world_assertion_topology", """
         SELECT a.assertion_id FROM aios.world_proposition_assertion a WHERE a.epistemic_status NOT IN ('rejected','superseded')
