@@ -143,7 +143,7 @@ STAGES: List[Stage] = [
         ORDER BY o.claim_id LIMIT $1
     """, claim_id_payload, 38, 96, True),
     Stage("project_character_knowledge", "project_character_knowledge", """
-        SELECT DISTINCT kae.instance_id AS live_instance_id
+        SELECT kae.instance_id AS live_instance_id
         FROM aios.knowledge_acquisition_event kae
         LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
         LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
@@ -160,6 +160,7 @@ STAGES: List[Stage] = [
                 AND pj.status IN ('queued','running')
                 AND pj.payload->>'live_instance_id'=kae.instance_id::text
           )
+        GROUP BY kae.instance_id
         ORDER BY (max(pfl.expires_at) IS NOT NULL) DESC, min(kae.created_at)
         LIMIT $1
     """, live_instance_payload, 40, 16, True),
