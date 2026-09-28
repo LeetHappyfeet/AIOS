@@ -114,6 +114,8 @@ class CharacterWorker:
             tx_id = await OpportunityRouter(self.db).admit(
                 instance_id=task.instance_id,
                 source_node_id=task.source_through_node_id or task.source_node_id,
+                source_task_id=task.task_id,
+                enqueue_inference=False,
             )
             if tx_id is None:
                 result = {
