@@ -29,13 +29,10 @@ def test_default_registry_exposes_new_capability_layer():
     assert "world.lookup" not in communication
 
 
-def test_inference_schema_contract_remains_plain_action_schemas():
+def test_action_registry_has_no_model_facing_schema_api():
     registry = default_action_registry(object())
-    schemas = registry.schemas_for("research")
-
-    assert schemas["research.search"]["type"] == "object"
-    assert "class" not in schemas["research.search"]
-    assert "side_effect_class" not in schemas["research.search"]
+    assert not hasattr(registry, "schemas_for")
+    assert "knowledge.lookup" in registry.capabilities_for("research")
 
 
 class _ReadDB:
