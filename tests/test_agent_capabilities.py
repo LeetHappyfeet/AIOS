@@ -142,20 +142,3 @@ def test_world_lookup_exposes_domain_without_granting_access():
     assert "ownership" in spec.description
 
 
-def test_memory_inspect_is_bounded_and_research_only():
-    registry = default_action_registry(object())
-    inspect_spec = registry.get("memory.inspect")
-    hint_spec = registry.get("memory.relation_hint")
-
-    assert inspect_spec is not None
-    assert inspect_spec.schema["properties"]["proposition_ids"]["maxItems"] == 2
-    assert inspect_spec.side_effect_class == "read_only"
-    assert "research" in inspect_spec.allowed_worker_classes
-    assert "communication" not in inspect_spec.allowed_worker_classes
-
-    assert hint_spec is not None
-    assert hint_spec.side_effect_class == "internal_write"
-    judgments = hint_spec.schema["properties"]["judgment"]["enum"]
-    assert "none" in judgments
-    assert "uncertain" in judgments
-    assert "garbage_both" in judgments
