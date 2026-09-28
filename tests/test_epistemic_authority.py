@@ -125,3 +125,17 @@ def test_world_epistemic_projection_remains_for_objective_observations():
     assert '<{obs_iri}> a world:Observation' in writer
     assert 'world:observesProposition <{prop_iri}>' in writer
     assert "if not character_owned and not world_receipt:" in writer
+
+
+def test_legacy_character_world_shadows_have_bounded_background_cleanup():
+    writer = (ROOT / "rdf" / "epistemic_writer.py").read_text()
+    runner = (ROOT / "runner_v2.py").read_text()
+    registry = (ROOT / "pipeline" / "job_registry.py").read_text()
+
+    assert "async def compact_character_world_epistemic_shadows" in writer
+    assert "ccr.origin_character_id IS NOT NULL" in writer
+    assert "LIMIT $4" in writer
+    assert "compact_character_world_epistemic" in runner
+    assert "pj.status IN ('queued','running')" in runner
+    assert '"compact_character_world_epistemic": JobSpec(ResourceClass.RDF' in registry
+    assert '{"project_semantic_scope", "compact_character_world_epistemic"}' in registry
