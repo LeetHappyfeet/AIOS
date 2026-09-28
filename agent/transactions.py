@@ -175,8 +175,7 @@ class InternalCognitionTransactions:
         thread_id=selected.get("thread_id")
         operation_id=await CognitiveOperationEngine(self.db).create_from_opportunity(
             opportunity=opportunity,
-            thread_id=UUID(str(thread_id)) if thread_id else None,
-            priority=int(tx["priority"]))
+            thread_id=UUID(str(thread_id)) if thread_id else None,\n            priority=int(tx["priority"]), source_task_id=tx.get("source_task_id"))
         return {"kind":"cognitive_operation","operation_id":str(operation_id),
                 "opportunity_id":str(oid),"operation_type":str(opportunity["operation_type"])}
 
