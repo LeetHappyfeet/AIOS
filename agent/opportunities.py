@@ -269,11 +269,11 @@ class CognitiveOpportunityService:
                      updated_at=now()
                    RETURNING *""",
                 instance_id,p["opportunity_type"],p["natural_language"],p["operation_type"],
-                json.dumps(p["operation_payload"]),p["source_node_id"],p["source_timeline_id"],
+                _json_dumps(p["operation_payload"]),p["source_node_id"],p["source_timeline_id"],
                 p["source_state_version"],p["novelty"],p["relevance"],p["urgency"],p["uncertainty"],
                 p["goal_affinity"],p["memory_affinity"],p["knowledge_gap"],p["recency"],
                 p["priority_score"],p["freshness_policy"],p["supersession_key"],
-                json.dumps(p["evidence"]),p.get("subject_id"))
+                _json_dumps(p["evidence"]),p.get("subject_id"))
             if row: stored.append(dict(row))
         return OpportunityBatch(instance_id,tuple(stored))
 
