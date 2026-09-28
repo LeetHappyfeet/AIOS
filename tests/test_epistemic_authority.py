@@ -51,12 +51,19 @@ def test_corpus_re_reads_share_lineage():
 
 
 def test_sillytavern_character_turns_are_generated_cognition():
-    sql = (ROOT / "migrations/current/20260927_epistemic_authority_membrane.sql").read_text()
+    sql = (ROOT / "migrations/current/20260928_character_generation_authority.sql").read_text()
     assert "lower(COALESCE(r.source_kind,''))='sillytavern_chat'" in sql
     assert "lower(COALESCE(r.speaker_role::text,''))='character'" in sql
     assert "THEN 'character_generation'" in sql
     assert "v_origin IN ('model_generation','model_inference','character_generation')" in sql
     assert "generated_cognition_has_no_historical_authority" in sql
+
+
+def test_applied_authority_migration_is_not_used_for_followup_policy_changes():
+    baseline = (ROOT / "migrations/current/20260927_epistemic_authority_membrane.sql").read_text()
+    forward = (ROOT / "migrations/current/20260928_character_generation_authority.sql").read_text()
+    assert "sillytavern_chat" not in baseline
+    assert "SillyTavern" in forward
 
 
 def test_rdf_observations_project_authority_membrane():
