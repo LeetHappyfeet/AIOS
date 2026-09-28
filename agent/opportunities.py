@@ -19,6 +19,17 @@ from aios_app.agent.cognitive_subjects import (
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
 
+def _json_default(value: Any) -> Any:
+    """Normalize typed identifiers at the JSON/JSONB persistence boundary."""
+    if isinstance(value, UUID):
+        return str(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default)
+
+
 @dataclass(frozen=True)
 class OpportunityBatch:
     instance_id: UUID
