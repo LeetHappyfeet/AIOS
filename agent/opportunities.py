@@ -55,8 +55,7 @@ class CognitiveOpportunityService:
         self.goal_demand=GoalKnowledgeDemandResolver(db)
         self.cognitive_operations=CognitiveOperationRegistry()
 
-    async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
-                       limit:int=8) -> OpportunityBatch:
+    async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,\n                       limit:int=8, focus_override:str|None=None) -> OpportunityBatch:
         context=await self.contexts.resolve(instance_id)
         raw=await self.db.fetchrow(
             "SELECT * FROM aios.character_runtime_state WHERE instance_id=$1",instance_id)
@@ -70,7 +69,7 @@ class CognitiveOpportunityService:
             if source_row and source_row["message_text"]:
                 delta_focus=str(source_row["message_text"])
         attention=await self.cognition.resolve_attention_inputs(
-            context,raw,{},recent_limit=6,focus_text=delta_focus)
+            context,raw,{},recent_limit=6,focus_text=focus_override or delta_focus)
         snapshot=await self.cognition.resolve_knowledge(context,None,attention)
         scene_row=await self.db.fetchrow(
             """SELECT scene_state FROM aios.character_scene_snapshot
