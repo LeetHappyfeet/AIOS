@@ -319,7 +319,7 @@ class CognitiveOpportunityService:
             freshness_policy=freshness, source_node_id=node,
             source_state_version=context.state_version,
         )
-        return {"opportunity_type":typ,"natural_language":prepared.label,
+        return {"opportunity_type":typ,"natural_language":_clip(label,220),
                 "operation_type":prepared.operation_type,
                 "operation_payload":dict(prepared.operation_payload),"source_node_id":node,
                 "source_timeline_id":context.source_timeline_id,
@@ -327,5 +327,5 @@ class CognitiveOpportunityService:
                 "relevance":relevance,"urgency":urgency,"uncertainty":uncertainty,
                 "goal_affinity":goal_affinity,"memory_affinity":memory_affinity,
                 "knowledge_gap":knowledge_gap,"recency":recency,"priority_score":score,
-                "freshness_policy":freshness,"supersession_key":key,"evidence":list(evidence),
+                "freshness_policy":prepared.freshness_policy,"supersession_key":key,"evidence":list(evidence),
                 "subject_id":subject_id}
