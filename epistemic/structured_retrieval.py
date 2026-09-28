@@ -38,6 +38,49 @@ class KnowledgeQuery:
     limit: int = 10
 
 
+class CoordinateResolver:
+    """Resolve durable character coordinates before invoking semantic search."""
+
+    def __init__(self, db: Any):
+        self.db = db
+
+    async def character_propositions(
+        self, *, instance_ids: Iterable[UUID], text: str, limit: int = 16,
+    ) -> list[UUID]:
+        instances = list(instance_ids)
+        terms = [part.lower() for part in text.replace("_", " ").split()
+                 if len(part.strip()) >= 3][:12]
+        if not instances or not terms:
+            return []
+        rows = await self.db.fetch(
+            """
+            WITH subject_hits AS (
+                SELECT s.subject_id,s.salience
+                FROM aios.character_cognitive_subject s
+                WHERE s.instance_id=ANY($1::uuid[])
+                  AND s.status='established'
+                  AND EXISTS (
+                      SELECT 1 FROM unnest($2::text[]) term
+                      WHERE lower(COALESCE(s.display_label,'') || ' ' ||
+                                  COALESCE(s.canonical_key,'') || ' ' ||
+                                  COALESCE(s.predicate_key,'') || ' ' ||
+                                  COALESCE(s.object_key,'') || ' ' ||
+                                  COALESCE(s.topic_key,'')) LIKE '%' || term || '%'
+                  )
+                ORDER BY s.salience DESC,s.last_seen_at DESC
+                LIMIT 16
+            )
+            SELECT DISTINCT e.proposition_id
+            FROM subject_hits s
+            JOIN aios.character_cognitive_subject_evidence e ON e.subject_id=s.subject_id
+            WHERE e.proposition_id IS NOT NULL
+            LIMIT $3
+            """,
+            instances, terms, max(1, min(int(limit), 32)),
+        )
+        return [row["proposition_id"] for row in rows if row["proposition_id"] is not None]
+
+
 class StructuredKnowledgeRetriever:
     """Exact, bounded retrieval over authoritative SQL coordinates.
 
