@@ -141,6 +141,28 @@ def test_no_longer_goal_is_parsed_as_negative_goal_evidence():
     assert goals[0].polarity == -1
 
 
+def test_narrative_markup_after_to_does_not_become_a_goal():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "Renamon wants to*—as though it were that simple.",
+        character_id="Renamon", speaker_id="Renamon",
+        speaker_role="character", viewpoint_id="Renamon",
+    )
+    assert not any(unit.claim_kind == "GOAL" for unit in units)
+
+
+def test_complete_infinitive_remains_a_goal():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "I want to visit the bookstore tomorrow.",
+        character_id="Renamon", speaker_id="Renamon",
+        speaker_role="character", viewpoint_id="Renamon",
+    )
+    assert [unit.meta["objective"] for unit in units if unit.claim_kind == "GOAL"] == [
+        "to visit the bookstore tomorrow"
+    ]
+
+
 class LifecycleDB:
     def __init__(self):
         self.executed = []

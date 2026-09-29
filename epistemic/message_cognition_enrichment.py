@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.epistemic.goals import CharacterGoalService
+from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 from aios_app.epistemic.message_cognition import cognition_topic_key
 from aios_app.inference import InferenceBroker, InferenceRequest, InferenceUnavailable
 
@@ -84,7 +84,7 @@ class MessageCognitionEnricher:
                 if kind=="GOAL":
                     if intent_type not in {"desire","objective","plan","commitment","immediate_intention"}:
                         continue
-                    if horizon not in {"immediate","scene","session","persistent"} or not objective:
+                    if horizon not in {"immediate","scene","session","persistent"} or not valid_goal_objective(objective):
                         continue
                 topic=cognition_topic_key(
                     text, character_id=str(row["character_id"]),

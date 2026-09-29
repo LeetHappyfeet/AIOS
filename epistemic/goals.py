@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 from uuid import UUID
 
 from aios_app.db import Database
+
+
+def valid_goal_objective(value: str | None) -> bool:
+    """Reject incomplete infinitives left by prose/markup sentence splitting."""
+    objective = " ".join(str(value or "").split())
+    if not objective or not re.search(r"[A-Za-z]", objective):
+        return False
+    if re.match(r"(?i)^to\b", objective) and not re.match(
+        r"(?i)^to\s+[A-Za-z]", objective
+    ):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -323,7 +336,7 @@ class CharacterGoalService:
         """
         topic = str(topic_key or "").strip()
         clean = " ".join(str(text or "").split())
-        if not topic or not clean:
+        if not topic or not clean or not valid_goal_objective(objective or clean):
             return None
         rows = await self.db.fetch(
             """SELECT goal_id,goal_text,status,priority,meta
