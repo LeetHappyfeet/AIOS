@@ -25,9 +25,9 @@ RESOLVER_VERSION = "context-resolver-v4-semantic"
 class _DeferredFuseki:
     """Compatibility sink used while the legacy resolver is being retired.
 
-    The legacy resolver still constructs SPARQL, but no network I/O occurs on
-    the semantic worker. We immediately remove its RDF receipt so downstream
-    code cannot mistake a deferred projection for a completed one.
+    The v4 compatibility call disables legacy RDF projection and receipts.
+    Keep this sink until the legacy resolver interface is retired so accidental
+    compatibility calls still cannot perform network I/O.
     """
 
     def update(self, dataset: str, sparql: str) -> None:
