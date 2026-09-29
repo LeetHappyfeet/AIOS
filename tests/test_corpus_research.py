@@ -300,6 +300,20 @@ def test_automatic_corpus_research_rejects_assistant_output():
     assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
 
 
+def test_scene_statement_does_not_trigger_corpus_research():
+    attention = _corpus_attention(speaker_id="Mia", speaker_role="user")
+    attention.recent_newest[0]["message_text"] = (
+        "Renamon, last time you mentioned libraries. Today we passed a used bookstore."
+    )
+    assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
+
+
+def test_conversational_question_does_not_trigger_corpus_research():
+    attention = _corpus_attention(speaker_id="Mia", speaker_role="user")
+    attention.recent_newest[0]["message_text"] = "Do you want to go inside?"
+    assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
+
+
 def test_domain_identifier_normalization_is_stable():
     from aios_app.corpus_routing import normalize_facet_value
     assert normalize_facet_value("  Star Wars   - All Media Types ") == "star wars - all media types"

@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Protocol
@@ -26,9 +27,14 @@ from aios_app.epistemic.research import (
     assess_retrieval_evidence,
     resolve_retrieval_demand,
 )
+
 from aios_app.epistemic.retrieval_policy import (
     CognitiveRetrievalPolicy,
     DEFAULT_COGNITIVE_RETRIEVAL_POLICY,
+)
+
+_EXPLICIT_RESEARCH_PATTERNS = (
+    re.compile(r"\b(?:research|look up|search for|find out about)\b", re.IGNORECASE),
 )
 
 
@@ -161,6 +167,18 @@ def automatic_corpus_research_allowed(
     if speaker_id and speaker_id == str(character_id):
         return False
     if speaker_role == "assistant":
+        return False
+    # Scene narration is not a request to research the cold corpus. Otherwise
+    # its unmatched words become a broad OR query and incidental fanwork hits
+    # are fed back into the generation context.
+    focus = str(focus_row.get("message_text") or "").strip()
+    explicit_research = any(pattern.search(focus) for pattern in _EXPLICIT_RESEARCH_PATTERNS)
+    external_question = (
+        "?" in focus
+        and resolve_retrieval_demand(focus, character_id=character_id).reason
+        == "external_knowledge_question"
+    )
+    if not (explicit_research or external_question):
         return False
     return True
 
@@ -741,6 +759,7 @@ class CognitiveContextService:
                     instance_id=context.instance_id,
                     query=corpus_query,
                     limit=5,
+                    include_fanwork=False,
                 )
                 corpus_references = corpus_result.reference_context()
             except Exception:
