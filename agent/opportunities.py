@@ -82,6 +82,7 @@ class CognitiveOpportunityService:
         current_scene=self._json_object(scene_row["scene_state"]) if scene_row else {}
         focus=_clip(attention.focus_text,360)
         goals=list(attention.goals)
+        current_scene["immediate_goal"] = goals[0].hud_item() if goals else None
         goal_states=await self.cognition.goals.cognitive_states(instance_id, goals)
         proposals:list[dict[str,Any]]=[]
         # The character can elect to consider a new intention. Formation is

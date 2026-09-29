@@ -326,6 +326,12 @@ class HUDAssembler:
             source_timeline_id=context.source_timeline_id,
             source_head_node_id=context.source_head_node_id,
         )
+        # A scene snapshot records the goal projected at its creation time.
+        # Goal lifecycle can change without DAG movement (including migration
+        # repairs), so the current intention must come from managed goals.
+        working_scene["immediate_goal"] = (
+            attention.goals[0].hud_item() if attention.goals else None
+        )
         scene["working_state"] = working_scene
 
         suppressed = cognitive_snapshot.firewall_suppressed
