@@ -474,7 +474,7 @@ async def _execute_claimed_job(
             db,
             job_id,
             worker_id=worker_id,
-            delay_seconds=0.5,
+            delay_seconds=15.0,
         )
         return
 
