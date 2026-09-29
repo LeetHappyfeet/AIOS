@@ -56,22 +56,6 @@ async def _primary_frame(db: Database, claim_id: UUID):
     )
 
 
-async def _clear_deferred_rdf_receipt(db: Database, claim_id: UUID) -> None:
-    await db.execute(
-        """
-        DELETE FROM aios.rdf_promotion_log
-        WHERE claim_id=$1
-          AND rdf_dataset=$2
-          AND rdf_graph=$3
-          AND rdf_predicate=$4
-        """,
-        claim_id,
-        legacy.DATASET,
-        legacy.LIMINAL_GRAPH,
-        legacy.RDF_RECEIPT_PREDICATE,
-    )
-
-
 async def resolve_claim_context(
     db: Database,
     fuseki: FusekiClient | None = None,
