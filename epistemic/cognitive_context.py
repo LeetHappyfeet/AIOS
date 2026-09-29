@@ -906,7 +906,7 @@ class CognitiveContextService:
                         'strength', pc.strength
                     )
                 ) AS items
-                FROM aios.proposition_conflict pc
+                FROM aios.verified_proposition_conflict pc
                 JOIN aios.proposition other
                   ON other.proposition_id = CASE
                       WHEN pc.proposition_a_id=p.proposition_id THEN pc.proposition_b_id

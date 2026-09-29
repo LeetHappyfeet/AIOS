@@ -23,7 +23,6 @@ EXCLUSIVE_PREDICATES = {
     "employed_by",
     "parent_of",
     "spouse_of",
-    "identity",
     "status",
 }
 

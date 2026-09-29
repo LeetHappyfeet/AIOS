@@ -181,7 +181,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             confidence = item.get("effective_confidence")
             suffix = f" confidence={confidence:.2f}" if isinstance(confidence, (float, int)) else ""
             lines.append(f"- [{status}{suffix}]{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
-            for conflict in item.get("conflicts") or []:
+            for conflict in (item.get("conflicts") or [])[:3]:
                 lines.append(f"  ! conflicts with: {conflict.get('text', '')}")
     corpus_references = frame.get("corpus_references") or []
     if corpus_references:

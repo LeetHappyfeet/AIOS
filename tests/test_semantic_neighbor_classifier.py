@@ -95,6 +95,17 @@ def test_single_value_slot_can_validate_object_conflict():
     assert features["exclusive_slot_conflict"] is True
 
 
+def test_identity_type_descriptions_are_not_exclusive():
+    relation, _, features = classify_neighbor_pair(
+        similarity=0.94,
+        a=proposition(subject_norm="renamon", predicate_norm="identity", object_norm="a digimon"),
+        b=proposition(subject_norm="renamon", predicate_norm="identity", object_norm="a data rookie digimon"),
+        conflict_type="exclusive_object",
+    )
+    assert relation != "CONTRADICTS"
+    assert features["exclusive_slot_conflict"] is False
+
+
 def test_same_character_conflict_is_internal_belief_conflict():
     relation, _, features = classify_neighbor_pair(
         similarity=0.94,
