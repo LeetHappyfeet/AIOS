@@ -43,7 +43,11 @@ async def test_stale_pair_validation_preserves_classifier_receipt():
         }],
     )
 
-    assert db.executed == []
+    assert len(db.executed) == 1
+    query, args = db.executed[0]
+    assert "semantic_relation_validation_queue" in query
+    assert args == ("proposition_relation", f"{a}:{b}")
+    assert "DELETE FROM aios.semantic_neighbor_relation" not in query
 
 
 @pytest.mark.asyncio
