@@ -72,17 +72,40 @@ POLICIES = {
 
 
 def _focus_terms(*values: Any) -> list[str]:
+    """Select bounded lexical seeds without discarding the tail of long turns.
+
+    Identifier-shaped tokens are retained first because character/user handles
+    commonly contain underscores. Remaining capacity is sampled across the
+    complete input so conversational preambles cannot consume the entire seed
+    budget before a later subject or object mention is seen.
+    """
     seen: set[str] = set()
-    result: list[str] = []
+    tokens: list[str] = []
     for value in values:
         for word in _WORD_RE.findall(str(value or "").lower()):
             if len(word) < 3 or word in seen:
                 continue
             seen.add(word)
-            result.append(word)
-            if len(result) >= MAX_FOCUS_TERMS:
-                return result
-    return result
+            tokens.append(word)
+
+    if len(tokens) <= MAX_FOCUS_TERMS:
+        return tokens
+
+    priority = [word for word in tokens if "_" in word]
+    priority_set = set(priority)
+    ordinary = [word for word in tokens if word not in priority_set]
+    remaining = MAX_FOCUS_TERMS - min(len(priority), MAX_FOCUS_TERMS)
+    if remaining <= 0:
+        return priority[:MAX_FOCUS_TERMS]
+    if len(ordinary) <= remaining:
+        sampled = ordinary
+    else:
+        step = len(ordinary) / remaining
+        sampled = [
+            ordinary[min(int(index * step), len(ordinary) - 1)]
+            for index in range(remaining)
+        ]
+    return (priority + sampled)[:MAX_FOCUS_TERMS]
 
 
 _RETRIEVAL_SQL = """
@@ -100,12 +123,16 @@ eligible_nodes AS (
 seed_candidates AS (
     SELECT
         topology_node_id,
+        proposition_id,
+        node_type,
+        node_key,
         significance,
         CASE
             WHEN node_type='INSTANCE' AND node_key=$4 THEN 0
             WHEN cardinality($6::uuid[]) > 0
                  AND proposition_id = ANY($6::uuid[]) THEN 1
-            ELSE 2
+            WHEN proposition_id IS NULL THEN 2
+            ELSE 3
         END AS seed_rank
     FROM eligible_nodes
     WHERE (node_type='INSTANCE' AND node_key=$4)
@@ -123,9 +150,26 @@ seed_candidates AS (
             AND proposition_id = ANY($6::uuid[])
        )
 ),
+diverse_seed_candidates AS (
+    SELECT DISTINCT ON (
+        COALESCE(proposition_id::text, node_type || ':' || node_key)
+    )
+        topology_node_id,
+        proposition_id,
+        node_type,
+        node_key,
+        significance,
+        seed_rank
+    FROM seed_candidates
+    ORDER BY
+        COALESCE(proposition_id::text, node_type || ':' || node_key),
+        seed_rank,
+        significance DESC NULLS LAST,
+        topology_node_id
+),
 seeds AS (
     SELECT topology_node_id
-    FROM seed_candidates
+    FROM diverse_seed_candidates
     ORDER BY seed_rank, significance DESC NULLS LAST, topology_node_id
     LIMIT 64
 ),
@@ -195,8 +239,19 @@ belief_owned AS (
         ck.retention_weight,
         ck.salience_weight,
         ck.effective_confidence,
+        auth.origin_kind, auth.epistemic_mode, auth.authority_state,
+        auth.authority_rank, auth.lineage_key, auth.authorized_uses,
         array_position($2::uuid[], ck.instance_id) AS instance_depth
     FROM aios.character_active_proposition_knowledge ck
+    LEFT JOIN LATERAL (
+        SELECT eaa.origin_kind,eaa.epistemic_mode,eaa.authority_state,
+               eaa.authority_rank,eaa.lineage_key,eaa.authorized_uses
+        FROM aios.knowledge_acquisition_event kae_auth
+        JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae_auth.acquisition_id
+        WHERE kae_auth.instance_id=ck.evidence_instance_id
+          AND kae_auth.proposition_id=ck.proposition_id
+        ORDER BY kae_auth.created_at DESC,kae_auth.acquisition_id DESC LIMIT 1
+    ) auth ON true
     WHERE ck.instance_id = ANY($2::uuid[])
       AND EXISTS (
           SELECT 1
@@ -238,12 +293,15 @@ episodic_owned AS (
         cpk.retention_weight,
         cpk.salience_weight,
         cpk.effective_confidence,
+        eaa.origin_kind, eaa.epistemic_mode, eaa.authority_state,
+        eaa.authority_rank, eaa.lineage_key, eaa.authorized_uses,
         array_position($2::uuid[], cpk.instance_id) AS instance_depth
     FROM aios.character_proposition_knowledge cpk
     JOIN aios.proposition p ON p.proposition_id=cpk.proposition_id
     JOIN aios.knowledge_acquisition_event kae
       ON kae.instance_id=cpk.instance_id
      AND kae.proposition_id=cpk.proposition_id
+    JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae.acquisition_id
     JOIN aios.observation obs ON obs.proposition_id=cpk.proposition_id
     JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
     LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id

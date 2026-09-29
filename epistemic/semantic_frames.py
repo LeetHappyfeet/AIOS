@@ -344,7 +344,22 @@ async def _interpret_claim_frames(db: Database, claim_id: UUID) -> None:
         await _persist_interpretation(db, frame, semantic)
 
 
-async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
+async def _run_linguistic_and_referent_phase(
+    db: Database,
+    *,
+    claim_id: UUID,
+) -> int:
+    """Materialize linguistic frames and resolve timeline-dependent referents.
+
+    This is the causal/serial portion of the current decomposition contract.
+    The source-level spaCy parse is normally already persisted by claim
+    extraction; this phase reuses that projection and delegates storage plus
+    discourse resolution to the established v2 writer.
+
+    Keeping this boundary explicit lets us later split claim-local frame
+    materialization from timeline-serial referent resolution without changing
+    downstream readiness semantics in this release.
+    """
     _install_projection_aware_nlp()
     sentence_doc = await _projected_sentence_for_claim(db, claim_id)
 
@@ -358,12 +373,29 @@ async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
             token = _PROJECTED_DOCS.set({row["raw_text"]: sentence_doc})
 
     try:
-        count = await legacy.decompose_claim_frames(db, claim_id=claim_id)
+        return await legacy.decompose_claim_frames(db, claim_id=claim_id)
     finally:
         if token is not None:
             _PROJECTED_DOCS.reset(token)
 
+
+async def _run_semantic_interpretation_phase(
+    db: Database,
+    *,
+    claim_id: UUID,
+) -> None:
+    """Interpret resolved source-language frames into semantic vocabulary.
+
+    This phase is claim-local. It remains in the same external pipeline job for
+    now so claim_semantic_frame_projection continues to mean downstream-ready.
+    """
+    await _interpret_claim_frames(db, claim_id)
+
+
+async def decompose_claim_frames(db: Database, *, claim_id: UUID) -> int:
+    count = await _run_linguistic_and_referent_phase(db, claim_id=claim_id)
+
     # Re-interpret even if linguistic v2 is already current: semantic versions
     # evolve independently from source-language decomposition.
-    await _interpret_claim_frames(db, claim_id)
+    await _run_semantic_interpretation_phase(db, claim_id=claim_id)
     return count

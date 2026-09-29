@@ -1,4 +1,4 @@
-from aios_app.epistemic.message_cognition import INTERPRETER_VERSION, interpret_message
+from aios_app.epistemic.message_cognition import INTERPRETER_VERSION, interpret_message, question_semantics
 
 
 def _interpret(text: str, *, speaker: str = "Shego_001", viewpoint: str = "Shego_001"):
@@ -104,3 +104,59 @@ def test_event_does_not_promote_first_token_to_subject():
     assert len(events) == 1
     assert events[0].meta["semantic_owner"] is None
     assert events[0].meta["character_owned"] is False
+
+
+
+def test_question_semantics_extracts_indirect_character_preference():
+    result = question_semantics(
+        (
+            'Mia looks confused. "But what is it about sleeves in a fashion sense '
+            'that interests you so much? If someone helped you out by giving you '
+            'some character and style out the gate it seems like they must have cared."'
+        ),
+        character_id="Renamon",
+        speaker_id="Mia",
+    )
+    assert result is not None
+    assert result.subject == "Renamon"
+    assert result.relation == "preference"
+    assert "sleeves" in result.topic_terms
+    assert result.confidence >= 0.90
+
+
+def test_question_semantics_does_not_turn_external_fact_question_into_self_memory():
+    result = question_semantics(
+        "What is hematite?",
+        character_id="Renamon",
+        speaker_id="Mia",
+    )
+    assert result is None
+
+
+def test_question_semantics_remains_nonpersistent():
+    text = "What is it about sleeves that interests you so much?"
+    assert interpret_message(
+        text,
+        character_id="Renamon",
+        speaker_id="Mia",
+        speaker_role="user",
+        viewpoint_id="Renamon",
+    ) == []
+
+
+
+def test_question_semantics_distinguishes_wear_history_from_preference():
+    history = question_semantics(
+        "Have you ever worn sleeves before?",
+        character_id="Renamon",
+        speaker_id="Mia",
+    )
+    preference = question_semantics(
+        "What would you wear if you picked for yourself?",
+        character_id="Renamon",
+        speaker_id="Mia",
+    )
+    assert history is not None
+    assert history.relation == "experience"
+    assert preference is not None
+    assert preference.relation == "preference"

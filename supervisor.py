@@ -35,6 +35,7 @@ def character_id_payload(row): return {"character_id": str(row["character_id"])}
 def world_id_payload(row): return {"world_id": str(row["world_id"])}
 def assertion_id_payload(row): return {"assertion_id": str(row["assertion_id"])}
 def acquisition_id_payload(row): return {"acquisition_id": str(row["acquisition_id"])}
+def live_instance_payload(row): return {"live_instance_id": str(row["live_instance_id"])}
 def empty_payload(_): return {}
 
 # Expansion stages use this contract after normalization:
@@ -98,11 +99,75 @@ STAGES: List[Stage] = [
         ORDER BY n.event_id LIMIT $1
     """, section_id_payload, 25, 48, True),
     Stage("decompose_claim_frames", "decompose_claim_frames", """
-        SELECT cc.claim_id FROM aios.claim_candidate cc JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node dn ON dn.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-        WHERE ie.superseded_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM aios.claim_semantic_frame_projection sfp WHERE sfp.claim_id=cc.claim_id AND sfp.decomposer_version='semantic-frame-v2')
-          AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='decompose_claim_frames' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=cc.claim_id::text)
-        ORDER BY cc.created_at LIMIT $1
+        WITH eligible AS (
+          SELECT
+              cc.claim_id,
+              cc.created_at,
+              EXISTS (
+                  SELECT 1
+                  FROM aios.pipeline_foreground_lineage pfl
+                  WHERE pfl.timeline_id=dn.timeline_id
+                    AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+                    AND pfl.expires_at > now()
+              ) AS is_foreground
+          FROM aios.claim_candidate cc
+          JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+          JOIN aios.document_section ds ON ds.section_id=es.section_id
+          JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+          JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+          WHERE ie.superseded_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM aios.claim_semantic_frame_projection sfp
+                WHERE sfp.claim_id=cc.claim_id
+                  AND sfp.decomposer_version='semantic-frame-v2'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM aios.pipeline_job pj
+                WHERE pj.job_type='decompose_claim_frames'
+                  AND pj.status IN ('queued','running')
+                  AND pj.payload->>'claim_id'=cc.claim_id::text
+            )
+        ),
+        foreground AS (
+          SELECT claim_id,created_at,0 AS band_order
+          FROM eligible
+          WHERE is_foreground
+          ORDER BY created_at,claim_id
+          LIMIT $1
+        ),
+        quotas AS (
+          SELECT
+              floor(GREATEST($1-(SELECT count(*) FROM foreground),0)::numeric*0.75)::integer AS backlog_quota,
+              GREATEST($1-(SELECT count(*) FROM foreground),0)
+                - floor(GREATEST($1-(SELECT count(*) FROM foreground),0)::numeric*0.75)::integer AS fresh_quota
+        ),
+        backlog AS (
+          SELECT e.claim_id,e.created_at,1 AS band_order
+          FROM eligible e
+          WHERE NOT e.is_foreground
+            AND NOT EXISTS (SELECT 1 FROM foreground f WHERE f.claim_id=e.claim_id)
+          ORDER BY e.created_at,e.claim_id
+          LIMIT (SELECT backlog_quota FROM quotas)
+        ),
+        fresh AS (
+          SELECT e.claim_id,e.created_at,2 AS band_order
+          FROM eligible e
+          WHERE NOT e.is_foreground
+            AND NOT EXISTS (SELECT 1 FROM foreground f WHERE f.claim_id=e.claim_id)
+            AND NOT EXISTS (SELECT 1 FROM backlog b WHERE b.claim_id=e.claim_id)
+          ORDER BY e.created_at DESC,e.claim_id
+          LIMIT (SELECT fresh_quota FROM quotas)
+        )
+        SELECT claim_id
+        FROM (
+          SELECT claim_id,created_at,band_order FROM foreground
+          UNION ALL
+          SELECT claim_id,created_at,band_order FROM backlog
+          UNION ALL
+          SELECT claim_id,created_at,band_order FROM fresh
+        ) admitted
+        ORDER BY band_order,created_at,claim_id
+        LIMIT $1
     """, claim_id_payload, 27, 128, True),
     Stage("resolve_claim_context", "resolve_claim_context", """
         WITH eligible AS (
@@ -142,15 +207,40 @@ STAGES: List[Stage] = [
         ORDER BY o.claim_id LIMIT $1
     """, claim_id_payload, 38, 96, True),
     Stage("project_character_knowledge", "project_character_knowledge", """
-        SELECT 1 WHERE EXISTS (SELECT 1 FROM aios.knowledge_acquisition_event kae LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id WHERE kae.processed_at IS NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL))
-          AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='project_character_knowledge' AND pj.status IN ('queued','running')) LIMIT $1
-    """, empty_payload, 40, 4, True),
+        SELECT kae.instance_id AS live_instance_id
+        FROM aios.knowledge_acquisition_event kae
+        LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+        LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+        LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+        LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+        LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+        LEFT JOIN aios.pipeline_foreground_lineage pfl
+          ON pfl.instance_id=kae.instance_id AND pfl.expires_at > now()
+        WHERE kae.processed_at IS NULL
+          AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.pipeline_job pj
+              WHERE pj.job_type='project_character_knowledge'
+                AND pj.status IN ('queued','running')
+                AND pj.payload->>'live_instance_id'=kae.instance_id::text
+          )
+        GROUP BY kae.instance_id
+        ORDER BY (max(pfl.expires_at) IS NOT NULL) DESC, min(kae.created_at)
+        LIMIT $1
+    """, live_instance_payload, 40, 16, True),
     Stage("derive_character_acquisition_topology", "derive_character_acquisition_topology", """
         SELECT kae.acquisition_id FROM aios.knowledge_acquisition_event kae LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.acquisition_id=kae.acquisition_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_character_acquisition_topology' AND pj.status IN ('queued','running') AND pj.payload->>'acquisition_id'=kae.acquisition_id::text)
-        ORDER BY kae.created_at LIMIT $1
+        ORDER BY EXISTS (
+            SELECT 1 FROM aios.pipeline_foreground_lineage pfl
+            WHERE pfl.instance_id=kae.instance_id
+              AND pfl.expires_at > now()
+              AND (dn.event_id IS NULL OR
+                   (dn.timeline_id=pfl.timeline_id AND
+                    dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id))
+        ) DESC, kae.created_at LIMIT $1
     """, acquisition_id_payload, 45, 48, True),
     Stage("derive_world_assertion_topology", "derive_world_assertion_topology", """
         SELECT a.assertion_id FROM aios.world_proposition_assertion a WHERE a.epistemic_status NOT IN ('rejected','superseded')
@@ -159,17 +249,20 @@ STAGES: List[Stage] = [
         ORDER BY a.created_at LIMIT $1
     """, assertion_id_payload, 50, 32, True),
     Stage("reconcile_character_beliefs", "reconcile_character_beliefs", """
-        SELECT 1
-        WHERE EXISTS (
-            SELECT 1 FROM aios.character_belief_reconciliation_dirty
-        )
-          AND NOT EXISTS (
+        SELECT d.instance_id AS live_instance_id
+        FROM aios.character_belief_reconciliation_dirty d
+        LEFT JOIN aios.pipeline_foreground_lineage pfl
+          ON pfl.instance_id=d.instance_id AND pfl.expires_at > now()
+        WHERE NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job pj
             WHERE pj.job_type='reconcile_character_beliefs'
               AND pj.status IN ('queued','running')
-          )
+              AND pj.payload->>'live_instance_id'=d.instance_id::text
+        )
+        GROUP BY d.instance_id
+        ORDER BY (max(pfl.expires_at) IS NOT NULL) DESC, min(d.dirty_at)
         LIMIT $1
-    """, empty_payload, 55, 1, True),
+    """, live_instance_payload, 55, 16, True),
     Stage("resolve_generated_facts", "resolve_generated_facts", """
         SELECT 1 WHERE EXISTS (SELECT 1 FROM aios.world_proposition_assertion a WHERE a.source_kind='generated_fill' AND a.epistemic_status='provisional')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='resolve_generated_facts' AND pj.status IN ('queued','running')) LIMIT $1

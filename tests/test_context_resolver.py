@@ -1,4 +1,5 @@
 import inspect
+from pathlib import Path
 
 from aios_app.models import ExternalObservationIn
 from aios_app.epistemic.normalizer import normalize_components
@@ -125,3 +126,15 @@ def test_runtime_binding_repair_keeps_instance_parameter_uuid_typed():
     assert "character_instance_id=$2::uuid" in source
     assert "'character_instance_id', ($2::uuid)::text" in source
     assert "'character_instance_id', $2::text" not in source
+
+
+def test_v4_skips_legacy_rdf_compatibility_receipts():
+    source = Path("epistemic/context_resolver_v4.py").read_text(encoding="utf-8")
+    assert "project_rdf=False" in source
+    assert "_clear_deferred_rdf_receipt" not in source
+
+
+def test_character_identity_lookup_is_batched_for_subject_and_object():
+    source = Path("epistemic/context_resolver_legacy.py").read_text(encoding="utf-8")
+    assert "subject_known_character, object_known_character = await _known_characters(" in source
+    assert "ANY($1::text[])" in source

@@ -16,6 +16,8 @@ from aios_app.pipeline.jobs import enqueue_job
 
 logger = logging.getLogger("aios.pipeline.runner")
 
+RDF_PROJECTION_SCHEDULER_SECONDS = 5.0
+
 
 async def handle_project_semantic_scope(db: Database, job: Dict[str, Any]) -> None:
     scope_key = str((job.get("payload") or {}).get("scope_key") or "").strip()
@@ -26,6 +28,15 @@ async def handle_project_semantic_scope(db: Database, job: Dict[str, Any]) -> No
 
 
 base.JOB_HANDLERS["project_semantic_scope"] = handle_project_semantic_scope
+
+
+async def handle_compact_character_world_epistemic(db: Database, job: Dict[str, Any]) -> None:
+    from aios_app.rdf.epistemic_writer import compact_character_world_epistemic_shadows
+    fuseki = base.FusekiClient(settings.fuseki_base_url)
+    await compact_character_world_epistemic_shadows(db, fuseki, limit=100)
+
+
+base.JOB_HANDLERS["compact_character_world_epistemic"] = handle_compact_character_world_epistemic
 
 async def handle_agent_wake(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
@@ -621,9 +632,34 @@ async def _projection_scheduler_loop() -> None:
                 created = await enqueue_dirty_scope_jobs(db, limit=64)
                 if created:
                     logger.debug("Queued %d coalesced semantic scope projections", created)
+
+                cleanup_needed = await db.fetchrow(
+                    """
+                    SELECT 1
+                    FROM aios.rdf_promotion_log rpl
+                    JOIN aios.claim_context_resolution ccr ON ccr.claim_id=rpl.claim_id
+                    WHERE rpl.rdf_dataset='world'
+                      AND rpl.rdf_graph='urn:aios:world:epistemic'
+                      AND rpl.rdf_predicate='world:observesProposition'
+                      AND ccr.origin_character_id IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM aios.pipeline_job pj
+                          WHERE pj.job_type='compact_character_world_epistemic'
+                            AND pj.status IN ('queued','running')
+                      )
+                    LIMIT 1
+                    """
+                )
+                if cleanup_needed:
+                    await enqueue_job(
+                        db,
+                        job_type="compact_character_world_epistemic",
+                        payload={},
+                        priority=250,
+                    )
             except Exception:
                 logger.exception("Failed to schedule dirty semantic topology scopes")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(RDF_PROJECTION_SCHEDULER_SECONDS)
     finally:
         await db.close()
 

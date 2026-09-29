@@ -25,9 +25,9 @@ RESOLVER_VERSION = "context-resolver-v4-semantic"
 class _DeferredFuseki:
     """Compatibility sink used while the legacy resolver is being retired.
 
-    The legacy resolver still constructs SPARQL, but no network I/O occurs on
-    the semantic worker. We immediately remove its RDF receipt so downstream
-    code cannot mistake a deferred projection for a completed one.
+    The v4 compatibility call disables legacy RDF projection and receipts.
+    Keep this sink until the legacy resolver interface is retired so accidental
+    compatibility calls still cannot perform network I/O.
     """
 
     def update(self, dataset: str, sparql: str) -> None:
@@ -56,22 +56,6 @@ async def _primary_frame(db: Database, claim_id: UUID):
     )
 
 
-async def _clear_deferred_rdf_receipt(db: Database, claim_id: UUID) -> None:
-    await db.execute(
-        """
-        DELETE FROM aios.rdf_promotion_log
-        WHERE claim_id=$1
-          AND rdf_dataset=$2
-          AND rdf_graph=$3
-          AND rdf_predicate=$4
-        """,
-        claim_id,
-        legacy.DATASET,
-        legacy.LIMINAL_GRAPH,
-        legacy.RDF_RECEIPT_PREDICATE,
-    )
-
-
 async def resolve_claim_context(
     db: Database,
     fuseki: FusekiClient | None = None,
@@ -85,8 +69,8 @@ async def resolve_claim_context(
         db,
         _DeferredFuseki(),
         claim_id=claim_id,
+        project_rdf=False,
     )
-    await _clear_deferred_rdf_receipt(db, claim_id)
 
     frame = await _primary_frame(db, claim_id)
     if not frame:
@@ -192,5 +176,4 @@ async def resolve_claim_context(
         confidence=max(context.confidence, float(interpretation.confidence)),
     )
 
-    await _clear_deferred_rdf_receipt(db, claim_id)
     return corrected

@@ -49,6 +49,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "reconcile_character_beliefs": JobSpec(ResourceClass.RECONCILIATION, "global", True),
     "resolve_generated_facts": JobSpec(ResourceClass.RECONCILIATION, "global", True),
     "rdf_epistemic_project": JobSpec(ResourceClass.RDF, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
+    "compact_character_world_epistemic": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
     "rdf_liminal_promote": JobSpec(ResourceClass.RDF, "section_id", True, isolate_blocking=True, requires_rdf_slot=True),
     "rdf_liminal_classify": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
     "project_world_topology": JobSpec(ResourceClass.RDF, "world_id", True, isolate_blocking=True, requires_rdf_slot=True),
@@ -97,6 +98,6 @@ def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) 
         "derive_world_assertion_topology",
     }:
         return SchedulingLane.STRUCTURAL
-    if job_type == "project_semantic_scope":
+    if job_type in {"project_semantic_scope", "compact_character_world_epistemic"}:
         return SchedulingLane.BACKGROUND
     return SchedulingLane.DEFAULT

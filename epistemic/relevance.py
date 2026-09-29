@@ -37,6 +37,21 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _continuity_distance(value: Any) -> int:
+    """Translate encoded cognitive-scope ordering into a recall distance.
+
+    cognitive_evidence_instances reserves the 100000 range for character-wide
+    continuity ordering. Those values are ranks, not graph depths.
+    """
+    try:
+        depth = max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+    if depth >= 100000:
+        return 1 + (depth - 100000)
+    return depth
+
+
 @dataclass(frozen=True)
 class CognitiveRelevanceBreakdown:
     recency: float = 0.0
@@ -212,7 +227,8 @@ def select_recalled_cognition(
         confidence = _as_float(item.get("effective_confidence"), _as_float(item.get("confidence"), 0.5))
         kind = str(item.get("claim_kind") or "BELIEF").upper()
         instance_depth = int((item.get("topology") or {}).get("instance_depth") or item.get("instance_depth") or 0)
-        continuity_penalty = min(0.9, math.log1p(max(0, instance_depth)) * 0.16)
+        continuity_distance = _continuity_distance(instance_depth)
+        continuity_penalty = min(0.9, math.log1p(continuity_distance) * 0.16)
         # Context overlap is diagnostic here, not scored a second time. The
         # cognition scorer already accounted for lexical relevance.
         context_bonus = 0.0

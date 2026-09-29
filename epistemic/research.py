@@ -43,6 +43,211 @@ class KnowledgeDemand:
     reason: str
 
 
+@dataclass(frozen=True)
+class RetrievalDemand:
+    """A conservative routing hint for generation-time knowledge retrieval."""
+
+    route: str
+    focus_text: str
+    reason: str
+    kind: str = "general"
+    subject: str = ""
+    topic_terms: tuple[str, ...] = ()
+    temporal_scope: str = "unspecified"
+
+
+@dataclass(frozen=True)
+class RetrievalEvidenceStatus:
+    """Query-relative support carried to generation without becoming knowledge."""
+
+    route: str
+    status: str
+    demand_kind: str
+    topic_terms: tuple[str, ...]
+    supporting_ids: tuple[str, ...]
+    reason: str
+
+    def as_dict(self) -> dict:
+        return {
+            "route": self.route,
+            "status": self.status,
+            "demand_kind": self.demand_kind,
+            "topic_terms": list(self.topic_terms),
+            "supporting_ids": list(self.supporting_ids),
+            "reason": self.reason,
+        }
+
+
+_DEMAND_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]?")
+_SECOND_PERSON_RE = re.compile(r"\b(?:you|your|yours|yourself)\b", re.IGNORECASE)
+_SELF_KNOWLEDGE_PATTERNS = (
+    re.compile(r"\b(?:what|which)\s+(?:do|would|did)\s+you\s+(?:like|prefer|want|choose|pick|wear|use|keep|own)\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+would\s+you\b.{0,80}\b(?:wear|wearing|choose|choosing|pick|picking)\b", re.IGNORECASE),
+    re.compile(r"\b(?:do|did|have)\s+you\s+(?:ever\s+)?(?:actually\s+)?(?:like|prefer|want|care|cared|choose|pick|wear|use|keep|own|have|visit|meet|remember|experience|go|been|see|saw|read|buy|bought|try|tried)\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+(?:is|was|are|were)\s+your\s+(?:favorite|favourite|preference|opinion|memory|experience|relationship|history)\b", re.IGNORECASE),
+    re.compile(r"\bhow\s+do\s+you\s+(?:feel|think)\s+about\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+you\s+remember\b", re.IGNORECASE),
+)
+_EXTERNAL_KNOWLEDGE_PATTERNS = (
+    re.compile(r"\b(?:do\s+you\s+know|what\s+do\s+you\s+know)\s+(?:about\s+)?", re.IGNORECASE),
+    re.compile(r"\b(?:what|who|where|when|why)\s+(?:is|are|was|were)\b", re.IGNORECASE),
+    re.compile(r"\b(?:explain|define|tell\s+me\s+about)\b", re.IGNORECASE),
+)
+_DEMAND_NOISE = frozenset({
+    "i", "me", "my", "mine", "you", "your", "yours", "yourself",
+    "do", "did", "does", "would", "could", "should", "can", "have", "has", "had",
+    "ever", "now", "then", "really", "just", "tell", "remember",
+})
+
+
+def _demand_clause(text: str) -> str:
+    """Prefer the last explicit question over surrounding scene/dialogue prose."""
+    clauses = [part.strip() for part in _DEMAND_SENTENCE_RE.findall(str(text or "")) if part.strip()]
+    questions = [part for part in clauses if part.endswith("?")]
+    if questions:
+        return questions[-1]
+    return clauses[-1] if clauses else str(text or "").strip()
+
+
+_PREFERENCE_WORDS = frozenset({
+    "like", "liked", "prefer", "preferred", "preference", "favorite", "favourite",
+    "want", "wanted", "care", "cared", "choose", "chose", "chosen", "pick", "picked", "wear", "wearing",
+})
+_PREFERENCE_PREDICATES = frozenset({
+    "like", "prefer", "want", "care", "choose", "pick", "favorite", "favourite",
+})
+_EXPERIENCE_WORDS = frozenset({
+    "visit", "visited", "meet", "met", "go", "went", "been", "see", "saw",
+    "read", "buy", "bought", "try", "tried", "experience", "experienced",
+})
+_MEMORY_WORDS = frozenset({"remember", "memory"})
+
+
+def _demand_semantics(clause: str) -> tuple[str, tuple[str, ...], str]:
+    terms = tuple(
+        term for term in research_terms(clause, limit=16)
+        if term not in _DEMAND_NOISE
+    )
+    term_set = set(terms)
+    if term_set & _PREFERENCE_WORDS:
+        kind = "preference"
+    elif term_set & _MEMORY_WORDS:
+        kind = "memory"
+    elif term_set & _EXPERIENCE_WORDS:
+        kind = "experience"
+    else:
+        kind = "history"
+    semantic_words = _PREFERENCE_WORDS | _MEMORY_WORDS | _EXPERIENCE_WORDS
+    topics = tuple(term for term in terms if term not in semantic_words)
+    temporal = "prior" if re.search(r"\b(?:before|ever|previously|used to|in the past)\b", clause, re.IGNORECASE) else "unspecified"
+    return kind, topics, temporal
+
+
+def _item_terms(item: Mapping[str, object]) -> set[str]:
+    terms: set[str] = set()
+    for key in ("subject_norm", "predicate_norm", "object_norm", "topic_key", "text"):
+        terms.update(research_terms(str(item.get(key) or ""), limit=128))
+    return terms
+
+
+def assess_retrieval_evidence(
+    demand: RetrievalDemand,
+    knowledge: Iterable[Mapping[str, object]],
+) -> RetrievalEvidenceStatus | None:
+    """Assess whether selected cognition answers a routed character demand.
+
+    Relevance gets evidence into cognition; this check asks whether the selected
+    propositions actually establish the requested relationship. It is transient
+    and never writes a new character fact.
+    """
+    if demand.route != "character":
+        return None
+
+    topics = set(demand.topic_terms)
+    related: list[Mapping[str, object]] = []
+    established: list[Mapping[str, object]] = []
+    for item in knowledge:
+        item_terms = _item_terms(item)
+        if topics and not (topics & item_terms):
+            continue
+        related.append(item)
+        predicate = str(item.get("predicate_norm") or "").strip().lower()
+        predicate_terms = set(research_terms(predicate, limit=16))
+        subject_terms = set(research_terms(str(item.get("subject_norm") or ""), limit=16))
+        demand_subject_terms = set(research_terms(demand.subject, limit=16))
+        subject_matches = not demand_subject_terms or bool(subject_terms & demand_subject_terms)
+        if demand.kind == "preference":
+            if subject_matches and predicate_terms & _PREFERENCE_PREDICATES:
+                established.append(item)
+        elif demand.kind in {"experience", "memory", "history"}:
+            # Event/memory propositions with a topical match establish that the
+            # character has relevant prior experience/history, without claiming
+            # any stronger preference or interpretation.
+            kind = str(item.get("claim_kind") or "").upper()
+            if kind in {"EVENT", "MEMORY"}:
+                established.append(item)
+
+    def ids(items: Iterable[Mapping[str, object]]) -> tuple[str, ...]:
+        values: list[str] = []
+        for item in items:
+            value = item.get("proposition_id") or item.get("semantic_event_id")
+            if value is not None:
+                values.append(str(value))
+        return tuple(values[:8])
+
+    if established:
+        return RetrievalEvidenceStatus(
+            demand.route, "established", demand.kind, demand.topic_terms,
+            ids(established), "relation_supported",
+        )
+    if related:
+        return RetrievalEvidenceStatus(
+            demand.route, "partial", demand.kind, demand.topic_terms,
+            ids(related), "topic_related_relation_unestablished",
+        )
+    return RetrievalEvidenceStatus(
+        demand.route, "unestablished", demand.kind, demand.topic_terms,
+        (), "no_related_character_evidence",
+    )
+
+
+def resolve_retrieval_demand(focus_text: str, *, character_id: str) -> RetrievalDemand:
+    """Classify only high-confidence self-memory demands.
+
+    Ambiguous language deliberately remains general so this layer cannot
+    suppress ordinary world/corpus retrieval merely because a character is
+    addressed in conversation.
+    """
+    raw = str(focus_text or "").strip()
+    clause = _demand_clause(raw)
+    if not clause:
+        return RetrievalDemand("general", raw, "empty_focus")
+
+    self_memory = bool(_SECOND_PERSON_RE.search(clause)) and any(
+        pattern.search(clause) for pattern in _SELF_KNOWLEDGE_PATTERNS
+    )
+    if not self_memory:
+        if any(pattern.search(clause) for pattern in _EXTERNAL_KNOWLEDGE_PATTERNS):
+            return RetrievalDemand("general", raw, "external_knowledge_question")
+        return RetrievalDemand("general", raw, "no_high_confidence_self_signal")
+
+    terms = tuple(
+        term for term in research_terms(clause, limit=16)
+        if term not in _DEMAND_NOISE
+    )
+    compact = " ".join((str(character_id).strip(), *terms)).strip()
+    kind, topic_terms, temporal_scope = _demand_semantics(clause)
+    return RetrievalDemand(
+        "character",
+        compact or str(character_id).strip() or clause,
+        "character_self_knowledge",
+        kind=kind,
+        subject=str(character_id).strip(),
+        topic_terms=topic_terms,
+        temporal_scope=temporal_scope,
+    )
+
+
 class KnowledgeDemandResolver:
     """Deterministic gate for deciding whether corpus lookup is warranted.
 

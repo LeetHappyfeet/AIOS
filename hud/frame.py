@@ -17,6 +17,9 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
+HUD_VERSION = "hud-v4"
+
+
 @dataclass(frozen=True)
 class HUDBudget:
     """Approximate token caps. These are selection budgets, not tokenizer guarantees."""
@@ -342,6 +345,7 @@ class HUDAssembler:
                 "location_entity_id": context.location_entity_id,
             },
             "scene": scene,
+            "retrieval_evidence": cognitive_snapshot.retrieval_evidence,
             "state": {
                 "health": raw_state.get("health"),
                 "stamina": raw_state.get("stamina"),
@@ -387,8 +391,17 @@ class HUDAssembler:
                     if action.get("key")
                 ],
             ],
+            # Public, compact affordances for the HUD consumer. These describe
+            # requests a human or host LLM may make of AIOS; worker-only tools
+            # and their schemas remain private to the agent capability layer.
+            "toolkit": [
+                {"key": "memory_lookup", "guidance": "one subject/question; a few memories"},
+                {"key": "world_lookup", "guidance": "one subject/question; a few facts"},
+                {"key": "research", "guidance": "one focused question; brief findings"},
+                {"key": "action", "guidance": "one concrete action; necessary details only"},
+            ],
             "hud": {
-                "version": "hud-v1",
+                "version": HUD_VERSION,
                 "profile_id": hud_profile.profile_id,
                 "profile_name": hud_profile.profile_name,
                 "selection": "pre-resolved-cognition/entity-centered/deterministic",

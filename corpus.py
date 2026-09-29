@@ -327,6 +327,7 @@ async def consume_corpus_sections(
                         "corpus_document_id": str(row["document_id"]),
                         "corpus_section_id": str(section_id),
                         "consumption_id": str(receipt["consumption_id"]),
+                        "evidence_correlation_key": f"corpus-section:{section_id}",
                         "acquisition_mode": mode,
                         "target_instance_id": str(instance_id),
                         "intentional_consumption": True,

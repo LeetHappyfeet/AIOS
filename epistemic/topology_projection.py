@@ -17,7 +17,7 @@ RDF_UPDATE_TARGET_BYTES = 2 * 1024 * 1024
 RDF_DELTA_TARGET_BYTES = 512 * 1024
 RDF_DELTA_TARGET_OBJECTS = 128
 RDF_DB_PAGE_SIZE = 2000
-RDF_PROJECTION_QUIET_SECONDS = 3.0
+RDF_PROJECTION_QUIET_SECONDS = 30.0
 RDF_PROJECTION_PRIORITY = 200
 
 
@@ -69,34 +69,10 @@ async def mark_scope_dirty(db: Database, *, decision: Any) -> int:
         graph,
     )
 
-    from aios_app.pipeline.jobs import enqueue_job
-
-    run_after = datetime.now(timezone.utc) + timedelta(seconds=RDF_PROJECTION_QUIET_SECONDS)
-    await enqueue_job(
-        db,
-        job_type="project_semantic_scope",
-        payload={"scope_key": decision.scope_key},
-        priority=RDF_PROJECTION_PRIORITY,
-        run_after=run_after,
-    )
-
-    # If a projection is already queued, every new mutation extends the quiet
-    # period. Running projections are left alone; once they finish, the dirty
-    # scope recovery scan will enqueue the latest version after it goes quiet.
-    await db.execute(
-        """
-        UPDATE aios.pipeline_job
-        SET run_after=GREATEST(run_after,$2),
-            priority=GREATEST(priority,$3),
-            updated_at=now()
-        WHERE job_type='project_semantic_scope'
-          AND status='queued'
-          AND payload->>'scope_key'=$1
-        """,
-        decision.scope_key,
-        run_after,
-        RDF_PROJECTION_PRIORITY,
-    )
+    # Projection scheduling is deliberately decoupled from topology mutation.
+    # The durable dirty state plus semantic_rdf_change outbox survive crashes;
+    # runner_v2's projection scheduler creates one coalesced background job only
+    # after the scope has remained quiet for RDF_PROJECTION_QUIET_SECONDS.
     return int(row["dirty_version"])
 
 

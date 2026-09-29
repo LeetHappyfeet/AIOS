@@ -13,7 +13,7 @@ from aios_app.epistemic.goals import CharacterGoalService, CognitiveGoal
 from aios_app.hud.context import HUDContext
 from aios_app.hud.retrieval import TopologyRetriever
 from aios_app.hud.singleflight import AsyncSingleFlight
-from aios_app.epistemic.message_cognition import current_message_cognition
+from aios_app.epistemic.message_cognition import current_message_cognition, question_semantics
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer, select_recalled_cognition
 from aios_app.epistemic.research import (
     CharacterResearchService,
@@ -22,6 +22,9 @@ from aios_app.epistemic.research import (
     SemanticCorpusReinforcementService,
     SemanticKnowledgeCoverageService,
     KnowledgeDemandResolver,
+    RetrievalDemand,
+    assess_retrieval_evidence,
+    resolve_retrieval_demand,
 )
 from aios_app.epistemic.retrieval_policy import (
     CognitiveRetrievalPolicy,
@@ -46,6 +49,9 @@ class CognitiveAttentionInputs:
     plugin_focus_text: str
     retrieval_focus_text: str
     goals: list[CognitiveGoal]
+    knowledge_route: str = "general"
+    demand_reason: str = "unclassified"
+    retrieval_demand: RetrievalDemand | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,7 @@ class CognitiveKnowledgeSnapshot:
     current_events: list[dict[str, Any]]
     corpus_references: list[dict[str, Any]]
     corpus_demand: dict[str, Any] | None
+    retrieval_evidence: dict[str, Any] | None
     recall_suppressed: dict[str, int]
     topology_retrieval: bool
     topology_partial_fallback: bool
@@ -146,6 +153,8 @@ def automatic_corpus_research_allowed(
         None,
     )
     if not focus_row:
+        return False
+    if attention.knowledge_route == "character":
         return False
     speaker_id = str(focus_row.get("speaker_id") or "").strip()
     speaker_role = str(focus_row.get("speaker_role") or "").strip().lower()
@@ -283,8 +292,47 @@ class CognitiveContextService:
             )
             if signal.get("focus_text")
         )
+        focus_row = next(
+            (row for row in recent_newest if row.get("message_text")),
+            None,
+        )
+        question = question_semantics(
+            resolved_focus_text,
+            character_id=context.character_id,
+            speaker_id=(str(focus_row.get("speaker_id")) if focus_row and focus_row.get("speaker_id") else None),
+        )
+        if question is not None:
+            compact_focus = " ".join(
+                (
+                    question.subject,
+                    question.relation,
+                    *question.topic_terms,
+                )
+            ).strip()
+            demand = RetrievalDemand(
+                route="character",
+                focus_text=compact_focus,
+                reason="structured_character_question",
+                kind=question.relation,
+                subject=question.subject,
+                topic_terms=question.topic_terms,
+                temporal_scope=question.temporal_scope,
+            )
+        else:
+            demand = resolve_retrieval_demand(
+                resolved_focus_text,
+                character_id=context.character_id,
+            )
+        # High-confidence self/history/preference questions retrieve against a
+        # compact demand rather than the entire surrounding dialogue turn.
+        # The raw focus remains available above for presentation/provenance.
+        retrieval_base = (
+            demand.focus_text
+            if demand.route == "character"
+            else resolved_focus_text
+        )
         retrieval_focus_text = " ".join(
-            part for part in (resolved_focus_text, plugin_focus_text) if part
+            part for part in (retrieval_base, plugin_focus_text) if part
         )
         return CognitiveAttentionInputs(
             recent_newest=recent_newest,
@@ -293,6 +341,9 @@ class CognitiveContextService:
             plugin_focus_text=plugin_focus_text,
             retrieval_focus_text=retrieval_focus_text,
             goals=goals,
+            knowledge_route=demand.route,
+            demand_reason=demand.reason,
+            retrieval_demand=demand,
         )
 
     def _prepared_retrieval_key(
@@ -404,26 +455,31 @@ class CognitiveContextService:
                 context, scorer, mode="memory", focus_text=focus_text, goals=goals,
                 max_hops=policy.effective_memory_hops,
                 limit=policy.memory_limit,
+                include_world=attention.knowledge_route != "character",
             )
             topology_beliefs = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="belief", focus_text=focus_text, goals=goals,
                 max_hops=policy.belief_hops,
                 limit=policy.semantic_retrieval_limit,
+                include_world=attention.knowledge_route != "character",
             )
             topology_goals = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="goal", focus_text=focus_text, goals=goals,
                 max_hops=policy.goal_hops,
                 limit=min(policy.semantic_retrieval_limit, 30),
+                include_world=attention.knowledge_route != "character",
             )
             topology_events = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="event", focus_text=focus_text, goals=goals,
                 max_hops=policy.event_hops,
                 limit=min(policy.semantic_retrieval_limit, 40),
+                include_world=attention.knowledge_route != "character",
             )
             topology_rules = await self.retriever.retrieve_character_knowledge(
                 context, scorer, mode="rule", focus_text=focus_text, goals=goals,
                 max_hops=policy.rule_hops,
                 limit=min(policy.semantic_retrieval_limit, 30),
+                include_world=attention.knowledge_route != "character",
             )
         except BaseException:
             if not flat_task.done():
@@ -540,6 +596,12 @@ class CognitiveContextService:
                 "conflicts": [],
                 "cognitive_commit": True,
                 "cognitive_provisional": True,
+                "origin_kind": "model_inference",
+                "epistemic_mode": "inference",
+                "authority_state": "candidate",
+                "authority_rank": 0,
+                "lineage_key": f"cognitive:{row['unit_id']}",
+                "authorized_uses": ["belief", "reflection"],
                 "cognitive_persistence": meta.get("persistence"),
                 "character_owned": bool(meta.get("character_owned")),
                 "parse_reason": meta.get("parse_reason"),
@@ -609,6 +671,16 @@ class CognitiveContextService:
         for reason, count in recall_suppressed.items():
             if count:
                 suppressed[reason] = suppressed.get(reason, 0) + count
+
+        retrieval_evidence = assess_retrieval_evidence(
+            attention.retrieval_demand
+            or RetrievalDemand(
+                attention.knowledge_route,
+                attention.retrieval_focus_text,
+                attention.demand_reason,
+            ),
+            knowledge,
+        )
 
         recalled_memories: list[dict[str, Any]] = []
         beliefs: list[dict[str, Any]] = []
@@ -718,6 +790,8 @@ class CognitiveContextService:
             "coverage": corpus_demand.coverage,
             "reason": corpus_demand.reason,
             "automatic_lookup_allowed": allow_automatic_corpus,
+            "knowledge_route": attention.knowledge_route,
+            "demand_reason": attention.demand_reason,
         }
 
         anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
@@ -742,6 +816,9 @@ class CognitiveContextService:
             current_events=list(attention.recent_newest),
             corpus_references=corpus_references,
             corpus_demand=corpus_demand_meta,
+            retrieval_evidence=(
+                retrieval_evidence.as_dict() if retrieval_evidence is not None else None
+            ),
             recall_suppressed=recall_suppressed,
             topology_retrieval=bool(topology_knowledge),
             topology_partial_fallback=bool(legacy_knowledge),

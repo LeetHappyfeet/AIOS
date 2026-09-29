@@ -11,12 +11,24 @@ from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
+from aios_app.agent.cognitive_operation_registry import CognitiveOperationRegistry
 from aios_app.agent.cognitive_subjects import (
     CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,
     GoalSubjectProjector, GoalKnowledgeDemandResolver,
 )
 
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
+
+
+def _json_default(value: Any) -> Any:
+    """Normalize typed identifiers at the JSON/JSONB persistence boundary."""
+    if isinstance(value, UUID):
+        return str(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default)
 
 
 @dataclass(frozen=True)
@@ -41,9 +53,10 @@ class CognitiveOpportunityService:
         self.subject_demand=SubjectKnowledgeDemandResolver()
         self.goal_subjects=GoalSubjectProjector(db)
         self.goal_demand=GoalKnowledgeDemandResolver(db)
+        self.cognitive_operations=CognitiveOperationRegistry()
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
-                       limit:int=8) -> OpportunityBatch:
+                       limit:int=8, focus_override:str|None=None) -> OpportunityBatch:
         context=await self.contexts.resolve(instance_id)
         raw=await self.db.fetchrow(
             "SELECT * FROM aios.character_runtime_state WHERE instance_id=$1",instance_id)
@@ -57,7 +70,7 @@ class CognitiveOpportunityService:
             if source_row and source_row["message_text"]:
                 delta_focus=str(source_row["message_text"])
         attention=await self.cognition.resolve_attention_inputs(
-            context,raw,{},recent_limit=6,focus_text=delta_focus)
+            context,raw,{},recent_limit=6,focus_text=focus_override or delta_focus)
         snapshot=await self.cognition.resolve_knowledge(context,None,attention)
         scene_row=await self.db.fetchrow(
             """SELECT scene_state FROM aios.character_scene_snapshot
@@ -269,11 +282,11 @@ class CognitiveOpportunityService:
                      updated_at=now()
                    RETURNING *""",
                 instance_id,p["opportunity_type"],p["natural_language"],p["operation_type"],
-                json.dumps(p["operation_payload"]),p["source_node_id"],p["source_timeline_id"],
+                _json_dumps(p["operation_payload"]),p["source_node_id"],p["source_timeline_id"],
                 p["source_state_version"],p["novelty"],p["relevance"],p["urgency"],p["uncertainty"],
                 p["goal_affinity"],p["memory_affinity"],p["knowledge_gap"],p["recency"],
                 p["priority_score"],p["freshness_policy"],p["supersession_key"],
-                json.dumps(p["evidence"]),p.get("subject_id"))
+                _json_dumps(p["evidence"]),p.get("subject_id"))
             if row: stored.append(dict(row))
         return OpportunityBatch(instance_id,tuple(stored))
 
@@ -294,12 +307,25 @@ class CognitiveOpportunityService:
            evidence=(),key:str,freshness="contextual",subject_id:UUID|None=None):
         score=(1.7*urgency+1.35*goal_affinity+1.2*relevance+1.1*knowledge_gap+
                .9*memory_affinity+.65*novelty+.45*uncertainty+.55*recency)
-        return {"opportunity_type":typ,"natural_language":_clip(label,220),"operation_type":op,
-                "operation_payload":payload,"source_node_id":node,
+        faculty={
+            "memory_recall":"reflection",
+            "knowledge_gap":"research",
+            "goal_review":"planning",
+            "reflection":"reflection",
+            "immediate":"executive",
+        }.get(str(typ),"executive")
+        prepared=self.cognitive_operations.prepare(
+            operation_type=str(op), operation_payload=dict(payload or {}), faculty=faculty,
+            freshness_policy=freshness, source_node_id=node,
+            source_state_version=context.state_version,
+        )
+        return {"opportunity_type":typ,"natural_language":_clip(label,220),
+                "operation_type":prepared.operation_type,
+                "operation_payload":dict(prepared.operation_payload),"source_node_id":node,
                 "source_timeline_id":context.source_timeline_id,
                 "source_state_version":context.state_version,"novelty":novelty,
                 "relevance":relevance,"urgency":urgency,"uncertainty":uncertainty,
                 "goal_affinity":goal_affinity,"memory_affinity":memory_affinity,
                 "knowledge_gap":knowledge_gap,"recency":recency,"priority_score":score,
-                "freshness_policy":freshness,"supersession_key":key,"evidence":list(evidence),
+                "freshness_policy":prepared.freshness_policy,"supersession_key":key,"evidence":list(evidence),
                 "subject_id":subject_id}

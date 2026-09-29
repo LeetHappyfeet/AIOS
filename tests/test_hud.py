@@ -86,6 +86,14 @@ def test_text_renderer_uses_canonical_hud_sections():
                 ],
             }
         ],
+        "retrieval_evidence": {
+            "route": "character",
+            "status": "partial",
+            "demand_kind": "preference",
+            "topic_terms": ["sleeves"],
+            "supporting_ids": [],
+            "reason": "topic_related_relation_unestablished",
+        },
         "beliefs": [
             {
                 "text": "The door is locked.",
@@ -103,15 +111,29 @@ def test_text_renderer_uses_canonical_hud_sections():
             }
         ],
         "actions": ["speak", "inspect"],
+        "toolkit": [
+            {"key": "memory_lookup", "guidance": "one subject/question; a few memories"},
+            {"key": "world_lookup", "guidance": "one subject/question; a few facts"},
+            {"key": "research", "guidance": "one focused question; brief findings"},
+            {"key": "action", "guidance": "one concrete action; necessary details only"},
+        ],
     }
 
     text = render_hud_text(frame)
 
     assert "ACTIVE MEMORY:" in text
     assert "[remembers; about basement; context: old house]" in text
+    assert "MEMORY STATUS:" in text
+    assert "Related character memory found, but the requested preference is not established." in text
     assert "KNOWLEDGE / BELIEFS:" in text
     assert "conflicts with: The door is open." in text
     assert "AVAILABLE ACTIONS: speak, inspect" in text
+    assert "AIOS TOOLKIT:" in text
+    assert "For missing context or another relevant thread, request one narrow operation." in text
+    assert "MEMORY LOOKUP — one subject/question; a few memories" in text
+    assert "WORLD LOOKUP — one subject/question; a few facts" in text
+    assert "RESEARCH — one focused question; brief findings" in text
+    assert "ACTION — one concrete action; necessary details only" in text
     assert "Stay inside this HUD's epistemic and branch boundaries." in text
 
 

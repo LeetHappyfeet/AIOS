@@ -111,6 +111,105 @@ class CognitiveUnit:
     meta: dict
 
 @dataclass(frozen=True)
+class QuestionSemantics:
+    """Transient semantics for retrieval routing; never persisted as cognition."""
+
+    subject: str
+    relation: str
+    topic_terms: tuple[str, ...]
+    temporal_scope: str
+    confidence: float
+    source_text: str
+
+
+_QUESTION_STOPWORDS = _STOPWORDS | {
+    "what", "which", "who", "where", "when", "why", "how", "much", "many",
+    "do", "does", "did", "would", "could", "should", "can", "ever", "actually",
+    "before", "today", "about", "really", "something", "anything",
+}
+_QUESTION_RELATIONS = (
+    ("preference", re.compile(
+        r"\b(?:like|likes|liked|prefer|prefers|preferred|preference|favorite|favourite|"
+        r"want|wants|wanted|care|cares|cared|interest|interests|interested|appeal|"
+        r"choose|chooses|chose|pick|picks|picked)\b", re.I
+    )),
+    ("memory", re.compile(r"\b(?:remember|remembers|recall|recalls|memory)\b", re.I)),
+    ("experience", re.compile(
+        r"\b(?:visit|visited|meet|met|go|went|been|see|saw|read|buy|bought|try|tried|"
+        r"experience|experienced|wear|wore|worn|use|used|own|owned|have|had)\b", re.I
+    )),
+)
+_QUESTION_SECOND_PERSON_RE = re.compile(r"\b(?:you|your|yours|yourself)\b", re.I)
+
+
+def question_semantics(
+    text: str,
+    *,
+    character_id: str,
+    speaker_id: str | None,
+) -> QuestionSemantics | None:
+    """Extract high-confidence character-directed question semantics.
+
+    This complements interpret_message: questions remain non-assertions and
+    are never persisted, but their subject/relation/topic can guide retrieval.
+    """
+    questions = [sentence for sentence in _sentences(text) if _QUESTION_RE.search(sentence)]
+    if not questions:
+        return None
+    sentence = questions[-1]
+    if not _QUESTION_SECOND_PERSON_RE.search(sentence):
+        return None
+    if speaker_id and _same_identity(speaker_id, character_id):
+        return None
+
+    relation = ""
+    relation_words: set[str] = set()
+    hypothetical_wear = re.search(
+        r"\b(?:would|could|might)\b[^?]{0,100}\b(?:wear|wearing|choose|pick)\b",
+        sentence,
+        re.I,
+    )
+    if hypothetical_wear:
+        relation = "preference"
+        relation_words.update(
+            token.lower()
+            for token in _WORD_RE.findall(hypothetical_wear.group(0))
+            if token.lower() in {"wear", "wearing", "choose", "pick"}
+        )
+    for candidate_relation, pattern in _QUESTION_RELATIONS:
+        if relation:
+            break
+        matches = pattern.findall(sentence)
+        if matches:
+            relation = candidate_relation
+            relation_words.update(str(value).lower() for value in matches)
+            break
+    if not relation:
+        return None
+
+    tokens = [
+        token.lower() for token in _WORD_RE.findall(sentence)
+        if len(token) >= 2 and token.lower() not in _QUESTION_STOPWORDS
+    ]
+    topic_terms = tuple(token for token in tokens if token not in relation_words)[:8]
+    if not topic_terms:
+        return None
+    temporal_scope = (
+        "prior"
+        if re.search(r"\b(?:before|ever|previously|used to|in the past)\b", sentence, re.I)
+        else "unspecified"
+    )
+    return QuestionSemantics(
+        subject=character_id,
+        relation=relation,
+        topic_terms=topic_terms,
+        temporal_scope=temporal_scope,
+        confidence=0.90,
+        source_text=sentence[:500],
+    )
+
+
+@dataclass(frozen=True)
 class ParsedCandidate:
     kind: str
     subject_text: str | None

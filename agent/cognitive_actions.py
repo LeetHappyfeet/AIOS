@@ -33,7 +33,12 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
             {"text": item.get("text"), "claim_kind": item.get("claim_kind"),
              "proposition_id": str(item.get("proposition_id") or ""),
              "source_node_id": str(item.get("source_node_id") or ""),
-             "confidence": item.get("effective_confidence", item.get("confidence"))}
+             "confidence": item.get("effective_confidence", item.get("confidence")),
+             "origin_kind": item.get("origin_kind"),
+             "epistemic_mode": item.get("epistemic_mode"),
+             "authority_state": item.get("authority_state"),
+             "lineage_key": item.get("lineage_key"),
+             "authorized_uses": list(item.get("authorized_uses") or ())}
             for item in candidates[:limit]
         ]}
 

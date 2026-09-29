@@ -88,15 +88,15 @@ class InternalCognitionTransactions:
             return TransactionResult(transaction_id,"stale",None,None,None)
 
         tx=dict(row); candidates=self._json(tx["candidates"],[])
-        output_schema={"type":"object","required":["choice"],"properties":{
-            "choice":{"type":"string"}},"additionalProperties":False}
         try:
             inference=await self.broker.infer(InferenceRequest(
                 instance_id=tx["instance_id"], task_id=tx["source_task_id"],
                 worker_class="executive", prompt=tx["prompt_text"],
                 context_state_version=tx["source_state_version"],
                 hud_profile_name=tx["hud_profile_name"],
-                allowed_actions={}, output_schema=output_schema,
+                allowed_actions={}, output_schema=None,
+                choice_keys=tuple(str(x.get("key","")).upper() for x in candidates if x.get("key")),
+                max_tokens=8,
             ))
             raw=inference.response.raw
             if set(raw) != {"choice"} or not isinstance(raw.get("choice"),str):
@@ -176,7 +176,7 @@ class InternalCognitionTransactions:
         operation_id=await CognitiveOperationEngine(self.db).create_from_opportunity(
             opportunity=opportunity,
             thread_id=UUID(str(thread_id)) if thread_id else None,
-            priority=int(tx["priority"]))
+            priority=int(tx["priority"]), source_task_id=tx.get("source_task_id"))
         return {"kind":"cognitive_operation","operation_id":str(operation_id),
                 "opportunity_id":str(oid),"operation_type":str(opportunity["operation_type"])}
 

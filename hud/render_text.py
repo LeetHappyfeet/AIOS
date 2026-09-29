@@ -58,6 +58,14 @@ def _knowledge_annotation(item: Mapping[str, Any]) -> str:
     return " [" + "; ".join(bits) + "]"
 
 
+def _epistemic_label(item: Mapping[str, Any]) -> str:
+    state = str(item.get("authority_state") or "").strip()
+    origin = str(item.get("origin_kind") or "").strip().replace("_", "-")
+    mode = str(item.get("epistemic_mode") or "").strip().replace("_", "-")
+    bits = [value for value in (state, origin, mode) if value]
+    return (" [" + " | ".join(bits) + "]") if bits else ""
+
+
 def _scene_text(value: Any) -> str:
     if isinstance(value, Mapping):
         return str(value.get("text") or value.get("label") or "").strip()
@@ -146,7 +154,25 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if memories:
         lines.append("\nACTIVE MEMORY:")
         for item in memories:
-            lines.append(f"-{_knowledge_annotation(item)} {item.get('text', '')}")
+            lines.append(f"-{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
+    retrieval_evidence = frame.get("retrieval_evidence") or {}
+    if retrieval_evidence.get("route") == "character":
+        status = str(retrieval_evidence.get("status") or "").strip().lower()
+        demand_kind = str(retrieval_evidence.get("demand_kind") or "memory").replace("_", " ")
+        if status == "established":
+            memory_status = f"Established character evidence found for this {demand_kind} question."
+        elif status == "partial":
+            memory_status = (
+                f"Related character memory found, but the requested {demand_kind} is not established."
+            )
+        elif status == "unestablished":
+            memory_status = f"No established character memory answers this {demand_kind} question."
+        else:
+            memory_status = ""
+        if memory_status:
+            lines.append("\nMEMORY STATUS:")
+            lines.append(f"- {memory_status}")
+
     beliefs = frame.get("beliefs") or []
     if beliefs:
         lines.append("\nKNOWLEDGE / BELIEFS:")
@@ -154,7 +180,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             status = item.get("epistemic_status") or "known"
             confidence = item.get("effective_confidence")
             suffix = f" confidence={confidence:.2f}" if isinstance(confidence, (float, int)) else ""
-            lines.append(f"- [{status}{suffix}]{_knowledge_annotation(item)} {item.get('text', '')}")
+            lines.append(f"- [{status}{suffix}]{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
             for conflict in item.get("conflicts") or []:
                 lines.append(f"  ! conflicts with: {conflict.get('text', '')}")
     corpus_references = frame.get("corpus_references") or []
@@ -219,5 +245,26 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     actions = frame.get("actions") or []
     if actions:
         lines.append("\nAVAILABLE ACTIONS: " + ", ".join(str(action) for action in actions))
+    toolkit = frame.get("toolkit") or []
+    if toolkit:
+        lines.append("\nAIOS TOOLKIT:")
+        lines.append("For missing context or another relevant thread, request one narrow operation.")
+        labels = {
+            "memory_lookup": "MEMORY LOOKUP",
+            "world_lookup": "WORLD LOOKUP",
+            "research": "RESEARCH",
+            "action": "ACTION",
+        }
+        for item in toolkit:
+            if isinstance(item, Mapping):
+                key = str(item.get("key") or "").strip()
+                guidance = str(item.get("guidance") or "").strip()
+            else:
+                key = str(item).strip()
+                guidance = ""
+            if not key:
+                continue
+            label = labels.get(key, key.replace("_", " ").upper())
+            lines.append(f"- {label} — {guidance}" if guidance else f"- {label}")
     lines.append("\nStay inside this HUD's epistemic and branch boundaries.")
     return "\n".join(lines)

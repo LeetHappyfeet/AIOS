@@ -25,6 +25,7 @@ class ActionSpec:
     result_mode: str = "final"
     capability_class: str = "action"
     description: str = ""
+    required_authority_use: str | None = None
 
 
 class ActionRegistry:
@@ -39,15 +40,8 @@ class ActionRegistry:
     def get(self, name: str) -> ActionSpec | None:
         return self._specs.get(name)
 
-    def schemas_for(self, worker_class: str) -> dict[str, dict[str, Any]]:
-        """Inference-compatible schema map retained for the broker."""
-        return {
-            name: spec.schema for name, spec in self._specs.items()
-            if not spec.allowed_worker_classes or worker_class in spec.allowed_worker_classes
-        }
-
     def capabilities_for(self, worker_class: str) -> dict[str, dict[str, Any]]:
-        """Prompt-facing metadata without changing the inference wire format."""
+        """Operator/runtime capability metadata; not an inference prompt contract."""
         return {
             name: {
                 "class": spec.capability_class,
@@ -56,6 +50,7 @@ class ActionRegistry:
                 "result_mode": spec.result_mode,
                 "execution_mode": spec.execution_mode,
                 "schema": spec.schema,
+                "required_authority_use": spec.required_authority_use,
             }
             for name, spec in self._specs.items()
             if not spec.allowed_worker_classes or worker_class in spec.allowed_worker_classes
@@ -67,6 +62,28 @@ class ActionDispatcher:
         self.db = db
         self.registry = registry
         self.store = CharacterAgencyStore(db)
+
+    async def _authority_precondition_satisfied(
+        self, action: ActionRecord, required_use: str
+    ) -> bool:
+        """Execution-time authority gate for consequential actions."""
+        if action.task_id is None:
+            return False
+        row = await self.db.fetchrow(
+            """SELECT 1
+               FROM aios.character_cognitive_task task
+               JOIN aios.cognitive_evidence_instances(task.instance_id) eligible ON true
+               JOIN aios.knowledge_acquisition_event kae ON kae.instance_id=eligible.instance_id
+               JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae.acquisition_id
+               WHERE task.task_id=$1
+                 AND $2=ANY(eaa.authorized_uses)
+                 AND (task.source_node_id IS NULL
+                      OR kae.dag_node_id=task.source_node_id
+                      OR kae.dag_node_id=task.source_through_node_id)
+               LIMIT 1""",
+            action.task_id, required_use,
+        )
+        return row is not None
 
     async def dispatch(self, action_id: UUID, *, worker_class: str) -> ActionRecord:
         action = await self.store.get_action(action_id)
@@ -95,6 +112,12 @@ class ActionDispatcher:
                     action_id, "rejected", rejection_reason="stale_character_state"
                 )
 
+        if spec.required_authority_use:
+            if not await self._authority_precondition_satisfied(action, spec.required_authority_use):
+                return await self.store.transition_action(
+                    action_id, "rejected", rejection_reason="epistemic_precondition_unsatisfied"
+                )
+
         policy = ActionPolicyService(self.db)
         disposition = await policy.disposition(action.instance_id, action.action_type, action.side_effect_class)
         if disposition == "deny":
@@ -121,7 +144,12 @@ class ActionDispatcher:
             )
         action = await self.store.transition_action(action_id, "running")
         try:
-            result = await spec.handler(action.instance_id, action.arguments)
+            handler_args = dict(action.arguments)
+            # Internal dispatch context is not part of the model-visible action
+            # schema or persisted arguments. Handlers may use it for per-worker
+            # budgets without trusting model-supplied metadata.
+            handler_args["_worker_class"] = worker_class
+            result = await spec.handler(action.instance_id, handler_args)
         except Exception as exc:
             return await self.store.transition_action(
                 action_id, "failed", error=str(exc)[:2000]

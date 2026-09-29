@@ -1,4 +1,5 @@
-from aios_app.hud.retrieval import POLICIES, _focus_terms
+from aios_app.hud.retrieval import MAX_FOCUS_TERMS, POLICIES, _RETRIEVAL_SQL, _focus_terms
+from aios_app.epistemic.relevance import _continuity_distance
 
 
 def test_memory_retrieval_keeps_topic_history():
@@ -30,3 +31,33 @@ def test_focus_terms_are_deduplicated_and_bounded():
     assert "station" in terms
     assert "sarah" in terms
     assert len(terms) <= 24
+
+
+def test_focus_terms_preserve_late_identifier_seed():
+    terms = _focus_terms(
+        "Mia sits up alright I'll go stand in the water with you do anything "
+        "really it's your afternoon off. Mia takes off her sandals. Boy I wish "
+        "Alex_ had been able to come, she loves the beach too."
+    )
+    assert "alex_" in terms
+    assert len(terms) <= MAX_FOCUS_TERMS
+
+
+def test_focus_terms_sample_across_long_turn():
+    terms = _focus_terms(" ".join(f"term{index}" for index in range(40)))
+    assert len(terms) == MAX_FOCUS_TERMS
+    assert terms[-1] != "term11"
+    assert any(int(term.removeprefix("term")) >= 30 for term in terms)
+
+
+def test_topology_seed_budget_deduplicates_semantic_identity_before_limit():
+    assert "diverse_seed_candidates AS" in _RETRIEVAL_SQL
+    assert "COALESCE(proposition_id::text, node_type || ':' || node_key)" in _RETRIEVAL_SQL
+    assert _RETRIEVAL_SQL.index("diverse_seed_candidates AS") < _RETRIEVAL_SQL.index("LIMIT 64")
+
+
+def test_character_continuity_rank_is_not_treated_as_graph_depth():
+    assert _continuity_distance(0) == 0
+    assert _continuity_distance(1) == 1
+    assert _continuity_distance(100001) == 2
+    assert _continuity_distance(100031) == 32

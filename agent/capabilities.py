@@ -10,7 +10,10 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
 from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
+from aios_app.epistemic.world_scope import build_retrieval_scope
+from aios_app.epistemic.structured_retrieval import StructuredKnowledgeRetriever, EpistemicComparisonService, CoordinateResolver
 from aios_app.epistemic.research import CharacterResearchService
+from aios_app.epistemic.hypothesis_validation import notify_evidence_change
 from .actions import ActionRegistry, ActionSpec
 from .temporal import TemporalTriggerStore
 
@@ -85,21 +88,109 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
     scenes = CharacterSceneStateStore(db)
     research = ResearchRouter(db)
     world = WorldPropositionRetriever(db)
+    structured = StructuredKnowledgeRetriever(db)
+    coordinates = CoordinateResolver(db)
+    comparison = EpistemicComparisonService(db)
     temporal = TemporalTriggerStore(db)
 
     async def knowledge_lookup(
         instance_id: UUID, args: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        query = str(args["query"]).strip()
-        if not query:
-            raise ValueError("knowledge lookup query is empty")
+        query = str(args.get("query") or "").strip()
+        operation = str(args.get("operation") or "search").strip().lower()
+        if not query and operation != "history" and not args.get("proposition_ids"):
+            raise ValueError("knowledge lookup requires query or proposition_ids")
         context = await contexts.resolve(instance_id)
         kinds = tuple(str(v).upper() for v in (args.get("kinds") or []) if str(v).strip())
-        limit = max(1, min(int(args.get("limit", 10)), 30))
+        is_research = str(args.get("_worker_class") or "") == "research"
+        default_limit = 5 if is_research else 10
+        hard_limit = 8 if is_research else 30
+        limit = max(1, min(int(args.get("limit", default_limit)), hard_limit))
         scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
-        candidates = await cognition.lookup_character_knowledge(
-            context, scorer, claim_kinds=kinds, limit=limit,
-        )
+
+        # Ordinary search remains the existing /char path.  Structured
+        # operations use search only to discover proposition coordinates when
+        # the caller did not already supply stable IDs; fuzzy retrieval does
+        # not answer the structured question itself.
+        candidates = []
+        supplied_ids = []
+        for raw in args.get("proposition_ids") or ():
+            try:
+                supplied_ids.append(UUID(str(raw)))
+            except (TypeError, ValueError):
+                continue
+        exact_ids = []
+        if query and operation != "search":
+            exact_ids = await coordinates.character_propositions(
+                instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
+                text=query, limit=16,
+            )
+        # Structured queries use durable cognitive-subject coordinates first.
+        # Fall back to ordinary semantic recall only when exact structure did not
+        # identify a usable proposition coordinate.
+        if query and (operation == "search" or (not supplied_ids and not exact_ids)):
+            candidates = await cognition.lookup_character_knowledge(
+                context, scorer, claim_kinds=kinds, limit=max(limit, 8),
+            )
+        coordinate_ids = list(supplied_ids) + list(exact_ids)
+        seen_ids = {str(v) for v in coordinate_ids}
+        for item in candidates:
+            raw = item.get("proposition_id")
+            if raw and str(raw) not in seen_ids:
+                try:
+                    coordinate_ids.append(UUID(str(raw)))
+                    seen_ids.add(str(raw))
+                except (TypeError, ValueError):
+                    pass
+            if len(coordinate_ids) >= 16:
+                break
+
+        if operation == "evidence":
+            rows = await structured.character_evidence(
+                instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
+                proposition_ids=coordinate_ids,
+                authorized_use=str(args.get("authorized_use") or "reflection"),
+                limit=limit,
+            )
+            return {
+                "query": query, "scope": "character", "operation": operation,
+                "coordinates": [str(v) for v in coordinate_ids],
+                "matches": [dict(row) for row in rows], "match_count": len(rows),
+            }
+
+        if operation == "relation":
+            rows = await structured.relation(
+                scope_key=f"char:{context.character_id}",
+                instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
+                seed_proposition_ids=coordinate_ids,
+                seed_terms=(query,) if query else (),
+                relation_types=tuple(str(v) for v in (args.get("relations") or ())),
+                direction=str(args.get("direction") or "either"),
+                max_hops=int(args.get("max_hops", 1)),
+                limit=limit,
+            )
+            return {
+                "query": query, "scope": "character", "operation": operation,
+                "coordinates": [str(v) for v in coordinate_ids],
+                "matches": [dict(row) for row in rows], "match_count": len(rows),
+            }
+
+        if operation == "history":
+            anchor_raw = args.get("anchor_node_id")
+            anchor = UUID(str(anchor_raw)) if anchor_raw else context.head_node_id
+            if anchor is None:
+                return {"query": query, "scope": "character", "operation": operation,
+                        "matches": [], "match_count": 0}
+            rows = await structured.history(
+                timeline_id=context.timeline_id, anchor_node_id=anchor,
+                direction=str(args.get("direction") or "before"), limit=limit,
+            )
+            return {"query": query, "scope": "character", "operation": operation,
+                    "matches": [dict(row) for row in rows], "match_count": len(rows)}
+
+        if operation != "search":
+            raise ValueError(f"unsupported knowledge lookup operation {operation!r}")
+
         matches = [
             {
                 "text": item.get("text"),
@@ -111,30 +202,85 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
                 "source_node_id": str(item.get("source_node_id") or ""),
                 "confidence": item.get("effective_confidence", item.get("confidence")),
                 "epistemic_status": item.get("epistemic_status"),
+                "origin_kind": item.get("origin_kind"),
+                "epistemic_mode": item.get("epistemic_mode"),
+                "authority_state": item.get("authority_state"),
+                "authority_rank": item.get("authority_rank"),
+                "lineage_key": item.get("lineage_key"),
+                "authorized_uses": list(item.get("authorized_uses") or ()),
                 "retrieval_scope": "character",
             }
-            for item in candidates
+            for item in candidates[:limit]
         ]
         return {
-            "query": query, "scope": "character",
+            "query": query, "scope": "character", "operation": operation,
             "matches": matches, "match_count": len(matches),
         }
 
     async def world_lookup(
         instance_id: UUID, args: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        query = str(args["query"]).strip()
-        if not query:
-            raise ValueError("world lookup query is empty")
+        query = str(args.get("query") or "").strip()
+        operation = str(args.get("operation") or "search").strip().lower()
+        if not query and not args.get("proposition_ids"):
+            raise ValueError("world lookup requires query or proposition_ids")
         context = await contexts.resolve(instance_id)
         domain = str(args.get("domain") or "general")
         kinds = tuple(str(v).upper() for v in (args.get("kinds") or []) if str(v).strip())
         limit = max(1, min(int(args.get("limit", 10)), 30))
         scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
-        rows = await world.retrieve(
-            context, scorer, query_text=query, domain=domain,
-            claim_kinds=kinds, limit=limit,
-        )
+        rows = []
+        if query:
+            rows = await world.retrieve(
+                context, scorer, query_text=query, domain=domain,
+                claim_kinds=kinds, limit=max(limit, 8),
+            )
+        coordinate_ids = []
+        seen_ids = set()
+        for raw in list(args.get("proposition_ids") or ()) + [
+            item.get("proposition_id") for item in rows
+        ]:
+            if not raw or str(raw) in seen_ids:
+                continue
+            try:
+                coordinate_ids.append(UUID(str(raw)))
+                seen_ids.add(str(raw))
+            except (TypeError, ValueError):
+                continue
+            if len(coordinate_ids) >= 16:
+                break
+
+        if operation == "evidence":
+            scope = await build_retrieval_scope(db, world_id=context.world_id, domain=domain)
+            evidence = await structured.world_evidence(
+                world_ids=scope.all_world_ids, proposition_ids=coordinate_ids, limit=limit,
+            )
+            return {
+                "query": query, "scope": "world", "domain": domain, "operation": operation,
+                "coordinates": [str(v) for v in coordinate_ids],
+                "matches": evidence, "match_count": len(evidence),
+                "durable_character_knowledge": False,
+            }
+
+        if operation == "relation":
+            graph_rows = await structured.relation(
+                scope_key=f"world:{context.world_id}:asserted",
+                seed_proposition_ids=coordinate_ids,
+                seed_terms=(query,) if query else (),
+                relation_types=tuple(str(v) for v in (args.get("relations") or ())),
+                direction=str(args.get("direction") or "either"),
+                max_hops=int(args.get("max_hops", 1)), limit=limit,
+            )
+            return {
+                "query": query, "scope": "world", "domain": domain, "operation": operation,
+                "coordinates": [str(v) for v in coordinate_ids],
+                "matches": graph_rows, "match_count": len(graph_rows),
+                "durable_character_knowledge": False,
+            }
+
+        if operation != "search":
+            raise ValueError(f"unsupported world lookup operation {operation!r}")
+
         matches = [
             {
                 "text": item.get("text"),
@@ -149,13 +295,56 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
                 "retrieval_scope": "world",
                 "world_domain": item.get("world_domain"),
             }
-            for item in rows
+            for item in rows[:limit]
         ]
         return {
-            "query": query, "scope": "world", "domain": domain,
+            "query": query, "scope": "world", "domain": domain, "operation": operation,
             "matches": matches, "match_count": len(matches),
             "durable_character_knowledge": False,
         }
+
+
+    async def epistemic_compare(
+        instance_id: UUID, args: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ValueError("epistemic comparison query is empty")
+        context = await contexts.resolve(instance_id)
+        limit = max(1, min(int(args.get("limit", 10)), 20))
+        scorer = CognitiveRelevanceScorer(context, focus_text=query, goals=())
+        char_rows = await cognition.lookup_character_knowledge(
+            context, scorer, claim_kinds=(), limit=max(limit, 8),
+        )
+        world_rows = await world.retrieve(
+            context, scorer, query_text=query,
+            domain=str(args.get("domain") or "general"), limit=max(limit, 8),
+        )
+        ids = []
+        seen = set()
+        for item in [*char_rows, *world_rows]:
+            raw = item.get("proposition_id")
+            if raw and str(raw) not in seen:
+                try:
+                    ids.append(UUID(str(raw)))
+                    seen.add(str(raw))
+                except (TypeError, ValueError):
+                    pass
+            if len(ids) >= 24:
+                break
+        scope = await build_retrieval_scope(
+            db, world_id=context.world_id, domain=str(args.get("domain") or "general"),
+        )
+        rows = await comparison.compare(
+            instance_ids=(context.cognitive_instance_ids or context.lineage_instance_ids),
+            world_ids=scope.all_world_ids, proposition_ids=ids, limit=limit,
+        )
+        return {
+            "query": query, "scope": "character_vs_world",
+            "matches": rows, "match_count": len(rows),
+            "note": "unverified means no admitted /world assertion for the same semantic atom; it does not mean false",
+        }
+
 
     async def state_inspect(
         instance_id: UUID, args: Mapping[str, Any],
@@ -259,20 +448,33 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
 
     registry.register(ActionSpec(
         name="knowledge.lookup",
-        schema={"type":"object","required":["query"],"properties":{
-            "query":{"type":"string"},"limit":{"type":"integer"},
+        schema={"type":"object","properties":{
+            "query":{"type":"string"},
+            "operation":{"type":"string","enum":["search","evidence","relation","history"]},
+            "proposition_ids":{"type":"array","items":{"type":"string"},"maxItems":16},
+            "relations":{"type":"array","items":{"type":"string"},"maxItems":16},
+            "direction":{"type":"string","enum":["outgoing","incoming","either","before","after"]},
+            "max_hops":{"type":"integer","minimum":1,"maximum":2},
+            "anchor_node_id":{"type":"string"},
+            "authorized_use":{"type":"string","enum":["belief","reflection","planning","action_precondition"]},
+            "limit":{"type":"integer"},
             "kinds":{"type":"array","items":{"type":"string"}}},"additionalProperties":False},
         side_effect_class="read_only",
         allowed_worker_classes=frozenset({"executive","research","planning","reflection"}),
         handler=knowledge_lookup,
         result_mode="return_to_cognition",
         capability_class="lookup",
-        description="Search durable character-owned /char knowledge only.",
+        description="Search or inspect bounded durable character-owned /char knowledge, relations, evidence, and history.",
     ))
     registry.register(ActionSpec(
         name="world.lookup",
-        schema={"type":"object","required":["query"],"properties":{
+        schema={"type":"object","properties":{
             "query":{"type":"string"},"domain":{"type":"string"},
+            "operation":{"type":"string","enum":["search","evidence","relation"]},
+            "proposition_ids":{"type":"array","items":{"type":"string"},"maxItems":16},
+            "relations":{"type":"array","items":{"type":"string"},"maxItems":16},
+            "direction":{"type":"string","enum":["outgoing","incoming","either"]},
+            "max_hops":{"type":"integer","minimum":1,"maximum":2},
             "limit":{"type":"integer"},
             "kinds":{"type":"array","items":{"type":"string"}}},"additionalProperties":False},
         side_effect_class="read_only",
@@ -280,7 +482,19 @@ def register_agent_capabilities(db: Database, registry: ActionRegistry) -> None:
         handler=world_lookup,
         result_mode="return_to_cognition",
         capability_class="lookup",
-        description="Search authorized public /world knowledge without granting character ownership.",
+        description="Search or inspect bounded authorized /world knowledge, evidence, and relations without granting character ownership.",
+    ))
+    registry.register(ActionSpec(
+        name="epistemic.compare",
+        schema={"type":"object","required":["query"],"properties":{
+            "query":{"type":"string"},"domain":{"type":"string"},
+            "limit":{"type":"integer"}},"additionalProperties":False},
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive","research","planning","reflection"}),
+        handler=epistemic_compare,
+        result_mode="return_to_cognition",
+        capability_class="lookup",
+        description="Compare character-owned /char knowledge with independently admitted /world state without merging the scopes.",
     ))
     registry.register(ActionSpec(
         name="state.inspect",

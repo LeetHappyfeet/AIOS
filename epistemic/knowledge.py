@@ -287,6 +287,9 @@ async def record_acquisition(
     source_entity_id: Optional[UUID] = None,
     dag_node_id: Optional[UUID] = None,
     meta: Optional[dict] = None,
+    origin_kind: Optional[str] = None,
+    epistemic_mode: Optional[str] = None,
+    origin_lineage_id: Optional[str] = None,
 ) -> UUID:
     if proposition_id is None and claim_id is None:
         raise ValueError("proposition_id or claim_id is required")
@@ -311,6 +314,17 @@ async def record_acquisition(
     if not exists:
         raise ValueError(f"unknown character instance {instance_id}")
 
+    acquisition_meta = dict(meta or {})
+    # These provenance labels are immutable once authority admission sees them.
+    # Callers may state them explicitly; otherwise the SQL membrane derives a
+    # conservative classification from the source event/acquisition mode.
+    if origin_kind:
+        acquisition_meta["origin_kind"] = origin_kind
+    if epistemic_mode:
+        acquisition_meta["epistemic_mode"] = epistemic_mode
+    if origin_lineage_id:
+        acquisition_meta["origin_lineage_id"] = origin_lineage_id
+
     row = await db.execute_returning_row(
         """
         INSERT INTO aios.knowledge_acquisition_event (
@@ -328,7 +342,7 @@ async def record_acquisition(
         confidence,
         source_entity_id,
         dag_node_id,
-        json.dumps(meta or {}),
+        json.dumps(acquisition_meta),
     )
     return row["acquisition_id"]
 

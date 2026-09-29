@@ -13,12 +13,14 @@ from uuid import UUID
 from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.pipeline.jobs import (
+    enqueue_job,
     fetch_next_job,
     heartbeat_job,
     mark_done,
     mark_failed,
     recover_stale_running_jobs,
     rebalance_queued_priorities,
+    _backfill_decompose_timeline_partitions,
 )
 from aios_app.pipeline.job_registry import ResourceClass, SchedulingLane, job_spec
 
@@ -90,6 +92,14 @@ async def handle_decompose_claim_frames(db: Database, job: Dict[str, Any]) -> No
         logger.warning("Skipping stale decompose_claim_frames job for missing claim %s", claim_id)
         return
     await decompose_claim_frames(db, claim_id=claim_id)
+    # Producer-driven semantic handoff. Supervisor discovery remains the repair
+    # path if this enqueue is interrupted or legacy data predates the invariant.
+    await enqueue_job(
+        db,
+        job_type="resolve_claim_context",
+        payload={"claim_id": str(claim_id), "admission_band": "producer"},
+        priority=30,
+    )
 
 
 async def handle_normalize_proposition(db: Database, job: Dict[str, Any]) -> None:
@@ -195,7 +205,12 @@ async def handle_resolve_generated_facts(db: Database, job: Dict[str, Any]) -> N
 
 
 async def handle_reconcile_character_beliefs(db: Database, job: Dict[str, Any]) -> None:
-    await reconcile_dirty_character_beliefs(db, limit=16)
+    live_instance_id = (job.get("payload") or {}).get("live_instance_id")
+    await reconcile_dirty_character_beliefs(
+        db,
+        limit=16,
+        instance_id=UUID(live_instance_id) if live_instance_id else None,
+    )
 
 
 # -------------------------------------------------
@@ -220,34 +235,31 @@ async def handle_rdf_liminal_classify(db: Database, job: Dict[str, Any]) -> None
 
 async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> None:
     claim_id = UUID(job["payload"]["claim_id"])
-    linked = await db.fetchrow(
-        """
-        SELECT 1
-        FROM aios.claim_candidate cc
-        JOIN aios.extracted_sentence es
-          ON es.sentence_id = cc.sentence_id
-        JOIN aios.document_section ds
-          ON ds.section_id = es.section_id
-        JOIN aios.dag_node n
-          ON n.node_id = ds.node_id
-        WHERE cc.claim_id = $1
-        """,
-        claim_id,
-    )
-    if not linked:
-        logger.warning(
-            "Skipping stale resolve_claim_context job for missing or unlinked claim %s",
-            claim_id,
-        )
-        return
     fuseki = FusekiClient(settings.fuseki_base_url)
-    context = await resolve_claim_context(db, fuseki, claim_id=claim_id)
+    try:
+        context = await resolve_claim_context(db, fuseki, claim_id=claim_id)
+    except RuntimeError as exc:
+        if str(exc).startswith("Cannot resolve context for missing or unlinked claim"):
+            logger.warning(
+                "Skipping stale resolve_claim_context job for missing or unlinked claim %s",
+                claim_id,
+            )
+            return
+        raise
     # Context resolution is the authority boundary: only explicitly world-scoped
     # resolved movement may proceed from semantic evidence into causal reality.
     if context and context.world_id and context.timeline_id:
         await admit_location_claim(
             db,CausalIntegrityKernel(db),claim_id=claim_id,
             world_id=context.world_id,timeline_id=context.timeline_id)
+
+    if context:
+        await enqueue_job(
+            db,
+            job_type="normalize_proposition",
+            payload={"claim_id": str(claim_id)},
+            priority=35,
+        )
 
 
 JOB_HANDLERS.update(
@@ -552,6 +564,11 @@ def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
         # Structural topology is intentionally single-writer at the worker
         # level. Do not let LIVE/BACKGROUND workers fall into this lane.
         return [structural], [structural]
+    if worker_index == 3:
+        # Preserve background ownership, but lend otherwise-idle capacity to
+        # claim-local LIVE work so accumulated context-resolution debt can drain.
+        # STRUCTURAL remains exclusively owned by worker 2.
+        return [background, default], [background, default, live]
     return [background], [background, default]
 
 
@@ -831,6 +848,10 @@ async def run_runner(poll_interval: float = 1.0) -> None:
     )
     if recovered:
         logger.warning("Recovered %d stale/expired pipeline jobs", recovered)
+
+    # Legacy repair belongs at runner startup, not on every NLP poll. New
+    # decomposition jobs receive their timeline partition at enqueue time.
+    await _backfill_decompose_timeline_partitions(db)
 
     rebalanced = await rebalance_queued_priorities(db)
     if rebalanced:

@@ -68,13 +68,16 @@ async def advance_matching_runtime_source_cursor(
                     "source cursor coordinate is invalid: live source timeline is not liminal"
                 )
             participant = await con.fetchrow(
-                """SELECT 1 FROM aios.conversation_participant
+                """SELECT character_instance_id
+                   FROM aios.conversation_participant
                    WHERE timeline_id=$1 AND character_id=$2 AND active
                    LIMIT 1""",
                 source_timeline_id, character_id,
             )
-            # Legacy timelines retain their original single-character contract;
-            # participant-aware timelines authorize any bound participant.
+            # Legacy timelines retain their original single-character contract.
+            # On participant-aware timelines, an explicit instance binding is
+            # authoritative: never substitute another instance merely because
+            # its runtime timeline metadata happens to match.
             if source["character_id"] != character_id and not participant:
                 raise RuntimeError("source cursor character is not a conversation participant")
             if source["session_id"] != session_id:
@@ -86,37 +89,79 @@ async def advance_matching_runtime_source_cursor(
             if int(source["event_id"]) != int(source_head_event_id):
                 raise RuntimeError("source cursor event identity mismatch")
 
-            rows = await con.fetch(
-                """
-                SELECT
-                    rs.instance_id,
-                    rs.timeline_id AS runtime_timeline_id,
-                    rs.source_timeline_id,
-                    rs.source_head_node_id,
-                    current_head.event_id AS current_source_event_id,
-                    current_source_world.world_key AS current_source_world_key
-                FROM aios.character_runtime_state rs
-                JOIN aios.character_instance ci
-                  ON ci.instance_id=rs.instance_id
-                JOIN aios.timeline rt
-                  ON rt.timeline_id=rs.timeline_id
-                LEFT JOIN aios.timeline current_source
-                  ON current_source.timeline_id=rs.source_timeline_id
-                LEFT JOIN aios.world current_source_world
-                  ON current_source_world.world_id=current_source.world_id
-                LEFT JOIN aios.dag_node current_head
-                  ON current_head.node_id=rs.source_head_node_id
-                WHERE ci.character_id=$1
-                  AND rt.session_id IS NOT DISTINCT FROM $2
-                  AND rt.user_name IS NOT DISTINCT FROM $3
-                  AND rt.scope_key=$4
-                FOR UPDATE OF rs
-                """,
-                character_id,
-                session_id,
-                user_name,
-                scope_key,
+            bound_instance_id = (
+                participant["character_instance_id"] if participant else None
             )
+            if participant and bound_instance_id is None:
+                raise RuntimeError(
+                    "conversation participant has no character instance binding"
+                )
+
+            if bound_instance_id is not None:
+                rows = await con.fetch(
+                    """
+                    SELECT
+                        rs.instance_id,
+                        rs.timeline_id AS runtime_timeline_id,
+                        rs.source_timeline_id,
+                        rs.source_head_node_id,
+                        current_head.event_id AS current_source_event_id,
+                        current_source_world.world_key AS current_source_world_key
+                    FROM aios.character_runtime_state rs
+                    JOIN aios.character_instance ci
+                      ON ci.instance_id=rs.instance_id
+                    LEFT JOIN aios.timeline current_source
+                      ON current_source.timeline_id=rs.source_timeline_id
+                    LEFT JOIN aios.world current_source_world
+                      ON current_source_world.world_id=current_source.world_id
+                    LEFT JOIN aios.dag_node current_head
+                      ON current_head.node_id=rs.source_head_node_id
+                    WHERE rs.instance_id=$1
+                      AND ci.character_id=$2
+                    FOR UPDATE OF rs
+                    """,
+                    bound_instance_id,
+                    character_id,
+                )
+                if not rows:
+                    raise RuntimeError(
+                        "conversation participant is bound to character instance "
+                        f"{bound_instance_id}, but that instance has no runtime state"
+                    )
+            else:
+                # Compatibility path for legacy single-character timelines that
+                # predate explicit conversation-participant instance bindings.
+                rows = await con.fetch(
+                    """
+                    SELECT
+                        rs.instance_id,
+                        rs.timeline_id AS runtime_timeline_id,
+                        rs.source_timeline_id,
+                        rs.source_head_node_id,
+                        current_head.event_id AS current_source_event_id,
+                        current_source_world.world_key AS current_source_world_key
+                    FROM aios.character_runtime_state rs
+                    JOIN aios.character_instance ci
+                      ON ci.instance_id=rs.instance_id
+                    JOIN aios.timeline rt
+                      ON rt.timeline_id=rs.timeline_id
+                    LEFT JOIN aios.timeline current_source
+                      ON current_source.timeline_id=rs.source_timeline_id
+                    LEFT JOIN aios.world current_source_world
+                      ON current_source_world.world_id=current_source.world_id
+                    LEFT JOIN aios.dag_node current_head
+                      ON current_head.node_id=rs.source_head_node_id
+                    WHERE ci.character_id=$1
+                      AND rt.session_id IS NOT DISTINCT FROM $2
+                      AND rt.user_name IS NOT DISTINCT FROM $3
+                      AND rt.scope_key=$4
+                    FOR UPDATE OF rs
+                    """,
+                    character_id,
+                    session_id,
+                    user_name,
+                    scope_key,
+                )
 
             advanced: list[UUID] = []
             for row in rows:

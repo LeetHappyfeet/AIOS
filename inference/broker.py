@@ -41,6 +41,9 @@ class InferenceRequest:
     output_schema: Mapping[str, Any] | None = None
     temperature: float = 0.2
     max_tokens: int = 1200
+    # Host-owned bounded choice protocol. When populated, the model returns one
+    # opaque key (for example "A"), never JSON or action arguments.
+    choice_keys: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -79,7 +82,13 @@ class OpenAICompatibleClient:
                 raise RuntimeError(f"health returned HTTP {response.status}")
 
     def _complete(self, provider: InferenceProvider, request: InferenceRequest) -> str:
-        if request.output_schema and request.allowed_actions == {}:
+        if request.choice_keys:
+            instruction = (
+                "Return exactly one allowed choice key and nothing else. "
+                "Do not return JSON, markdown, explanation, or punctuation. "
+                "Allowed keys: " + ", ".join(request.choice_keys)
+            )
+        elif request.output_schema and request.allowed_actions == {}:
             instruction = (
                 "Return exactly one small JSON object and no markdown. "
                 "Follow the output shape stated by the user prompt. "
@@ -101,7 +110,9 @@ class OpenAICompatibleClient:
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
         }
-        if provider.capabilities.get("json_mode", True):
+        # JSON mode is useful for semantic extraction, but must not be used for
+        # bounded control choices. Choice syntax is owned and parsed by AIOS.
+        if not request.choice_keys and provider.capabilities.get("json_mode", True):
             body["response_format"] = {"type": "json_object"}
         thinking = provider.capabilities.get("thinking")
         if thinking is not None:
@@ -233,10 +244,36 @@ class InferenceBroker:
         lease_task = asyncio.create_task(renew_lease())
         try:
             text = await self.client.complete(provider, request)
-            payload = extract_json_object(text)
-            structured = validate_structured_response(
-                payload, allowed_actions=request.allowed_actions
-            )
+            if request.choice_keys:
+                raw_choice = text.strip()
+                # The control protocol remains host-owned. Accept either the
+                # preferred bare opaque token or the legacy minimal
+                # {"choice":"A"} envelope, but never actions/arguments/prose.
+                choice = raw_choice
+                if raw_choice.startswith("{") and raw_choice.endswith("}"):
+                    try:
+                        envelope = json.loads(raw_choice)
+                    except json.JSONDecodeError:
+                        envelope = None
+                    if (
+                        isinstance(envelope, dict)
+                        and set(envelope) == {"choice"}
+                        and isinstance(envelope.get("choice"), str)
+                    ):
+                        choice = envelope["choice"].strip()
+                if choice not in request.choice_keys:
+                    raise StructuredResponseError(
+                        f"response is not one allowed choice key: {raw_choice!r}"
+                    )
+                payload = {"choice": choice}
+                structured = StructuredInferenceResponse(
+                    expression="", actions=(), raw=payload
+                )
+            else:
+                payload = extract_json_object(text)
+                structured = validate_structured_response(
+                    payload, allowed_actions=request.allowed_actions
+                )
             latency_ms = int((time.monotonic() - started) * 1000)
             await self.db.execute(
                 """

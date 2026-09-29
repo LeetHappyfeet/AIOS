@@ -9,6 +9,8 @@ from aios_app.epistemic.research import (
     SemanticKnowledgeCoverageService,
     SemanticCorpusReinforcementService,
     research_terms,
+    assess_retrieval_evidence,
+    resolve_retrieval_demand,
 )
 
 
@@ -20,6 +22,114 @@ def test_research_terms_are_deterministic_and_drop_function_words():
         "red",
         "rocks",
     )
+
+
+def test_retrieval_demand_routes_character_preference_question_to_memory():
+    demand = resolve_retrieval_demand(
+        (
+            "The boardwalk was busy and Mia kept talking about the stores. "
+            "If I gave you money and dropped you in a clothing store by yourself now, "
+            "what would you come out wearing?"
+        ),
+        character_id="Renamon",
+    )
+    assert demand.route == "character"
+    assert demand.reason == "character_self_knowledge"
+    assert demand.focus_text.startswith("Renamon ")
+    assert "clothing" in demand.focus_text
+    assert "wearing" in demand.focus_text
+    assert "boardwalk" not in demand.focus_text
+
+
+def test_preference_demand_carries_answerability_semantics():
+    demand = resolve_retrieval_demand(
+        "Wait. Have you ever actually cared about sleeves before today?",
+        character_id="Renamon",
+    )
+    assert demand.route == "character"
+    assert demand.kind == "preference"
+    assert "sleeves" in demand.topic_terms
+    assert "cared" not in demand.topic_terms
+    assert demand.temporal_scope == "prior"
+
+
+def test_preference_topic_match_without_preference_relation_is_partial():
+    demand = resolve_retrieval_demand(
+        "Have you ever liked sleeves before today?",
+        character_id="Renamon",
+    )
+    status = assess_retrieval_evidence(demand, [{
+        "proposition_id": UUID("00000000-0000-0000-0000-000000000010"),
+        "claim_kind": "EVENT",
+        "subject_norm": "outfit",
+        "predicate_norm": "pull",
+        "object_norm": "sleeves",
+        "text": "the whole outfit a size up — and | pull | the sleeves",
+    }])
+    assert status is not None
+    assert status.status == "partial"
+    assert status.reason == "topic_related_relation_unestablished"
+
+
+def test_preference_relation_match_is_established():
+    demand = resolve_retrieval_demand(
+        "Have you ever liked sleeves before today?",
+        character_id="Renamon",
+    )
+    status = assess_retrieval_evidence(demand, [{
+        "proposition_id": UUID("00000000-0000-0000-0000-000000000011"),
+        "claim_kind": "BELIEF",
+        "subject_norm": "renamon",
+        "predicate_norm": "like",
+        "object_norm": "sleeves",
+        "text": "renamon | like | sleeves",
+    }])
+    assert status is not None
+    assert status.status == "established"
+
+
+def test_preference_without_topic_evidence_is_unestablished():
+    demand = resolve_retrieval_demand(
+        "Have you ever liked sleeves before today?",
+        character_id="Renamon",
+    )
+    status = assess_retrieval_evidence(demand, [{
+        "proposition_id": UUID("00000000-0000-0000-0000-000000000012"),
+        "claim_kind": "BELIEF",
+        "subject_norm": "renamon",
+        "predicate_norm": "like",
+        "object_norm": "libraries",
+        "text": "renamon | like | libraries",
+    }])
+    assert status is not None
+    assert status.status == "unestablished"
+
+
+def test_retrieval_demand_keeps_external_knowledge_question_general():
+    demand = resolve_retrieval_demand(
+        "What do you know about hematite?",
+        character_id="Renamon",
+    )
+    assert demand.route == "general"
+    assert demand.reason == "external_knowledge_question"
+
+
+def test_character_routed_attention_blocks_automatic_corpus_lookup():
+    attention = CognitiveAttentionInputs(
+        recent_newest=[{
+            "speaker_id": "Mia",
+            "speaker_role": "character",
+            "message_text": "What would you choose to wear?",
+        }],
+        visible_source_node_ids=frozenset(),
+        focus_text="What would you choose to wear?",
+        plugin_focus_text="",
+        retrieval_focus_text="Renamon choose wear",
+        goals=[],
+        knowledge_route="character",
+        demand_reason="character_self_knowledge",
+    )
+    assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
 
 
 def test_knowledge_demand_detects_missing_concepts():

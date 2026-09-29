@@ -148,15 +148,25 @@ async def record_validation_decision(
         decision_type,
         decision_key,
     )
-    for evidence_type, evidence_key in dependencies:
+
+    dependency_rows = list(dict.fromkeys(dependencies))
+    if dependency_rows:
+        evidence_types = [evidence_type for evidence_type, _ in dependency_rows]
+        evidence_keys = [evidence_key for _, evidence_key in dependency_rows]
         await db.execute(
             """
             INSERT INTO aios.semantic_validation_dependency (
                 decision_type, decision_key, evidence_type, evidence_key
-            ) VALUES ($1,$2,$3,$4)
+            )
+            SELECT $1, $2, u.evidence_type, u.evidence_key
+            FROM unnest($3::text[], $4::text[])
+                 AS u(evidence_type, evidence_key)
             ON CONFLICT DO NOTHING
             """,
-            decision_type, decision_key, evidence_type, evidence_key,
+            decision_type,
+            decision_key,
+            evidence_types,
+            evidence_keys,
         )
 
 
@@ -238,8 +248,21 @@ async def apply_local_revalidation_invalidations(
             # The classifier receipt is durable. Validation staleness means the
             # interpretation must be re-evaluated under current evidence; it
             # does not mean classifier version X never evaluated this pair.
-            # Keeping the relation row preserves the classifier fixpoint and
-            # prevents validation churn from recreating classifier work.
+            # Queue the exact pair instead of deleting the receipt or relying
+            # on a whole-history anti-join to rediscover stale validation.
+            await db.execute(
+                """
+                INSERT INTO aios.semantic_relation_validation_queue(
+                    decision_type, decision_key, enqueued_at, reason
+                )
+                VALUES ($1,$2,now(),'evidence_stale')
+                ON CONFLICT (decision_type, decision_key) DO UPDATE
+                SET enqueued_at=EXCLUDED.enqueued_at,
+                    reason=EXCLUDED.reason
+                """,
+                dtype,
+                item["decision_key"],
+            )
             continue
         elif dtype == "epistemic_promotion":
             await db.execute(
