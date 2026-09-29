@@ -389,6 +389,29 @@ async def verify_semantic_ownership(
     if proposed.status != "resolved":
         return proposed
 
+    # Explicit semantic ownership is an authority boundary, not a hypothesis
+    # that vector neighbors may overturn. Preserve a verification receipt while
+    # avoiding identity/neighbor queries whose result cannot change placement.
+    if proposed.resolution_source in PROTECTED_RESOLUTION_SOURCES:
+        verification = AdversarialVerification(
+            status="verified",
+            proposed_owner_key=proposed.owner_key,
+            winner_owner_key=proposed.owner_key,
+            winner_score=0,
+            runner_up_score=0,
+            margin=0,
+            stability=1.0,
+            matrix={},
+            vector_evidence={
+                "skipped": True,
+                "reason": "protected_explicit_ownership",
+            },
+        )
+        return replace(
+            proposed,
+            evidence={**proposed.evidence, "adversarial_verification": verification.as_meta()},
+        )
+
     candidates, canonical_speaker_id = await _plausible_candidates(db, row, proposed)
     if len(candidates) < 2:
         verification = AdversarialVerification(
@@ -415,16 +438,6 @@ async def verify_semantic_ownership(
     )
     verification = score_adversarial_matrix(matrix, proposed_owner_key=proposed.owner_key)
     verification = replace(verification, vector_evidence=vector_evidence)
-
-    if proposed.resolution_source in PROTECTED_RESOLUTION_SOURCES:
-        protected_status = replace(
-            verification,
-            status=("verified" if verification.status == "verified" else "protected_explicit"),
-        )
-        return replace(
-            proposed,
-            evidence={**proposed.evidence, "adversarial_verification": protected_status.as_meta()},
-        )
 
     if verification.status != "verified":
         return _unresolved_from(row, proposed, verification)
