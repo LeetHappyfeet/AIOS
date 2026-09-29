@@ -101,7 +101,7 @@ class CharacterGoalService:
         """
         await self.db.execute(
             """WITH target AS (
-                 SELECT character_id,world_id,owner_user_id,
+                 SELECT character_id,world_id,
                         meta->>'runtime_user_name' AS user_name,created_at
                  FROM aios.character_instance WHERE instance_id=$1
                ), candidates AS (
@@ -117,11 +117,8 @@ class CharacterGoalService:
                         OR source.world_id=t.world_id)
                    AND source.created_at<t.created_at
                    AND g.created_at<t.created_at AND g.updated_at<t.created_at
-                   AND ((t.owner_user_id IS NOT NULL
-                         AND source.owner_user_id=t.owner_user_id)
-                        OR (t.owner_user_id IS NULL AND source.owner_user_id IS NULL
-                            AND t.user_name IS NOT NULL AND t.user_name<>''
-                            AND source.meta->>'runtime_user_name'=t.user_name))
+                   AND t.user_name IS NOT NULL AND t.user_name<>''
+                   AND source.meta->>'runtime_user_name'=t.user_name
                    AND COALESCE(g.meta->>'created_by','') NOT IN
                        ('legacy_runtime_goal_import','goal_backfill')
                  ORDER BY COALESCE(g.meta->>'inherited_from_goal_id',g.goal_id::text),

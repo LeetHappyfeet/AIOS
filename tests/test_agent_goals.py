@@ -88,7 +88,7 @@ def test_persistent_continuity_requires_same_identity_and_excludes_future_update
     from inspect import getsource
     source = getsource(CharacterGoalService._carry_persistent)
     assert "source.character_id=t.character_id" in source
-    assert "source.owner_user_id=t.owner_user_id" in source
+    assert "owner_user_id" not in source
     assert "source.meta->>'runtime_user_name'=t.user_name" in source
     assert "g.updated_at<t.created_at" in source
     assert "c.status='active'" in source
