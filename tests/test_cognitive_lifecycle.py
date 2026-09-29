@@ -5,6 +5,14 @@ import pytest
 from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
 
 
+@pytest.fixture(autouse=True)
+def isolate_scene_refresh(monkeypatch):
+    # These are lifecycle unit tests; scene projection has separate coverage.
+    async def refresh(self, instance_id):
+        pass
+    monkeypatch.setattr("aios_app.epistemic.goals.CharacterGoalService._refresh_scene", refresh)
+
+
 class FakeDB:
     def __init__(self):
         self.goal_id=uuid4()
@@ -21,8 +29,9 @@ class FakeDB:
     async def execute_returning_row(self, sql, *args):
         self.executed.append((sql,args))
         if "UPDATE aios.character_agent_goal" in sql and self.goal_status=="active":
-            self.goal_status="completed"
-            return {"goal_id":self.goal_id}
+            self.goal_status=args[2]
+            return {"goal_id":self.goal_id,"goal_text":"Buy jacket",
+                    "priority":100,"meta":{},"status":self.goal_status}
         return None
 
     async def fetchrow(self, sql, *args):
@@ -96,7 +105,7 @@ async def test_irrelevant_goal_review_parks_goal_as_dormant():
     lifecycle=CognitiveLifecycleReconciler(db)
 
     original_finish=lifecycle.goals.finish
-    async def finish(*,instance_id,goal_id,status="completed"):
+    async def finish(*,instance_id,goal_id,status="completed",**kwargs):
         assert status=="dormant"
         db.goal_status="dormant"
         return type("Goal",(),{"goal_id":goal_id,"status":"dormant"})()

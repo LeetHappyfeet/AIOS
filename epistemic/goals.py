@@ -171,7 +171,7 @@ class CharacterGoalService:
                )
                INSERT INTO aios.character_agent_goal(instance_id,goal_text,priority,meta)
                SELECT $1,c.goal_text,c.priority,
-                      c.meta || jsonb_build_object('inherited_from_goal_id',c.root_id,
+                      (c.meta-'expectation'-'outcome_decision'-'resolution_kind'-'retry_request_id') || jsonb_build_object('inherited_from_goal_id',c.root_id,
                                                   'inherited_from_instance_id',c.instance_id::text)
                FROM candidates c WHERE c.status='active'
                ORDER BY c.priority,c.goal_id LIMIT 5
@@ -260,6 +260,11 @@ class CharacterGoalService:
         if not clean:
             raise ValueError("goal text cannot be empty")
         goal_meta = dict(meta or {})
+        if "expectation" in goal_meta:
+            from aios_app.agent.reinforcement import validate_expectation
+            if not isinstance(goal_meta["expectation"], Mapping):
+                raise ValueError("expectation must be an object")
+            goal_meta["expectation"] = validate_expectation(goal_meta["expectation"])
         if "origin_scene" not in goal_meta:
             origin_scene = await self._origin_scene(instance_id, source_node_id)
             if origin_scene:
@@ -306,49 +311,71 @@ class CharacterGoalService:
         return goal
 
     async def finish(
-        self,
-        *,
-        instance_id: UUID,
-        goal_id: UUID,
-        status: str = "completed",
-        refresh_scene: bool = True,
+        self, *, instance_id: UUID, goal_id: UUID, status: str = "completed",
+        refresh_scene: bool = True, resolution_kind: str | None = None,
+        verification: str = "unverified", source_node_id: UUID | None = None,
+        evidence_ids: list[str] | None = None, attempt_id: UUID | None = None,
     ) -> CognitiveGoal:
-        if status not in {"completed", "cancelled", "dormant"}:
+        """One status mutation; the database atomically owns its durable effects.
+
+        Verified appraisal is admitted separately by OutcomeResolver. Neither
+        callers nor model-visible goal actions can upgrade evidence authority.
+        """
+        if status not in {"completed", "failed", "cancelled", "dormant"}:
             raise ValueError("invalid goal status")
+        if verification not in {"unverified", "reviewed", "projected"}:
+            raise ValueError("goal finish cannot assert verified authority")
+        decision = {"resolution_kind": resolution_kind or status,
+                    "outcome_decision": {"verification": verification,
+                        "source_node_id": str(source_node_id) if source_node_id else None,
+                        "evidence_ids": list(evidence_ids or [])}}
         row = await self._returning(
             """UPDATE aios.character_agent_goal
-               SET status=$3,
-                   completed_at=CASE WHEN $3 IN ('completed','cancelled') THEN now() ELSE NULL END,
+               SET status=$3,meta=meta || $4::jsonb,
+                   completed_at=CASE WHEN $3 IN ('completed','failed','cancelled') THEN now() ELSE NULL END,
                    updated_at=now()
-               WHERE goal_id=$1 AND instance_id=$2 AND status IN ('active','scheduled')
+               WHERE goal_id=$1 AND instance_id=$2 AND status IN ('active','scheduled','dormant')
+                 AND ($5::uuid IS NULL OR EXISTS (SELECT 1 FROM aios.character_goal_attempt a
+                      WHERE a.goal_id=$1 AND a.attempt_id=$5 AND a.closed_at IS NULL))
                RETURNING goal_id,goal_text,status,priority,meta""",
-            goal_id, instance_id, status,
+            goal_id, instance_id, status, json.dumps(decision), attempt_id,
         )
         if not row:
-            raise LookupError("active goal not found")
+            raise LookupError("open goal not found")
         goal = self._goal(row)
-        await self.db.execute(
-            """UPDATE aios.character_temporal_trigger
-               SET status='cancelled',cancelled_at=COALESCE(cancelled_at,now()),
-                   last_evaluated_at=now(),last_outcome=$2,updated_at=now()
-               WHERE goal_id=$1 AND status='scheduled'""",
-            goal_id, f"goal_{status}",
-        )
-        if status in {"completed", "cancelled"}:
-            await self._reconcile_terminal_threads(instance_id, goal_id, status)
-        elif status == "dormant":
-            await self.db.execute(
-                """UPDATE aios.character_cognitive_thread
-                   SET status='resolved',resolved_at=COALESCE(resolved_at,now()),
-                       pressure=0,meta=meta || $3::jsonb,updated_at=now()
-                   WHERE instance_id=$1 AND goal_id=$2 AND status<>'resolved'""",
-                instance_id, goal_id,
-                json.dumps({"resolution_kind":"dormant","resolved_by":"goal_lifecycle"}),
-            )
-        await self._invalidate(instance_id)
         if refresh_scene:
             await self._refresh_scene(instance_id)
         return goal
+
+    async def retry(
+        self, *, instance_id: UUID, goal_id: UUID, request_id: UUID,
+        refresh_scene: bool = True,
+    ) -> CognitiveGoal:
+        """Explicit idempotent retry; timer reactivation never starts an attempt."""
+        row = await self._returning(
+            """UPDATE aios.character_agent_goal
+               SET status='active',completed_at=NULL,updated_at=now(),
+                   meta=(meta-'outcome_decision'-'resolution_kind'-'expectation') ||
+                        jsonb_build_object('retry_request_id',$3::text)
+               WHERE goal_id=$1 AND instance_id=$2 AND status IN ('completed','failed','cancelled')
+                 AND NOT EXISTS (SELECT 1 FROM aios.character_goal_attempt
+                                 WHERE goal_id=$1 AND retry_request_id=$3)
+               RETURNING goal_id,goal_text,status,priority,meta""",
+            goal_id, instance_id, request_id,
+        )
+        if not row:
+            row = await self.db.fetchrow(
+                """SELECT g.goal_id,g.goal_text,g.status,g.priority,g.meta
+                   FROM aios.character_agent_goal g
+                   JOIN aios.character_goal_attempt a ON a.goal_id=g.goal_id
+                   WHERE g.goal_id=$1 AND g.instance_id=$2 AND a.retry_request_id=$3""",
+                goal_id, instance_id, request_id,
+            )
+        if not row:
+            raise LookupError("terminal goal not found or retry is not eligible")
+        if refresh_scene:
+            await self._refresh_scene(instance_id)
+        return self._goal(row)
 
     async def reconcile_evidence(
         self,
@@ -399,32 +426,16 @@ class CharacterGoalService:
         }
         if polarity < 0:
             if active:
-                row = await self._returning(
-                    """UPDATE aios.character_agent_goal
-                       SET status='cancelled',completed_at=now(),updated_at=now(),
-                           meta=meta || $3::jsonb
-                       WHERE goal_id=$1 AND instance_id=$2 AND status IN ('active','scheduled')
-                       RETURNING goal_id,goal_text,status,priority,meta""",
-                    active["goal_id"], instance_id,
-                    json.dumps({**evidence_meta, "resolution_kind": "negated"}),
-                )
-                if not row:
+                try:
+                    return await self.finish(
+                        instance_id=instance_id, goal_id=active["goal_id"],
+                        status="cancelled", resolution_kind="negated",
+                        source_node_id=source_node_id,
+                        evidence_ids=[str(source_unit_id)] if source_unit_id else [],
+                        refresh_scene=refresh_scene,
+                    )
+                except LookupError:
                     return None
-                await self.db.execute(
-                    """UPDATE aios.character_temporal_trigger
-                       SET status='cancelled',cancelled_at=COALESCE(cancelled_at,now()),
-                           last_evaluated_at=now(),last_outcome='goal_withdrawn',updated_at=now()
-                       WHERE goal_id=$1 AND status='scheduled'""",
-                    active["goal_id"],
-                )
-                goal = self._goal(row)
-                await self._reconcile_terminal_threads(
-                    instance_id, goal.goal_id, "cancelled", resolution_kind="negated"
-                )
-                await self._invalidate(instance_id)
-                if refresh_scene:
-                    await self._refresh_scene(instance_id)
-                return goal
             return None
 
         if active:
@@ -479,9 +490,9 @@ class CharacterGoalService:
         self, instance_id: UUID, goal_id: UUID | None, status: str,
         *, resolution_kind: str | None = None,
     ) -> None:
-        if goal_id is None or status not in {"completed", "cancelled"}:
+        if goal_id is None or status not in {"completed", "failed", "cancelled"}:
             return
-        reason = resolution_kind or ("cancelled" if status == "cancelled" else "goal_completed")
+        reason = resolution_kind or {"cancelled":"cancelled", "failed":"goal_failed", "completed":"goal_completed"}[status]
         await self.db.execute(
             """UPDATE aios.character_cognitive_thread
                SET status='resolved',resolved_at=COALESCE(resolved_at,now()),

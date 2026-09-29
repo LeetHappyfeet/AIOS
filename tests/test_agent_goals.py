@@ -7,6 +7,14 @@ import pytest
 from aios_app.epistemic.goals import CharacterGoalService, CognitiveGoal, ResolvedGoalSet
 
 
+@pytest.fixture(autouse=True)
+def isolate_scene_refresh(monkeypatch):
+    # These are lifecycle unit tests; scene projection has separate coverage.
+    async def refresh(self, instance_id):
+        pass
+    monkeypatch.setattr("aios_app.epistemic.goals.CharacterGoalService._refresh_scene", refresh)
+
+
 INSTANCE_ID = UUID("00000000-0000-0000-0000-000000000001")
 GOAL_ID = UUID("00000000-0000-0000-0000-000000000002")
 
@@ -102,7 +110,7 @@ def test_goal_formation_runs_on_isolated_inference_job():
     registry=(root / "pipeline" / "job_registry.py").read_text()
     assert 'job_type="goal_formulation_inference"' in operations
     assert '"goal_formulation_inference": JobSpec(ResourceClass.GLOBAL' in registry
-    assert "source['speaker_role'] not in" in operations
+    assert "source['speaker_role'] not in" in operations.replace('"', "'")
 
 
 def test_goal_backfill_is_bounded_and_character_owned():

@@ -43,7 +43,7 @@ class CognitiveLifecycleReconciler:
         self, *, instance_id: UUID, goal_id: UUID, resolution_kind: str,
         evidence_type: str, evidence_id: str | None = None,
         source_node_id: UUID | None = None, confidence: float = 1.0,
-        meta: Mapping[str, Any] | None = None,
+        meta: Mapping[str, Any] | None = None, attempt_id: UUID | None = None,
     ) -> bool:
         await self.record_goal_evidence(
             instance_id=instance_id,goal_id=goal_id,evidence_type=evidence_type,
@@ -52,20 +52,13 @@ class CognitiveLifecycleReconciler:
         )
         try:
             await self.goals.finish(
-                instance_id=instance_id, goal_id=goal_id, status="completed"
+                instance_id=instance_id, goal_id=goal_id, status="completed",
+                resolution_kind=resolution_kind, verification="reviewed",
+                source_node_id=source_node_id, evidence_ids=[evidence_id] if evidence_id else [], attempt_id=attempt_id
             )
         except LookupError:
             await self.reconcile_goal_threads(instance_id=instance_id,goal_id=goal_id)
             return False
-        await self.db.execute(
-            """UPDATE aios.character_agent_goal
-               SET meta=meta || $3::jsonb,updated_at=now()
-               WHERE goal_id=$1 AND instance_id=$2""",
-            goal_id, instance_id,
-            json.dumps({"resolution_kind":resolution_kind,
-                        "completion_confidence":max(0.0,min(1.0,float(confidence)))},
-                       default=str),
-        )
         await self.reconcile_goal_threads(instance_id=instance_id,goal_id=goal_id)
         return True
 
@@ -76,10 +69,10 @@ class CognitiveLifecycleReconciler:
         if not goal:
             return
         status=str(goal["status"])
-        if status not in {"completed","cancelled"}:
+        if status not in {"completed","failed","cancelled","dormant"}:
             return
         meta=self._mapping(goal["meta"])
-        reason=str(meta.get("resolution_kind") or ("cancelled" if status=="cancelled" else "goal_completed"))
+        reason=str(meta.get("resolution_kind") or {"cancelled":"cancelled","failed":"goal_failed","completed":"goal_completed","dormant":"dormant"}[status])
         await self.db.execute(
             """UPDATE aios.character_cognitive_thread
                SET status='resolved',resolved_at=COALESCE(resolved_at,now()),
@@ -101,6 +94,14 @@ class CognitiveLifecycleReconciler:
             row=await self.db.fetchrow(
                 "SELECT goal_id FROM aios.character_cognitive_thread WHERE thread_id=$1",thread_id)
             goal_id=row["goal_id"] if row else None
+
+        attempt_id = operation.get("goal_attempt_id")
+        if goal_id is not None and "goal_attempt_id" in operation:
+            current = await self.db.fetchrow(
+                "SELECT attempt_id FROM aios.character_goal_attempt WHERE goal_id=$1 AND instance_id=$2 AND closed_at IS NULL",
+                goal_id, operation["instance_id"])
+            if not attempt_id or not current or current["attempt_id"] != attempt_id:
+                return  # Stale work remains telemetry, not new-attempt evidence.
 
         if goal_id is not None and terminal_status == "succeeded":
             operation_type=str(operation.get("operation_type") or "")
@@ -124,6 +125,7 @@ class CognitiveLifecycleReconciler:
                         evidence_id=str(operation["operation_id"]),
                         source_node_id=operation.get("source_node_id"),confidence=.8,
                         meta={"label":result.get("label"),"option_index":option_index},
+                        attempt_id=attempt_id,
                     )
                 elif relation is not None:
                     lifecycle_effect=(
@@ -139,24 +141,14 @@ class CognitiveLifecycleReconciler:
                               **({"lifecycle_effect":lifecycle_effect} if lifecycle_effect else {})},
                     )
                     if option_index in {3,4}:
-                        terminal_status="cancelled" if option_index==3 else "dormant"
+                        goal_status="failed" if option_index==3 else "dormant"
                         try:
                             await self.goals.finish(
                                 instance_id=operation["instance_id"],
-                                goal_id=goal_id,status=terminal_status)
-                            if option_index==3:
-                                await self.db.execute(
-                                    """UPDATE aios.character_agent_goal
-                                       SET meta=meta || $3::jsonb,updated_at=now()
-                                       WHERE goal_id=$1 AND instance_id=$2""",
-                                    goal_id,operation["instance_id"],
-                                    json.dumps({
-                                        "resolution_kind":"opportunity_missed",
-                                        "resolution_operation_id":str(operation["operation_id"]),
-                                        "resolution_source_node_id":str(operation.get("source_node_id") or ""),
-                                    }))
-                                await self.reconcile_goal_threads(
-                                    instance_id=operation["instance_id"],goal_id=goal_id)
+                                goal_id=goal_id,status=goal_status,
+                                resolution_kind=lifecycle_effect, verification="reviewed",
+                                source_node_id=operation.get("source_node_id"),
+                                evidence_ids=[str(operation["operation_id"])], attempt_id=attempt_id)
                         except LookupError:
                             pass
             elif operation_type != "planning.review":
@@ -180,7 +172,7 @@ class CognitiveLifecycleReconciler:
                FROM aios.character_cognitive_thread t
                LEFT JOIN aios.character_agent_goal g ON g.goal_id=t.goal_id
                WHERE t.thread_id=$1""",thread_id)
-        if thread and thread["goal_id"] and str(thread["goal_status"]) in {"completed","cancelled"}:
+        if thread and thread["goal_id"] and str(thread["goal_status"]) in {"completed","failed","cancelled","dormant"}:
             await self.reconcile_goal_threads(
                 instance_id=operation["instance_id"],goal_id=thread["goal_id"])
             return

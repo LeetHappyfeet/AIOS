@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+INSTANCE_ID = UUID("00000000-0000-0000-0000-000000000001")
+
 from aios_app.agent.actions import default_action_registry
 from aios_app.agent.autonomy import AutonomyScheduler
 from aios_app.agent.temporal import TemporalTriggerStore, resolve_goal_time_expression

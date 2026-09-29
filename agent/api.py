@@ -75,7 +75,42 @@ def _action_payload(action) -> dict[str, Any]:
     }
 
 
+class GoalRetryIn(BaseModel):
+    request_id: UUID
+
+
+class OutcomeCorrectionIn(BaseModel):
+    request_id: UUID
+    reason: str = Field(min_length=1, max_length=500)
+
+
 def install_external_agency_routes(app, db) -> None:
+    @app.get("/agent/instance/{instance_id}/reinforcement")
+    async def inspect_reinforcement(instance_id: UUID, limit: int = 50):
+        from .reinforcement import ShadowReinforcementService
+        return await ShadowReinforcementService(db).inspect(instance_id, limit=limit)
+
+    @app.post("/agent/instance/{instance_id}/goal/{goal_id}/retry")
+    async def retry_goal(instance_id: UUID, goal_id: UUID, req: GoalRetryIn):
+        from fastapi import HTTPException
+        from aios_app.epistemic.goals import CharacterGoalService
+        try:
+            goal = await CharacterGoalService(db).retry(instance_id=instance_id, goal_id=goal_id, request_id=req.request_id)
+        except LookupError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"goal_id": str(goal.goal_id), "status": goal.status}
+
+    @app.post("/agent/instance/{instance_id}/outcome/{outcome_id}/invalidate")
+    async def invalidate_outcome(instance_id: UUID, outcome_id: UUID, req: OutcomeCorrectionIn):
+        from fastapi import HTTPException
+        from .outcomes import OutcomeResolver
+        try:
+            corrected = await OutcomeResolver(db).invalidate(instance_id=instance_id, outcome_id=outcome_id,
+                                                              request_id=req.request_id, reason=req.reason)
+        except (LookupError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"outcome_id": str(corrected), "shadow": True}
+
     @app.post("/agent/workers")
     async def register_remote_worker(req: RemoteWorkerIn):
         row = await RemoteWorkerStore(db).register(**req.model_dump())
