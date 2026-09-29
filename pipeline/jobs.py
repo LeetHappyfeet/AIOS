@@ -462,6 +462,42 @@ async def heartbeat_job(
 # State transitions
 # ---------------------------------------------------------------------
 
+async def defer_claimed_job(
+    db: Database,
+    job_id: UUID,
+    *,
+    worker_id: str,
+    delay_seconds: float = 0.5,
+) -> bool:
+    """Return a throttled lease to the runnable queue without marking failure.
+
+    Attempts are decremented because admission denial means execution never
+    started. Ownership is checked so a stale worker cannot release another
+    worker's lease.
+    """
+    row = await db.execute_returning_row(
+        """
+        UPDATE aios.pipeline_job
+        SET status='queued',
+            attempts=GREATEST(attempts - 1, 0),
+            worker_id=NULL,
+            claimed_at=NULL,
+            heartbeat_at=NULL,
+            lease_expires_at=NULL,
+            run_after=GREATEST(run_after, now() + make_interval(secs => $3)),
+            updated_at=now()
+        WHERE job_id=$1
+          AND status='running'
+          AND worker_id=$2
+        RETURNING job_id
+        """,
+        job_id,
+        worker_id,
+        max(0.0, float(delay_seconds)),
+    )
+    return bool(row)
+
+
 async def mark_running(db: Database, job_id: UUID) -> None:
     await db.execute(
         """
