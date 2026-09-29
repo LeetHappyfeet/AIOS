@@ -236,6 +236,7 @@ class CognitiveOperationEngine:
         from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
         await CognitiveLifecycleReconciler(self.db).reconcile_operation(
             operation=op,result=result,terminal_status="succeeded")
+        await self._resume_source_task(op, status="succeeded", result=result)
 
     async def _resume_source_task(self, op: Mapping[str,Any], *, status: str,
                                   result: Mapping[str,Any]) -> None:
