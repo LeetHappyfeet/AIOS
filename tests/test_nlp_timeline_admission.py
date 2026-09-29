@@ -55,6 +55,6 @@ def test_nlp_claim_excludes_running_same_timeline_and_orders_causally():
     assert "q.job_type <> 'decompose_claim_frames'" in db.claim_sql
     assert "active.job_type='decompose_claim_frames'" in db.claim_sql
     assert "active.partition_key=q.partition_key" in db.claim_sql
-    assert "WHEN q.job_type = 'decompose_claim_frames' THEN 1" in db.claim_sql
-    assert "SELECT dn.event_id" in db.claim_sql
-    assert "SELECT es.sentence_index" in db.claim_sql
+    assert "earlier.status='queued'" in db.claim_sql
+    assert "earlier.partition_key=q.partition_key" in db.claim_sql
+    assert "earlier.created_at < q.created_at" in db.claim_sql
