@@ -564,6 +564,11 @@ def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
         # Structural topology is intentionally single-writer at the worker
         # level. Do not let LIVE/BACKGROUND workers fall into this lane.
         return [structural], [structural]
+    if worker_index == 3:
+        # Preserve background ownership, but lend otherwise-idle capacity to
+        # claim-local LIVE work so accumulated context-resolution debt can drain.
+        # STRUCTURAL remains exclusively owned by worker 2.
+        return [background, default], [background, default, live]
     return [background], [background, default]
 
 
