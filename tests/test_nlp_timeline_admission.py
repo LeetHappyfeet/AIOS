@@ -38,7 +38,7 @@ def test_decompose_enqueue_uses_timeline_partition():
     assert partition.startswith("timeline:")
 
 
-def test_nlp_claim_backfills_legacy_jobs_and_excludes_running_same_timeline():
+def test_nlp_claim_excludes_running_same_timeline_and_orders_causally():
     db = TimelineDb()
     asyncio.run(
         fetch_next_job(
@@ -49,11 +49,12 @@ def test_nlp_claim_backfills_legacy_jobs_and_excludes_running_same_timeline():
         )
     )
 
-    assert db.executed
-    backfill_sql = db.executed[0][0]
-    assert "job_type='decompose_claim_frames'" in backfill_sql
-    assert "partition_key='timeline:'" in backfill_sql
+    # Queue repair runs once at runner startup; polling must remain read/claim only.
+    assert not db.executed
 
     assert "q.job_type <> 'decompose_claim_frames'" in db.claim_sql
     assert "active.job_type='decompose_claim_frames'" in db.claim_sql
     assert "active.partition_key=q.partition_key" in db.claim_sql
+    assert "WHEN q.job_type = 'decompose_claim_frames' THEN 1" in db.claim_sql
+    assert "SELECT dn.event_id" in db.claim_sql
+    assert "SELECT es.sentence_index" in db.claim_sql
