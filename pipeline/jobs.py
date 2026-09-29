@@ -327,9 +327,6 @@ async def fetch_next_job(
     workers and starve proposition normalization/materialization.
     """
 
-    if resource_class == "NLP":
-        await _backfill_decompose_timeline_partitions(db)
-
     row = await db.execute_returning_row(
         """
         WITH next_job AS (
@@ -359,6 +356,10 @@ async def fetch_next_job(
               )
             ORDER BY
                 CASE
+                    -- Frame decomposition consumes prior discourse state. Do not
+                    -- let foreground promotion reorder claims inside a causal
+                    -- timeline; later claims must not outrun their antecedents.
+                    WHEN q.job_type = 'decompose_claim_frames' THEN 1
                     WHEN q.foreground_until > now() THEN 0 ELSE 1
                 END ASC,
                 CASE
@@ -383,6 +384,20 @@ async def fetch_next_job(
                     THEN 1 ELSE 0
                 END ASC,
                 q.priority ASC,
+                CASE WHEN q.job_type = 'decompose_claim_frames' THEN (
+                    SELECT dn.event_id
+                    FROM aios.claim_candidate cc
+                    JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                    JOIN aios.document_section ds ON ds.section_id=es.section_id
+                    JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                    WHERE cc.claim_id=(q.payload->>'claim_id')::uuid
+                ) END ASC NULLS LAST,
+                CASE WHEN q.job_type = 'decompose_claim_frames' THEN (
+                    SELECT es.sentence_index
+                    FROM aios.claim_candidate cc
+                    JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                    WHERE cc.claim_id=(q.payload->>'claim_id')::uuid
+                ) END ASC NULLS LAST,
                 q.created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
