@@ -579,24 +579,99 @@ STRUCTURAL_BATCH_PLAN: tuple[tuple[str, int], ...] = (
 )
 
 
-def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
-    """Reserve capacity for serial semantic stages that share the LIVE lane.
+async def _semantic_stage_reservation(
+    db: Database,
+    worker_index: int,
+) -> Optional[list[str]]:
+    """Choose LIVE semantic work from current downstream pressure.
 
-    Worker 0 advances interpretation/context. Worker 1 advances the immediately
-    downstream proposition/materialization stages. This prevents a resolver
-    backlog from occupying every LIVE semantic worker while normalization ages
-    indefinitely. Structural/background workers keep their lane reservations,
-    and all workers fall back to ordinary lane scheduling when their reserved
-    stage has no runnable work.
+    Worker 0 always protects context resolution capacity. Worker 1 protects
+    normalization, while worker 3 may lend its otherwise-background capacity to
+    the most pressured claim-local LIVE stage. Worker 2 remains the exclusive
+    STRUCTURAL writer.
+
+    Pressure is age-first with queue depth as the tie-breaker. Thresholds keep
+    the adaptive worker on background/default work when LIVE is healthy while
+    preventing a fast producer (context resolution) from starving downstream
+    normalization/materialization.
     """
     if worker_index == 0:
         return ["resolve_claim_context"]
+
     if worker_index == 1:
         return [
             "normalize_proposition",
             "materialize_event_occurrences",
             "project_character_knowledge",
         ]
+
+    if worker_index != 3:
+        return None
+
+    rows = await db.fetch(
+        """
+        SELECT
+            job_type,
+            COUNT(*)::integer AS queued,
+            COALESCE(
+                EXTRACT(EPOCH FROM (now() - MIN(created_at))),
+                0
+            )::double precision AS oldest_seconds
+        FROM aios.pipeline_job
+        WHERE status='queued'
+          AND run_after <= now()
+          AND resource_class='SEMANTIC'
+          AND scheduling_lane='LIVE'
+          AND job_type = ANY($1::text[])
+        GROUP BY job_type
+        """,
+        [
+            "normalize_proposition",
+            "materialize_event_occurrences",
+            "project_character_knowledge",
+            "resolve_claim_context",
+        ],
+    )
+    pressure = {
+        str(row["job_type"]): (
+            int(row["queued"] or 0),
+            float(row["oldest_seconds"] or 0.0),
+        )
+        for row in rows
+    }
+
+    normalize_q, normalize_age = pressure.get("normalize_proposition", (0, 0.0))
+    materialize_q, materialize_age = pressure.get(
+        "materialize_event_occurrences", (0, 0.0)
+    )
+    knowledge_q, knowledge_age = pressure.get(
+        "project_character_knowledge", (0, 0.0)
+    )
+    resolver_q, resolver_age = pressure.get("resolve_claim_context", (0, 0.0))
+
+    # Downstream pressure gets first claim on adaptive capacity. The depth
+    # thresholds catch bursts; the age threshold catches low-volume starvation.
+    candidates: list[tuple[float, int, str]] = []
+    if normalize_q >= 100 or normalize_age >= 30.0:
+        candidates.append((normalize_age, normalize_q, "normalize_proposition"))
+    if materialize_q >= 100 or materialize_age >= 30.0:
+        candidates.append(
+            (materialize_age, materialize_q, "materialize_event_occurrences")
+        )
+    if knowledge_q >= 25 or knowledge_age >= 30.0:
+        candidates.append(
+            (knowledge_age, knowledge_q, "project_character_knowledge")
+        )
+
+    if candidates:
+        candidates.sort(reverse=True)
+        return [item[2] for item in candidates]
+
+    # Resolver overflow is deliberately conservative: worker 0 already owns
+    # this stage, and adaptive capacity should not recreate resolver starvation.
+    if resolver_q >= 100 or resolver_age >= 60.0:
+        return ["resolve_claim_context"]
+
     return None
 
 
@@ -613,7 +688,7 @@ async def _claim_for_worker(
     reserved_job_types: Optional[list[str]] = None
     if resource_class == ResourceClass.SEMANTIC:
         preferred, fallback = _semantic_lane_order(worker_index)
-        reserved_job_types = _semantic_stage_reservation(worker_index)
+        reserved_job_types = await _semantic_stage_reservation(db, worker_index)
 
     async with claim_gate:
         # First honor a stage reservation. This is deliberately narrower than
