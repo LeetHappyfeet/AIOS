@@ -429,7 +429,7 @@ async def fetch_next_job(
                 END ASC,
                 q.priority ASC,
                 q.created_at ASC
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF q SKIP LOCKED
             LIMIT 1
         )
         UPDATE aios.pipeline_job pj

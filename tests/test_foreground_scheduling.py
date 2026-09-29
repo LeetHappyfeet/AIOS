@@ -27,6 +27,7 @@ def test_job_claim_uses_current_source_lineage_for_queued_descendants():
     jobs = source("pipeline/jobs.py")
     assert "_foreground_context_for_enqueue" in jobs
     assert "LEFT JOIN LATERAL" in jobs
+    assert "FOR UPDATE OF q SKIP LOCKED" in jobs
     assert "current_foreground.updated_at DESC NULLS LAST" in jobs
     assert "kae.instance_id" in jobs
     assert "dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id" in jobs
