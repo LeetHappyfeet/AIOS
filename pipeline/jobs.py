@@ -358,6 +358,7 @@ async def fetch_next_job(
                             SELECT 1
                             FROM aios.pipeline_job earlier
                             WHERE earlier.status='queued'
+                              AND earlier.run_after <= now()
                               AND earlier.job_type='decompose_claim_frames'
                               AND earlier.partition_key=q.partition_key
                               AND (
