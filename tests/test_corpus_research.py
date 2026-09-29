@@ -48,7 +48,8 @@ def test_preference_demand_carries_answerability_semantics():
     )
     assert demand.route == "character"
     assert demand.kind == "preference"
-    assert "sleeves" in demand.topic_terms\n    assert "cared" not in demand.topic_terms
+    assert "sleeves" in demand.topic_terms
+    assert "cared" not in demand.topic_terms
     assert demand.temporal_scope == "prior"
 
 
