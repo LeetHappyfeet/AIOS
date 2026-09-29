@@ -94,8 +94,8 @@ def test_relationship_observation_can_cross_speaker_boundary():
     assert relationships[0].meta["character_owned"] is False
 
 
-def test_v3_interpreter_version_forces_old_commit_refresh():
-    assert INTERPRETER_VERSION == "message-cognition-v6"
+def test_v7_interpreter_version_forces_old_commit_refresh():
+    assert INTERPRETER_VERSION == "message-cognition-v7"
 
 
 def test_event_does_not_promote_first_token_to_subject():

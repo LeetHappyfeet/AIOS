@@ -105,6 +105,38 @@ class CharacterGoalService:
         )
         return ResolvedGoalSet(goals)
 
+    async def list_scheduled(self, instance_id: UUID, *, limit: int = 8) -> list[dict[str, Any]]:
+        """Return future goals without promoting them into active attention."""
+        rows = await self.db.fetch(
+            """SELECT g.goal_id,g.goal_text,g.priority,g.meta,t.due_at,
+                      t.window_end_at,t.timezone,t.reason,t.time_expression
+               FROM aios.character_agent_goal g
+               LEFT JOIN LATERAL (
+                 SELECT due_at,window_end_at,timezone,reason,payload->>'time_expression' AS time_expression
+                 FROM aios.character_temporal_trigger
+                 WHERE goal_id=g.goal_id AND status='scheduled'
+                 ORDER BY due_at LIMIT 1
+               ) t ON true
+               WHERE g.instance_id=$1 AND g.status='scheduled'
+               ORDER BY t.due_at NULLS LAST,g.priority,g.created_at
+               LIMIT $2""",
+            instance_id, max(1, min(int(limit), 32)),
+        )
+        return [
+            {
+                "goal_id": str(row["goal_id"]),
+                "text": str(row["goal_text"]),
+                "priority": int(row["priority"]),
+                "status": "scheduled",
+                "due_at": row["due_at"].isoformat() if row["due_at"] else None,
+                "window_end_at": row["window_end_at"].isoformat() if row["window_end_at"] else None,
+                "timezone": row["timezone"],
+                "reason": row["reason"],
+                "time_expression": row["time_expression"],
+            }
+            for row in rows
+        ]
+
     async def _carry_persistent(self, instance_id: UUID) -> None:
         """Bring forward explicit standing intentions within the same character/user.
 
@@ -288,13 +320,20 @@ class CharacterGoalService:
                SET status=$3,
                    completed_at=CASE WHEN $3 IN ('completed','cancelled') THEN now() ELSE NULL END,
                    updated_at=now()
-               WHERE goal_id=$1 AND instance_id=$2 AND status='active'
+               WHERE goal_id=$1 AND instance_id=$2 AND status IN ('active','scheduled')
                RETURNING goal_id,goal_text,status,priority,meta""",
             goal_id, instance_id, status,
         )
         if not row:
             raise LookupError("active goal not found")
         goal = self._goal(row)
+        await self.db.execute(
+            """UPDATE aios.character_temporal_trigger
+               SET status='cancelled',cancelled_at=COALESCE(cancelled_at,now()),
+                   last_evaluated_at=now(),last_outcome=$2,updated_at=now()
+               WHERE goal_id=$1 AND status='scheduled'""",
+            goal_id, f"goal_{status}",
+        )
         if status in {"completed", "cancelled"}:
             await self._reconcile_terminal_threads(instance_id, goal_id, status)
         elif status == "dormant":
@@ -346,7 +385,7 @@ class CharacterGoalService:
                ORDER BY created_at DESC, goal_id DESC""",
             instance_id, topic,
         )
-        active = next((row for row in rows if str(row["status"]) == "active"), None)
+        active = next((row for row in rows if str(row["status"]) in {"active", "scheduled"}), None)
         dormant = next((row for row in rows if str(row["status"]) == "dormant"), None)
         evidence_meta = {
             "semantic_topic_key": topic,
@@ -364,13 +403,20 @@ class CharacterGoalService:
                     """UPDATE aios.character_agent_goal
                        SET status='cancelled',completed_at=now(),updated_at=now(),
                            meta=meta || $3::jsonb
-                       WHERE goal_id=$1 AND instance_id=$2 AND status='active'
+                       WHERE goal_id=$1 AND instance_id=$2 AND status IN ('active','scheduled')
                        RETURNING goal_id,goal_text,status,priority,meta""",
                     active["goal_id"], instance_id,
                     json.dumps({**evidence_meta, "resolution_kind": "negated"}),
                 )
                 if not row:
                     return None
+                await self.db.execute(
+                    """UPDATE aios.character_temporal_trigger
+                       SET status='cancelled',cancelled_at=COALESCE(cancelled_at,now()),
+                           last_evaluated_at=now(),last_outcome='goal_withdrawn',updated_at=now()
+                       WHERE goal_id=$1 AND status='scheduled'""",
+                    active["goal_id"],
+                )
                 goal = self._goal(row)
                 await self._reconcile_terminal_threads(
                     instance_id, goal.goal_id, "cancelled", resolution_kind="negated"

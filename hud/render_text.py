@@ -217,6 +217,17 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         for goal, text in rendered_goals:
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
             lines.append(f"-{annotation} {text}")
+    scheduled_goals = frame.get("scheduled_goals") or []
+    if scheduled_goals:
+        lines.append("\nFUTURE GOALS (SCHEDULED FOR REVIEW):")
+        for goal in scheduled_goals:
+            text = goal.get("text") if isinstance(goal, dict) else str(goal)
+            expression = goal.get("time_expression") if isinstance(goal, dict) else None
+            timezone_name = goal.get("timezone") if isinstance(goal, dict) else None
+            timing = str(expression or goal.get("due_at") or "") if isinstance(goal, dict) else ""
+            if timezone_name and expression:
+                timing += f" ({timezone_name})"
+            lines.append(f"- {text}" + (f" — review {timing}" if timing else ""))
     rules = frame.get("rules") or []
     if rules:
         lines.append("\nWORLD RULES:")

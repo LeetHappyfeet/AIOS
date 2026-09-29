@@ -119,6 +119,48 @@ class AutonomyScheduler:
         if not events:
             return False
 
+        # A fired goal timer is only a review opportunity. If the goal became
+        # terminal or was parked again after the wake was written, consume the
+        # stale event deterministically and avoid an unnecessary LLM turn.
+        live_events = []
+        for event in events:
+            if str(event["event_type"]) != "GOAL_REVIEW_DUE":
+                live_events.append(event)
+                continue
+            payload = event["payload"] if isinstance(event["payload"], dict) else {}
+            try:
+                goal_id = UUID(str(payload.get("goal_id")))
+                trigger_id = UUID(str(payload.get("trigger_id")))
+            except (TypeError, ValueError):
+                goal_id = trigger_id = None
+            active = None
+            if goal_id is not None:
+                active = await self.db.fetchval(
+                    """SELECT 1 FROM aios.character_agent_goal
+                       WHERE instance_id=$1 AND goal_id=$2 AND status='active'""",
+                    instance_id, goal_id,
+                )
+            if active:
+                live_events.append(event)
+                continue
+            await self.db.execute(
+                """UPDATE aios.character_wake_event
+                   SET status='consumed',consumed_at=now()
+                   WHERE wake_id=$1 AND status='pending'""",
+                event["wake_id"],
+            )
+            if trigger_id is not None:
+                await self.db.execute(
+                    """UPDATE aios.character_temporal_trigger
+                       SET last_evaluated_at=now(),
+                           last_outcome='goal_changed_before_review',updated_at=now()
+                       WHERE trigger_id=$1 AND status='fired'""",
+                    trigger_id,
+                )
+        events = live_events
+        if not events:
+            return False
+
         # Pure heartbeat with no other reason to think is intentionally cheap.
         if all(str(e["event_type"]) == "HEARTBEAT" for e in events):
             for event in events:
