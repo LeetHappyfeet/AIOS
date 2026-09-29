@@ -148,15 +148,25 @@ async def record_validation_decision(
         decision_type,
         decision_key,
     )
-    for evidence_type, evidence_key in dependencies:
+
+    dependency_rows = list(dict.fromkeys(dependencies))
+    if dependency_rows:
+        evidence_types = [evidence_type for evidence_type, _ in dependency_rows]
+        evidence_keys = [evidence_key for _, evidence_key in dependency_rows]
         await db.execute(
             """
             INSERT INTO aios.semantic_validation_dependency (
                 decision_type, decision_key, evidence_type, evidence_key
-            ) VALUES ($1,$2,$3,$4)
+            )
+            SELECT $1, $2, u.evidence_type, u.evidence_key
+            FROM unnest($3::text[], $4::text[])
+                 AS u(evidence_type, evidence_key)
             ON CONFLICT DO NOTHING
             """,
-            decision_type, decision_key, evidence_type, evidence_key,
+            decision_type,
+            decision_key,
+            evidence_types,
+            evidence_keys,
         )
 
 
