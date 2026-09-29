@@ -1,3 +1,5 @@
+from aios_app.pipeline.job_registry import SchedulingLane
+from aios_app.runner import _semantic_lane_order
 import ast
 from pathlib import Path
 
@@ -94,6 +96,8 @@ def test_structural_lane_is_owned_by_worker_two():
     )
     assert "return [live], [live, default]" in source
     assert "return [structural], [structural]" in source
+    assert "if worker_index == 3:" in source
+    assert "return [background, default], [background, default, live]" in source
     assert "return [background], [background, default]" in source
 
 
@@ -105,3 +109,15 @@ def test_ordinary_claim_topology_prefers_recent_observations():
         'Stage("derive_semantic_episodes"', 1
     )[0]
     assert "ORDER BY o.observed_at DESC LIMIT $1" in stage
+
+
+def test_worker_three_live_overflow_excludes_structural_lane():
+    assert _semantic_lane_order(3) == (
+        [SchedulingLane.BACKGROUND.value, SchedulingLane.DEFAULT.value],
+        [
+            SchedulingLane.BACKGROUND.value,
+            SchedulingLane.DEFAULT.value,
+            SchedulingLane.LIVE.value,
+        ],
+    )
+    assert SchedulingLane.STRUCTURAL.value not in _semantic_lane_order(3)[1]
