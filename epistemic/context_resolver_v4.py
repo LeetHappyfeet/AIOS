@@ -85,8 +85,8 @@ async def resolve_claim_context(
         db,
         _DeferredFuseki(),
         claim_id=claim_id,
+        project_rdf=False,
     )
-    await _clear_deferred_rdf_receipt(db, claim_id)
 
     frame = await _primary_frame(db, claim_id)
     if not frame:
@@ -192,5 +192,4 @@ async def resolve_claim_context(
         confidence=max(context.confidence, float(interpretation.confidence)),
     )
 
-    await _clear_deferred_rdf_receipt(db, claim_id)
     return corrected
