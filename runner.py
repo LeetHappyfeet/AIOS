@@ -696,6 +696,7 @@ async def _claim_for_worker(
     resource_class: ResourceClass,
     worker_index: int,
     claim_gate: asyncio.Lock,
+    prefer_foreground: bool = True,
 ) -> Optional[Dict[str, Any]]:
     preferred: Optional[list[str]] = None
     fallback: Optional[list[str]] = None
@@ -722,6 +723,7 @@ async def _claim_for_worker(
                 scheduling_lanes=reserved_lanes,
                 prefer_uncontended=True,
                 job_types=reserved_job_types,
+                prefer_foreground=prefer_foreground,
             )
             if job:
                 return job
@@ -733,6 +735,7 @@ async def _claim_for_worker(
             lease_seconds=settings.pipeline_lease_seconds,
             scheduling_lanes=preferred,
             prefer_uncontended=True,
+            prefer_foreground=prefer_foreground,
         )
         if (
             not job
@@ -746,6 +749,7 @@ async def _claim_for_worker(
                 lease_seconds=settings.pipeline_lease_seconds,
                 scheduling_lanes=fallback,
                 prefer_uncontended=True,
+                prefer_foreground=prefer_foreground,
             )
         return job
 
@@ -767,7 +771,7 @@ async def _run_structural_semantic_batch_cycle(
     completed = 0
     structural = [SchedulingLane.STRUCTURAL.value]
     for job_type, quantum in STRUCTURAL_BATCH_PLAN:
-        for _ in range(quantum):
+        for slot in range(quantum):
             async with claim_gate:
                 job = await fetch_next_job(
                     db,
@@ -777,6 +781,7 @@ async def _run_structural_semantic_batch_cycle(
                     scheduling_lanes=structural,
                     prefer_uncontended=True,
                     job_types=[job_type],
+                    prefer_foreground=(slot % 4 != 3),
                 )
             if not job:
                 break
@@ -805,6 +810,7 @@ async def _resource_worker(
         f"{socket.gethostname()}:{os.getpid()}:"
         f"{resource_class.value}:{worker_index}"
     )
+    claims_since_backlog = 0
     while True:
         if resource_class == ResourceClass.SEMANTIC and worker_index == 2:
             completed = await _run_structural_semantic_batch_cycle(
@@ -824,10 +830,12 @@ async def _resource_worker(
             resource_class=resource_class,
             worker_index=worker_index,
             claim_gate=claim_gate,
+            prefer_foreground=(claims_since_backlog % 4 != 3),
         )
         if not job:
             await asyncio.sleep(poll_interval)
             continue
+        claims_since_backlog += 1
         await _execute_claimed_job(
             db,
             job=job,

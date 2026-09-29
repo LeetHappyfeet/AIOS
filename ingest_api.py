@@ -323,7 +323,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                         instance_id, character_id, timeline_id,
                         first_event_id, head_event_id, head_node_id,
                         activated_at, expires_at, reason, updated_at
-                    ) VALUES ($1,$2,$3,$4,$4,$5,now(),now()+interval '5 minutes',
+                    ) VALUES ($1,$2,$3,$4,$4,$5,now(),now()+interval '1 hour',
                               'interactive_ingest',now())
                     ON CONFLICT (instance_id) DO UPDATE
                     SET character_id=EXCLUDED.character_id,

@@ -23,11 +23,37 @@ def test_ingest_refreshes_foreground_from_exact_affected_instances():
     assert "LEAST(aios.pipeline_foreground_lineage.first_event_id" in ingest
 
 
-def test_job_lease_prefers_unexpired_foreground_without_changing_priority():
+def test_job_claim_uses_current_source_lineage_for_queued_descendants():
     jobs = source("pipeline/jobs.py")
     assert "_foreground_context_for_enqueue" in jobs
-    assert "q.foreground_until > now()" in jobs
+    assert "LEFT JOIN LATERAL" in jobs
+    assert "current_foreground.updated_at DESC NULLS LAST" in jobs
+    assert "kae.instance_id" in jobs
     assert "dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id" in jobs
+
+
+def test_acquisition_admission_prioritizes_latest_source_and_reserves_backlog():
+    supervisor = source("supervisor.py")
+    stage = supervisor.split('Stage("derive_character_acquisition_topology"', 1)[1].split(
+        'Stage("derive_world_assertion_topology"', 1
+    )[0]
+    assert "foreground_at DESC" in stage
+    assert "ceil($1::numeric*0.75)" in stage
+    assert "ORDER BY e.created_at,e.acquisition_id" in stage
+    assert "pfl.instance_id=kae.instance_id" in stage
+
+
+def test_foreground_renewal_keeps_activity_order_and_backfills_live_source():
+    supervisor = source("supervisor.py")
+    refresh = supervisor.split("async def renew_unfinished_foreground", 1)[1].split(
+        "def stage_admission_capacity", 1
+    )[0]
+    assert "SET expires_at=" in refresh
+    assert "SET expires_at=now()+interval '1 hour'" in refresh
+    assert "updated_at=" not in refresh.split('await db.execute("""', 1)[1]
+    migration = source("migrations/current/20260929_foreground_source_continuation.sql")
+    assert "WHERE hr.live" in migration
+    assert "ON CONFLICT (instance_id) DO NOTHING" in migration
 
 
 def test_character_convergence_is_instance_scoped():
