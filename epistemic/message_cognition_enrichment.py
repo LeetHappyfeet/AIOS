@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.epistemic.goals import CharacterGoalService
+from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 from aios_app.epistemic.message_cognition import cognition_topic_key
 from aios_app.inference import InferenceBroker, InferenceRequest, InferenceUnavailable
 
@@ -84,7 +84,7 @@ class MessageCognitionEnricher:
                 if kind=="GOAL":
                     if intent_type not in {"desire","objective","plan","commitment","immediate_intention"}:
                         continue
-                    if horizon not in {"immediate","scene","session","persistent"} or not objective:
+                    if horizon not in {"immediate","scene","session","persistent"} or not valid_goal_objective(objective):
                         continue
                 topic=cognition_topic_key(
                     text, character_id=str(row["character_id"]),
@@ -97,6 +97,11 @@ class MessageCognitionEnricher:
                        SELECT $1,COALESCE(max(ordinal),-1)+1,$2,$3,$4,$5,
                               CASE WHEN $2='GOAL' THEN .86 ELSE .72 END,$6,'active',$7::jsonb
                        FROM aios.message_cognitive_unit WHERE commit_id=$1
+                       HAVING count(*) FILTER (
+                           WHERE claim_kind=$2::text
+                             AND meta->>'source'='bounded_inference'
+                             AND meta->>'source_index'=$8::text
+                       )=0
                        ON CONFLICT (commit_id,ordinal) DO NOTHING
                        RETURNING unit_id""",
                     row["commit_id"],kind,text,topic,polarity,confidence,
@@ -105,7 +110,7 @@ class MessageCognitionEnricher:
                                 "source_text":sentences[source_index],
                                 "inference_request_id":str(result.request_id),
                                 "intent_type":intent_type or None,"horizon":horizon or None,
-                                "objective":objective or None}))
+                                "objective":objective or None}),str(source_index))
                 if not unit:
                     continue
                 admitted+=1
@@ -119,8 +124,8 @@ class MessageCognitionEnricher:
         await self.db.execute(
             """UPDATE aios.message_cognitive_commit
                SET summary=summary || jsonb_build_object(
-                   'enrichment_pending',false,'enrichment_request_id',$3,
-                   'enrichment_admitted',$4),
+                   'enrichment_pending',false,'enrichment_request_id',$3::text,
+                   'enrichment_admitted',$4::integer),
                    enrichment_completed_at=now()
                WHERE instance_id=$1 AND node_id=$2""",
             instance_id,node_id,str(result.request_id),admitted)

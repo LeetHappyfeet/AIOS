@@ -12,7 +12,7 @@ from .config import SemanticIndexConfig
 
 logger = logging.getLogger("aios.semantic_classifier")
 
-CLASSIFIER_VERSION = "semantic-structure-classifier-v1"
+CLASSIFIER_VERSION = "semantic-structure-classifier-v2"
 
 STATE_PREDICATE_FAMILIES = {
     "spatial",
@@ -280,20 +280,30 @@ async def _cross_cluster_conflicts(
             SELECT
                 COUNT(*)::double precision AS conflict_count,
                 COUNT(*) FILTER (
-                    WHERE pc.conflict_type='exclusive_object'
+                    WHERE pc.features->>'exclusive_slot_conflict'='true'
                 )::double precision AS exclusive_count,
                 COUNT(*) FILTER (
-                    WHERE pc.conflict_type='opposite_polarity'
+                    WHERE pc.features->>'polarity_conflict'='true'
                 )::double precision AS polarity_count
-            FROM aios.proposition_conflict pc
-            WHERE (
-                pc.proposition_a_id IN (SELECT proposition_id FROM a)
-                AND pc.proposition_b_id IN (SELECT proposition_id FROM b)
+            FROM aios.validated_semantic_neighbor_relation pc
+            JOIN aios.proposition prop ON prop.proposition_id=pc.proposition_id
+            WHERE pc.relation='CONTRADICTS'
+              AND pc.status IN ('candidate','reconciled')
+              AND NOT (prop.predicate_norm='identity' AND pc.features->>'exclusive_slot_conflict'='true')
+              AND EXISTS (
+                  SELECT 1 FROM aios.semantic_validation_decision d
+                  WHERE d.decision_type IN ('proposition_relation','event_identity')
+                    AND d.decision_key=(pc.proposition_id::text || ':' || pc.neighbor_proposition_id::text)
+                    AND d.selected_value='CONTRADICTS' AND d.status='verified'
+              )
+              AND ((
+                pc.proposition_id IN (SELECT proposition_id FROM a)
+                AND pc.neighbor_proposition_id IN (SELECT proposition_id FROM b)
             )
             OR (
-                pc.proposition_a_id IN (SELECT proposition_id FROM b)
-                AND pc.proposition_b_id IN (SELECT proposition_id FROM a)
-            )
+                pc.proposition_id IN (SELECT proposition_id FROM b)
+                AND pc.neighbor_proposition_id IN (SELECT proposition_id FROM a)
+            ))
         )
         SELECT
             cp.pair_count,

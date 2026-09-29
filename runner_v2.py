@@ -73,6 +73,16 @@ async def handle_internal_cognition_inference(db: Database, job: Dict[str, Any])
 
 base.JOB_HANDLERS["internal_cognition_inference"] = handle_internal_cognition_inference
 
+async def handle_goal_formulation_inference(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.cognitive_operations import CognitiveOperationEngine
+    operation_id=job.get("payload",{}).get("operation_id")
+    if not operation_id:
+        raise ValueError("goal_formulation_inference requires operation_id")
+    await CognitiveOperationEngine(db).form_goal(UUID(str(operation_id)))
+
+base.JOB_HANDLERS["goal_formulation_inference"] = handle_goal_formulation_inference
+
 async def handle_message_cognition_enrichment(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
     from aios_app.epistemic.message_cognition_enrichment import MessageCognitionEnricher
@@ -91,7 +101,7 @@ _original_resolve_partition_key = base._resolve_partition_key
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
-    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","message_cognition_enrichment"} and payload.get("instance_id"):
+    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment"} and payload.get("instance_id"):
         return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])

@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 from uuid import UUID
 
 from aios_app.db import Database
+
+
+def valid_goal_objective(value: str | None) -> bool:
+    """Reject incomplete infinitives left by prose/markup sentence splitting."""
+    objective = " ".join(str(value or "").split())
+    if not objective or not re.search(r"[A-Za-z]", objective):
+        return False
+    if re.match(r"(?i)^to\b", objective) and not re.match(
+        r"(?i)^to\s+[A-Za-z]", objective
+    ):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -70,6 +83,7 @@ class CharacterGoalService:
         legacy_goals: Any = None,
     ) -> ResolvedGoalSet:
         await self._import_legacy(instance_id, legacy_goals)
+        await self._carry_persistent(instance_id)
         rows = await self.db.fetch(
             """SELECT goal_id,goal_text,status,priority,meta
                FROM aios.character_agent_goal
@@ -90,6 +104,49 @@ class CharacterGoalService:
             if str(row["goal_text"]).strip()
         )
         return ResolvedGoalSet(goals)
+
+    async def _carry_persistent(self, instance_id: UUID) -> None:
+        """Bring forward explicit standing intentions within the same character/user.
+
+        Session and scene intentions never cross this boundary. The unique
+        provenance key also prevents concurrent HUD requests from duplicating
+        an inherited goal or reviving one that was completed locally.
+        """
+        await self.db.execute(
+            """WITH target AS (
+                 SELECT character_id,world_id,
+                        meta->>'runtime_user_name' AS user_name,created_at
+                 FROM aios.character_instance WHERE instance_id=$1
+               ), candidates AS (
+                 SELECT DISTINCT ON (COALESCE(g.meta->>'inherited_from_goal_id',g.goal_id::text))
+                        g.goal_id,g.instance_id,g.goal_text,g.priority,g.meta,g.status,
+                        COALESCE(g.meta->>'inherited_from_goal_id',g.goal_id::text) AS root_id
+                 FROM aios.character_agent_goal g
+                 JOIN aios.character_instance source ON source.instance_id=g.instance_id
+                 CROSS JOIN target t
+                 WHERE g.meta->>'horizon'='persistent'
+                   AND source.character_id=t.character_id
+                   AND (source.world_id IS NULL OR t.world_id IS NULL
+                        OR source.world_id=t.world_id)
+                   AND source.created_at<t.created_at
+                   AND g.created_at<t.created_at AND g.updated_at<t.created_at
+                   AND t.user_name IS NOT NULL AND t.user_name<>''
+                   AND source.meta->>'runtime_user_name'=t.user_name
+                   AND COALESCE(g.meta->>'created_by','') NOT IN
+                       ('legacy_runtime_goal_import','goal_backfill')
+                 ORDER BY COALESCE(g.meta->>'inherited_from_goal_id',g.goal_id::text),
+                          source.created_at DESC,g.created_at DESC
+               )
+               INSERT INTO aios.character_agent_goal(instance_id,goal_text,priority,meta)
+               SELECT $1,c.goal_text,c.priority,
+                      c.meta || jsonb_build_object('inherited_from_goal_id',c.root_id,
+                                                  'inherited_from_instance_id',c.instance_id::text)
+               FROM candidates c WHERE c.status='active'
+               ORDER BY c.priority,c.goal_id LIMIT 5
+               ON CONFLICT (instance_id,(meta->>'inherited_from_goal_id'))
+                 WHERE meta ? 'inherited_from_goal_id' DO NOTHING""",
+            instance_id,
+        )
 
     async def cognitive_states(
         self, instance_id: UUID, goals: tuple[CognitiveGoal, ...] | list[CognitiveGoal]
@@ -279,7 +336,7 @@ class CharacterGoalService:
         """
         topic = str(topic_key or "").strip()
         clean = " ".join(str(text or "").split())
-        if not topic or not clean:
+        if not topic or not clean or not valid_goal_objective(objective or clean):
             return None
         rows = await self.db.fetch(
             """SELECT goal_id,goal_text,status,priority,meta

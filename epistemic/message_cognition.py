@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.epistemic.goals import CharacterGoalService
+from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
 INTERPRETER_VERSION = "message-cognition-v6"
 MAX_UNITS = 12
@@ -328,7 +328,7 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
         return ParsedCandidate("RULE", match.group("subject"), match.group("verb"), match.group("object"), 0.93, "deontic_predicate")
     if not _CAUSAL_DESIRE_RE.search(sentence):
         match = _GOAL_RE.search(sentence)
-        if match:
+        if match and valid_goal_objective(match.group("object")):
             return ParsedCandidate("GOAL", match.group("subject"), match.group("verb"), match.group("object"), 0.91, "goal_predicate")
     if _RELATIONSHIP_RE.search(sentence):
         subject_match = _RELATIONSHIP_SUBJECT_RE.search(sentence)

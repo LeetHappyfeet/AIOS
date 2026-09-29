@@ -25,6 +25,9 @@ SPECS = {
     "planning.review": CognitiveOperationSpec(
         "planning.review", frozenset({"planning","executive"})
     ),
+    "planning.form_goal": CognitiveOperationSpec(
+        "planning.form_goal", frozenset({"planning","executive"}), "strict"
+    ),
     "executive.review": CognitiveOperationSpec(
         "executive.review", frozenset({"executive"}), "strict"
     ),

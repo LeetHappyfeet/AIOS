@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List
 
@@ -85,18 +86,58 @@ STAGES: List[Stage] = [
         ORDER BY w.created_at LIMIT LEAST($1,1)
     """, world_id_payload, 20, 8, True),
     Stage("dag_to_document_section", "dag_to_document_section", """
-        SELECT n.node_id FROM aios.dag_node n JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+        WITH eligible AS (
+        SELECT n.node_id,n.event_id,pfl.updated_at AS foreground_at
+        FROM aios.dag_node n JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+        LEFT JOIN LATERAL (
+          SELECT updated_at FROM aios.pipeline_foreground_lineage pfl
+          WHERE pfl.timeline_id=n.timeline_id
+            AND n.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+            AND pfl.expires_at>now()
+          ORDER BY updated_at DESC LIMIT 1
+        ) pfl ON true
         WHERE n.message_text IS NOT NULL AND ie.superseded_at IS NULL
           AND (((n.kind='paragraph') AND n.payload?'document_id' AND n.payload?'paragraph_index') OR (n.kind IN ('chat_message','observation') AND n.event_id IS NOT NULL))
           AND NOT EXISTS (SELECT 1 FROM aios.document_section ds WHERE ds.node_id=n.node_id)
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='dag_to_document_section' AND pj.status IN ('queued','running') AND pj.payload->>'node_id'=n.node_id::text)
-        ORDER BY n.event_id LIMIT $1
+        ), foreground AS (
+          SELECT node_id,0 AS band FROM eligible WHERE foreground_at IS NOT NULL
+          ORDER BY foreground_at DESC,event_id DESC
+          LIMIT GREATEST(1,ceil($1::numeric*0.75)::integer)
+        ), backlog AS (
+          SELECT e.node_id,1 AS band FROM eligible e
+          WHERE NOT EXISTS (SELECT 1 FROM foreground f WHERE f.node_id=e.node_id)
+          ORDER BY e.event_id
+          LIMIT $1-(SELECT count(*) FROM foreground)
+        )
+        SELECT node_id FROM (SELECT * FROM foreground UNION ALL SELECT * FROM backlog) admitted
+        ORDER BY band
     """, node_id_payload, 20, 48, True),
     Stage("extract_claims", "extract_claims", """
-        SELECT ds.section_id FROM aios.document_section ds JOIN aios.dag_node n ON n.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+        WITH eligible AS (
+        SELECT ds.section_id,n.event_id,pfl.updated_at AS foreground_at
+        FROM aios.document_section ds JOIN aios.dag_node n ON n.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+        LEFT JOIN LATERAL (
+          SELECT updated_at FROM aios.pipeline_foreground_lineage pfl
+          WHERE pfl.timeline_id=n.timeline_id
+            AND n.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+            AND pfl.expires_at>now()
+          ORDER BY updated_at DESC LIMIT 1
+        ) pfl ON true
         WHERE ds.claims_extracted_at IS NULL AND ie.superseded_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='extract_claims' AND pj.status IN ('queued','running') AND pj.payload->>'section_id'=ds.section_id::text)
-        ORDER BY n.event_id LIMIT $1
+        ), foreground AS (
+          SELECT section_id,0 AS band FROM eligible WHERE foreground_at IS NOT NULL
+          ORDER BY foreground_at DESC,event_id DESC
+          LIMIT GREATEST(1,ceil($1::numeric*0.75)::integer)
+        ), backlog AS (
+          SELECT e.section_id,1 AS band FROM eligible e
+          WHERE NOT EXISTS (SELECT 1 FROM foreground f WHERE f.section_id=e.section_id)
+          ORDER BY e.event_id
+          LIMIT $1-(SELECT count(*) FROM foreground)
+        )
+        SELECT section_id FROM (SELECT * FROM foreground UNION ALL SELECT * FROM backlog) admitted
+        ORDER BY band
     """, section_id_payload, 25, 48, True),
     Stage("decompose_claim_frames", "decompose_claim_frames", """
         WITH eligible AS (
@@ -229,18 +270,36 @@ STAGES: List[Stage] = [
         LIMIT $1
     """, live_instance_payload, 40, 16, True),
     Stage("derive_character_acquisition_topology", "derive_character_acquisition_topology", """
-        SELECT kae.acquisition_id FROM aios.knowledge_acquisition_event kae LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-        WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
-          AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.acquisition_id=kae.acquisition_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
-          AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_character_acquisition_topology' AND pj.status IN ('queued','running') AND pj.payload->>'acquisition_id'=kae.acquisition_id::text)
-        ORDER BY EXISTS (
-            SELECT 1 FROM aios.pipeline_foreground_lineage pfl
-            WHERE pfl.instance_id=kae.instance_id
-              AND pfl.expires_at > now()
-              AND (dn.event_id IS NULL OR
-                   (dn.timeline_id=pfl.timeline_id AND
-                    dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id))
-        ) DESC, kae.created_at LIMIT $1
+        WITH eligible AS (
+          SELECT kae.acquisition_id,kae.created_at,
+                 pfl.updated_at AS foreground_at
+          FROM aios.knowledge_acquisition_event kae
+          LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+          LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+          LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+          LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+          LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+          LEFT JOIN aios.pipeline_foreground_lineage pfl
+            ON pfl.instance_id=kae.instance_id AND pfl.expires_at>now()
+           AND dn.timeline_id=pfl.timeline_id
+           AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+          WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL
+            AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
+            AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.acquisition_id=kae.acquisition_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
+            AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_character_acquisition_topology' AND pj.status IN ('queued','running') AND pj.payload->>'acquisition_id'=kae.acquisition_id::text)
+        ), foreground AS (
+          SELECT acquisition_id,0 AS band FROM eligible WHERE foreground_at IS NOT NULL
+          ORDER BY foreground_at DESC,created_at DESC,acquisition_id
+          LIMIT GREATEST(1,ceil($1::numeric*0.75)::integer)
+        ), backlog AS (
+          SELECT e.acquisition_id,1 AS band FROM eligible e
+          WHERE NOT EXISTS (SELECT 1 FROM foreground f WHERE f.acquisition_id=e.acquisition_id)
+          ORDER BY e.created_at,e.acquisition_id
+          LIMIT $1-(SELECT count(*) FROM foreground)
+        )
+        SELECT acquisition_id FROM (
+          SELECT * FROM foreground UNION ALL SELECT * FROM backlog
+        ) admitted ORDER BY band
     """, acquisition_id_payload, 45, 48, True),
     Stage("derive_world_assertion_topology", "derive_world_assertion_topology", """
         SELECT a.assertion_id FROM aios.world_proposition_assertion a WHERE a.epistemic_status NOT IN ('rejected','superseded')
@@ -334,6 +393,47 @@ async def queued_job_counts_by_type(db: Database) -> dict[str, int]:
     return {str(row["job_type"]): int(row["cnt"]) for row in rows}
 
 
+async def renew_unfinished_foreground(db: Database) -> None:
+    """Keep the priority lease alive while an adopted source has unfinished work.
+
+    Do not touch updated_at: that timestamp orders characters by their last
+    interactive turn, rather than by a supervisor maintenance pass.
+    """
+    await db.execute("""
+        UPDATE aios.pipeline_foreground_lineage pfl
+        SET expires_at=now()+interval '1 hour'
+        WHERE pfl.expires_at < now()+interval '15 minutes'
+          AND pfl.updated_at > now()-interval '1 day'
+          AND EXISTS (
+            SELECT 1 FROM aios.dag_node dn
+            LEFT JOIN aios.document_section ds ON ds.node_id=dn.node_id
+            WHERE dn.timeline_id=pfl.timeline_id
+              AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+              AND dn.message_text IS NOT NULL
+              AND dn.kind IN ('chat_message','observation','paragraph')
+              AND (
+                ds.section_id IS NULL OR ds.claims_extracted_at IS NULL
+                OR EXISTS (
+                  SELECT 1 FROM aios.claim_candidate cc
+                  JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                  WHERE es.section_id=ds.section_id
+                    AND NOT EXISTS (SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id)
+                )
+                OR EXISTS (
+                  SELECT 1 FROM aios.knowledge_acquisition_event kae
+                  WHERE kae.instance_id=pfl.instance_id AND kae.dag_node_id=dn.node_id
+                    AND (kae.processed_at IS NULL OR NOT EXISTS (
+                      SELECT 1 FROM aios.semantic_topology_projection stp
+                      WHERE stp.acquisition_id=kae.acquisition_id
+                        AND stp.projected_at IS NOT NULL
+                        AND stp.resolver_version='semantic-topology-v1'
+                    ))
+                )
+              )
+          )
+    """)
+
+
 def stage_admission_capacity(*, stage: Stage, total_queued: int, stage_queued: int,
                              batch_size: int, remaining_cycle: int,
                              soft_cap: int, critical_reserve: int) -> int:
@@ -362,9 +462,16 @@ async def run_supervisor() -> None:
     max_queued_backlog = getattr(settings, "supervisor_max_queued_backlog", 500)
     db = Database(settings.db_dsn)
     await db.connect()
+    last_foreground_refresh = 0.0
     logger.info("AIOS supervisor started")
     try:
         while True:
+            if time.monotonic() - last_foreground_refresh >= 60.0:
+                try:
+                    await renew_unfinished_foreground(db)
+                except Exception:
+                    logger.exception("Failed to renew unfinished foreground work")
+                last_foreground_refresh = time.monotonic()
             # Heartbeats are cheap events; ready inboxes coalesce into one wake job.
             try:
                 from aios_app.agent.autonomy import AutonomyScheduler

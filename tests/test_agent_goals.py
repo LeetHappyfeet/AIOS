@@ -19,6 +19,9 @@ class FakeDB:
     async def fetch(self, sql, *args):
         return list(self.rows)
 
+    async def execute(self, sql, *args):
+        return "INSERT 0 0"
+
     async def fetchrow(self, sql, *args):
         wanted = args[1].lower() if len(args) > 1 else ""
         for row in self.rows:
@@ -81,6 +84,27 @@ def test_goal_reconciler_is_wired_to_message_cognition():
     assert "reconcile_evidence(" in source
 
 
+def test_persistent_continuity_requires_same_identity_and_excludes_future_updates():
+    from inspect import getsource
+    source = getsource(CharacterGoalService._carry_persistent)
+    assert "source.character_id=t.character_id" in source
+    assert "owner_user_id" not in source
+    assert "source.meta->>'runtime_user_name'=t.user_name" in source
+    assert "g.updated_at<t.created_at" in source
+    assert "c.status='active'" in source
+    assert "inherited_from_goal_id" in source
+
+
+def test_goal_formation_runs_on_isolated_inference_job():
+    from pathlib import Path
+    root=Path(__file__).resolve().parents[1]
+    operations=(root / "agent" / "cognitive_operations.py").read_text()
+    registry=(root / "pipeline" / "job_registry.py").read_text()
+    assert 'job_type="goal_formulation_inference"' in operations
+    assert '"goal_formulation_inference": JobSpec(ResourceClass.GLOBAL' in registry
+    assert "source['speaker_role'] not in" in operations
+
+
 def test_goal_backfill_is_bounded_and_character_owned():
     from pathlib import Path
     source = (Path(__file__).resolve().parents[1] / "migrations" / "current" / "20260925_01_goal_convergence.sql").read_text(encoding="utf-8")
@@ -115,6 +139,28 @@ def test_no_longer_goal_is_parsed_as_negative_goal_evidence():
     goals = [unit for unit in units if unit.claim_kind == "GOAL"]
     assert len(goals) == 1
     assert goals[0].polarity == -1
+
+
+def test_narrative_markup_after_to_does_not_become_a_goal():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "Renamon wants to*—as though it were that simple.",
+        character_id="Renamon", speaker_id="Renamon",
+        speaker_role="character", viewpoint_id="Renamon",
+    )
+    assert not any(unit.claim_kind == "GOAL" for unit in units)
+
+
+def test_complete_infinitive_remains_a_goal():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "I want to visit the bookstore tomorrow.",
+        character_id="Renamon", speaker_id="Renamon",
+        speaker_role="character", viewpoint_id="Renamon",
+    )
+    assert [unit.meta["objective"] for unit in units if unit.claim_kind == "GOAL"] == [
+        "to visit the bookstore tomorrow"
+    ]
 
 
 class LifecycleDB:

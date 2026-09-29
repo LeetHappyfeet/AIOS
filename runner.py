@@ -18,11 +18,14 @@ from aios_app.pipeline.jobs import (
     heartbeat_job,
     mark_done,
     mark_failed,
+    defer_claimed_job,
     recover_stale_running_jobs,
     rebalance_queued_priorities,
     _backfill_decompose_timeline_partitions,
 )
 from aios_app.pipeline.job_registry import ResourceClass, SchedulingLane, job_spec
+from aios_app.scheduler.resource_governor import ResourceGovernor
+from aios_app.scheduler.runner_admission import admit_job, release_job
 
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
 from aios_app.pipeline.worker import run_claim_extraction_for_section
@@ -451,6 +454,7 @@ async def _execute_claimed_job(
     job: Dict[str, Any],
     worker_id: str,
     rdf_gate: asyncio.Semaphore,
+    resource_governor: ResourceGovernor,
 ) -> None:
     job_id = job["job_id"]
     job_type = str(job["job_type"])
@@ -465,6 +469,15 @@ async def _execute_claimed_job(
         return
 
     spec = job_spec(job_type)
+    if not await admit_job(resource_governor, job):
+        await defer_claimed_job(
+            db,
+            job_id,
+            worker_id=worker_id,
+            delay_seconds=15.0,
+        )
+        return
+
     partition_key = await _resolve_partition_key(db, job)
     if partition_key.startswith(("char:", "source:", "world:")):
         lock_key = f"semantic-scope:{partition_key}"
@@ -549,6 +562,7 @@ async def _execute_claimed_job(
             await heartbeat
         except asyncio.CancelledError:
             pass
+        await release_job(resource_governor, job)
 
 
 def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
@@ -579,18 +593,25 @@ STRUCTURAL_BATCH_PLAN: tuple[tuple[str, int], ...] = (
 )
 
 
-def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
-    """Reserve capacity for serial semantic stages that share the LIVE lane.
+async def _semantic_stage_reservation(
+    db: Database,
+    worker_index: int,
+) -> Optional[list[str]]:
+    """Choose LIVE semantic work from current downstream pressure.
 
-    Worker 0 advances interpretation/context. Worker 1 advances the immediately
-    downstream proposition/materialization stages. This prevents a resolver
-    backlog from occupying every LIVE semantic worker while normalization ages
-    indefinitely. Structural/background workers keep their lane reservations,
-    and all workers fall back to ordinary lane scheduling when their reserved
-    stage has no runnable work.
+    Worker 0 always protects context resolution capacity. Worker 1 protects
+    normalization, while worker 3 may lend its otherwise-background capacity to
+    the most pressured claim-local LIVE stage. Worker 2 remains the exclusive
+    STRUCTURAL writer.
+
+    Pressure is age-first with queue depth as the tie-breaker. Thresholds keep
+    the adaptive worker on background/default work when LIVE is healthy while
+    preventing a fast producer (context resolution) from starving downstream
+    normalization/materialization.
     """
     if worker_index == 0:
         return ["resolve_claim_context"]
+
     if worker_index == 1:
         return [
             "normalize_proposition",
@@ -600,6 +621,74 @@ def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
             "materialize_event_occurrences",
             "project_character_knowledge",
         ]
+
+    if worker_index != 3:
+        return None
+
+    rows = await db.fetch(
+        """
+        SELECT
+            job_type,
+            COUNT(*)::integer AS queued,
+            COALESCE(
+                EXTRACT(EPOCH FROM (now() - MIN(created_at))),
+                0
+            )::double precision AS oldest_seconds
+        FROM aios.pipeline_job
+        WHERE status='queued'
+          AND run_after <= now()
+          AND resource_class='SEMANTIC'
+          AND scheduling_lane='LIVE'
+          AND job_type = ANY($1::text[])
+        GROUP BY job_type
+        """,
+        [
+            "normalize_proposition",
+            "materialize_event_occurrences",
+            "project_character_knowledge",
+            "resolve_claim_context",
+        ],
+    )
+    pressure = {
+        str(row["job_type"]): (
+            int(row["queued"] or 0),
+            float(row["oldest_seconds"] or 0.0),
+        )
+        for row in rows
+    }
+
+    normalize_q, normalize_age = pressure.get("normalize_proposition", (0, 0.0))
+    materialize_q, materialize_age = pressure.get(
+        "materialize_event_occurrences", (0, 0.0)
+    )
+    knowledge_q, knowledge_age = pressure.get(
+        "project_character_knowledge", (0, 0.0)
+    )
+    resolver_q, resolver_age = pressure.get("resolve_claim_context", (0, 0.0))
+
+    # Downstream pressure gets first claim on adaptive capacity. The depth
+    # thresholds catch bursts; the age threshold catches low-volume starvation.
+    candidates: list[tuple[float, int, str]] = []
+    if normalize_q >= 100 or normalize_age >= 30.0:
+        candidates.append((normalize_age, normalize_q, "normalize_proposition"))
+    if materialize_q >= 100 or materialize_age >= 30.0:
+        candidates.append(
+            (materialize_age, materialize_q, "materialize_event_occurrences")
+        )
+    if knowledge_q >= 25 or knowledge_age >= 30.0:
+        candidates.append(
+            (knowledge_age, knowledge_q, "project_character_knowledge")
+        )
+
+    if candidates:
+        candidates.sort(reverse=True)
+        return [item[2] for item in candidates]
+
+    # Resolver overflow is deliberately conservative: worker 0 already owns
+    # this stage, and adaptive capacity should not recreate resolver starvation.
+    if resolver_q >= 100 or resolver_age >= 60.0:
+        return ["resolve_claim_context"]
+
     return None
 
 
@@ -610,27 +699,34 @@ async def _claim_for_worker(
     resource_class: ResourceClass,
     worker_index: int,
     claim_gate: asyncio.Lock,
+    prefer_foreground: bool = True,
 ) -> Optional[Dict[str, Any]]:
     preferred: Optional[list[str]] = None
     fallback: Optional[list[str]] = None
     reserved_job_types: Optional[list[str]] = None
     if resource_class == ResourceClass.SEMANTIC:
         preferred, fallback = _semantic_lane_order(worker_index)
-        reserved_job_types = _semantic_stage_reservation(worker_index)
+        reserved_job_types = await _semantic_stage_reservation(db, worker_index)
 
     async with claim_gate:
         # First honor a stage reservation. This is deliberately narrower than
         # priority tweaking: if normalization is queued, worker 1 cannot be
         # captured by a large resolver backlog.
         if reserved_job_types:
+            reserved_lanes = preferred
+            if resource_class == ResourceClass.SEMANTIC and worker_index == 3:
+                # Worker 3's adaptive reservation targets LIVE stages even
+                # though its ordinary ownership remains BACKGROUND/DEFAULT.
+                reserved_lanes = [SchedulingLane.LIVE.value]
             job = await fetch_next_job(
                 db,
                 worker_id=worker_id,
                 resource_class=resource_class.value,
                 lease_seconds=settings.pipeline_lease_seconds,
-                scheduling_lanes=preferred,
+                scheduling_lanes=reserved_lanes,
                 prefer_uncontended=True,
                 job_types=reserved_job_types,
+                prefer_foreground=prefer_foreground,
             )
             if job:
                 return job
@@ -642,6 +738,7 @@ async def _claim_for_worker(
             lease_seconds=settings.pipeline_lease_seconds,
             scheduling_lanes=preferred,
             prefer_uncontended=True,
+            prefer_foreground=prefer_foreground,
         )
         if (
             not job
@@ -655,6 +752,7 @@ async def _claim_for_worker(
                 lease_seconds=settings.pipeline_lease_seconds,
                 scheduling_lanes=fallback,
                 prefer_uncontended=True,
+                prefer_foreground=prefer_foreground,
             )
         return job
 
@@ -665,6 +763,7 @@ async def _run_structural_semantic_batch_cycle(
     worker_id: str,
     rdf_gate: asyncio.Semaphore,
     claim_gate: asyncio.Lock,
+    resource_governor: ResourceGovernor,
 ) -> int:
     """Run one serial weighted cycle on the dedicated STRUCTURAL worker.
 
@@ -675,7 +774,7 @@ async def _run_structural_semantic_batch_cycle(
     completed = 0
     structural = [SchedulingLane.STRUCTURAL.value]
     for job_type, quantum in STRUCTURAL_BATCH_PLAN:
-        for _ in range(quantum):
+        for slot in range(quantum):
             async with claim_gate:
                 job = await fetch_next_job(
                     db,
@@ -685,6 +784,7 @@ async def _run_structural_semantic_batch_cycle(
                     scheduling_lanes=structural,
                     prefer_uncontended=True,
                     job_types=[job_type],
+                    prefer_foreground=(slot % 4 != 3),
                 )
             if not job:
                 break
@@ -693,6 +793,7 @@ async def _run_structural_semantic_batch_cycle(
                 job=job,
                 worker_id=worker_id,
                 rdf_gate=rdf_gate,
+                resource_governor=resource_governor,
             )
             completed += 1
     return completed
@@ -706,11 +807,13 @@ async def _resource_worker(
     poll_interval: float,
     rdf_gate: asyncio.Semaphore,
     claim_gate: asyncio.Lock,
+    resource_governor: ResourceGovernor,
 ) -> None:
     worker_id = (
         f"{socket.gethostname()}:{os.getpid()}:"
         f"{resource_class.value}:{worker_index}"
     )
+    claims_since_backlog = 0
     while True:
         if resource_class == ResourceClass.SEMANTIC and worker_index == 2:
             completed = await _run_structural_semantic_batch_cycle(
@@ -718,6 +821,7 @@ async def _resource_worker(
                 worker_id=worker_id,
                 rdf_gate=rdf_gate,
                 claim_gate=claim_gate,
+                resource_governor=resource_governor,
             )
             if completed == 0:
                 await asyncio.sleep(poll_interval)
@@ -729,15 +833,18 @@ async def _resource_worker(
             resource_class=resource_class,
             worker_index=worker_index,
             claim_gate=claim_gate,
+            prefer_foreground=(claims_since_backlog % 4 != 3),
         )
         if not job:
             await asyncio.sleep(poll_interval)
             continue
+        claims_since_backlog += 1
         await _execute_claimed_job(
             db,
             job=job,
             worker_id=worker_id,
             rdf_gate=rdf_gate,
+            resource_governor=resource_governor,
         )
 
 
@@ -868,6 +975,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
 
     rdf_gate = asyncio.Semaphore(max(1, settings.runner_rdf_workers))
     claim_gate = asyncio.Lock()
+    resource_governor = ResourceGovernor()
     tasks: list[asyncio.Task] = [
         asyncio.create_task(_lease_recovery_loop(db), name="lease-recovery"),
         asyncio.create_task(_scheduler_metrics_loop(db), name="scheduler-metrics"),
@@ -883,6 +991,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
                         poll_interval=poll_interval,
                         rdf_gate=rdf_gate,
                         claim_gate=claim_gate,
+                        resource_governor=resource_governor,
                     ),
                     name=f"{resource_class.value}-{worker_index}",
                 )

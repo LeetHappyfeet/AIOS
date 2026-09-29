@@ -338,6 +338,7 @@ class CorpusSearchService:
         instance_id: UUID,
         query: str,
         limit: int = 8,
+        include_fanwork: bool = True,
     ) -> CorpusResearchResult:
         query = query.strip()
         if not query:
@@ -426,6 +427,11 @@ class CorpusSearchService:
             JOIN aios.corpus_document_scope cds ON cds.document_id=cs.document_id
             CROSS JOIN q
             WHERE cs.search_vector @@ q.query
+              AND ($5::boolean OR NOT EXISTS (
+                  SELECT 1 FROM aios.corpus_document_scope fan_scope
+                  WHERE fan_scope.document_id=cs.document_id
+                    AND fan_scope.scope_key ~ '(^|[.])fanwork([.]|$)'
+              ))
               AND (
                   EXISTS (
                       SELECT 1
@@ -499,6 +505,7 @@ class CorpusSearchService:
             query,
             bounded_limit,
             list(terms),
+            include_fanwork,
         )
 
         hits = tuple(
@@ -582,8 +589,12 @@ class CharacterResearchService:
         instance_id: UUID,
         query: str,
         limit: int = 8,
+        include_fanwork: bool = True,
     ) -> CorpusResearchResult:
-        return await self.searcher.search(instance_id=instance_id, query=query, limit=limit)
+        return await self.searcher.search(
+            instance_id=instance_id, query=query, limit=limit,
+            include_fanwork=include_fanwork,
+        )
 
     async def acquire(
         self,

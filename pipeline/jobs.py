@@ -95,7 +95,7 @@ async def _partition_key_for_enqueue(
         )
         return str(row["scope_key"]) if row else f"assertion:{assertion_id}"
 
-    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "message_cognition_enrichment"} and payload.get("instance_id"):
+    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "goal_formulation_inference", "message_cognition_enrichment"} and payload.get("instance_id"):
         return f"instance:{payload['instance_id']}"
 
     for key in ("world_id", "character_id", "section_id", "node_id"):
@@ -317,6 +317,7 @@ async def fetch_next_job(
     scheduling_lanes: Optional[list[str]] = None,
     prefer_uncontended: bool = True,
     job_types: Optional[list[str]] = None,
+    prefer_foreground: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Atomically lease the next runnable job for one execution class.
 
@@ -332,6 +333,35 @@ async def fetch_next_job(
         WITH next_job AS (
             SELECT q.job_id
             FROM aios.pipeline_job q
+            LEFT JOIN LATERAL (
+                SELECT pfl.updated_at
+                FROM aios.pipeline_foreground_lineage pfl
+                JOIN aios.dag_node dn
+                  ON dn.timeline_id=pfl.timeline_id
+                 AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
+                WHERE pfl.expires_at>now()
+                  AND dn.node_id=COALESCE(
+                    (q.payload->>'node_id')::uuid,
+                    (SELECT ds.node_id FROM aios.document_section ds
+                     WHERE ds.section_id=(q.payload->>'section_id')::uuid),
+                    (SELECT ds.node_id FROM aios.claim_candidate cc
+                     JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                     JOIN aios.document_section ds ON ds.section_id=es.section_id
+                     WHERE cc.claim_id=(q.payload->>'claim_id')::uuid),
+                    (SELECT ds.node_id FROM aios.knowledge_acquisition_event kae
+                     JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+                     JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                     JOIN aios.document_section ds ON ds.section_id=es.section_id
+                     WHERE kae.acquisition_id=(q.payload->>'acquisition_id')::uuid)
+                  )
+                  AND (
+                    q.payload->>'acquisition_id' IS NULL
+                    OR pfl.instance_id=(SELECT kae.instance_id
+                                        FROM aios.knowledge_acquisition_event kae
+                                        WHERE kae.acquisition_id=(q.payload->>'acquisition_id')::uuid)
+                  )
+                ORDER BY pfl.updated_at DESC LIMIT 1
+            ) current_foreground ON true
             WHERE q.status = 'queued'
               AND q.run_after <= now()
               AND ($1::text IS NULL OR q.resource_class = $1)
@@ -358,6 +388,7 @@ async def fetch_next_job(
                             SELECT 1
                             FROM aios.pipeline_job earlier
                             WHERE earlier.status='queued'
+                              AND earlier.run_after <= now()
                               AND earlier.job_type='decompose_claim_frames'
                               AND earlier.partition_key=q.partition_key
                               AND (
@@ -372,8 +403,9 @@ async def fetch_next_job(
               )
             ORDER BY
                 CASE
-                    WHEN q.foreground_until > now() THEN 0 ELSE 1
+                    WHEN (current_foreground.updated_at IS NOT NULL)=$7::boolean THEN 0 ELSE 1
                 END ASC,
+                current_foreground.updated_at DESC NULLS LAST,
                 CASE
                     WHEN $6::text[] IS NOT NULL
                      AND q.created_at <= now() - interval '5 minutes'
@@ -397,7 +429,7 @@ async def fetch_next_job(
                 END ASC,
                 q.priority ASC,
                 q.created_at ASC
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF q SKIP LOCKED
             LIMIT 1
         )
         UPDATE aios.pipeline_job pj
@@ -421,6 +453,7 @@ async def fetch_next_job(
         scheduling_lanes,
         prefer_uncontended,
         job_types,
+        prefer_foreground,
     )
 
     if not row:
@@ -461,6 +494,42 @@ async def heartbeat_job(
 # ---------------------------------------------------------------------
 # State transitions
 # ---------------------------------------------------------------------
+
+async def defer_claimed_job(
+    db: Database,
+    job_id: UUID,
+    *,
+    worker_id: str,
+    delay_seconds: float = 0.5,
+) -> bool:
+    """Return a throttled lease to the runnable queue without marking failure.
+
+    Attempts are decremented because admission denial means execution never
+    started. Ownership is checked so a stale worker cannot release another
+    worker's lease.
+    """
+    row = await db.execute_returning_row(
+        """
+        UPDATE aios.pipeline_job
+        SET status='queued',
+            attempts=GREATEST(attempts - 1, 0),
+            worker_id=NULL,
+            claimed_at=NULL,
+            heartbeat_at=NULL,
+            lease_expires_at=NULL,
+            run_after=GREATEST(run_after, now() + make_interval(secs => $3)),
+            updated_at=now()
+        WHERE job_id=$1
+          AND status='running'
+          AND worker_id=$2
+        RETURNING job_id
+        """,
+        job_id,
+        worker_id,
+        max(0.0, float(delay_seconds)),
+    )
+    return bool(row)
+
 
 async def mark_running(db: Database, job_id: UUID) -> None:
     await db.execute(

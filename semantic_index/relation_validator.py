@@ -12,7 +12,6 @@ RELATION_VERIFIER_VERSION = "semantic-relation-verifier-v6"
 # deliberately excluded: differing complements are not contradictions by
 # themselves.
 STRICT_SINGLE_VALUE_PREDICATES = {
-    "identity",
     "located_at",
     "location",
     "born_in",

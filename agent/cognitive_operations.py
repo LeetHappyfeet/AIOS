@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -63,10 +64,97 @@ class CognitiveOperationEngine:
                                        "status":found.status,"hits":found.reference_context()})
             elif kind in {"reflection.review","planning.review","executive.review"}:
                 await self._queue_decision(op)
+            elif kind=="planning.form_goal":
+                job_id=await enqueue_job(self.db,job_type="goal_formulation_inference",
+                    payload={"instance_id":str(op["instance_id"]),
+                             "operation_id":str(op["operation_id"])},priority=120)
+                if job_id is None:
+                    raise RuntimeError("could not enqueue goal formulation")
             else:
                 await self._finish(op,{"kind":"unsupported","operation_type":kind})
         except Exception as exc:
             await self._fail(op, exc)
+            raise
+
+    async def form_goal(self, operation_id: UUID) -> None:
+        """One bounded planning inference, executed in the isolated inference lane."""
+        row=await self.db.fetchrow(
+            "SELECT * FROM aios.character_cognitive_operation WHERE operation_id=$1",
+            operation_id)
+        if not row or row["status"]!="running" or row["operation_type"]!="planning.form_goal":
+            return
+        op=dict(row)
+        try:
+            context=await HUDContextResolver(self.db).resolve(op["instance_id"])
+            if (context.source_timeline_id != op["source_timeline_id"] or
+                context.source_head_node_id != op["source_node_id"] or
+                context.state_version != op["source_state_version"]):
+                await self._stale(op,"goal formation context advanced")
+                return
+            source=await self.db.fetchrow(
+                "SELECT message_text,speaker_role,speaker_id FROM aios.dag_node WHERE node_id=$1",
+                op["source_node_id"])
+            if not source or not source["message_text"]:
+                await self._finish(op,{"kind":"no_goal","reason":"no source evidence"})
+                return
+            from aios_app.inference.broker import InferenceBroker, InferenceRequest
+            from aios_app.epistemic.goals import CharacterGoalService
+            source_text=str(source["message_text"])[:1800]
+            existing=await CharacterGoalService(self.db).resolve_active(op["instance_id"])
+            prompt=(
+                "Decide whether the character should set ONE concrete, actionable objective "
+                "based on the current event. Return JSON with exactly goal (string or null) "
+                "and horizon (scene, session, or persistent). A user suggestion is not an "
+                "accepted character commitment: for an unaccepted invitation only propose "
+                "an objective to decide or respond to it. Do not invent an activity, desire, "
+                "past event, or commitment. Return null if there is no worthwhile new "
+                "objective or it duplicates an active goal. Persistent requires an explicit "
+                "future commitment made by the character in this event. Keep goal under 140 characters.\n"
+                f"Speaker role: {source['speaker_role']}\n"
+                f"Speaker: {source['speaker_id']}\n"
+                f"Active goals: {[g.text for g in existing.active[:5]]}\n"
+                f"Current event: {source_text}"
+            )
+            inference=await InferenceBroker(self.db).infer(InferenceRequest(
+                instance_id=op["instance_id"],worker_class="planning",prompt=prompt,
+                context_state_version=context.state_version,allowed_actions={},
+                output_schema={"goal":"string or null","horizon":"scene|session|persistent"},
+                max_tokens=160))
+            raw=inference.response.raw
+            goal=raw.get("goal")
+            if goal is None:
+                await self._finish(op,{"kind":"no_goal"})
+                return
+            if not isinstance(goal,str) or len(goal.strip())<12 or len(goal)>140:
+                await self._finish(op,{"kind":"rejected_goal","reason":"invalid text"})
+                return
+            # The inference can formulate an objective, but cannot introduce
+            # unrelated people, places, or activities into the character state.
+            tokens=set(re.findall(r"[a-z]{4,}",goal.lower()))
+            evidence=set(re.findall(r"[a-z]{4,}",source_text.lower()))
+            if len(tokens & evidence)<2 or any(g.text.casefold()==goal.strip().casefold()
+                                                for g in existing.active):
+                await self._finish(op,{"kind":"rejected_goal","reason":"ungrounded or duplicate"})
+                return
+            horizon=str(raw.get("horizon") or "session")
+            if horizon not in {"scene","session","persistent"}:
+                horizon="session"
+            if source["speaker_role"] not in {"character","assistant"}:
+                horizon="session" if horizon=="persistent" else horizon
+            # Recheck after inference. A new turn may have arrived meanwhile.
+            current=await HUDContextResolver(self.db).resolve(op["instance_id"])
+            if (current.source_head_node_id != op["source_node_id"] or
+                current.state_version != op["source_state_version"]):
+                await self._stale(op,"goal formation context advanced")
+                return
+            created=await CharacterGoalService(self.db).create(
+                instance_id=op["instance_id"],text=goal.strip(),
+                source_node_id=op["source_node_id"],
+                meta={"created_by":"planning_formation","horizon":horizon,
+                      "source_operation_id":str(operation_id)})
+            await self._finish(op,{"kind":"formed_goal","goal_id":str(created.goal_id)})
+        except Exception as exc:
+            await self._fail(op,exc)
             raise
 
     async def _queue_decision(self, op: Mapping[str,Any]) -> None:

@@ -990,7 +990,7 @@ class TopologyRetriever:
                     pc.conflict_type,
                     pc.strength
                 FROM unnest($1::uuid[]) base(proposition_id)
-                JOIN aios.proposition_conflict pc
+                JOIN aios.verified_proposition_conflict pc
                   ON pc.proposition_a_id=base.proposition_id
                   OR pc.proposition_b_id=base.proposition_id
                 JOIN aios.proposition other
@@ -1006,6 +1006,7 @@ class TopologyRetriever:
                       AND other_ck.proposition_id=other.proposition_id
                 )
                 ORDER BY pc.strength DESC
+                LIMIT 100
                 """,
                 proposition_ids,
                 lineage_ids,
