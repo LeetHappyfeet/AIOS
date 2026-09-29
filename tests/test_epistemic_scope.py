@@ -24,7 +24,7 @@ def test_scope_classifier_marks_supposition_and_condition():
 
 
 def test_fast_cognition_does_not_promote_hypothetical_belief():
-    assert INTERPRETER_VERSION == "message-cognition-v4"
+    assert INTERPRETER_VERSION == "message-cognition-v7"
     units = _cognition("Let's say I believe you.")
     assert not any(unit.claim_kind == "BELIEF" for unit in units)
 

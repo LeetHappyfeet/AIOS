@@ -266,6 +266,9 @@ class HUDAssembler:
             if goal.goal_id is not None:
                 item["lifecycle"] = goal_states.get(goal.goal_id, {})
             goal_items.append(item)
+        scheduled_goal_items = await self.cognition.goals.list_scheduled(
+            context.instance_id, limit=8
+        )
         rule_items = rules + [
             {**item, "source": "character_knowledge"}
             for item in semantic_rules
@@ -379,6 +382,7 @@ class HUDAssembler:
             "memories": memories,
             "beliefs": beliefs,
             "goals": goal_items,
+            "scheduled_goals": scheduled_goal_items,
             "rules": rule_items,
             "recent_events": event_items,
             "corpus_references": corpus_references,

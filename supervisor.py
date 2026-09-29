@@ -489,6 +489,16 @@ async def run_supervisor() -> None:
             except Exception:
                 logger.exception("Agent autonomy scheduling failed")
 
+            # Shadow appraisal is durable background work, never an agent wake
+            # or a dependency of autonomy/inference scheduling.
+            try:
+                from aios_app.agent.reinforcement import ShadowReinforcementService
+                from aios_app.agent.outcomes import OutcomeResolver
+                await OutcomeResolver(db).process_receipts(limit=16)
+                await ShadowReinforcementService(db).process_pending(limit=16)
+            except Exception:
+                logger.exception("Shadow outcome appraisal failed")
+
             # Inference endpoints are ephemeral donated/external capacity. Probe them
             # continuously and reap abandoned leases so dead processes cannot consume
             # provider concurrency forever.

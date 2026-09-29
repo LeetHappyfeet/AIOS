@@ -78,12 +78,14 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
     async def goal_finish(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         goal_id=UUID(str(args["goal_id"]))
         status=str(args.get("status","completed"))
-        goal = await goals.finish(instance_id=instance_id,goal_id=goal_id,status=status)
+        goal = await goals.finish(instance_id=instance_id,goal_id=goal_id,status=status,
+                                  resolution_kind="explicit_goal_action")
         from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
         lifecycle=CognitiveLifecycleReconciler(db)
         await lifecycle.record_goal_evidence(
             instance_id=instance_id,goal_id=goal_id,evidence_type="explicit_goal_action",
-            relation="completion_candidate" if status=="completed" else "withdrawal",
+            relation="completion_candidate" if status=="completed" else
+                     "contradiction" if status=="failed" else "withdrawal",
             confidence=1.0,meta={"status":status})
         await lifecycle.reconcile_goal_threads(instance_id=instance_id,goal_id=goal_id)
         return {"goal_id":str(goal.goal_id),"status":goal.status}

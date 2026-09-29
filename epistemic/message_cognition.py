@@ -9,7 +9,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v6"
+INTERPRETER_VERSION = "message-cognition-v7"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -448,16 +448,35 @@ def ambiguous_cognition_sentences(
     """
     if not _same_identity(speaker_id, character_id):
         return []
+    explicit_units = interpret_message(
+        text,character_id=character_id,speaker_id=speaker_id,
+        speaker_role=speaker_role,viewpoint_id=viewpoint_id)
     explicit_sources={
         str(unit.meta.get("source_text") or "").strip()
-        for unit in interpret_message(
-            text,character_id=character_id,speaker_id=speaker_id,
-            speaker_role=speaker_role,viewpoint_id=viewpoint_id)
+        for unit in explicit_units
+    }
+    # Explicit fast-path goals remain authoritative, but future timing still
+    # benefits from one bounded temporal review. Reuse the original unit when
+    # the enrichment worker admits that proposal; never classify all fast-path
+    # cognition again.
+    explicit_timer_goals={
+        str(unit.meta.get("source_text") or "").strip()
+        for unit in explicit_units
+        if unit.claim_kind == "GOAL" and unit.polarity > 0
+        and bool(unit.meta.get("character_owned"))
+        and re.search(
+            r"\b(?:today|tomorrow|tonight|later|soon|afterwards|sometime later|"
+            r"in\s+\d+\s+(?:minutes?|hours?|days?|weeks?))\b",
+            str(unit.meta.get("source_text") or ""), re.I,
+        )
     }
     candidates=[]
-    for sentence in _sentences(text):
+    message_sentences = _sentences(text)
+    for sentence_index, sentence in enumerate(message_sentences):
         clean=sentence.strip()
-        if not clean or clean in explicit_sources or _QUESTION_RE.search(clean):
+        explicit_timer_goal = clean in explicit_timer_goals
+        if (not clean or (clean in explicit_sources and not explicit_timer_goal)
+                or _QUESTION_RE.search(clean)):
             continue
         # Dialogue/action prose with first-person commitment, future intent,
         # offers/agreements, or self-development language is high-value enough
@@ -468,8 +487,16 @@ def ambiguous_cognition_sentences(
             "i could ","my goal","my plan","counter-offer","standing offer",
             "i'm learning","i am learning","i'd rather","i would rather",
         )
-        if any(signal in lower for signal in signals):
-            candidates.append(clean[:700])
+        if explicit_timer_goal or any(signal in lower for signal in signals):
+            # Keep the immediately preceding sentence: commitments are often
+            # elliptical ("Tomorrow afternoon. I'll go.") and the date is
+            # essential to distinguishing a future plan from an immediate act.
+            excerpt = clean
+            if sentence_index > 0:
+                previous = message_sentences[sentence_index - 1].strip()
+                if previous:
+                    excerpt = f"{previous} {clean}"
+            candidates.append(excerpt[:700])
         if len(candidates)>=4:
             break
     return candidates

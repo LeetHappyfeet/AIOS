@@ -137,6 +137,8 @@ class InternalHUDAssembler:
         if profile.include_goals:
             goals = list(frame.get("goals") or [])[:max(0, profile.goal_items)]
             add_items("ACTIVE GOAL", goals, profile.goal_items)
+            scheduled_goals = list(frame.get("scheduled_goals") or [])[:2]
+            add_items("FUTURE GOALS (REVIEW WHEN DUE)", scheduled_goals, 2)
             # Planning workers get a tiny deterministic lifecycle digest. Other
             # workers keep the old text-only goal surface.
             if worker_profile == "planning" and goals:

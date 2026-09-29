@@ -27,6 +27,10 @@ class Settings(BaseModel):
     # -------------------------------------------------
     source_name: str = os.getenv("AIOS_SOURCE_NAME", "SillyTavern")
     default_scope: str = os.getenv("AIOS_DEFAULT_SCOPE", "conversation")
+    # IANA timezone used to resolve relative character commitments such as
+    # "tomorrow afternoon". Leave unset when the installation has no known
+    # narrative/user timezone; temporal cognition then keeps the goal active.
+    default_timezone: str | None = os.getenv("AIOS_DEFAULT_TIMEZONE") or None
 
     # -------------------------------------------------
     # RDF / Fuseki
