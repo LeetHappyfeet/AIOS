@@ -293,24 +293,40 @@ def infer_acquisition_mode(*, source_kind: Optional[str], speaker_role: Optional
     return "observed_source"
 
 
-async def _known_character(db: Database, value: Optional[str]) -> bool:
-    clean = _norm(value)
-    if not clean:
-        return False
-    row = await db.fetchrow(
+async def _known_characters(
+    db: Database, *values: Optional[str]
+) -> tuple[bool, ...]:
+    """Resolve several possible character names with one identity lookup."""
+    cleaned = [_norm(value) for value in values]
+    wanted = sorted({value for value in cleaned if value})
+    if not wanted:
+        return tuple(False for _ in cleaned)
+
+    rows = await db.fetch(
         """
-        SELECT 1
-        FROM aios.character_identity ci
-        LEFT JOIN aios.character_alias ca ON ca.character_id=ci.character_id
-        WHERE lower(ci.character_id)=$1
-           OR lower(COALESCE(ci.canonical_name,''))=$1
-           OR lower(COALESCE(ci.display_name,''))=$1
-           OR lower(COALESCE(ca.alias,''))=$1
-        LIMIT 1
+        SELECT DISTINCT matched
+        FROM (
+            SELECT lower(ci.character_id) AS matched
+            FROM aios.character_identity ci
+            WHERE lower(ci.character_id)=ANY($1::text[])
+            UNION
+            SELECT lower(COALESCE(ci.canonical_name,'')) AS matched
+            FROM aios.character_identity ci
+            WHERE lower(COALESCE(ci.canonical_name,''))=ANY($1::text[])
+            UNION
+            SELECT lower(COALESCE(ci.display_name,'')) AS matched
+            FROM aios.character_identity ci
+            WHERE lower(COALESCE(ci.display_name,''))=ANY($1::text[])
+            UNION
+            SELECT lower(COALESCE(ca.alias,'')) AS matched
+            FROM aios.character_alias ca
+            WHERE lower(COALESCE(ca.alias,''))=ANY($1::text[])
+        ) matches
         """,
-        clean,
+        wanted,
     )
-    return bool(row)
+    matched = {str(row["matched"]) for row in rows if row["matched"]}
+    return tuple(bool(value and value in matched) for value in cleaned)
 
 
 async def _resolve_exact_runtime_instance(
@@ -360,6 +376,7 @@ async def resolve_claim_context(
     fuseki: FusekiClient,
     *,
     claim_id: UUID,
+    project_rdf: bool = True,
 ) -> ClaimContext:
     existing = await db.fetchrow(
         "SELECT * FROM aios.claim_context_resolution WHERE claim_id=$1",
@@ -415,23 +432,24 @@ async def resolve_claim_context(
             object_is_pivot=bool(existing["object_is_pivot"]),
             confidence=float(existing["confidence"]),
         )
-        receipt = await db.fetchrow(
-            """
-            SELECT 1
-            FROM aios.rdf_promotion_log
-            WHERE claim_id=$1
-              AND rdf_dataset=$2
-              AND rdf_graph=$3
-              AND rdf_predicate=$4
-            """,
-            claim_id,
-            DATASET,
-            LIMINAL_GRAPH,
-            RDF_RECEIPT_PREDICATE,
-        )
-        if rebound or not receipt:
-            await _write_liminal_context(fuseki, context)
-            await _log_rdf_context(db, context)
+        if project_rdf:
+            receipt = await db.fetchrow(
+                """
+                SELECT 1
+                FROM aios.rdf_promotion_log
+                WHERE claim_id=$1
+                  AND rdf_dataset=$2
+                  AND rdf_graph=$3
+                  AND rdf_predicate=$4
+                """,
+                claim_id,
+                DATASET,
+                LIMINAL_GRAPH,
+                RDF_RECEIPT_PREDICATE,
+            )
+            if rebound or not receipt:
+                await _write_liminal_context(fuseki, context)
+                await _log_rdf_context(db, context)
         return context
 
     row = await db.fetchrow(
@@ -494,8 +512,9 @@ async def resolve_claim_context(
     family = classify_predicate_family(row["predicate"], row["raw_text"])
     claim_kind = classify_claim_kind(family, row["predicate"], row["raw_text"])
 
-    subject_known_character = await _known_character(db, row["subject"])
-    object_known_character = await _known_character(db, row["object"])
+    subject_known_character, object_known_character = await _known_characters(
+        db, row["subject"], row["object"]
+    )
 
     subject_kind = (
         row["semantic_subject_kind"]
@@ -658,8 +677,9 @@ async def resolve_claim_context(
         }),
     )
 
-    await _write_liminal_context(fuseki, context)
-    await _log_rdf_context(db, context)
+    if project_rdf:
+        await _write_liminal_context(fuseki, context)
+        await _log_rdf_context(db, context)
     return context
 
 
