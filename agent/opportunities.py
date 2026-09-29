@@ -84,6 +84,23 @@ class CognitiveOpportunityService:
         goals=list(attention.goals)
         goal_states=await self.cognition.goals.cognitive_states(instance_id, goals)
         proposals:list[dict[str,Any]]=[]
+        # The character can elect to consider a new intention. Formation is
+        # limited to one attempt per source node and the planning model must
+        # ground its proposal in that node before the goal service admits it.
+        if context.source_head_node_id and focus and len(focus.split()) >= 5 and len(goals)<3:
+            attempted=await self.db.fetchval(
+                """SELECT 1 FROM aios.character_cognitive_operation
+                   WHERE instance_id=$1 AND source_node_id=$2
+                     AND operation_type='planning.form_goal' LIMIT 1""",
+                instance_id,context.source_head_node_id)
+            if not attempted:
+                proposals.append(self._p(
+                    "goal_formation","Consider whether this event calls for a new objective.",
+                    "planning.form_goal",{"focus":focus},
+                    context.source_head_node_id,context,
+                    relevance=.55,novelty=.65,recency=1,
+                    evidence=[{"kind":"source_node","id":str(context.source_head_node_id)}],
+                    key=f"goal-formation:{context.source_head_node_id}",freshness="strict"))
         subjects=await self.subjects.build(
             instance_id=instance_id,focus_text=focus,knowledge=list(snapshot.knowledge),
             source_node_id=source_node_id or context.source_head_node_id)
@@ -258,11 +275,11 @@ class CognitiveOpportunityService:
         # OpportunityRouter ever has a chance to reserve one.
         due_review=next(
             (p for p in proposals if p["opportunity_type"]=="goal_review"),None)
-        if due_review is not None:
-            non_reviews=[p for p in proposals if p is not due_review]
-            budgeted=non_reviews[:max(0,budget-1)] + [due_review]
-        else:
-            budgeted=proposals[:budget]
+        due_formation=next(
+            (p for p in proposals if p["opportunity_type"]=="goal_formation"),None)
+        reserved=[p for p in (due_review,due_formation) if p is not None]
+        budgeted=([p for p in proposals if p not in reserved][
+                    :max(0,budget-len(reserved))] + reserved)
         stored=[]
         for p in budgeted:
             row=await self.db.execute_returning_row(
@@ -311,6 +328,7 @@ class CognitiveOpportunityService:
             "memory_recall":"reflection",
             "knowledge_gap":"research",
             "goal_review":"planning",
+            "goal_formation":"planning",
             "reflection":"reflection",
             "immediate":"executive",
         }.get(str(typ),"executive")

@@ -32,9 +32,9 @@ class TaskOpportunityPlanner:
         rows=list(batch.opportunities)
         allowed={
             "research":{"knowledge_gap","memory_recall","reflection"},
-            "planning":{"goal_review","knowledge_gap","memory_recall","reflection"},
+            "planning":{"goal_review","goal_formation","knowledge_gap","memory_recall","reflection"},
             "reflection":{"memory_recall","reflection","knowledge_gap"},
-            "executive":{"immediate","goal_review","memory_recall","knowledge_gap","reflection"},
+            "executive":{"immediate","goal_review","goal_formation","memory_recall","knowledge_gap","reflection"},
             "communication":{"memory_recall","reflection"},
         }.get(task.task_type,set())
         ranked=[r for r in rows if str(r.get("opportunity_type")) in allowed]

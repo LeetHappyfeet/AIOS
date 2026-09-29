@@ -55,11 +55,14 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
 
     async def goal_create(instance_id: UUID, args: Mapping[str, Any]) -> Mapping[str, Any]:
         parent_task, source_node, root_task, _ = await _origin(instance_id)
+        horizon = str(args.get("horizon") or "session")
+        if horizon not in {"scene", "session", "persistent"}:
+            raise ValueError("invalid goal horizon")
         goal = await goals.create(
             instance_id=instance_id,text=str(args["goal"]),
             priority=int(args.get("priority",100)),source_task_id=parent_task,
             source_node_id=source_node,root_task_id=root_task,
-            meta={"created_by":"cognitive_action",
+            meta={"created_by":"cognitive_action", "horizon":horizon,
                   **({"completion_contract":dict(args["completion_contract"])}
                      if isinstance(args.get("completion_contract"),Mapping) else {})})
         return {"goal_id":str(goal.goal_id),"status":goal.status,
@@ -115,7 +118,7 @@ def register_cognitive_actions(db: Database, registry: ActionRegistry) -> None:
         return {"task_id":str(task.task_id),"task_type":kind,"status":task.status}
 
     registry.register(ActionSpec("memory.search",{"type":"object","required":["query"],"properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"additionalProperties":False},"read_only",frozenset({"executive","research","planning","reflection"}),memory_search,"return_to_cognition"))
-    registry.register(ActionSpec("goal.create",{"type":"object","required":["goal"],"properties":{"goal":{"type":"string"},"priority":{"type":"integer"},"completion_contract":{"type":"object","required":["slot","value"],"properties":{"slot":{"type":"string"},"path":{"type":"string"},"operator":{"type":"string","enum":["equals","not_equals","contains"]},"value":{}},"additionalProperties":False}},"additionalProperties":False},"internal_write",frozenset({"executive","planning","reflection"}),goal_create))
+    registry.register(ActionSpec("goal.create",{"type":"object","required":["goal"],"properties":{"goal":{"type":"string"},"priority":{"type":"integer"},"horizon":{"type":"string","enum":["scene","session","persistent"]},"completion_contract":{"type":"object","required":["slot","value"],"properties":{"slot":{"type":"string"},"path":{"type":"string"},"operator":{"type":"string","enum":["equals","not_equals","contains"]},"value":{}},"additionalProperties":False}},"additionalProperties":False},"internal_write",frozenset({"executive","planning","reflection"}),goal_create))
     registry.register(ActionSpec("goal.update",{"type":"object","required":["goal_id"],"properties":{"goal_id":{"type":"string"},"goal":{"type":"string"},"priority":{"type":"integer"}},"additionalProperties":False},"internal_write",frozenset({"executive","planning","reflection"}),goal_update))
     registry.register(ActionSpec("goal.complete",{"type":"object","required":["goal_id"],"properties":{"goal_id":{"type":"string"},"status":{"type":"string"}},"additionalProperties":False},"internal_write",frozenset({"executive","planning"}),goal_finish))
     registry.register(ActionSpec("task.create",{"type":"object","required":["objective"],"properties":{"objective":{"type":"string"},"task_type":{"type":"string"},"retrieval_focus":{"type":"string"},"priority":{"type":"integer"},"execution_mode":{"type":"string"}},"additionalProperties":False},"internal_write",frozenset({"executive","planning"}),task_create,"asynchronous"))

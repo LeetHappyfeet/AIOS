@@ -43,7 +43,10 @@ class OpportunityRouter:
             (row for row in ranked if str(row["opportunity_type"])=="goal_review"),None)
         attention_rows=[row for row in ranked if row is not goal_review]
         # Avoid asking the character to choose among duplicate cognitive modes.
-        selected=[]; seen=set()
+        formation=next((row for row in attention_rows
+                        if str(row["opportunity_type"])=="goal_formation"),None)
+        selected=[formation] if formation is not None else []
+        seen={"goal_formation"} if formation is not None else set()
         for row in attention_rows:
             key=str(row["opportunity_type"])
             if key in seen: continue
