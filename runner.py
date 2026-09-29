@@ -964,6 +964,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
 
     rdf_gate = asyncio.Semaphore(max(1, settings.runner_rdf_workers))
     claim_gate = asyncio.Lock()
+    resource_governor = ResourceGovernor()
     tasks: list[asyncio.Task] = [
         asyncio.create_task(_lease_recovery_loop(db), name="lease-recovery"),
         asyncio.create_task(_scheduler_metrics_loop(db), name="scheduler-metrics"),
@@ -979,6 +980,7 @@ async def run_runner(poll_interval: float = 1.0) -> None:
                         poll_interval=poll_interval,
                         rdf_gate=rdf_gate,
                         claim_gate=claim_gate,
+                        resource_governor=resource_governor,
                     ),
                     name=f"{resource_class.value}-{worker_index}",
                 )
