@@ -11,6 +11,13 @@ from aios_app.epistemic.halo_retrieval import (
     RetrievalPolicy,
     TopologyRetriever,
 )
-from aios_app.epistemic.retrieval import _focus_terms
+from aios_app.epistemic.retrieval import MAX_FOCUS_TERMS, _RETRIEVAL_SQL, _focus_terms
 
-__all__ = ["POLICIES", "RetrievalPolicy", "TopologyRetriever", "_focus_terms"]
+__all__ = [
+    "MAX_FOCUS_TERMS",
+    "POLICIES",
+    "RetrievalPolicy",
+    "TopologyRetriever",
+    "_RETRIEVAL_SQL",
+    "_focus_terms",
+]
