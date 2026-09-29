@@ -20,6 +20,7 @@ from aios_app.pipeline.jobs import (
     mark_failed,
     recover_stale_running_jobs,
     rebalance_queued_priorities,
+    _backfill_decompose_timeline_partitions,
 )
 from aios_app.pipeline.job_registry import ResourceClass, SchedulingLane, job_spec
 
@@ -853,6 +854,10 @@ async def run_runner(poll_interval: float = 1.0) -> None:
     )
     if recovered:
         logger.warning("Recovered %d stale/expired pipeline jobs", recovered)
+
+    # Legacy repair belongs at runner startup, not on every NLP poll. New
+    # decomposition jobs receive their timeline partition at enqueue time.
+    await _backfill_decompose_timeline_partitions(db)
 
     rebalanced = await rebalance_queued_priorities(db)
     if rebalanced:
