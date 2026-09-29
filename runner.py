@@ -18,11 +18,14 @@ from aios_app.pipeline.jobs import (
     heartbeat_job,
     mark_done,
     mark_failed,
+    defer_claimed_job,
     recover_stale_running_jobs,
     rebalance_queued_priorities,
     _backfill_decompose_timeline_partitions,
 )
 from aios_app.pipeline.job_registry import ResourceClass, SchedulingLane, job_spec
+from aios_app.scheduler.resource_governor import ResourceGovernor
+from aios_app.scheduler.runner_admission import admit_job, release_job
 
 from aios_app.pipeline.dag_to_document_section_worker import run_worker as run_dag_to_document_section
 from aios_app.pipeline.worker import run_claim_extraction_for_section
@@ -451,6 +454,7 @@ async def _execute_claimed_job(
     job: Dict[str, Any],
     worker_id: str,
     rdf_gate: asyncio.Semaphore,
+    resource_governor: ResourceGovernor,
 ) -> None:
     job_id = job["job_id"]
     job_type = str(job["job_type"])
@@ -465,6 +469,15 @@ async def _execute_claimed_job(
         return
 
     spec = job_spec(job_type)
+    if not await admit_job(resource_governor, job):
+        await defer_claimed_job(
+            db,
+            job_id,
+            worker_id=worker_id,
+            delay_seconds=0.5,
+        )
+        return
+
     partition_key = await _resolve_partition_key(db, job)
     if partition_key.startswith(("char:", "source:", "world:")):
         lock_key = f"semantic-scope:{partition_key}"
@@ -549,6 +562,7 @@ async def _execute_claimed_job(
             await heartbeat
         except asyncio.CancelledError:
             pass
+        await release_job(resource_governor, job)
 
 
 def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:
@@ -695,12 +709,17 @@ async def _claim_for_worker(
         # priority tweaking: if normalization is queued, worker 1 cannot be
         # captured by a large resolver backlog.
         if reserved_job_types:
+            reserved_lanes = preferred
+            if resource_class == ResourceClass.SEMANTIC and worker_index == 3:
+                # Worker 3's adaptive reservation targets LIVE stages even
+                # though its ordinary ownership remains BACKGROUND/DEFAULT.
+                reserved_lanes = [SchedulingLane.LIVE.value]
             job = await fetch_next_job(
                 db,
                 worker_id=worker_id,
                 resource_class=resource_class.value,
                 lease_seconds=settings.pipeline_lease_seconds,
-                scheduling_lanes=preferred,
+                scheduling_lanes=reserved_lanes,
                 prefer_uncontended=True,
                 job_types=reserved_job_types,
             )
@@ -737,6 +756,7 @@ async def _run_structural_semantic_batch_cycle(
     worker_id: str,
     rdf_gate: asyncio.Semaphore,
     claim_gate: asyncio.Lock,
+    resource_governor: ResourceGovernor,
 ) -> int:
     """Run one serial weighted cycle on the dedicated STRUCTURAL worker.
 
@@ -765,6 +785,7 @@ async def _run_structural_semantic_batch_cycle(
                 job=job,
                 worker_id=worker_id,
                 rdf_gate=rdf_gate,
+                resource_governor=resource_governor,
             )
             completed += 1
     return completed
@@ -778,6 +799,7 @@ async def _resource_worker(
     poll_interval: float,
     rdf_gate: asyncio.Semaphore,
     claim_gate: asyncio.Lock,
+    resource_governor: ResourceGovernor,
 ) -> None:
     worker_id = (
         f"{socket.gethostname()}:{os.getpid()}:"
@@ -790,6 +812,7 @@ async def _resource_worker(
                 worker_id=worker_id,
                 rdf_gate=rdf_gate,
                 claim_gate=claim_gate,
+                resource_governor=resource_governor,
             )
             if completed == 0:
                 await asyncio.sleep(poll_interval)
@@ -810,6 +833,7 @@ async def _resource_worker(
             job=job,
             worker_id=worker_id,
             rdf_gate=rdf_gate,
+            resource_governor=resource_governor,
         )
 
 
