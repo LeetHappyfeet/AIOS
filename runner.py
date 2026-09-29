@@ -594,6 +594,9 @@ def _semantic_stage_reservation(worker_index: int) -> Optional[list[str]]:
     if worker_index == 1:
         return [
             "normalize_proposition",
+        ]
+    if worker_index == 2:
+        return [
             "materialize_event_occurrences",
             "project_character_knowledge",
         ]
