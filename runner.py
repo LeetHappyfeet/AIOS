@@ -235,28 +235,17 @@ async def handle_rdf_liminal_classify(db: Database, job: Dict[str, Any]) -> None
 
 async def handle_resolve_claim_context(db: Database, job: Dict[str, Any]) -> None:
     claim_id = UUID(job["payload"]["claim_id"])
-    linked = await db.fetchrow(
-        """
-        SELECT 1
-        FROM aios.claim_candidate cc
-        JOIN aios.extracted_sentence es
-          ON es.sentence_id = cc.sentence_id
-        JOIN aios.document_section ds
-          ON ds.section_id = es.section_id
-        JOIN aios.dag_node n
-          ON n.node_id = ds.node_id
-        WHERE cc.claim_id = $1
-        """,
-        claim_id,
-    )
-    if not linked:
-        logger.warning(
-            "Skipping stale resolve_claim_context job for missing or unlinked claim %s",
-            claim_id,
-        )
-        return
     fuseki = FusekiClient(settings.fuseki_base_url)
-    context = await resolve_claim_context(db, fuseki, claim_id=claim_id)
+    try:
+        context = await resolve_claim_context(db, fuseki, claim_id=claim_id)
+    except RuntimeError as exc:
+        if str(exc).startswith("Cannot resolve context for missing or unlinked claim"):
+            logger.warning(
+                "Skipping stale resolve_claim_context job for missing or unlinked claim %s",
+                claim_id,
+            )
+            return
+        raise
     # Context resolution is the authority boundary: only explicitly world-scoped
     # resolved movement may proceed from semantic evidence into causal reality.
     if context and context.world_id and context.timeline_id:
