@@ -245,12 +245,25 @@ class InferenceBroker:
         try:
             text = await self.client.complete(provider, request)
             if request.choice_keys:
-                choice = text.strip()
-                # Be strict: no repair, fuzzy parsing, or extraction from prose.
-                # A malformed model response has no control authority.
+                raw_choice = text.strip()
+                # The control protocol remains host-owned. Accept either the
+                # preferred bare opaque token or the legacy minimal
+                # {"choice":"A"} envelope, but never actions/arguments/prose.
+                choice = raw_choice
+                if raw_choice.startswith("{") and raw_choice.endswith("}"):
+                    try:
+                        envelope = json.loads(raw_choice)
+                    except json.JSONDecodeError:
+                        envelope = None
+                    if (
+                        isinstance(envelope, dict)
+                        and set(envelope) == {"choice"}
+                        and isinstance(envelope.get("choice"), str)
+                    ):
+                        choice = envelope["choice"].strip()
                 if choice not in request.choice_keys:
                     raise StructuredResponseError(
-                        f"response is not one allowed choice key: {choice!r}"
+                        f"response is not one allowed choice key: {raw_choice!r}"
                     )
                 payload = {"choice": choice}
                 structured = StructuredInferenceResponse(
