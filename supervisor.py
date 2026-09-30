@@ -43,8 +43,10 @@ def empty_payload(_): return {}
 # - exact reinforcement: already completed by suppression receipts
 # - exact novel: wait for a terminal vector admission decision
 # - vector reinforcement: completed by suppression receipts
-# - novel/refine/challenge/bypass: expand normally
+# - novel/refine/challenge: expand only with standalone occurrence support
+# - timeout/error/unavailable bypass: preserve evidence, retry admission
 ADMISSION_EXPANSION_SQL = """
+          AND aios.semantic_claim_topology_eligible(o.claim_id)
           AND EXISTS (
               SELECT 1
               FROM aios.semantic_exact_admission sea
@@ -57,8 +59,7 @@ ADMISSION_EXPANSION_SQL = """
                             SELECT 1 FROM aios.semantic_neighbor_admission sna
                             WHERE sna.claim_id=o.claim_id
                               AND sna.decision IN (
-                                  'reinforces','refines','challenges','novel',
-                                  'bypass_unavailable','bypass_timeout','bypass_error'
+                                  'reinforces','refines','challenges','novel'
                               )
                         )
                     )
@@ -235,6 +236,7 @@ STAGES: List[Stage] = [
         FROM aios.observation o
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
         WHERE upper(COALESCE(ccr.claim_kind,''))='EVENT'
+          AND aios.semantic_claim_topology_admitted(o.claim_id)
           AND NOT EXISTS (
               SELECT 1 FROM aios.semantic_event_membership sem
               WHERE sem.observation_id=o.observation_id AND sem.status='active'
@@ -284,6 +286,8 @@ STAGES: List[Stage] = [
            AND dn.timeline_id=pfl.timeline_id
            AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
           WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL
+            AND aios.semantic_proposition_topology_admitted(kae.proposition_id)
+            AND (kae.claim_id IS NULL OR aios.semantic_claim_topology_admitted(kae.claim_id))
             AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
             AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.acquisition_id=kae.acquisition_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
             AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_character_acquisition_topology' AND pj.status IN ('queued','running') AND pj.payload->>'acquisition_id'=kae.acquisition_id::text)
@@ -346,7 +350,7 @@ STAGES: List[Stage] = [
     """), claim_id_payload, 80, 64),
     Stage("backfill_semantic_proposition_leaves", "derive_claim_topology", """
         SELECT DISTINCT o.claim_id FROM aios.observation o JOIN aios.semantic_topology_projection stp ON stp.claim_id=o.claim_id JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node dn ON dn.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-        WHERE ie.superseded_at IS NULL AND stp.projected_at IS NULL AND stp.resolver_version='semantic-topology-v1' AND stp.meta->>'reproject_reason'='semantic_proposition_leaves_20260909'
+        WHERE ie.superseded_at IS NULL AND aios.semantic_claim_topology_admitted(o.claim_id) AND stp.projected_at IS NULL AND stp.resolver_version='semantic-topology-v1' AND stp.meta->>'reproject_reason'='semantic_proposition_leaves_20260909'
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_node n WHERE n.scope_key=stp.scope_key AND n.node_type='PROPOSITION' AND n.proposition_id=o.proposition_id)
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
         ORDER BY o.claim_id LIMIT $1

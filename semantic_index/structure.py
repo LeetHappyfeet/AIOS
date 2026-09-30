@@ -24,7 +24,8 @@ async def analyze_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
         LEFT JOIN aios.semantic_structure_state ss
           ON ss.proposition_id=p.proposition_id
          AND ss.embedding_version=$4
-        WHERE ss.proposition_id IS NULL
+        WHERE aios.semantic_proposition_topology_admitted(p.proposition_id)
+          AND (ss.proposition_id IS NULL
            OR (ss.analyzed_at < s.indexed_at)
            OR (ss.analyzed_at < now() - make_interval(secs => $5::double precision)
                AND ss.analyzed_at < (
@@ -32,7 +33,7 @@ async def analyze_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
                    WHERE newer.object_type='proposition'
                      AND newer.qdrant_collection=$2
                      AND newer.embedding_model=$3 AND newer.embedding_version=$4
-               ))
+               )))
         ORDER BY ss.analyzed_at ASC NULLS FIRST, p.created_at
         LIMIT $1
         """,
@@ -91,6 +92,11 @@ async def analyze_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
             for _, score, payload in hits:
                 other = payload.get("proposition_id")
                 if not other or other == str(proposition_id) or score < cfg.neighbor_min_score:
+                    continue
+                eligible = await db.fetchrow(
+                    'SELECT aios.semantic_proposition_topology_admitted($1::uuid) AS eligible', other,
+                )
+                if not eligible or not eligible['eligible']:
                     continue
                 a, b = sorted((str(proposition_id), str(other)))
                 await db.execute(

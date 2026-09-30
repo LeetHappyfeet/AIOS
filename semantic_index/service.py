@@ -365,10 +365,12 @@ async def index_propositions_once(db: Database, cfg: SemanticIndexConfig) -> int
             FROM aios.observation o
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
             WHERE o.proposition_id=p.proposition_id
+              AND aios.semantic_occurrence_topology_eligible(o.claim_id,p.proposition_id)
             ORDER BY ccr.resolved_at DESC
             LIMIT 1
         ) ctx ON true
-        WHERE NOT EXISTS (
+        WHERE aios.semantic_proposition_topology_eligible(p.proposition_id)
+          AND NOT EXISTS (
             SELECT 1 FROM aios.semantic_vector_index_state s
             WHERE s.object_type='proposition'
               AND s.object_key=p.proposition_id::text
@@ -486,6 +488,7 @@ async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -
             ) ctx ON true
         ) e
         WHERE e.epistemic_status NOT IN ('rejected','superseded')
+          AND aios.semantic_proposition_topology_eligible(e.proposition_id)
           AND NOT EXISTS (
               SELECT 1 FROM aios.semantic_vector_index_state s
               WHERE s.object_type=e.object_type
@@ -549,6 +552,8 @@ async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -
 
 
 async def index_once(db: Database, cfg: SemanticIndexConfig) -> int:
+    from .eligibility import quarantine_ineligible_vectors_once
+    await quarantine_ineligible_vectors_once(db, cfg)
     source = await index_source_sections_once(db, cfg)
     source += await index_corpus_sections_once(db, cfg)
     frames = await index_semantic_frames_once(db, cfg)

@@ -10,7 +10,7 @@ from .relation_validator import validate_neighbor_relation
 
 logger = logging.getLogger("aios.semantic_neighbor_classifier")
 
-NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v5"
+NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v6"
 
 
 def classify_neighbor_pair(
@@ -103,6 +103,8 @@ async def classify_neighbor_relations_once(
             FROM aios.observation o
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
             WHERE o.proposition_id=pa.proposition_id
+              AND aios.semantic_occurrence_topology_eligible(o.claim_id,pa.proposition_id)
+              AND aios.semantic_claim_topology_admitted(o.claim_id)
             ORDER BY ccr.resolved_at DESC
             LIMIT 1
         ) ca ON true
@@ -127,6 +129,8 @@ async def classify_neighbor_relations_once(
             FROM aios.observation o
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
             WHERE o.proposition_id=pb.proposition_id
+              AND aios.semantic_occurrence_topology_eligible(o.claim_id,pb.proposition_id)
+              AND aios.semantic_claim_topology_admitted(o.claim_id)
             ORDER BY ccr.resolved_at DESC
             LIMIT 1
         ) cb ON true
@@ -146,6 +150,8 @@ async def classify_neighbor_relations_once(
         ) pc ON true
         WHERE snc.embedding_version=$1
           AND snc.status='candidate'
+          AND aios.semantic_proposition_topology_admitted(snc.proposition_id)
+          AND aios.semantic_proposition_topology_admitted(snc.neighbor_proposition_id)
           AND NOT EXISTS (
               SELECT 1
               FROM aios.semantic_neighbor_relation r

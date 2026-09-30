@@ -14,7 +14,7 @@ from .neighbor_classifier import NEIGHBOR_CLASSIFIER_VERSION
 
 logger = logging.getLogger("aios.semantic_clustering")
 
-ALGORITHM_VERSION = "semantic-cluster-v4"
+ALGORITHM_VERSION = "semantic-cluster-v5"
 
 # Only semantically interpreted relations that imply a coherent shared region
 # may fuse core components. Generic RELATED similarity is intentionally excluded:
@@ -424,6 +424,8 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
     watermark = await db.fetchrow(
         """
         SELECT MAX(changed_at) AS watermark FROM (
+            SELECT interpreted_at AS changed_at FROM aios.semantic_interpretation
+            UNION ALL
             SELECT analyzed_at AS changed_at FROM aios.semantic_structure_state
             WHERE embedding_version=$1
             UNION ALL
@@ -492,6 +494,8 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
          AND nr.status IN ('candidate','reconciled')
         WHERE snc.embedding_version=$1
           AND snc.status='candidate'
+          AND aios.semantic_proposition_topology_admitted(snc.proposition_id)
+          AND aios.semantic_proposition_topology_admitted(snc.neighbor_proposition_id)
           AND (snc.similarity >= $2 OR nr.relation='CONTRADICTS')
         ORDER BY snc.similarity DESC
         """,
@@ -518,6 +522,7 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
          AND s.qdrant_collection=$1
          AND s.embedding_model=$2
          AND s.embedding_version=$3
+        WHERE aios.semantic_proposition_topology_admitted(p.proposition_id)
         """,
         cfg.proposition_collection,
         cfg.embedding_model,

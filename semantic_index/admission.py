@@ -59,6 +59,7 @@ async def _same_scope_claim(db: Database, *, proposition_id: UUID, scope_key: st
         FROM aios.observation o
         WHERE o.proposition_id=$1
           AND aios.exact_admission_scope_key(o.claim_id)=$2
+          AND aios.semantic_occurrence_topology_eligible(o.claim_id,o.proposition_id)
         ORDER BY o.observed_at, o.observation_id
         LIMIT 1
         """, proposition_id, scope_key,
@@ -81,6 +82,11 @@ async def classify_semantic_admission(db: Database, *, proposition_id: UUID,
 
     for candidate in sorted(candidates, key=lambda c: c.score, reverse=True):
         if candidate.proposition_id == proposition_id:
+            continue
+        eligibility = await db.fetchrow(
+            'SELECT aios.semantic_proposition_topology_eligible($1) AS eligible', candidate.proposition_id,
+        )
+        if not eligibility or not eligibility['eligible']:
             continue
         matched_claim_id = await _same_scope_claim(
             db, proposition_id=candidate.proposition_id, scope_key=scope_key,
@@ -173,7 +179,8 @@ async def fail_open_stalled_admissions_once(db: Database, cfg: SemanticIndexConf
     """Release exact-novel claims that vector admission has failed to classify.
 
     A Qdrant/index outage is allowed to cost optimization, never memory. Claims
-    older than the timeout receive a terminal bypass decision and may expand.
+    older than the timeout retain a bypass audit record. Topology remains
+    deferred, and normal admission retries these records after indexing.
     """
     rows = await db.fetch(
         """
@@ -228,7 +235,10 @@ async def admit_semantic_neighbors_once(db: Database, cfg: SemanticIndexConfig, 
           ON svi.object_type='proposition' AND svi.object_key=o.proposition_id::text
          AND svi.qdrant_collection=$2 AND svi.embedding_model=$3 AND svi.embedding_version=$4
         WHERE sea.decision='novel_exact'
-          AND NOT EXISTS (SELECT 1 FROM aios.semantic_neighbor_admission sna WHERE sna.claim_id=o.claim_id)
+          AND aios.semantic_occurrence_topology_eligible(o.claim_id,o.proposition_id)
+          AND NOT EXISTS (SELECT 1 FROM aios.semantic_neighbor_admission sna
+              WHERE sna.claim_id=o.claim_id
+                AND sna.decision NOT IN ('bypass_timeout','bypass_error','bypass_unavailable'))
         ORDER BY o.observed_at LIMIT $1
         """, cfg.batch_size, cfg.proposition_collection,
         cfg.embedding_model, cfg.embedding_version,

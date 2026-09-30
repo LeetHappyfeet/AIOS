@@ -503,11 +503,12 @@ async def project_normalized_observation(
         JOIN aios.proposition p ON p.proposition_id=o.proposition_id
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
         WHERE o.claim_id=$1
+          AND aios.semantic_claim_topology_admitted(o.claim_id)
         """,
         claim_id,
     )
     if not row:
-        raise RuntimeError(f"claim {claim_id} has not been normalized")
+        return False
 
     perceiver_rows = await db.fetch(
         """

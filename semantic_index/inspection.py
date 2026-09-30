@@ -139,7 +139,7 @@ async def inspect_neighborhood(db: Database, *, collection: str | None = None,
     # A missing vector must not hide the SQL member of a stored cluster.
     proposition_ids = list(dict.fromkeys(ids if cluster_id else mapped))
     uuids = [UUID(key) for key in proposition_ids]
-    rows = await db.fetch("SELECT * FROM aios.proposition WHERE proposition_id=ANY($1::uuid[]) ORDER BY proposition_id", uuids)
+    rows = await db.fetch("SELECT p.*, aios.semantic_proposition_topology_eligible(p.proposition_id) AS topology_eligible, aios.semantic_proposition_topology_admitted(p.proposition_id) AS topology_admitted FROM aios.proposition p WHERE proposition_id=ANY($1::uuid[]) ORDER BY proposition_id", uuids)
     evidence = await db.fetch("""
         SELECT p.proposition_id, e.* FROM aios.proposition p
         CROSS JOIN LATERAL (
@@ -205,6 +205,8 @@ async def inspect_neighborhood(db: Database, *, collection: str | None = None,
         item["structural_differences"] = [field for field in ("subject", "predicate", "object", "polarity")
                                           if item[field + "_a"] != item[field + "_b"]]
         edge_items.append(item)
+    eligible_ids = {str(row["proposition_id"]) for row in rows if row.get("topology_admitted", False)}
+    vectors = {key: vector for key, vector in vectors.items() if key in eligible_ids}
     sample = representatives(vectors, core_ids={key for key, kind in membership.items() if kind == "core"} or None)
     sample["sampled"] = bool(cluster and cluster["member_count"] > len(proposition_ids))
     sample["missing_vector_count"] = len(set(proposition_ids) - set(vectors))

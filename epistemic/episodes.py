@@ -27,6 +27,8 @@ async def materialize_event_occurrences_once(
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
         WHERE upper(COALESCE(ccr.claim_kind,''))='EVENT'
           AND ($1::uuid IS NULL OR o.claim_id=$1)
+          AND aios.semantic_occurrence_topology_eligible(o.claim_id,o.proposition_id)
+          AND aios.semantic_claim_topology_admitted(o.claim_id)
           AND NOT EXISTS (
               SELECT 1 FROM aios.semantic_event_membership m
               WHERE m.observation_id=o.observation_id AND m.status='active'
@@ -49,7 +51,7 @@ async def materialize_event_occurrences_once(
             )
             VALUES ($1,$2,$3,$4,'active',$5,$6,$7::jsonb,now(),now())
             ON CONFLICT (event_key) DO UPDATE
-            SET confidence=GREATEST(aios.semantic_event.confidence,EXCLUDED.confidence),
+            SET status='active', confidence=GREATEST(aios.semantic_event.confidence,EXCLUDED.confidence),
                 updated_at=now()
             RETURNING semantic_event_id
             """,
@@ -100,6 +102,8 @@ async def derive_semantic_episodes_once(db: Database, *, limit: int = 500) -> in
           ON sem.semantic_event_id=se.semantic_event_id AND sem.status='active'
         LEFT JOIN aios.observation o ON o.observation_id=sem.observation_id
         WHERE se.status='active'
+          AND aios.semantic_proposition_topology_admitted(sem.proposition_id)
+          AND (sem.claim_id IS NULL OR aios.semantic_occurrence_topology_eligible(sem.claim_id,sem.proposition_id))
           AND se.dag_node_id IS NOT NULL
           AND NOT EXISTS (
               SELECT 1 FROM aios.semantic_episode_membership em

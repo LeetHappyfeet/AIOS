@@ -37,8 +37,8 @@ def test_ownership_copies_are_deduplicated_and_source_evidence_preserved(monkeyp
     monkeypatch.setattr(inspection, "QdrantStore", lambda *args: SimpleNamespace(client=Client()))
     class DB:
         async def fetch(self, sql, *args):
-            if "SELECT * FROM aios.proposition" in sql:
-                return [{"proposition_id":proposition,"canonical_text":"Window is open"}]
+            if "SELECT p.*, aios.semantic_proposition_topology_eligible" in sql:
+                return [{"proposition_id":proposition,"canonical_text":"Window is open","topology_eligible":True,"topology_admitted":True}]
             if "CROSS JOIN LATERAL" in sql:
                 return [{"proposition_id":proposition,"raw_text":"Open the window", "message_text":"Original message"}]
             return []
@@ -63,7 +63,7 @@ def test_cluster_keeps_sql_member_when_vector_is_missing(monkeypatch):
         async def fetch(self, sql, *args):
             if "SELECT proposition_id, membership_kind" in sql:
                 return [{"proposition_id":proposition,"membership_kind":"core"}]
-            if "SELECT * FROM aios.proposition" in sql:
+            if "SELECT p.*, aios.semantic_proposition_topology_eligible" in sql:
                 return [{"proposition_id":proposition,"canonical_text":"Missing vector"}]
             return []
     result = asyncio.run(inspect_neighborhood(DB(),cluster_id=UUID(int=5)))
@@ -94,7 +94,7 @@ def test_expansion_around_one_seed_returns_seed_and_one_neighbor(monkeypatch):
     monkeypatch.setattr(inspection,'QdrantStore',lambda *args: Store())
     class DB:
         async def fetch(self,sql,*args):
-            if 'SELECT * FROM aios.proposition' in sql:
+            if 'SELECT p.*, aios.semantic_proposition_topology_eligible' in sql:
                 return [{'proposition_id':key,'canonical_text':str(key)} for key in args[0]]
             return []
     result = asyncio.run(inspect_neighborhood(DB(),point_ids=[ids[0]],neighbors=1))

@@ -20,6 +20,7 @@ from .admission import (
     fail_open_stalled_admissions_once,
     admission_backlog_snapshot,
 )
+from .eligibility import quarantine_ineligible_vectors_once
 from .query_server import start_query_server
 from .structure import analyze_neighbors_once
 from .neighbor_classifier import classify_neighbor_relations_once
@@ -92,6 +93,7 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
             return await func(*args, **kwargs)
 
         while True:
+            await run_stage("topology-quarantine", quarantine_ineligible_vectors_once, db, cfg)
             source_indexed = await run_stage("vector-source", index_source_sections_once, db, cfg)
             corpus_indexed = await run_stage("vector-corpus", index_corpus_sections_once, db, cfg)
             source_indexed = int(source_indexed) + int(corpus_indexed)

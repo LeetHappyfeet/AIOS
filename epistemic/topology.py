@@ -678,6 +678,7 @@ async def derive_claim_topology(
         JOIN aios.proposition p ON p.proposition_id=o.proposition_id
         LEFT JOIN aios.character_instance ci ON ci.instance_id=ccr.character_instance_id
         WHERE ccr.claim_id=$1
+          AND aios.semantic_claim_topology_admitted(ccr.claim_id)
         """,
         claim_id,
     )
@@ -978,6 +979,8 @@ async def derive_character_acquisition_topology(
         ) o ON true
         LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=kae.claim_id
         WHERE kae.acquisition_id=$1
+          AND aios.semantic_proposition_topology_admitted(kae.proposition_id)
+          AND (kae.claim_id IS NULL OR aios.semantic_occurrence_topology_eligible(kae.claim_id,kae.proposition_id))
         """,
         acquisition_id,
     )
