@@ -14,6 +14,9 @@ def build_inspection_request(collection: str, cluster: str, points: str,
     payload = {"collection": (collection or "").strip() or None,
                "neighbors": neighbors, "offset": offset, "evidence_offset": evidence_offset}
     if neighbors:
+        if not ids and cluster:
+            payload.update(cluster_id=str(UUID(cluster)), neighbors=0)
+            return payload
         if len(ids) != 1:
             raise ValueError("To expand neighbors, click one member row or paste exactly one Qdrant point ID. "
                              "The neighbor count controls how many points to find; it does not select a seed.")

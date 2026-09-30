@@ -21,7 +21,7 @@ def test_cluster_inspection_without_expansion_remains_supported():
     assert build_inspection_request('propositions_v1', cluster, '', 0, 0, 0)['cluster_id'] == cluster
 
 
-@pytest.mark.parametrize('points,offset', [('',0),(f'{seed} {cluster}',0),(seed,1)])
+@pytest.mark.parametrize('points,offset', [(f'{seed} {cluster}',0),(seed,1)])
 def test_invalid_seed_selection_is_explained_before_api_request(points,offset):
     with pytest.raises(ValueError):
         build_inspection_request('propositions_v1', cluster, points, 1, offset, 0)
@@ -52,3 +52,9 @@ def test_api_validation_explanation_is_preserved():
 def test_api_rejects_invalid_expansion_before_database_or_qdrant(kwargs):
     with pytest.raises(ValueError):
         asyncio.run(inspect_neighborhood(None,**kwargs))
+
+
+def test_cluster_expansion_first_loads_cluster_to_resolve_its_medoid():
+    payload = build_inspection_request('propositions_v1', cluster, '', 1, 0, 0)
+    assert payload['cluster_id'] == cluster
+    assert payload['neighbors'] == 0

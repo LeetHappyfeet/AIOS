@@ -187,10 +187,12 @@ vectors arrive and `AIOS_SEMANTIC_NEIGHBOR_REFRESH_SECONDS` has elapsed (default
 extends the advisory candidate graph; it does not prune historical candidate
 edges or perform a full current-kNN replacement.
 
-To expand around a cluster member, inspect the cluster with neighbor count 0,
-click a member row, then set the desired neighbor count and inspect again. Row
-selection fills the actual Qdrant point ID, clears the cluster field, and resets
-the member offset. For epistemic objects the selected point ID is distinct from
-the proposition ID. Expansion uses exactly one seed; the neighbor count alone
-does not select one. Invalid selections and API validation details are displayed
-as UI messages before or instead of a generic HTTP traceback.
+Choose a current cluster from the dropdown after listing clusters. With a
+positive neighbor count the UI first inspects the cluster, selects its sampled
+medoid, and expands around that actual Qdrant point. The selected seed and method
+are shown in the details. A cluster ID copied from the displayed current list
+into the point field is recognized as a cluster ID. Clicking a member row still
+selects a specific seed, clears the cluster field, and resets the member offset.
+For epistemic objects the selected point ID is distinct from the proposition ID.
+Validation and API errors are displayed in the result details without throwing
+Gradio exceptions; the neighbor count alone cannot identify a cluster or seed.

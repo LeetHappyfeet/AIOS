@@ -16,24 +16,39 @@ def _api(path: str, payload: dict | None = None):
         response = (requests.post(base + path, json=payload, timeout=60) if payload is not None
                     else requests.get(base + path, timeout=30))
     except requests.RequestException as exc:
-        raise gr.Error(f"Cannot reach AIOS API: {exc}") from exc
+        raise ValueError(f"Cannot reach AIOS API: {exc}") from exc
     if not response.ok:
         try:
             body = response.json()
         except ValueError:
             body = None
         detail = api_error_detail(body, f"API returned HTTP {response.status_code}.")
-        raise gr.Error(detail)
+        raise ValueError(detail)
     return response.json()
 
 
-def inspect(collection, cluster, point_ids, neighbors, offset, evidence_offset):
+def inspect(collection, cluster, point_ids, neighbors, offset, evidence_offset, current_clusters=None):
     try:
+        # IDs copied from the cluster list are cluster IDs, not vector IDs.
+        listed = {str(item["cluster_id"]) for item in (current_clusters or {}).get("clusters", [])}
+        if (point_ids or "").strip() in listed:
+            cluster, point_ids, collection = point_ids.strip(), "", "propositions_v1"
         payload = build_inspection_request(collection, cluster, point_ids,
                                            int(neighbors), int(offset), int(evidence_offset))
-    except (ValueError, TypeError, OverflowError) as exc:
-        raise gr.Error(str(exc)) from exc
-    result = _api("/semantic/inspect", payload)
+        result = _api("/semantic/inspect", payload)
+        if int(neighbors) and payload.get("cluster_id"):
+            medoid = result["representatives"]["medoid_id"]
+            members = result.get("members", [])
+            index = next((i for i, item in enumerate(members) if str(item["proposition_id"]) == medoid), None)
+            if index is None:
+                raise ValueError("This cluster has no available representative vector. Choose another cluster.")
+            seed, _, seed_collection, _ = member_seed(result, index)
+            expanded = build_inspection_request(seed_collection, "", seed, int(neighbors), 0, int(evidence_offset))
+            result = _api("/semantic/inspect", expanded)
+            result["seed_selection"] = {"method": "cluster_sample_medoid", "point_id": seed,
+                                        "cluster_id": payload["cluster_id"]}
+    except (ValueError, TypeError, OverflowError, KeyError) as exc:
+        return [], [], {"error": str(exc)}
     samples = result["representatives"]
     representative_ids = set(samples["representative_ids"])
     rows = []
@@ -54,18 +69,34 @@ def select_seed(result, evt: gr.SelectData):
     try:
         return member_seed(result, row_index)
     except (ValueError, TypeError, KeyError) as exc:
-        raise gr.Error(str(exc)) from exc
+        gr.Warning(str(exc))
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip()
+
+
+def list_clusters():
+    try:
+        result = _api("/semantic/clusters")
+        choices = [(f"{item['member_count']} members — {item.get('classification') or 'unclassified'} — {item['cluster_id']}",
+                    item['cluster_id']) for item in result.get("clusters", [])]
+        return result, gr.update(choices=choices, value=None)
+    except ValueError as exc:
+        return {"error": str(exc)}, gr.update(choices=[], value=None)
+
+
+def choose_cluster(value):
+    return value or "", "", "propositions_v1", 0
 
 
 @register_tab
 def render_semantic_inspector():
     with gr.Tab("Semantic neighborhoods"):
         gr.Markdown("Inspect a stored cluster or paste Qdrant point IDs. Source evidence, viewpoints, "
-                    "frames and verifier explanations appear in the details. Click a member row to select "
-                    "one seed, then set the neighbor count and inspect again.")
+                    "frames and verifier explanations appear in the details. Choose a current cluster to inspect it. "
+                    "With neighbors above 0, its medoid is selected automatically; click a member row to choose a different seed.")
         refresh = gr.Button("List current clusters")
         clusters = gr.JSON(label="Current clusters")
-        refresh.click(lambda: _api("/semantic/clusters"), outputs=clusters)
+        cluster_picker = gr.Dropdown(label="Choose a current cluster", choices=[])
+        refresh.click(list_clusters, outputs=[clusters, cluster_picker])
         collection = gr.Textbox(value="propositions_v1", label="Collection")
         cluster = gr.Textbox(label="Cluster ID (leave empty to inspect point IDs)")
         points = gr.Textbox(label="Point IDs / selected seed (comma or whitespace separated)")
@@ -77,6 +108,7 @@ def render_semantic_inspector():
         members = gr.Dataframe(headers=["Proposition", "Representative", "Text", "Polarity", "Membership", "Evidence shown"], interactive=False)
         edges = gr.Dataframe(headers=["Text A", "Text B", "Similarity", "Relation", "Validation", "Boundary"], interactive=False)
         details = gr.JSON(label="Source evidence and relation explanations")
+        cluster_picker.change(choose_cluster, inputs=cluster_picker, outputs=[cluster, points, collection, offset])
         members.select(select_seed, inputs=details, outputs=[points, cluster, collection, offset])
-        button.click(inspect, inputs=[collection, cluster, points, neighbors, offset, evidence_offset],
+        button.click(inspect, inputs=[collection, cluster, points, neighbors, offset, evidence_offset, clusters],
                      outputs=[members, edges, details])
