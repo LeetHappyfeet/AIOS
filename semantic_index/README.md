@@ -196,3 +196,38 @@ selects a specific seed, clears the cluster field, and resets the member offset.
 For epistemic objects the selected point ID is distinct from the proposition ID.
 Validation and API errors are displayed in the result details without throwing
 Gradio exceptions; the neighbor count alone cannot identify a cluster or seed.
+
+
+### Incremental ingestion and explicit region analysis
+
+The normal semantic loop runs neighbor discovery, relation classification,
+targeted validation, verified pair reconciliation, stale cluster cleanup, and
+RDF catch-up. It does not rebuild clusters or materialize global outliers.
+Validation drains once per cycle even when no new relation was classified.
+Package imports no longer replace classifier/reconciler functions.
+
+For deliberate maintenance or inspection, the existing global analysis remains
+available as a one-shot command (avoid running another region analysis at the
+same time):
+
+```bash
+python -m aios_app.semantic_index.cli --analyze-regions-once
+```
+
+This command still analyzes the full eligible graph; bounded scope selection
+and incremental candidate queues are follow-up work. Existing cluster results
+remain inspectable, and stale derived pivots are retired during normal ingestion.
+No schema migration or vector deletion is introduced by this scheduling change.
+
+Independent environment budgets retain the previous defaults:
+
+| Setting | Default with index batch 64 |
+| --- | ---: |
+| `AIOS_SEMANTIC_NEIGHBOR_BATCH_SIZE` | 32 |
+| `AIOS_SEMANTIC_RELATION_BATCH_SIZE` | 64 |
+| `AIOS_SEMANTIC_VALIDATION_BATCH_SIZE` | 256 |
+| `AIOS_SEMANTIC_RECONCILIATION_BATCH_SIZE` | 64 |
+
+Completed nonempty or slow stages log their count and elapsed time. Relation
+classification additionally logs candidate-query, classification, and write
+durations. These timings distinguish SQL cost from the separate validation drain.

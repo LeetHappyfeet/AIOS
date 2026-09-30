@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from aios_app.db import Database
@@ -38,6 +39,8 @@ async def classify_neighbor_relations_once(
     db: Database,
     cfg: SemanticIndexConfig,
 ) -> int:
+    started = time.monotonic()
+    logger.debug("Semantic relation candidate query started")
     rows = await db.fetch(
         """
         SELECT
@@ -165,11 +168,17 @@ async def classify_neighbor_relations_once(
         """,
         cfg.embedding_version,
         NEIGHBOR_CLASSIFIER_VERSION,
-        cfg.batch_size,
+        getattr(cfg, "relation_batch_size", cfg.batch_size),
     )
 
+    query_seconds = time.monotonic() - started
+    logger.log(logging.INFO if rows or query_seconds >= 1.0 else logging.DEBUG,
+                "Semantic relation candidate query returned %d pairs in %.2fs",
+                len(rows), query_seconds)
+    classify_seconds = write_seconds = 0.0
     written = 0
     for row in rows:
+        row_started = time.monotonic()
         a = {
             "topic_key": row["a_topic_key"],
             "observation_id": str(row["a_observation_id"]) if row["a_observation_id"] else None,
@@ -224,6 +233,8 @@ async def classify_neighbor_relations_once(
             conflict_type=row["conflict_type"],
         )
 
+        classify_seconds += time.monotonic() - row_started
+        write_started = time.monotonic()
         inserted = await db.fetchrow(
             """
             INSERT INTO aios.semantic_neighbor_relation (
@@ -247,13 +258,13 @@ async def classify_neighbor_relations_once(
                 "proposition_b": b,
             }),
         )
+        write_seconds += time.monotonic() - write_started
         if inserted:
             written += 1
 
-    if written:
-        logger.info(
-            "Classified %d semantic neighbor relations",
-            written,
-        )
+    logger.log(logging.INFO if written or time.monotonic() - started >= 1.0 else logging.DEBUG,
+        "Classified %d semantic neighbor relations: query=%.2fs classify=%.2fs writes=%.2fs total=%.2fs",
+        written, query_seconds, classify_seconds, write_seconds,
+        time.monotonic() - started,
+    )
     return written
-

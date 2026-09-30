@@ -540,7 +540,7 @@ async def reconcile_neighbor_relations_once(
         NEIGHBOR_CLASSIFIER_VERSION,
         cfg.reconcile_relation_min_confidence,
         list(PAIR_EDGE_TYPES) + ["SAME_EVENT"],
-        cfg.batch_size,
+        getattr(cfg, "reconciliation_batch_size", cfg.batch_size),
     )
     written = 0
     affected_scopes: set[str] = set()
@@ -780,6 +780,25 @@ async def _retract_superseded_cluster_topology(
         RECONCILER_VERSION,
     )
     return {str(row["scope_key"]) for row in rows}
+
+
+async def retract_superseded_clusters_once(
+    db: Database, cfg: SemanticIndexConfig,
+) -> int:
+    """Retire stale region pivots without creating or promoting clusters.
+
+    Node deletion cascades to derived edges and emits durable RDF deltas.
+    Mark affected receipts pending so projection failures remain retryable.
+    """
+    scopes = await _retract_superseded_cluster_topology(db)
+    if scopes:
+        await db.execute(
+            """UPDATE aios.semantic_reconciliation_receipt
+               SET rdf_dataset=NULL, rdf_graph=NULL, updated_at=now()
+               WHERE scope_key=ANY($1::text[])""",
+            sorted(scopes),
+        )
+    return len(scopes)
 
 
 async def reconcile_clusters_once(
@@ -1282,6 +1301,11 @@ async def reconcile_semantic_structure_once(
     fuseki: FusekiClient,
     cfg: SemanticIndexConfig,
 ) -> int:
+    # Compatibility entry point for explicit full-structure consumers.
+    # The normal semantic loop calls the stages independently.
+    from .validation_adapter import record_new_relation_decisions
+    await record_new_relation_decisions(
+        db, limit=getattr(cfg, "validation_batch_size", max(100, cfg.batch_size * 4)))
     pair_count = await reconcile_neighbor_relations_once(db, fuseki, cfg)
     cluster_count = await reconcile_clusters_once(db, fuseki, cfg)
     boundary_count = await reconcile_boundaries_once(db, fuseki, cfg)

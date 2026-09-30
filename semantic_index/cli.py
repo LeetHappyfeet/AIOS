@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -24,9 +25,11 @@ from .eligibility import quarantine_ineligible_vectors_once
 from .query_server import start_query_server
 from .structure import analyze_neighbors_once
 from .neighbor_classifier import classify_neighbor_relations_once
-from .clustering import cluster_neighbors_once
-from .classifier import classify_latest_clusters_once
-from .reconciliation import reconcile_semantic_structure_once
+from .validation_adapter import record_new_relation_decisions
+from .reconciliation import (
+    reconcile_neighbor_relations_once, retract_superseded_clusters_once,
+    reproject_pending_reconciliation_once,
+)
 
 logger = logging.getLogger("aios.semantic_index.cli")
 
@@ -58,7 +61,62 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
         "clusters_per_s": round(totals["clustered"] / elapsed, 2),
         "cluster_classified_per_s": round(totals["classified"] / elapsed, 2),
         "reconciled_per_s": round(totals["reconciled"] / elapsed, 2),
+        "validated_per_s": round(totals.get("validated", 0) / elapsed, 2),
     }
+
+
+async def _timed_stage(stage: str, func: Any, *args: Any, **kwargs: Any) -> Any:
+    started = time.monotonic()
+    try:
+        result = await func(*args, **kwargs)
+    except Exception:
+        logger.exception("Semantic stage failed stage=%s elapsed=%.2fs",
+                         stage, time.monotonic() - started)
+        raise
+    elapsed = time.monotonic() - started
+    if result or elapsed >= 1.0:
+        logger.info("Semantic stage completed stage=%s count=%s elapsed=%.2fs",
+                    stage, result, elapsed)
+    return result
+
+
+async def _run_topology_stages(db, fuseki, cfg, run_stage) -> dict[str, int]:
+    structured = await run_stage("neighbors", analyze_neighbors_once, db, cfg)
+    classified = await run_stage("neighbor-classification", classify_neighbor_relations_once, db, cfg)
+    # Always drain validation, including stale work when classification is idle.
+    validated = await run_stage("relation-validation", record_new_relation_decisions,
+                                db, limit=cfg.validation_batch_size)
+    pairs = await run_stage("pair-reconciliation", reconcile_neighbor_relations_once, db, fuseki, cfg)
+    retired = await run_stage("cluster-cleanup", retract_superseded_clusters_once, db, cfg)
+    projected = await run_stage("rdf-catch-up", reproject_pending_reconciliation_once, db, fuseki, cfg)
+    return {"structured": int(structured), "neighbor_classified": int(classified),
+            "validated": int(validated),
+            "reconciled": int(pairs) + int(retired) + int(projected)}
+
+
+async def analyze_regions_once() -> None:
+    """Explicit legacy global region analysis; never called by ingestion.
+
+    Scoped/incremental region jobs are a separate follow-up change.
+    """
+    from .clustering import cluster_neighbors_once
+    from .classifier import classify_latest_clusters_once
+    from .reconciliation import reconcile_clusters_once, reconcile_boundaries_once
+    cfg = SemanticIndexConfig()
+    db = Database(settings.db_dsn)
+    fuseki = FusekiClient(settings.fuseki_base_url)
+    await db.connect()
+    try:
+        await _timed_stage("relation-validation", record_new_relation_decisions,
+                           db, limit=cfg.validation_batch_size)
+        await _timed_stage("clustering", cluster_neighbors_once, db, cfg)
+        await _timed_stage("cluster-classification", classify_latest_clusters_once, db, cfg)
+        await _timed_stage("cluster-reconciliation", reconcile_clusters_once, db, fuseki, cfg)
+        await _timed_stage("boundary-reconciliation", reconcile_boundaries_once, db, fuseki, cfg)
+        await _timed_stage("cluster-cleanup", retract_superseded_clusters_once, db, cfg)
+        await _timed_stage("rdf-catch-up", reproject_pending_reconciliation_once, db, fuseki, cfg)
+    finally:
+        await db.close()
 
 
 async def run_forever(poll_seconds: float = 1.0) -> None:
@@ -77,7 +135,7 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         totals = {key: 0 for key in (
             "source_indexed", "frames_indexed", "propositions_indexed", "epistemic_indexed",
             "admitted", "admission_bypassed", "structured", "neighbor_classified",
-            "clustered", "classified", "reconciled"
+            "clustered", "classified", "reconciled", "validated"
         )}
         last_batches = {"source": 0, "frames": 0, "propositions": 0,
                         "epistemic": 0, "admission": 0, "admission_bypass": 0}
@@ -90,7 +148,7 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 last_batches=last_batches, totals=totals, window_started=window_started,
                 admission_backlog=backlog,
             ))
-            return await func(*args, **kwargs)
+            return await _timed_stage(stage, func, *args, **kwargs)
 
         while True:
             await run_stage("topology-quarantine", quarantine_ineligible_vectors_once, db, cfg)
@@ -119,11 +177,9 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
             last_batches["epistemic"] = int(epistemic_indexed); totals["epistemic_indexed"] += int(epistemic_indexed)
             indexed = source_indexed + frames_indexed + propositions_indexed + epistemic_indexed
 
-            structured = await run_stage("neighbors", analyze_neighbors_once, db, cfg); totals["structured"] += int(structured)
-            neighbor_classified = await run_stage("neighbor-classification", classify_neighbor_relations_once, db, cfg); totals["neighbor_classified"] += int(neighbor_classified)
-            clustered = await run_stage("clustering", cluster_neighbors_once, db, cfg); totals["clustered"] += int(clustered)
-            classified = await run_stage("cluster-classification", classify_latest_clusters_once, db, cfg); totals["classified"] += int(classified)
-            reconciled = await run_stage("reconciliation", reconcile_semantic_structure_once, db, fuseki, cfg); totals["reconciled"] += int(reconciled)
+            topology_work = await _run_topology_stages(db, fuseki, cfg, run_stage)
+            for key, value in topology_work.items():
+                totals[key] += value
 
             active = any(value > 0 for value in totals.values())
             state = "DRAINING" if active else "CAUGHT_UP"
@@ -134,7 +190,7 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 admission_backlog=backlog,
             ))
             totals = {key: 0 for key in totals}; window_started = time.monotonic()
-            if indexed == 0 and admitted == 0 and bypassed == 0 and structured == 0 and neighbor_classified == 0 and clustered == 0 and classified == 0 and reconciled == 0:
+            if indexed == 0 and admitted == 0 and bypassed == 0 and not any(topology_work.values()):
                 await asyncio.sleep(poll_seconds)
     finally:
         if query_server is not None:
@@ -146,4 +202,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    asyncio.run(run_forever())
+    parser = argparse.ArgumentParser(description="AIOS semantic index")
+    parser.add_argument("--analyze-regions-once", action="store_true",
+                        help="Run the legacy global region analysis explicitly, then exit")
+    args = parser.parse_args()
+    asyncio.run(analyze_regions_once() if args.analyze_regions_once else run_forever())

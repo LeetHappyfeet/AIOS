@@ -41,6 +41,16 @@ class SemanticIndexConfig:
     )
 
     batch_size: int = int(os.getenv("AIOS_SEMANTIC_INDEX_BATCH_SIZE", "64"))
+    # Separate budgets preserve existing defaults while allowing each
+    # stage to be tuned without changing vector indexing throughput.
+    neighbor_batch_size: int = max(1, int(os.getenv(
+        "AIOS_SEMANTIC_NEIGHBOR_BATCH_SIZE", str(max(1, batch_size // 2)))))
+    relation_batch_size: int = max(1, int(os.getenv(
+        "AIOS_SEMANTIC_RELATION_BATCH_SIZE", str(batch_size))))
+    validation_batch_size: int = max(1, int(os.getenv(
+        "AIOS_SEMANTIC_VALIDATION_BATCH_SIZE", str(max(100, batch_size * 4)))))
+    reconciliation_batch_size: int = max(1, int(os.getenv(
+        "AIOS_SEMANTIC_RECONCILIATION_BATCH_SIZE", str(batch_size))))
     default_top_k: int = int(os.getenv("AIOS_SEMANTIC_TOP_K", "80"))
     hud_candidate_k: int = int(os.getenv("AIOS_SEMANTIC_HUD_CANDIDATE_K", "200"))
     neighbor_refresh_seconds: float = float(os.getenv("AIOS_SEMANTIC_NEIGHBOR_REFRESH_SECONDS", "3600"))

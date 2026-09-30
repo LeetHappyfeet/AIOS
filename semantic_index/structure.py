@@ -37,7 +37,7 @@ async def analyze_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
         ORDER BY ss.analyzed_at ASC NULLS FIRST, p.created_at
         LIMIT $1
         """,
-        max(1, cfg.batch_size // 2),
+        getattr(cfg, "neighbor_batch_size", max(1, cfg.batch_size // 2)),
         cfg.proposition_collection,
         cfg.embedding_model,
         cfg.embedding_version,
