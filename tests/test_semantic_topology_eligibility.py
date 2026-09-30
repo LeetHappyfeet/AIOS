@@ -92,7 +92,9 @@ async def test_quarantine_deletes_both_collections_before_receipts(monkeypatch, 
             calls.append(('sql', sql))
     class Client:
         def delete(self, **kwargs):
-            calls.append(('vector', kwargs['collection_name']))
+            selector = kwargs['points_selector']
+            match = selector.filter.must[0].match
+            calls.append(('vector', kwargs['collection_name'], list(match.any)))
             if fails:
                 raise RuntimeError('Qdrant unavailable')
     monkeypatch.setattr(eligibility, '_get_store', lambda *args: SimpleNamespace(client=Client()))
@@ -100,13 +102,15 @@ async def test_quarantine_deletes_both_collections_before_receipts(monkeypatch, 
     if fails:
         with pytest.raises(RuntimeError):
             await eligibility.quarantine_ineligible_vectors_once(DB(), cfg)
-        assert not any('DELETE FROM aios.semantic_vector_index_state' in sql for kind, sql in calls if kind == 'sql')
+        assert not any('DELETE FROM aios.semantic_vector_index_state' in sql for call in calls if call[0] == 'sql' for sql in [call[1]])
     else:
         assert await eligibility.quarantine_ineligible_vectors_once(DB(), cfg) == 1
-        vector_indexes = [i for i, (kind, _) in enumerate(calls) if kind == 'vector']
-        receipt_index = next(i for i, (kind, sql) in enumerate(calls) if kind == 'sql' and 'DELETE FROM aios.semantic_vector_index_state' in sql)
+        vector_indexes = [i for i, call in enumerate(calls) if call[0] == 'vector']
+        receipt_index = next(i for i, call in enumerate(calls) if call[0] == 'sql' and 'DELETE FROM aios.semantic_vector_index_state' in call[1])
         assert len(vector_indexes) == 2 and max(vector_indexes) < receipt_index
-    assert not any(re.search(r'DELETE FROM aios\.(observation|proposition|claim_candidate)\b', sql) for kind, sql in calls if kind == 'sql')
+        assert {calls[i][1] for i in vector_indexes} == {'props', 'owners'}
+        assert all(calls[i][2] == [str(prop)] for i in vector_indexes)
+    assert not any(re.search(r'DELETE FROM aios\.(observation|proposition|claim_candidate)\b', sql) for call in calls if call[0] == 'sql' for sql in [call[1]])
 
 
 def test_timeout_preserves_eligible_evidence_but_defers_topology(evidence):
