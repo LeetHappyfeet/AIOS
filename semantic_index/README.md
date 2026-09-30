@@ -186,3 +186,11 @@ vectors arrive and `AIOS_SEMANTIC_NEIGHBOR_REFRESH_SECONDS` has elapsed (default
 3,600 seconds). Reindexed propositions are eligible immediately. This refresh
 extends the advisory candidate graph; it does not prune historical candidate
 edges or perform a full current-kNN replacement.
+
+To expand around a cluster member, inspect the cluster with neighbor count 0,
+click a member row, then set the desired neighbor count and inspect again. Row
+selection fills the actual Qdrant point ID, clears the cluster field, and resets
+the member offset. For epistemic objects the selected point ID is distinct from
+the proposition ID. Expansion uses exactly one seed; the neighbor count alone
+does not select one. Invalid selections and API validation details are displayed
+as UI messages before or instead of a generic HTTP traceback.

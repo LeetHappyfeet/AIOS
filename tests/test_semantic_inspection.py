@@ -77,3 +77,27 @@ def test_asyncpg_json_fields_are_inspectable_objects():
     row = inspection_record({"context":'{"viewpoint_id":"a"}',"frames":'[{"frame_id":"b"}]'})
     assert row["context"]["viewpoint_id"] == "a"
     assert row["frames"][0]["frame_id"] == "b"
+
+
+def test_expansion_around_one_seed_returns_seed_and_one_neighbor(monkeypatch):
+    from aios_app.semantic_index import inspection
+    ids = [UUID(int=1), UUID(int=2)]
+    points = {str(key): SimpleNamespace(id=key,payload={'proposition_id':str(key)},vector=[1,0]) for key in ids}
+    class Client:
+        def retrieve(self, **kwargs): return [points[key] for key in kwargs['ids']]
+        def close(self): pass
+    class Store:
+        client = Client()
+        def search(self,vector,*,top_k):
+            assert top_k == 2
+            return [(str(key),1.0 if key == ids[0] else .9,points[str(key)].payload) for key in ids]
+    monkeypatch.setattr(inspection,'QdrantStore',lambda *args: Store())
+    class DB:
+        async def fetch(self,sql,*args):
+            if 'SELECT * FROM aios.proposition' in sql:
+                return [{'proposition_id':key,'canonical_text':str(key)} for key in args[0]]
+            return []
+    result = asyncio.run(inspect_neighborhood(DB(),point_ids=[ids[0]],neighbors=1))
+    assert result['point_count'] == 2
+    assert {row['proposition_id'] for row in result['members']} == set(ids)
+    assert result['members'][1]['points'][0]['seed_similarity'] == .9

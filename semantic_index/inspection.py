@@ -70,6 +70,11 @@ async def inspect_neighborhood(db: Database, *, collection: str | None = None,
         raise ValueError("evidence_limit must be 1..20 and evidence_offset nonnegative")
     if bool(cluster_id) == bool(point_ids):
         raise ValueError("provide either cluster_id or point_ids")
+    if neighbors:
+        if cluster_id or len(set(point_ids or [])) != 1:
+            raise ValueError("Neighbor expansion requires one point ID, not a cluster. Select one member as the seed.")
+        if offset:
+            raise ValueError("Neighbor expansion requires member offset 0.")
     collection = collection or cfg.proposition_collection
     if collection not in {cfg.proposition_collection, cfg.epistemic_collection}:
         raise ValueError("inspection supports proposition and epistemic collections")
