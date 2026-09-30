@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -79,12 +80,48 @@ class GoalRetryIn(BaseModel):
     request_id: UUID
 
 
+class ParticipationExperimentIn(BaseModel):
+    since_at: datetime | None = None
+    duration_minutes: int = Field(default=60, ge=1, le=1440)
+    max_claims: int = Field(default=100, ge=1, le=1000)
+
+
 class OutcomeCorrectionIn(BaseModel):
     request_id: UUID
     reason: str = Field(min_length=1, max_length=500)
 
 
 def install_external_agency_routes(app, db) -> None:
+    @app.post("/agent/instance/{instance_id}/participation/experiments")
+    async def start_participation(instance_id: UUID, req: ParticipationExperimentIn):
+        from fastapi import HTTPException
+        from .participation import ParticipationService
+        try:
+            return await ParticipationService(db).start(instance_id, **req.model_dump())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/agent/instance/{instance_id}/participation/experiments/{experiment_id}")
+    async def inspect_participation(instance_id: UUID, experiment_id: UUID, limit: int = 50):
+        from fastapi import HTTPException
+        from .participation import ParticipationService
+        try:
+            return await ParticipationService(db).inspect(instance_id, experiment_id, limit=limit)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/agent/instance/{instance_id}/participation/experiments/{experiment_id}/stop")
+    async def stop_participation(instance_id: UUID, experiment_id: UUID):
+        from fastapi import HTTPException
+        from .participation import ParticipationService
+        try:
+            await ParticipationService(db).stop(instance_id, experiment_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"shadow": True, "status": "stopped"}
+
     @app.get("/agent/instance/{instance_id}/reinforcement")
     async def inspect_reinforcement(instance_id: UUID, limit: int = 50):
         from .reinforcement import ShadowReinforcementService
