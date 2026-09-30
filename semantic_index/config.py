@@ -43,9 +43,11 @@ class SemanticIndexConfig:
     batch_size: int = int(os.getenv("AIOS_SEMANTIC_INDEX_BATCH_SIZE", "64"))
     default_top_k: int = int(os.getenv("AIOS_SEMANTIC_TOP_K", "80"))
     hud_candidate_k: int = int(os.getenv("AIOS_SEMANTIC_HUD_CANDIDATE_K", "200"))
+    neighbor_refresh_seconds: float = float(os.getenv("AIOS_SEMANTIC_NEIGHBOR_REFRESH_SECONDS", "3600"))
     neighbor_k: int = int(os.getenv("AIOS_SEMANTIC_NEIGHBOR_K", "24"))
     neighbor_min_score: float = float(os.getenv("AIOS_SEMANTIC_NEIGHBOR_MIN_SCORE", "0.72"))
 
+    cluster_min_interval_seconds: float = float(os.getenv("AIOS_SEMANTIC_CLUSTER_MIN_INTERVAL_SECONDS", "30"))
     cluster_core_threshold: float = float(
         os.getenv("AIOS_SEMANTIC_CLUSTER_CORE_THRESHOLD", "0.82")
     )

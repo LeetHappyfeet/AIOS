@@ -133,3 +133,56 @@ The authority rule remains unchanged: vector geometry discovers structure;
 classifiers interpret it; reconciliation may enrich derived topology/RDF; only
 the existing SQL/RDF epistemic and runtime layers decide truth, ownership,
 visibility, and actual branch creation.
+
+## Neighborhood inspection
+
+The **Semantic neighborhoods** control-plane tab is a read-only diagnostic. List
+current clusters, then enter a cluster ID; or choose `epistemic_objects_v1` and
+paste Qdrant point IDs. Set neighbors to expand around one seed. The API is:
+
+- `GET /semantic/clusters?limit=50&offset=0`
+- `POST /semantic/inspect`
+
+Example request:
+
+```json
+{"collection":"epistemic_objects_v1","point_ids":["<point UUID>"],"neighbors":100,"limit":200}
+```
+
+The response contains canonical propositions, ownership payloads, raw extracted
+claims, original sentences, source sections/messages, semantic frames, all paged
+observation contexts, and internal/boundary relation pairs with both texts,
+structural differences and verifier explanations. These are operator diagnostics;
+they do not grant character knowledge or alter truth, ownership or topology.
+Validation status is separate from advisory relation labels.
+
+Ownership points are counted separately from distinct propositions. Medoids use
+original vectors and one deterministically selected ownership vector per
+proposition, not projected display coordinates or ownership frequency. They are
+exact for the returned vector set, restricted to core candidates for stored
+clusters; paged cluster samples and missing vectors are explicitly reported.
+Diverse exemplars, contradictory endpoints and fringe IDs are also returned.
+Medoids are calculated on demand and are not new assertions or replacement
+memories. Existing region/edge labels remain the types for derived groups;
+behavioral patterns and additional automatic collapse are deferred pending
+inspection of evidence.
+
+Requests return at most 512 points and 2,000 edges, prioritize contradiction
+pairs, and report edge truncation. Evidence uses a per-proposition limit/offset
+(default 5, maximum 20), source/message excerpts are limited to 12,000 characters
+with original lengths, and each observation returns up to 32 frames plus a total
+frame count. Missing points and missing SQL propositions are explicit.
+
+Clustering v4 prevents known contradictory endpoints from sharing a core or
+attaching to the same fringe through indirect positive paths. Cluster metadata
+counts distinct proposition/context-value pairs across observations rather than
+selecting the last observation. Rebuilds track classifier inserts and validation
+evaluation/staleness as well as geometry, with a 30-second minimum interval
+(`AIOS_SEMANTIC_CLUSTER_MIN_INTERVAL_SECONDS`). Reconciliation timestamp writes
+alone do not retrigger clustering.
+
+Older neighborhoods become eligible for bounded refresh after new proposition
+vectors arrive and `AIOS_SEMANTIC_NEIGHBOR_REFRESH_SECONDS` has elapsed (default
+3,600 seconds). Reindexed propositions are eligible immediately. This refresh
+extends the advisory candidate graph; it does not prune historical candidate
+edges or perform a full current-kNN replacement.

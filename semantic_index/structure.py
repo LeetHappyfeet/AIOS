@@ -25,13 +25,22 @@ async def analyze_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
           ON ss.proposition_id=p.proposition_id
          AND ss.embedding_version=$4
         WHERE ss.proposition_id IS NULL
-        ORDER BY p.created_at
+           OR (ss.analyzed_at < s.indexed_at)
+           OR (ss.analyzed_at < now() - make_interval(secs => $5::double precision)
+               AND ss.analyzed_at < (
+                   SELECT MAX(newer.indexed_at) FROM aios.semantic_vector_index_state newer
+                   WHERE newer.object_type='proposition'
+                     AND newer.qdrant_collection=$2
+                     AND newer.embedding_model=$3 AND newer.embedding_version=$4
+               ))
+        ORDER BY ss.analyzed_at ASC NULLS FIRST, p.created_at
         LIMIT $1
         """,
         max(1, cfg.batch_size // 2),
         cfg.proposition_collection,
         cfg.embedding_model,
         cfg.embedding_version,
+        cfg.neighbor_refresh_seconds,
     )
     if not rows:
         return 0

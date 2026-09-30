@@ -487,3 +487,46 @@ async def emit_agent_heartbeats(limit: int = 100) -> dict[str, Any]:
 
 from aios_app.agent.api import install_external_agency_routes
 install_external_agency_routes(app, db)
+
+
+class NeighborhoodInspectionIn(BaseModel):
+    collection: str | None = None
+    point_ids: list[UUID] = Field(default_factory=list, max_length=512)
+    cluster_id: UUID | None = None
+    neighbors: int = Field(default=0, ge=0, le=511)
+    limit: int = Field(default=200, ge=1, le=512)
+    offset: int = Field(default=0, ge=0)
+    evidence_limit: int = Field(default=5, ge=1, le=20)
+    evidence_offset: int = Field(default=0, ge=0)
+
+
+@app.post("/semantic/inspect")
+async def semantic_inspect(req: NeighborhoodInspectionIn) -> dict[str, Any]:
+    """Operator diagnostic: resolve vector groups to propositions and source evidence."""
+    from fastapi import HTTPException
+    from aios_app.semantic_index.inspection import inspect_neighborhood
+    try:
+        return await inspect_neighborhood(db, **req.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/semantic/clusters")
+async def semantic_clusters(limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    from fastapi import HTTPException
+    if not 1 <= limit <= 200 or offset < 0:
+        raise HTTPException(status_code=422, detail="limit must be 1..200 and offset nonnegative")
+    rows = await db.fetch("""SELECT c.*, cc.classification, cc.confidence AS classification_confidence
+        FROM aios.semantic_cluster_candidate c
+        JOIN aios.semantic_cluster_run run ON run.run_id=c.run_id AND run.status='done'
+        LEFT JOIN LATERAL (
+            SELECT classification, confidence FROM aios.semantic_cluster_classification cc
+            WHERE cc.cluster_id=c.cluster_id ORDER BY created_at DESC LIMIT 1
+        ) cc ON true
+        WHERE c.status='candidate'
+        ORDER BY c.member_count DESC, c.cluster_id LIMIT $1 OFFSET $2""", limit, offset)
+    import json
+    return {"clusters": [dict(row, meta=json.loads(row["meta"]) if isinstance(row["meta"],str) else row["meta"])
+                         for row in rows], "limit": limit, "offset": offset}
