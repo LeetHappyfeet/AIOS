@@ -317,6 +317,8 @@ class WorldRuntimeService:
                 self.db,
                 character_id=character_id,
                 session_id=session_id,
+                user_name=user_name,
+                scope_key=scope_key,
             )
             if latest_timeline_id is not None:
                 source_timeline_id = latest_timeline_id

@@ -1,7 +1,24 @@
 import asyncio
+import ast
+from pathlib import Path
 from uuid import uuid4
 
 from aios_app.world.conversation import bind_available_instance, reconcile_runtime_observations
+
+
+def test_activation_passes_its_own_source_identity():
+    tree = ast.parse((Path(__file__).parents[1] / "world/runtime.py").read_text())
+    activation = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.AsyncFunctionDef)
+                      and node.name == "activate_character")
+    calls = [node for node in ast.walk(activation)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "latest_source_anchor"]
+    assert len(calls) == 1
+    args = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+    for name in ("character_id", "session_id", "user_name", "scope_key"):
+        assert isinstance(args.get(name), ast.Name)
+        assert args[name].id == name
 
 
 class BindingDB:
