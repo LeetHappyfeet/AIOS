@@ -1,10 +1,9 @@
-# aios_app/supervisor.py
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+import asyncpg
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List
 
@@ -450,7 +449,10 @@ def stage_admission_capacity(*, stage: Stage, total_queued: int, stage_queued: i
 
 
 async def enqueue_stage_jobs(db: Database, stage: Stage, *, batch_size: int) -> int:
-    rows: Iterable[Dict[str, object]] = await db.fetch(stage.eligibility_sql, batch_size)
+    rows: Iterable[Dict[str, object]] = await asyncio.wait_for(
+        db.fetch_bounded(stage.eligibility_sql, batch_size, timeout_seconds=5.0),
+        timeout=7.0,
+    )
     count = 0
     for row in rows:
         payload = stage.payload_builder(dict(row))
@@ -467,6 +469,7 @@ async def run_supervisor() -> None:
     db = Database(settings.db_dsn)
     await db.connect()
     last_foreground_refresh = 0.0
+    discovery_retry_at: Dict[str, float] = {}
     logger.info("AIOS supervisor started")
     try:
         while True:
@@ -527,6 +530,8 @@ async def run_supervisor() -> None:
             scheduled = 0
             for stage in sorted(STAGES, key=lambda value: value.priority):
                 if remaining <= 0: break
+                if time.monotonic() < discovery_retry_at.get(stage.name, 0.0):
+                    continue
                 stage_queued = queued_by_type.get(stage.job_type, 0)
                 allowed = stage_admission_capacity(stage=stage,total_queued=qcnt,stage_queued=stage_queued,batch_size=batch_size,remaining_cycle=remaining,soft_cap=max_queued_backlog,critical_reserve=critical_reserve)
                 if allowed <= 0: continue
@@ -534,6 +539,10 @@ async def run_supervisor() -> None:
                     n = await enqueue_stage_jobs(db, stage, batch_size=allowed)
                     scheduled += n; remaining -= n; qcnt += n
                     queued_by_type[stage.job_type] = stage_queued+n
+                except (asyncio.TimeoutError, asyncpg.QueryCanceledError,
+                        asyncpg.LockNotAvailableError):
+                    discovery_retry_at[stage.name] = time.monotonic() + 60.0
+                    logger.warning("Stage '%s' discovery exceeded its SQL/lock budget; retry in 60s", stage.name)
                 except Exception:
                     logger.exception("Stage '%s' enqueue failed", stage.name)
             if scheduled == 0: await asyncio.sleep(poll_interval)
