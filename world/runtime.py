@@ -352,6 +352,26 @@ class WorldRuntimeService:
             source_timeline_id,
             source_head_node_id,
         )
+        # Activation names the runtime the user selected. Ingestion must keep
+        # this participant binding rather than substituting a newer instance.
+        if source_timeline_id is not None:
+            await self.db.execute(
+                """UPDATE aios.conversation_participant cp
+                   SET character_instance_id=$1,active=true,updated_at=now()
+                   FROM aios.character_runtime_state rs
+                   JOIN aios.timeline rt ON rt.timeline_id=rs.timeline_id
+                   JOIN aios.timeline st ON st.timeline_id=rs.source_timeline_id
+                   WHERE rs.instance_id=$1 AND cp.timeline_id=st.timeline_id
+                     AND cp.character_id=$2
+                     AND rt.session_id IS NOT DISTINCT FROM st.session_id
+                     AND rt.user_name IS NOT DISTINCT FROM st.user_name
+                     AND rt.scope_key=st.scope_key""", instance_id, character_id,
+            )
+            from aios_app.world.conversation import reconcile_runtime_observations
+            try:
+                await reconcile_runtime_observations(self.db, instance_id=instance_id)
+            except Exception:
+                logger.exception("Observation recovery deferred for instance %s", instance_id)
         try:
             await ensure_readiness_row(self.db, instance_id=instance_id, live=True)
             if await source_node_retrieval_ready(

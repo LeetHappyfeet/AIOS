@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Optional
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from aios_app.pipeline.jobs import enqueue_job
 
 LIVE_PRIORITY = 15
 READY_STATUS = {"ready"}
+logger = logging.getLogger("aios.hud.readiness")
 
 
 async def ensure_readiness_row(
@@ -138,6 +140,11 @@ async def mark_matching_runtime_dirty(
             instance_id=instance_id,
             node_id=source_head_node_id,
         )
+        from aios_app.world.conversation import reconcile_runtime_observations
+        try:
+            await reconcile_runtime_observations(db, instance_id=instance_id)
+        except Exception:
+            logger.exception("Observation recovery deferred for instance %s", instance_id)
     return instance_ids
 
 
