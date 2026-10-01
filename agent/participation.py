@@ -177,7 +177,7 @@ class ParticipationService:
                         if not item["proposition_id"] or item["claim_kind"] in (None, 'UNKNOWN'):
                             await con.execute("""UPDATE aios.character_participation_pending
                                 SET ready_at=now()+interval '30 seconds',
-                                    status=CASE WHEN now()>$3+interval '10 minutes' THEN 'skipped' ELSE 'pending' END,
+                                    status=CASE WHEN now()>$3::timestamptz+interval '10 minutes' THEN 'skipped' ELSE 'pending' END,
                                     last_error='awaiting resolved context' WHERE experiment_id=$1 AND claim_id=$2""",
                                 *args, item["queued_at"])
                             continue
@@ -210,7 +210,9 @@ class ParticipationService:
                         await con.execute("UPDATE aios.character_participation_pending SET status='evaluated',last_error=NULL WHERE experiment_id=$1 AND claim_id=$2", *args)
                         processed += 1
             except Exception as exc:
-                logger.warning("Shadow participation evaluation failed: %s", type(exc).__name__)
+                error = f"{type(exc).__name__}: {exc}"
+                logger.warning("Shadow participation evaluation failed (SQLSTATE %s): %s",
+                               getattr(exc, "sqlstate", None), error)
                 if item:
                     async with self.db.connection() as con:
                         async with con.transaction():
@@ -219,7 +221,7 @@ class ParticipationService:
                                 status=CASE WHEN error_count>=2 THEN 'failed' ELSE 'pending' END,
                                 ready_at=now()+interval '30 seconds',last_error=$3
                                 WHERE experiment_id=$1 AND claim_id=$2 AND status='pending'""",
-                                item['experiment_id'],item['claim_id'],type(exc).__name__)
+                                item['experiment_id'],item['claim_id'],error[:2000])
                 break
         return processed
 

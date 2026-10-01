@@ -125,6 +125,7 @@ def test_unresolved_evidence_is_deferred(changes):
     con = Connection(item(**changes))
     asyncio.run(ParticipationService(Database(con)).process_pending())
     assert any("awaiting resolved context" in sql for sql, _ in con.calls)
+    assert any("$3::timestamptz+interval '10 minutes'" in sql for sql, _ in con.calls)
     assert not any("INSERT INTO aios.character_participation_evaluation" in sql for sql, _ in con.calls)
 
 
@@ -142,7 +143,8 @@ def test_worker_ledger_is_scoped_and_has_auditable_inputs():
 def test_worker_failure_retries_are_capped():
     con = Connection(item(), fail_context=True)
     assert asyncio.run(ParticipationService(Database(con)).process_pending()) == 0
-    assert any("error_count>=2" in sql and args[-1] == "RuntimeError" for sql, args in con.calls)
+    assert any("error_count>=2" in sql and args[-1] == "RuntimeError: test database failure"
+               for sql, args in con.calls)
 
 
 def test_worker_batch_limit():
