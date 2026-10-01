@@ -41,20 +41,25 @@ class SemanticIndexConfig:
     )
 
     batch_size: int = int(os.getenv("AIOS_SEMANTIC_INDEX_BATCH_SIZE", "64"))
-    # Separate budgets preserve existing defaults while allowing each
-    # stage to be tuned without changing vector indexing throughput.
+    # Independent budgets keep topology maintenance below the vector workload.
     neighbor_batch_size: int = max(1, int(os.getenv(
-        "AIOS_SEMANTIC_NEIGHBOR_BATCH_SIZE", str(max(1, batch_size // 2)))))
+        "AIOS_SEMANTIC_NEIGHBOR_BATCH_SIZE", "8")))
     relation_batch_size: int = max(1, int(os.getenv(
-        "AIOS_SEMANTIC_RELATION_BATCH_SIZE", str(batch_size))))
+        "AIOS_SEMANTIC_RELATION_BATCH_SIZE", "16")))
     validation_batch_size: int = max(1, int(os.getenv(
         "AIOS_SEMANTIC_VALIDATION_BATCH_SIZE", str(max(100, batch_size * 4)))))
     reconciliation_batch_size: int = max(1, int(os.getenv(
         "AIOS_SEMANTIC_RECONCILIATION_BATCH_SIZE", str(batch_size))))
+    background_batch_size: int = max(1, int(os.getenv("AIOS_SEMANTIC_BACKGROUND_BATCH_SIZE", "8")))
+    admission_batch_size: int = max(1, int(os.getenv("AIOS_SEMANTIC_ADMISSION_BATCH_SIZE", "8")))
+    vector_sql_seconds: float = max(0.1, float(os.getenv("AIOS_SEMANTIC_VECTOR_SQL_SECONDS", "10")))
+    admission_stage_seconds: float = max(1.0, float(os.getenv("AIOS_SEMANTIC_ADMISSION_STAGE_SECONDS", "10")))
+    topology_stage_seconds: float = max(1.0, float(os.getenv("AIOS_SEMANTIC_TOPOLOGY_STAGE_SECONDS", "10")))
+    topology_sql_seconds: float = max(0.1, float(os.getenv("AIOS_SEMANTIC_TOPOLOGY_SQL_SECONDS", "5")))
     default_top_k: int = int(os.getenv("AIOS_SEMANTIC_TOP_K", "80"))
     hud_candidate_k: int = int(os.getenv("AIOS_SEMANTIC_HUD_CANDIDATE_K", "200"))
     neighbor_refresh_seconds: float = float(os.getenv("AIOS_SEMANTIC_NEIGHBOR_REFRESH_SECONDS", "3600"))
-    neighbor_k: int = int(os.getenv("AIOS_SEMANTIC_NEIGHBOR_K", "24"))
+    neighbor_k: int = int(os.getenv("AIOS_SEMANTIC_NEIGHBOR_K", "12"))
     neighbor_min_score: float = float(os.getenv("AIOS_SEMANTIC_NEIGHBOR_MIN_SCORE", "0.72"))
 
     cluster_min_interval_seconds: float = float(os.getenv("AIOS_SEMANTIC_CLUSTER_MIN_INTERVAL_SECONDS", "30"))

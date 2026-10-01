@@ -47,6 +47,12 @@ SERVICES = [
         "readiness": {"type": "log", "marker": "AIOS_READY service=semantic_index"},
     },
     {
+        "name": "Semantic Topology",
+        "cmd": [PYTHON, "-m", "aios_app.semantic_index.cli", "--topology-only"],
+        "required": False,
+        "readiness": {"type": "log", "marker": "AIOS_READY service=semantic_topology"},
+    },
+    {
         "name": "Supervisor",
         "cmd": [PYTHON, "-m", "aios_app.supervisor"],
         "required": True,
@@ -94,6 +100,7 @@ STARTUP_STAGES = [
     ("Core services", {"Accumulator", "Supervisor", "Pipeline Runner", "API"}),
     ("UI", {"UI"}),
     ("Semantic Index", {"Semantic Index"}),
+    ("Semantic Topology", {"Semantic Topology"}),
 ]
 
 
@@ -236,7 +243,7 @@ def _should_print_line(name: str, line: str) -> bool:
         if routine:
             return LOG_MODE == "verbose" and "Job done " not in line
 
-    if name == "Semantic Index":
+    if name in {"Semantic Index", "Semantic Topology"}:
         if "INFO:httpx:HTTP Request:" in line or "INFO:httpcore:" in line:
             return False
         routine = (
@@ -384,6 +391,14 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
         else:
             semantic_detail = semantic_stage
         index_rate = _format_rate(semantic.get("indexed_per_s"))
+    topology = _TELEMETRY.get("semantic_topology", {})
+    topology_runtime = runtime_by_name.get("Semantic Topology")
+    topology_state = str(topology.get("state") or "WAITING")
+    if topology_runtime and topology_runtime.process.poll() is not None:
+        topology_state = "DEGRADED"
+    topology_stage = str(topology.get("stage") or "waiting")
+    if topology.get("stage_started_at"):
+        topology_stage += " " + _format_age(time.time() - float(topology["stage_started_at"]))
     api_text = f"{api_ms:.0f}ms" if api_ok and api_ms is not None else "DOWN"
 
     print(
@@ -393,6 +408,7 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
         f"GLOBAL {pipeline_state} {queued}q/{running}r lag {lag} "
         f"in {in_rate} out {done_rate} | "
         f"semantic {semantic_state} {semantic_detail} index {index_rate} | "
+        f"topology {topology_state} {topology_stage} | "
         f"API {api_text}",
         flush=True,
     )

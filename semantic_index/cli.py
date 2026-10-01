@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import asyncpg
 import json
 import logging
 import time
+from dataclasses import replace
 from typing import Any
 
 from aios_app.config import settings
@@ -14,7 +16,7 @@ from .config import SemanticIndexConfig
 from .service import (
     index_source_sections_once, index_corpus_sections_once, index_semantic_frames_once,
     index_propositions_once, index_epistemic_objects_once,
-    initialize_backend, _get_embedder, _get_store,
+    initialize_backend, initialize_topology_backend, _get_embedder, _get_store,
 )
 from .admission import (
     admit_semantic_neighbors_once,
@@ -69,6 +71,10 @@ async def _timed_stage(stage: str, func: Any, *args: Any, **kwargs: Any) -> Any:
     started = time.monotonic()
     try:
         result = await func(*args, **kwargs)
+    except (asyncio.TimeoutError, asyncpg.QueryCanceledError, asyncpg.LockNotAvailableError):
+        logger.warning("Semantic stage reached its SQL/lock budget stage=%s elapsed=%.2fs",
+                       stage,time.monotonic()-started)
+        raise
     except Exception:
         logger.exception("Semantic stage failed stage=%s elapsed=%.2fs",
                          stage, time.monotonic() - started)
@@ -119,82 +125,152 @@ async def analyze_regions_once() -> None:
         await db.close()
 
 
+async def _run_vector_stages(db, cfg, run_stage) -> dict[str, int]:
+    # Admission requires a canonical proposition vector. No topology or cleanup
+    # operation may be inserted into this dependency chain.
+    propositions = await run_stage("vector-propositions", index_propositions_once, db, cfg)
+    admission_cfg = replace(cfg, batch_size=cfg.admission_batch_size)
+    admitted = await run_stage(
+        "semantic-admission", admit_semantic_neighbors_once, db, admission_cfg,
+        embedder=_get_embedder(cfg), store=_get_store(cfg, cfg.proposition_collection))
+    bypassed = await run_stage("semantic-admission-repair", fail_open_stalled_admissions_once, db, cfg)
+    frames = await run_stage("vector-frames", index_semantic_frames_once, db, cfg)
+    epistemic = await run_stage("vector-epistemic", index_epistemic_objects_once, db, cfg)
+    background_cfg = replace(cfg, batch_size=cfg.background_batch_size)
+    source = await run_stage("vector-source", index_source_sections_once, db, background_cfg)
+    # Cold corpus embeddings only consume a small batch after the live streams.
+    corpus = 0
+    if max(propositions, frames, epistemic) < cfg.batch_size:
+        corpus = await run_stage("vector-corpus", index_corpus_sections_once, db, background_cfg)
+    return {"propositions_indexed": propositions, "frames_indexed": frames,
+            "epistemic_indexed": epistemic, "source_indexed": source + corpus,
+            "admitted": admitted, "admission_bypassed": bypassed}
+
+
 async def run_forever(poll_seconds: float = 1.0) -> None:
     cfg = SemanticIndexConfig()
-    db = Database(settings.db_dsn)
-    fuseki = FusekiClient(settings.fuseki_base_url)
+    db = Database(settings.db_dsn, max_size=4,
+                  server_settings={"statement_timeout": str(int(cfg.vector_sql_seconds * 1000)), "lock_timeout": "1000"})
     query_server = None
     await db.connect()
     try:
-        logger.info("Semantic Index startup: initializing embedding backend and Qdrant collections")
         initialize_backend(cfg, warmup=True)
         query_server = start_query_server(cfg)
         logger.info("AIOS_READY service=semantic_index")
-
         window_started = time.monotonic()
         totals = {key: 0 for key in (
             "source_indexed", "frames_indexed", "propositions_indexed", "epistemic_indexed",
             "admitted", "admission_bypassed", "structured", "neighbor_classified",
-            "clustered", "classified", "reconciled", "validated"
-        )}
-        last_batches = {"source": 0, "frames": 0, "propositions": 0,
-                        "epistemic": 0, "admission": 0, "admission_bypass": 0}
-        backlog = {"pending": 0, "overdue": 0}
+            "clustered", "classified", "reconciled", "validated")}
+        last_batches = {}
+        backlog = {}
+        failed = []
+        last_backlog_snapshot = 0.0
 
-        async def run_stage(stage: str, func: Any, *args: Any, **kwargs: Any) -> Any:
-            started_at = time.time()
+        async def run_stage(stage, func, *args, **kwargs):
             _emit_telemetry(_semantic_snapshot(
-                state="WORKING", stage=stage, stage_started_at=started_at, cfg=cfg,
+                state="WORKING", stage=stage, stage_started_at=time.time(), cfg=cfg,
                 last_batches=last_batches, totals=totals, window_started=window_started,
-                admission_backlog=backlog,
-            ))
-            return await _timed_stage(stage, func, *args, **kwargs)
+                admission_backlog=backlog))
+            try:
+                # Bound semantic admission's per-candidate SQL/ANN work as well
+                # as its batch size. Vector upserts retain receipt-after-write ordering.
+                if stage.startswith("semantic-admission"):
+                    return await asyncio.wait_for(
+                        _timed_stage(stage,func,*args,**kwargs),
+                        timeout=cfg.admission_stage_seconds)
+                return await _timed_stage(stage, func, *args, **kwargs)
+            except Exception as exc:
+                failed.append(stage)
+                if isinstance(exc,(asyncio.TimeoutError,asyncpg.QueryCanceledError,asyncpg.LockNotAvailableError)):
+                    logger.warning("Vector stage deferred stage=%s reason=%s",stage,type(exc).__name__)
+                else:
+                    logger.exception("Vector stage deferred for retry stage=%s", stage)
+                return 0
 
         while True:
-            await run_stage("topology-quarantine", quarantine_ineligible_vectors_once, db, cfg)
-            source_indexed = await run_stage("vector-source", index_source_sections_once, db, cfg)
-            corpus_indexed = await run_stage("vector-corpus", index_corpus_sections_once, db, cfg)
-            source_indexed = int(source_indexed) + int(corpus_indexed)
-            last_batches["source"] = int(source_indexed); totals["source_indexed"] += int(source_indexed)
-            frames_indexed = await run_stage("vector-frames", index_semantic_frames_once, db, cfg)
-            last_batches["frames"] = int(frames_indexed); totals["frames_indexed"] += int(frames_indexed)
-            propositions_indexed = await run_stage("vector-propositions", index_propositions_once, db, cfg)
-            last_batches["propositions"] = int(propositions_indexed); totals["propositions_indexed"] += int(propositions_indexed)
-
-            admitted = await run_stage(
-                "semantic-admission", admit_semantic_neighbors_once, db, cfg,
-                embedder=_get_embedder(cfg), store=_get_store(cfg, cfg.proposition_collection),
-            )
-            last_batches["admission"] = int(admitted); totals["admitted"] += int(admitted)
-
-            # Repair sweep is deliberately after the normal attempt. It only
-            # releases claims which have remained unclassified past the timeout.
-            bypassed = await run_stage("semantic-admission-repair", fail_open_stalled_admissions_once, db, cfg)
-            last_batches["admission_bypass"] = int(bypassed); totals["admission_bypassed"] += int(bypassed)
-            backlog = await admission_backlog_snapshot(db)
-
-            epistemic_indexed = await run_stage("vector-epistemic", index_epistemic_objects_once, db, cfg)
-            last_batches["epistemic"] = int(epistemic_indexed); totals["epistemic_indexed"] += int(epistemic_indexed)
-            indexed = source_indexed + frames_indexed + propositions_indexed + epistemic_indexed
-
-            topology_work = await _run_topology_stages(db, fuseki, cfg, run_stage)
-            for key, value in topology_work.items():
-                totals[key] += value
-
-            active = any(value > 0 for value in totals.values())
-            state = "DRAINING" if active else "CAUGHT_UP"
+            failed.clear()
+            totals.update(await _run_vector_stages(db, cfg, run_stage))
+            last_batches = dict(totals)
+            if time.monotonic() - last_backlog_snapshot >= 10:
+                try:
+                    backlog = await admission_backlog_snapshot(db)
+                except Exception:
+                    failed.append("admission-backlog")
+                    logger.exception("Admission backlog telemetry unavailable")
+                last_backlog_snapshot = time.monotonic()
+            active = any(totals.values())
             _emit_telemetry(_semantic_snapshot(
-                state=state, stage="idle" if not active else "cycle-complete",
+                state="DEGRADED" if failed else ("DRAINING" if active else "CAUGHT_UP"),
+                stage="retry" if failed else ("cycle-complete" if active else "idle"),
                 stage_started_at=None, cfg=cfg, last_batches=last_batches,
-                totals=totals, window_started=window_started,
-                admission_backlog=backlog,
-            ))
-            totals = {key: 0 for key in totals}; window_started = time.monotonic()
-            if indexed == 0 and admitted == 0 and bypassed == 0 and not any(topology_work.values()):
-                await asyncio.sleep(poll_seconds)
+                totals=totals, window_started=window_started, admission_backlog=backlog))
+            totals = {key: 0 for key in totals}
+            window_started = time.monotonic()
+            # Every cycle yields; outages cannot produce a CPU spin.
+            await asyncio.sleep(poll_seconds)
     finally:
         if query_server is not None:
-            query_server.shutdown(); query_server.server_close()
+            query_server.shutdown()
+            query_server.server_close()
+        await db.close()
+
+
+async def run_topology_forever(poll_seconds: float = 2.0) -> None:
+    """Independent low-budget maintenance, with no embedding model or query port."""
+    cfg = SemanticIndexConfig()
+    db = Database(settings.db_dsn, max_size=2, server_settings={
+        "statement_timeout": str(int(cfg.topology_sql_seconds * 1000)),
+        "lock_timeout": "1000"})
+    fuseki = FusekiClient(settings.fuseki_base_url, timeout=5, retries=0)
+    await db.connect()
+    try:
+        # Launch starts this worker after the vector/query service is ready.
+        initialize_topology_backend(cfg)
+        logger.info("AIOS_READY service=semantic_topology")
+        failed = []
+        batch_sizes = {name:getattr(cfg,name) for name in (
+            "neighbor_batch_size","relation_batch_size","validation_batch_size",
+            "reconciliation_batch_size","background_batch_size")}
+        stage_batches = {"neighbors":"neighbor_batch_size",
+                         "neighbor-classification":"relation_batch_size",
+                         "relation-validation":"validation_batch_size",
+                         "pair-reconciliation":"reconciliation_batch_size",
+                         "topology-quarantine":"background_batch_size"}
+
+        async def run_stage(stage, func, *args, **kwargs):
+            _emit_telemetry({"service": "semantic_topology", "state": "WORKING",
+                             "stage": stage, "stage_started_at": time.time()})
+            try:
+                return await asyncio.wait_for(
+                    _timed_stage(stage,func,*args,**kwargs),
+                    timeout=cfg.topology_stage_seconds)
+            except Exception as exc:
+                failed.append(stage)
+                size = stage_batches.get(stage)
+                if size:
+                    batch_sizes[size] = max(1,batch_sizes[size] // 2)
+                if isinstance(exc,(asyncio.TimeoutError,asyncpg.QueryCanceledError,asyncpg.LockNotAvailableError)):
+                    logger.warning("Topology stage yielded stage=%s reason=%s next_batch=%s",
+                                   stage,type(exc).__name__,batch_sizes.get(size))
+                else:
+                    logger.exception("Topology stage yielded for retry stage=%s next_batch=%s",
+                                     stage,batch_sizes.get(size))
+                return 0
+
+        while True:
+            failed.clear()
+            # Failure in candidate discovery/classification must not stop older
+            # verified decisions and RDF deltas from progressing.
+            effective_cfg = replace(cfg,**batch_sizes)
+            work = await _run_topology_stages(db, fuseki, effective_cfg, run_stage)
+            await run_stage("topology-quarantine", quarantine_ineligible_vectors_once,
+                            db, replace(effective_cfg, batch_size=effective_cfg.background_batch_size))
+            _emit_telemetry({"service": "semantic_topology",
+                             "state": "DEGRADED" if failed else ("DRAINING" if any(work.values()) else "CAUGHT_UP"),
+                             "stage": "retry" if failed else "idle", "stage_started_at": None})
+            await asyncio.sleep(max(poll_seconds,5.0) if failed else poll_seconds)
+    finally:
         await db.close()
 
 
@@ -205,5 +281,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AIOS semantic index")
     parser.add_argument("--analyze-regions-once", action="store_true",
                         help="Run the legacy global region analysis explicitly, then exit")
+    parser.add_argument("--topology-only", action="store_true",
+                        help="Run independent bounded topology maintenance without an embedding model")
     args = parser.parse_args()
-    asyncio.run(analyze_regions_once() if args.analyze_regions_once else run_forever())
+    if args.topology_only and args.analyze_regions_once:
+        parser.error("--topology-only and --analyze-regions-once are mutually exclusive")
+    asyncio.run(analyze_regions_once() if args.analyze_regions_once else
+                run_topology_forever() if args.topology_only else run_forever())

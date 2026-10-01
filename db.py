@@ -8,10 +8,12 @@ from uuid import UUID
 
 
 class Database:
-    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 24):
+    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 24,
+                 server_settings: dict[str, str] | None = None):
         self._dsn = dsn
         self._min_size = min_size
         self._max_size = max_size
+        self._server_settings = server_settings
         self.pool: Optional[asyncpg.Pool] = None
 
     # -------------------------------------------------
@@ -23,6 +25,7 @@ class Database:
             dsn=self._dsn,
             min_size=self._min_size,
             max_size=self._max_size,
+            server_settings=self._server_settings,
         )
 
     async def close(self) -> None:

@@ -35,13 +35,13 @@ def _payload_candidate(payload: dict[str, Any], score: float) -> AdmissionCandid
 
 
 def search_canonical_candidates(*, cfg: SemanticIndexConfig, embedder: Embedder,
-                                store: QdrantStore, canonical_text: str,
+                                store: QdrantStore, canonical_text: str, vector: list[float] | None = None,
                                 limit: int = 12) -> list[AdmissionCandidate]:
     """Generate a small ANN neighborhood; never make truth decisions here."""
-    vector = embedder.embed([canonical_text])[0]
+    vector = vector if vector is not None else embedder.embed([canonical_text])[0]
     result = store.client.query_points(
         collection_name=cfg.proposition_collection, query=vector,
-        limit=max(1, int(limit)), with_payload=True, with_vectors=False,
+        limit=max(1, int(limit)), score_threshold=0.90, with_payload=True, with_vectors=False,
     )
     points: Iterable[Any] = getattr(result, "points", result)
     candidates: list[AdmissionCandidate] = []
@@ -80,25 +80,34 @@ async def classify_semantic_admission(db: Database, *, proposition_id: UUID,
     if not current:
         return AdmissionDecision("novel", None, None, "missing_current_proposition")
 
-    for candidate in sorted(candidates, key=lambda c: c.score, reverse=True):
-        if candidate.proposition_id == proposition_id:
-            continue
-        eligibility = await db.fetchrow(
-            'SELECT aios.semantic_proposition_topology_eligible($1) AS eligible', candidate.proposition_id,
-        )
-        if not eligibility or not eligibility['eligible']:
-            continue
-        matched_claim_id = await _same_scope_claim(
-            db, proposition_id=candidate.proposition_id, scope_key=scope_key,
-        )
-        if matched_claim_id is None:
-            continue
-        other = await db.fetchrow(
-            """SELECT subject_norm,predicate_norm,object_norm,polarity,modality,topic_key
-               FROM aios.proposition WHERE proposition_id=$1""", candidate.proposition_id,
-        )
+    candidates = sorted((c for c in candidates
+                         if c.proposition_id != proposition_id
+                         and c.score >= min(reinforce_score,challenge_score)),
+                        key=lambda c:c.score,reverse=True)[:12]
+    if not candidates:
+        return AdmissionDecision("novel",None,None,"no_safe_same_scope_neighbor")
+    peers = await db.fetch("""
+        SELECT p.*, matched.claim_id AS matched_claim_id
+        FROM aios.proposition p
+        JOIN LATERAL (
+            SELECT o.claim_id FROM aios.observation o
+            WHERE o.proposition_id=p.proposition_id
+              AND aios.exact_admission_scope_key(o.claim_id)=$2
+              AND aios.semantic_occurrence_topology_eligible(o.claim_id,o.proposition_id)
+            ORDER BY o.observed_at DESC,o.observation_id LIMIT 1
+        ) matched ON true
+        WHERE p.proposition_id=ANY($1::uuid[])
+          AND ((NULLIF($3::text,'') IS NOT NULL AND p.topic_key=$3)
+            OR (p.subject_norm=$4 AND p.predicate_norm=$5 AND p.object_norm=$6))
+          AND aios.semantic_proposition_topology_eligible(p.proposition_id)
+        """, [c.proposition_id for c in candidates],scope_key,current["topic_key"],
+        current["subject_norm"],current["predicate_norm"],current["object_norm"])
+    peers = {r["proposition_id"]:r for r in peers}
+    for candidate in candidates:
+        other = peers.get(candidate.proposition_id)
         if not other:
             continue
+        matched_claim_id = other["matched_claim_id"]
         same_subject = bool(current["subject_norm"] and current["subject_norm"] == other["subject_norm"])
         same_predicate = bool(current["predicate_norm"] and current["predicate_norm"] == other["predicate_norm"])
         same_object = bool(current["object_norm"] and current["object_norm"] == other["object_norm"])
@@ -239,18 +248,27 @@ async def admit_semantic_neighbors_once(db: Database, cfg: SemanticIndexConfig, 
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_neighbor_admission sna
               WHERE sna.claim_id=o.claim_id
                 AND sna.decision NOT IN ('bypass_timeout','bypass_error','bypass_unavailable'))
-        ORDER BY o.observed_at LIMIT $1
+        ORDER BY o.observed_at DESC,o.observation_id DESC LIMIT $1
         """, cfg.batch_size, cfg.proposition_collection,
         cfg.embedding_model, cfg.embedding_version,
     )
+    if not rows:
+        return 0
+    # Encode the bounded batch once, not one model invocation per claim.
+    try:
+        vectors = embedder.embed([row["canonical_text"] for row in rows])
+    except Exception:
+        vectors = [None] * len(rows)
     processed = 0
-    for row in rows:
+    for row, vector in zip(rows, vectors):
         scope_key = row["scope_key"]
         if not scope_key:
             continue
         try:
+            if vector is None:
+                raise RuntimeError("admission_embedding_unavailable")
             candidates = search_canonical_candidates(
-                cfg=cfg, embedder=embedder, store=store, canonical_text=row["canonical_text"],
+                cfg=cfg, embedder=embedder, store=store, canonical_text=row["canonical_text"],vector=vector,
             )
             decision = await classify_semantic_admission(
                 db, proposition_id=row["proposition_id"], scope_key=scope_key,

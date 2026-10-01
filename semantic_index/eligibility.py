@@ -8,7 +8,7 @@ from qdrant_client.http import models as qm
 
 from aios_app.db import Database
 from .config import SemanticIndexConfig
-from .service import _get_store
+from .service import _get_store, VECTOR_MUTATION_LOCK
 
 logger = logging.getLogger("aios.semantic_index.eligibility")
 
@@ -102,30 +102,42 @@ async def quarantine_ineligible_vectors_once(db: Database, cfg: SemanticIndexCon
     if not rows:
         return 0
 
-    keys = [str(row['proposition_id']) for row in rows]
-    proposition_ids = [row['proposition_id'] for row in rows]
-    selector = qm.FilterSelector(filter=qm.Filter(must=[qm.FieldCondition(
-        key='proposition_id', match=qm.MatchAny(any=keys))]))
-    for collection in (cfg.proposition_collection, cfg.epistemic_collection):
-        store = _get_store(cfg, collection)
-        store.client.delete(collection_name=collection, points_selector=selector, wait=True)
+    async with db.connection() as con:
+        async with con.transaction():
+            # Cleanup yields immediately to indexing, and rechecks eligibility
+            # under the shared write lock before deleting any points/receipts.
+            if not await con.fetchval("SELECT pg_try_advisory_xact_lock($1)", VECTOR_MUTATION_LOCK):
+                return 0
+            rows = await con.fetch("""SELECT proposition_id FROM aios.proposition
+                WHERE proposition_id=ANY($1::uuid[])
+                  AND NOT aios.semantic_proposition_topology_eligible(proposition_id)""",
+                [r["proposition_id"] for r in rows])
+            if not rows:
+                return 0
+            keys = [str(row['proposition_id']) for row in rows]
+            proposition_ids = [row['proposition_id'] for row in rows]
+            selector = qm.FilterSelector(filter=qm.Filter(must=[qm.FieldCondition(
+                key='proposition_id', match=qm.MatchAny(any=keys))]))
+            for collection in (cfg.proposition_collection, cfg.epistemic_collection):
+                store = _get_store(cfg, collection)
+                store.client.delete(collection_name=collection, points_selector=selector, wait=True)
 
-    # One SQL delete clears the index receipts for all collection copies only
-    # after Qdrant has acknowledged both collection deletes.
-    await db.execute("""
-        DELETE FROM aios.semantic_vector_index_state s
-        WHERE s.qdrant_collection=ANY($2::text[]) AND (
-            (s.object_type='proposition' AND s.object_key=ANY($1::text[]))
-            OR (s.object_type='character_knowledge'
-                AND split_part(s.object_key,':',2)=ANY($1::text[]))
-            OR (s.object_type='world_assertion' AND EXISTS (
-                SELECT 1 FROM aios.world_proposition_assertion wa
-                WHERE wa.proposition_id=ANY($3::uuid[])
-                  AND s.object_key='world:' || wa.assertion_id::text)))
-    """, keys, [cfg.proposition_collection, cfg.epistemic_collection], proposition_ids)
-    await db.execute("""
-        DELETE FROM aios.semantic_structure_state WHERE proposition_id=ANY($1::uuid[])
-    """, proposition_ids)
+            # One SQL delete clears the index receipts for all collection copies only
+            # after Qdrant has acknowledged both collection deletes.
+            await con.execute("""
+                DELETE FROM aios.semantic_vector_index_state s
+                WHERE s.qdrant_collection=ANY($2::text[]) AND (
+                    (s.object_type='proposition' AND s.object_key=ANY($1::text[]))
+                    OR (s.object_type='character_knowledge'
+                        AND split_part(s.object_key,':',2)=ANY($1::text[]))
+                    OR (s.object_type='world_assertion' AND EXISTS (
+                        SELECT 1 FROM aios.world_proposition_assertion wa
+                        WHERE wa.proposition_id=ANY($3::uuid[])
+                          AND s.object_key='world:' || wa.assertion_id::text)))
+            """, keys, [cfg.proposition_collection, cfg.epistemic_collection], proposition_ids)
+            await con.execute("""
+                DELETE FROM aios.semantic_structure_state WHERE proposition_id=ANY($1::uuid[])
+            """, proposition_ids)
     logger.info("Quarantined %d ineligible propositions in %.2fs",
                 len(rows), time.monotonic() - started)
     return len(rows)
