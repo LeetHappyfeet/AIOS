@@ -109,9 +109,12 @@ def propose_v2(claim: dict, context: dict, *, recurrence: int | None = None,
         quality_reasons.append("unresolved_or_generic_subject")
     if not predicate or predicate == "_":
         quality_reasons.append("missing_predicate")
-    # Missing objects can be valid for explicit intransitive predicates.
-    if obj in {"", "_"} and predicate not in {"hesitate", "arrive", "leave", "sleep", "wait", "smile", "laugh", "nod", "pause"}:
-        quality_reasons.append("insufficient_predicate_arguments")
+    # Valency belongs to source integrity, not a fixed participation verb list.
+    integrity = str(claim.get("semantic_integrity_status") or "unknown").lower()
+    if integrity == "invalid":
+        quality_reasons.append("source_integrity_invalid")
+    elif integrity in {"incomplete", "unknown"}:
+        quality_reasons.append("source_integrity_unverified")
     usable = not quality_reasons
     unknown = list(signals["unknown"])
     for name in ("goals", "relationships"):
@@ -239,7 +242,8 @@ class ParticipationService:
                             i.display_name,i.canonical_name,o.proposition_id,o.observed_at,p.canonical_text,
                             p.subject_norm,p.predicate_norm,p.object_norm,o.dag_node_id,o.source_key,
                             cc.raw_text AS source_sentence,c.claim_kind,c.target_character_id,c.speaker_id,
-                            c.resolved_at,ck.epistemic_status,ck.claim_id AS acquired_claim
+                            c.resolved_at,ck.epistemic_status,ck.claim_id AS acquired_claim,
+                            si.status AS semantic_integrity_status
                             FROM aios.character_participation_pending q
                             JOIN aios.character_participation_experiment x USING(experiment_id)
                             JOIN aios.character_instance ci ON ci.instance_id=x.instance_id
@@ -249,6 +253,7 @@ class ParticipationService:
                             LEFT JOIN aios.proposition p ON p.proposition_id=o.proposition_id
                             LEFT JOIN aios.claim_candidate cc ON cc.claim_id=q.claim_id
                             LEFT JOIN aios.claim_context_resolution c ON c.claim_id=q.claim_id
+                            LEFT JOIN aios.claim_semantic_integrity si ON si.claim_id=q.claim_id
                             WHERE q.status='pending' AND q.ready_at<=now() AND x.status='running'
                               AND x.policy_version=$1
                             ORDER BY q.ready_at,q.experiment_id,q.claim_id
@@ -303,7 +308,7 @@ class ParticipationService:
                             json.dumps({key: item.get(key) for key in (
                                 "canonical_text","subject_norm","predicate_norm","object_norm","observed_at",
                                 "speaker_id","target_character_id","source_sentence","dag_node_id","source_key",
-                                "claim_kind","resolved_at","epistemic_status")},default=str),snapshot,
+                                "claim_kind","resolved_at","epistemic_status","semantic_integrity_status")},default=str),snapshot,
                             hashlib.sha256(snapshot.encode()).hexdigest(),(time.monotonic()-started)*1000)
                         await con.execute("UPDATE aios.character_participation_pending SET status='evaluated',last_error=NULL WHERE experiment_id=$1 AND claim_id=$2", *args)
                         processed += 1

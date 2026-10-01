@@ -48,7 +48,7 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
         return IntegrityResult("invalid", ("discourse_marker_as_subject",))
     if re.search(r"\bit(?:'s| is)\s+\w+\s+out\b", source.casefold()) and subject not in {"it", "outdoor conditions", "weather"}:
         reasons.append("environmental_subject_replaced_with_entity")
-    if re.search(r"\\bshe\\s+\\w+\\b", text) and subject in {"he", "him", "his"}:
+    if re.search(r"\bshe\s+\w+\b", text) and subject in {"he", "him", "his"}:
         reasons.append("subject_gender_contradicts_source")
     original_subject = _norm(source_subject)
     original_object = _norm(source_object)

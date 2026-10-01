@@ -226,7 +226,6 @@ STAGES: List[Stage] = [
         WHERE ie.superseded_at IS NULL
           AND EXISTS (SELECT 1 FROM aios.claim_context_resolution ccr WHERE ccr.claim_id=cc.claim_id AND ccr.resolver_version='context-resolver-v4-semantic')
           AND EXISTS (SELECT 1 FROM aios.claim_semantic_frame_projection sfp WHERE sfp.claim_id=cc.claim_id AND sfp.decomposer_version='semantic-frame-v2')
-          AND NOT EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=cc.claim_id AND si.status <> 'valid')
           AND (NOT EXISTS(SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id) OR EXISTS(SELECT 1 FROM aios.observation o JOIN aios.claim_semantic_frame sf ON sf.claim_id=o.claim_id AND sf.decomposer_version='semantic-frame-v2' LEFT JOIN aios.observation_proposition op ON op.observation_id=o.observation_id AND op.frame_id=sf.frame_id WHERE o.claim_id=cc.claim_id AND op.frame_id IS NULL))
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='normalize_proposition' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=cc.claim_id::text)
         ORDER BY cc.created_at LIMIT $1
@@ -236,6 +235,7 @@ STAGES: List[Stage] = [
         FROM aios.observation o
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
         WHERE upper(COALESCE(ccr.claim_kind,''))='EVENT'
+          AND EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=o.claim_id AND si.status='valid')
           AND aios.semantic_claim_topology_admitted(o.claim_id)
           AND NOT EXISTS (
               SELECT 1 FROM aios.semantic_event_membership sem
@@ -343,6 +343,7 @@ STAGES: List[Stage] = [
     Stage("rdf_epistemic_project", "rdf_epistemic_project", _admission("""
         SELECT o.claim_id FROM aios.observation o JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node dn ON dn.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE ie.superseded_at IS NULL
+          AND EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=o.claim_id AND si.status='valid')
           /* ADMISSION_BARRIER */
           AND NOT EXISTS (SELECT 1 FROM aios.rdf_promotion_log rpl WHERE rpl.claim_id=o.claim_id AND rpl.rdf_dataset='world' AND rpl.rdf_graph='urn:aios:world:epistemic' AND rpl.rdf_predicate='world:observesProposition')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='rdf_epistemic_project' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
@@ -358,6 +359,7 @@ STAGES: List[Stage] = [
     Stage("derive_claim_topology", "derive_claim_topology", _admission("""
         SELECT o.claim_id FROM aios.observation o JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node dn ON dn.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE ie.superseded_at IS NULL
+          AND EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=o.claim_id AND si.status='valid')
           /* ADMISSION_BARRIER */
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.claim_id=o.claim_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
