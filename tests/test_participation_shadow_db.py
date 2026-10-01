@@ -33,7 +33,7 @@ def test_disposable_postgres_queue_and_worker():
                 "character_knowledge": "instance_id,claim_id", "claim_context_resolution": "claim_id",
                 "observation": "observation_id", "proposition": "proposition_id",
                 "proposition_conflict": "conflict_id", "world_entity": "entity_id",
-                "character_relationship": "relationship_id",
+                "character_relationship": "relationship_id", "claim_candidate": "claim_id",
             }
             await db.execute("CREATE SCHEMA aios")
             for table, key in keys.items():
@@ -43,6 +43,7 @@ def test_disposable_postgres_queue_and_worker():
             await db.execute("ALTER TABLE aios.observation ADD UNIQUE(claim_id)")
             for filename, table in [
                 ("20260919_identity_kernel.sql", "character_identity_facet"),
+                ("20260919_identity_kernel.sql", "character_identity_candidate"),
                 ("20260923_14_cognitive_actions.sql", "character_agent_goal"),
             ]:
                 source = (root / "migrations/current" / filename).read_text()
@@ -86,6 +87,7 @@ def test_disposable_postgres_queue_and_worker():
             assert len(report["evaluations"]) == 2
             assert report["evaluations"][0]["claim_snapshot"]["epistemic_status"] == "observed"
             assert report["evaluations"][0]["signals"]["direct_involvement"]
+            assert report["comparisons"][0]["evaluation_mode"] == "paired_live"
             with pytest.raises(LookupError):
                 await service.inspect(other, exp_id)
             await service.stop(instance, exp_id)

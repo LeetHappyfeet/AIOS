@@ -92,6 +92,15 @@ class OutcomeCorrectionIn(BaseModel):
 
 
 def install_external_agency_routes(app, db) -> None:
+    @app.get("/agent/instance/{instance_id}/participation/context")
+    async def audit_participation_context(instance_id: UUID):
+        from fastapi import HTTPException
+        from .participation import ParticipationService
+        try:
+            return await ParticipationService(db).audit_context(instance_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
     @app.post("/agent/instance/{instance_id}/participation/experiments")
     async def start_participation(instance_id: UUID, req: ParticipationExperimentIn):
         from fastapi import HTTPException
@@ -109,6 +118,15 @@ def install_external_agency_routes(app, db) -> None:
         from .participation import ParticipationService
         try:
             return await ParticipationService(db).inspect(instance_id, experiment_id, limit=limit)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/agent/instance/{instance_id}/participation/experiments/{experiment_id}/compare")
+    async def compare_participation(instance_id: UUID, experiment_id: UUID, limit: int = 50):
+        from fastapi import HTTPException
+        from .participation import ParticipationService
+        try:
+            return await ParticipationService(db).compare_existing(instance_id, experiment_id, limit=limit)
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
 

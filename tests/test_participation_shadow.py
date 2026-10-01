@@ -136,6 +136,7 @@ def test_worker_ledger_is_scoped_and_has_auditable_inputs():
     assert ledger[2] == con.item["instance_id"]
     assert json.loads(ledger[8])["canonical_text"] == "Alice waters flowers"
     assert json.loads(ledger[7])["unknown"] == ["identity_relevance"]
+    assert json.loads(ledger[7])["comparison"]["policy_version"] == "participation-shadow-v2"
     assert all("qdrant" not in sql.lower() and "semantic_neighbor" not in sql.lower() for sql, _ in con.calls)
     assert any("ck.instance_id=$1" in sql and "o.observed_at<=$3" in sql for sql, _ in con.calls)
 

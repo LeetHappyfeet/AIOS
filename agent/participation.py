@@ -11,6 +11,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 POLICY_VERSION = "participation-shadow-v1"
+COMPARISON_VERSION = "participation-shadow-v2"
+RELEVANCE_FACETS = {"value", "values", "interest", "interests", "preference",
+                    "preferences", "personality", "role", "constraint"}
 logger = logging.getLogger("aios.participation")
 STOPWORDS = set("the and that this with from have has was were are for not into about she her his him they them you your its says said like want wants".split())
 
@@ -83,6 +86,63 @@ def propose(claim: dict, context: dict, *, recurrence: int = 1,
                         "unknown": unknown}}
 
 
+def propose_v2(claim: dict, context: dict, *, recurrence: int | None = None,
+               conflicts: list | None = None) -> dict:
+    """Conservative shadow policy. Access to evidence is not significance."""
+    baseline = propose(claim, context, recurrence=1, conflicts=conflicts)
+    signals = baseline["signals"]
+    names = {str(n).strip().casefold() for n in context["names"] if n}
+    matches = lambda key: str(claim.get(key) or "").strip().casefold() in names
+    involvement = {
+        "authorship": matches("speaker_id"),
+        # Source routing target is not proof that this sentence addresses them.
+        "source_target": matches("target_character_id"),
+        "claim_participation": matches("subject_norm") or matches("object_norm"),
+        "addressed": None,
+        "scene_presence": None,
+    }
+    subject = str(claim.get("subject_norm") or "").strip().casefold()
+    predicate = str(claim.get("predicate_norm") or "").strip().casefold()
+    obj = str(claim.get("object_norm") or "").strip().casefold()
+    quality_reasons = []
+    if not subject or subject in {"_", "which", "something", "anything", "nothing", "it"}:
+        quality_reasons.append("unresolved_or_generic_subject")
+    if not predicate or predicate == "_":
+        quality_reasons.append("missing_predicate")
+    # Missing objects can be valid for explicit intransitive predicates.
+    if obj in {"", "_"} and predicate not in {"hesitate", "arrive", "leave", "sleep", "wait", "smile", "laugh", "nod", "pause"}:
+        quality_reasons.append("insufficient_predicate_arguments")
+    usable = not quality_reasons
+    unknown = list(signals["unknown"])
+    for name in ("goals", "relationships"):
+        if not context[name]:
+            unknown.append(name + "_relevance")
+    missing = [key for key in ("speaker_id", "target_character_id", "predicate_norm", "source_sentence", "dag_node_id") if key not in claim]
+    if missing:
+        unknown.append("legacy_snapshot_missing_evidence")
+    if recurrence is None:
+        unknown.append("independent_recurrence")
+    relevance = bool(signals["goal_ids"] or signals["facet_ids"] or conflicts)
+    relationship_repeat = bool(signals["relationship_ids"] and (recurrence or 0) >= 2)
+    participant_repeat = involvement["claim_participation"] and (recurrence or 0) >= 3
+    foreground = usable and (relevance or relationship_repeat or participant_repeat)
+    reasons = [r for r in baseline["reasons"] if r not in {"direct_involvement", "recurrence", "no_supported_relevance"}]
+    if any(v is True for v in involvement.values()):
+        reasons.append("participation_evidence")
+    if (recurrence or 0) >= 2:
+        reasons.append("independent_recurrence")
+    if not usable:
+        reasons.append("insufficient_semantic_content")
+    return {"policy_version": COMPARISON_VERSION,
+            "population": "foreground" if foreground else "latent" if reasons or unknown else "background",
+            "reasons": reasons or ["no_supported_relevance"],
+            "signals": {**signals, "direct_involvement": involvement["claim_participation"],
+                        "involvement": involvement, "representation_quality": {
+                            "usable": usable, "reasons": quality_reasons},
+                        "independent_occurrences_capped_at_four": recurrence,
+                        "unknown": sorted(set(unknown)), "missing_snapshot_fields": missing}}
+
+
 class ParticipationService:
     def __init__(self, db):
         self.db = db
@@ -127,18 +187,41 @@ class ParticipationService:
                     WHERE experiment_id=$1 AND status='pending'""", experiment_id)
 
     async def _context(self, con, row):
-        goals = await con.fetch("""SELECT goal_id,goal_text,updated_at FROM aios.character_agent_goal
-            WHERE instance_id=$1 AND status='active' ORDER BY priority,created_at,goal_id LIMIT 65""", row["instance_id"])
-        facets = await con.fetch("""SELECT facet_id,value,updated_at FROM aios.character_identity_facet
-            WHERE character_id=$1 AND status='active' AND facet_type IN ('value','values','interest','interests','preference','preferences','personality','role','constraint')
-            ORDER BY facet_type,facet_key LIMIT 65""", row["character_id"])
-        relationships = await con.fetch("""SELECT r.relationship_id,e.display_name,e.entity_key,r.updated_at
-            FROM aios.character_relationship r JOIN aios.world_entity e ON e.entity_id=r.target_entity_id
+        # Read bounded excluded rows too, so empty relevance arrays are explainable.
+        goal_rows = await con.fetch("""SELECT goal_id,goal_text,status,meta,updated_at
+            FROM aios.character_agent_goal WHERE instance_id=$1
+            ORDER BY (status='active') DESC,priority,created_at,goal_id LIMIT 65""", row["instance_id"])
+        facet_rows = await con.fetch("""SELECT facet_id,facet_type,facet_key,value,status,
+            authority,source_id,source_field,updated_at FROM aios.character_identity_facet
+            WHERE character_id=$1 AND status='active'
+            ORDER BY (facet_type=ANY($2::text[])) DESC,facet_type,facet_key LIMIT 65""",
+            row["character_id"], sorted(RELEVANCE_FACETS))
+        candidates = await con.fetch("""SELECT candidate_id,facet_type,disposition
+            FROM aios.character_identity_candidate WHERE character_id=$1
+            ORDER BY candidate_id LIMIT 65""", row["character_id"])
+        relationship_rows = await con.fetch("""SELECT r.relationship_id,r.relationship_type,
+            r.affinity,r.trust,r.familiarity,e.display_name,e.entity_key,r.updated_at
+            FROM aios.character_relationship r LEFT JOIN aios.world_entity e ON e.entity_id=r.target_entity_id
             WHERE r.observer_instance_id=$1 ORDER BY r.target_entity_id LIMIT 65""", row["instance_id"])
-        return {"names": [row["character_id"], row["display_name"], row["canonical_name"]],
-                "goals": [dict(r) for r in goals[:64]], "facets": [{**dict(r), "value": json_value(r["value"])} for r in facets[:64]],
-                "relationships": [dict(r) for r in relationships[:64]],
-                "truncated": {"goals": len(goals)>64,"facets": len(facets)>64,"relationships": len(relationships)>64}}
+        goals = [dict(r) for r in goal_rows[:64] if r["status"] == "active"]
+        facets = [{**dict(r), "value": json_value(r["value"])} for r in facet_rows[:64]
+                  if r["facet_type"] in RELEVANCE_FACETS]
+        relationships = [dict(r) for r in relationship_rows[:64] if r["entity_key"] or r["display_name"]]
+        return {"names": list(dict.fromkeys(n for n in (
+                    row["character_id"], row["display_name"], row["canonical_name"]) if n)),
+                "goals": goals, "facets": facets, "relationships": relationships,
+                "coverage": {
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "temporal_basis": "evaluation_time_not_historical",
+                    "goals": {"scope": "instance", "instance_id": str(row["instance_id"]),
+                              "eligible": len(goals), "sampled_rows": [dict(r) for r in goal_rows[:64]]},
+                    "facets": {"scope": "character", "character_id": row["character_id"],
+                               "eligible": len(facets), "excluded_types": sorted({r["facet_type"] for r in facet_rows[:64] if r["facet_type"] not in RELEVANCE_FACETS}),
+                               "candidate_sample": [dict(r) for r in candidates[:64]],
+                               "candidates_truncated": len(candidates)>64},
+                    "relationships": {"scope": "instance", "eligible": len(relationships),
+                                      "missing_entities": len(relationship_rows[:64])-len(relationships)}},
+                "truncated": {"goals": len(goal_rows)>64,"facets": len(facet_rows)>64,"relationships": len(relationship_rows)>64}}
 
     async def process_pending(self, *, limit=16, budget_seconds=5.0):
         deadline = time.monotonic() + max(0.1, min(budget_seconds, 30))
@@ -154,7 +237,8 @@ class ParticipationService:
                         await con.execute("SET LOCAL statement_timeout='1500ms'")
                         item = await con.fetchrow("""SELECT q.*,x.instance_id,x.until_at,ci.character_id,
                             i.display_name,i.canonical_name,o.proposition_id,o.observed_at,p.canonical_text,
-                            p.subject_norm,p.object_norm,c.claim_kind,c.target_character_id,c.speaker_id,
+                            p.subject_norm,p.predicate_norm,p.object_norm,o.dag_node_id,o.source_key,
+                            cc.raw_text AS source_sentence,c.claim_kind,c.target_character_id,c.speaker_id,
                             c.resolved_at,ck.epistemic_status,ck.claim_id AS acquired_claim
                             FROM aios.character_participation_pending q
                             JOIN aios.character_participation_experiment x USING(experiment_id)
@@ -163,6 +247,7 @@ class ParticipationService:
                             LEFT JOIN aios.character_knowledge ck ON ck.instance_id=x.instance_id AND ck.claim_id=q.claim_id
                             LEFT JOIN aios.observation o ON o.claim_id=q.claim_id
                             LEFT JOIN aios.proposition p ON p.proposition_id=o.proposition_id
+                            LEFT JOIN aios.claim_candidate cc ON cc.claim_id=q.claim_id
                             LEFT JOIN aios.claim_context_resolution c ON c.claim_id=q.claim_id
                             WHERE q.status='pending' AND q.ready_at<=now() AND x.status='running'
                               AND x.policy_version=$1
@@ -187,6 +272,14 @@ class ParticipationService:
                             JOIN aios.character_knowledge ck ON ck.claim_id=o.claim_id AND ck.instance_id=$1
                             WHERE o.proposition_id=$2 AND o.observed_at<=$3 LIMIT 4) r""",
                             item["instance_id"],item["proposition_id"],item["observed_at"])
+                        # One source node/document counts once, regardless of extracted claim count.
+                        independent = await con.fetchval("""SELECT count(*) FROM (
+                            SELECT DISTINCT COALESCE(o.dag_node_id::text,o.document_id::text) AS occurrence
+                            FROM aios.observation o
+                            JOIN aios.character_knowledge ck ON ck.claim_id=o.claim_id AND ck.instance_id=$1
+                            WHERE o.proposition_id=$2 AND o.observed_at<=$3
+                              AND (o.dag_node_id IS NOT NULL OR o.document_id IS NOT NULL)
+                            LIMIT 4) r""", item["instance_id"],item["proposition_id"],item["observed_at"])
                         # Indexed pair directions; conflict hints remain candidates.
                         conflicts = await con.fetch("""WITH candidates AS (
                             SELECT conflict_id,proposition_b_id AS other FROM aios.proposition_conflict WHERE proposition_a_id=$1
@@ -196,6 +289,10 @@ class ParticipationService:
                             JOIN aios.character_knowledge ck ON ck.claim_id=o.claim_id AND ck.instance_id=$2
                             WHERE o.observed_at<=$3 LIMIT 8""", item["proposition_id"],item["instance_id"],item["observed_at"])
                         result = propose(dict(item),context,recurrence=int(recurrence),conflicts=[r['conflict_id'] for r in conflicts])
+                        comparison = propose_v2(dict(item), context, recurrence=int(independent),
+                                                conflicts=[r['conflict_id'] for r in conflicts])
+                        comparison["evaluation_mode"] = "paired_live"
+                        result["signals"]["comparison"] = comparison
                         snapshot = json.dumps(context,default=str,sort_keys=True)
                         await con.execute("""INSERT INTO aios.character_participation_evaluation
                             (experiment_id,claim_id,instance_id,proposition_id,policy_version,population,
@@ -203,8 +300,9 @@ class ParticipationService:
                             VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12)
                             ON CONFLICT DO NOTHING""", *args,item["instance_id"],item["proposition_id"],POLICY_VERSION,
                             result['population'],json.dumps(result['reasons']),json.dumps(result['signals']),
-                            json.dumps({key: item[key] for key in (
-                                "canonical_text","subject_norm","object_norm","observed_at",
+                            json.dumps({key: item.get(key) for key in (
+                                "canonical_text","subject_norm","predicate_norm","object_norm","observed_at",
+                                "speaker_id","target_character_id","source_sentence","dag_node_id","source_key",
                                 "claim_kind","resolved_at","epistemic_status")},default=str),snapshot,
                             hashlib.sha256(snapshot.encode()).hexdigest(),(time.monotonic()-started)*1000)
                         await con.execute("UPDATE aios.character_participation_pending SET status='evaluated',last_error=NULL WHERE experiment_id=$1 AND claim_id=$2", *args)
@@ -225,6 +323,39 @@ class ParticipationService:
                 break
         return processed
 
+    async def audit_context(self, instance_id):
+        async with self.db.connection() as con:
+            async with con.transaction():
+                await con.execute("SET LOCAL statement_timeout='2000ms'")
+                row = await con.fetchrow("""SELECT ci.instance_id,ci.character_id,i.display_name,i.canonical_name
+                    FROM aios.character_instance ci LEFT JOIN aios.character_identity i USING(character_id)
+                    WHERE ci.instance_id=$1""", instance_id)
+                if not row:
+                    raise LookupError("Unknown instance")
+                return {"shadow": True, "context": await self._context(con, row)}
+
+    async def compare_existing(self, instance_id, experiment_id, *, limit=50):
+        """Replay frozen snapshots; missing legacy evidence stays explicitly unknown."""
+        async with self.db.connection() as con:
+            async with con.transaction():
+                await con.execute("SET LOCAL statement_timeout='2000ms'")
+                if not await con.fetchval("SELECT 1 FROM aios.character_participation_experiment WHERE instance_id=$1 AND experiment_id=$2", instance_id, experiment_id):
+                    raise LookupError("Experiment not found for instance")
+                rows = await con.fetch("""SELECT * FROM aios.character_participation_evaluation
+                    WHERE instance_id=$1 AND experiment_id=$2 AND NOT (signals ? 'comparison')
+                    ORDER BY evaluated_at,claim_id LIMIT $3 FOR UPDATE SKIP LOCKED""",
+                    instance_id,experiment_id,max(1,min(limit,100)))
+                for row in rows:
+                    signals = json_value(row["signals"])
+                    result = propose_v2(json_value(row["claim_snapshot"]),json_value(row["context_snapshot"]),
+                        recurrence=None, conflicts=signals.get("conflict_ids"))
+                    result["evaluation_mode"] = "frozen_legacy_replay"
+                    await con.execute("""UPDATE aios.character_participation_evaluation
+                        SET signals=jsonb_set(signals,'{comparison}',$3::jsonb)
+                        WHERE experiment_id=$1 AND claim_id=$2""", experiment_id,row["claim_id"],json.dumps(result))
+                return {"shadow": True, "compared": len(rows), "policy_version": COMPARISON_VERSION,
+                        "note": "Legacy snapshots lack source involvement and independent recurrence; neither is inferred."}
+
     async def inspect(self, instance_id, experiment_id, *, limit=50):
         exp = await self.db.fetchrow("SELECT * FROM aios.character_participation_experiment WHERE instance_id=$1 AND experiment_id=$2",instance_id,experiment_id)
         if not exp:
@@ -233,10 +364,17 @@ class ParticipationService:
         populations = await self.db.fetch("SELECT population,count(*) AS count,avg(elapsed_ms) AS mean_elapsed_ms FROM aios.character_participation_evaluation WHERE experiment_id=$1 GROUP BY population",experiment_id)
         rows = await self.db.fetch("""SELECT * FROM aios.character_participation_evaluation
             WHERE experiment_id=$1 ORDER BY evaluated_at DESC,claim_id LIMIT $2""",experiment_id,max(1,min(limit,200)))
+        comparisons = await self.db.fetch("""SELECT population AS baseline_population,
+            signals->'comparison'->>'population' AS comparison_population,
+            signals->'comparison'->>'evaluation_mode' AS evaluation_mode,count(*) AS count
+            FROM aios.character_participation_evaluation
+            WHERE experiment_id=$1 AND signals ? 'comparison'
+            GROUP BY 1,2,3""",experiment_id)
         total = sum(int(r['count']) for r in populations)
         foreground = sum(int(r['count']) for r in populations if r['population']=='foreground')
         return {'shadow':True,'experiment':dict(exp),'queue':[dict(r) for r in counts],
                 'populations':[dict(r) for r in populations],
+                'comparison_version':COMPARISON_VERSION,'comparisons':[dict(r) for r in comparisons],
                 'proposed_foreground_share':foreground/total if total else None,
                 'evaluations':[{**dict(r), **{k:json_value(r[k]) for k in (
                     'reasons','signals','claim_snapshot','context_snapshot')}} for r in rows],
