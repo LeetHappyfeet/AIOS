@@ -101,7 +101,7 @@ async def compare_claim_with_local_inference(db, *, claim_id: UUID,
         verdict = "ambiguous"
     # An alleged evidence quote must be traceable to the supplied source.
     quote = str(raw.get("evidence_quote") or "")[:300]
-    if quote and quote not in str(source["raw_text"] or "") and quote not in bounded_source_context(context, str(source["raw_text"] or "")):
+    if not quote or (quote not in str(source["raw_text"] or "") and quote not in bounded_source_context(context, str(source["raw_text"] or ""))):
         quote = ""
         verdict = "ambiguous"
     return {
@@ -120,3 +120,38 @@ async def compare_claim_with_local_inference(db, *, claim_id: UUID,
         "admission_effect": "none",
         "verification_version": "source-compare-v2-preceding-context",
     }
+
+
+async def audit_claim_with_local_inference(db, *, claim_id: UUID,
+                                          instance_id: UUID) -> dict:
+    """Persist audit against the exact integrity revision without admission effects."""
+    before = await db.fetchrow(
+        "SELECT revision_key FROM aios.claim_semantic_integrity WHERE claim_id=$1",
+        claim_id,
+    )
+    if not before:
+        raise LookupError(f"Missing integrity revision for claim {claim_id}")
+    review = await compare_claim_with_local_inference(
+        db, claim_id=claim_id, instance_id=instance_id,
+    )
+    revision = str(before["revision_key"])
+    record = await db.fetchrow(
+        """INSERT INTO aios.claim_source_comparison_audit (
+             claim_id, revision_key, comparison_version, instance_id,
+             inference_request_id, verdict, audit_json)
+           SELECT $1, si.revision_key, $3, $4, $5, $6, $7::jsonb
+           FROM aios.claim_semantic_integrity si
+           WHERE si.claim_id=$1 AND si.revision_key=$2
+           ON CONFLICT (claim_id, revision_key) DO UPDATE
+           SET comparison_version=EXCLUDED.comparison_version,
+               inference_request_id=EXCLUDED.inference_request_id,
+               verdict=EXCLUDED.verdict,
+               audit_json=EXCLUDED.audit_json,
+               audited_at=now()
+           RETURNING claim_id""",
+        claim_id, revision, review["verification_version"], instance_id,
+        review["inference_request_id"], review["verdict"], json.dumps(review),
+    )
+    if not record:
+        raise RuntimeError("Source/frame revision changed during audit; retry")
+    return {**review, "integrity_revision_key": revision, "review_persisted": True}
