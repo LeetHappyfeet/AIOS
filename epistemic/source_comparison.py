@@ -156,3 +156,33 @@ async def audit_claim_with_local_inference(db, *, claim_id: UUID,
     if not record:
         raise RuntimeError("Source/frame revision changed during audit; retry")
     return {**review, "integrity_revision_key": revision, "review_persisted": True}
+
+
+
+async def _audit_cli() -> None:
+    """Explicit, bounded offline diagnostic; never part of ingestion hot path."""
+    import argparse
+    from aios_app.config import settings
+    from aios_app.db import Database
+
+    parser = argparse.ArgumentParser(description="Audit stored claims against source DAG")
+    parser.add_argument("--instance-id", type=UUID, required=True)
+    parser.add_argument("--claim-id", type=UUID, action="append", required=True)
+    args = parser.parse_args()
+    if len(args.claim_id) > 12:
+        parser.error("At most 12 explicit claim IDs per invocation")
+    db = Database(settings.db_dsn, min_size=1, max_size=2)
+    await db.connect()
+    try:
+        for claim_id in dict.fromkeys(args.claim_id):
+            review = await audit_claim_with_local_inference(
+                db, claim_id=claim_id, instance_id=args.instance_id,
+            )
+            print(json.dumps(review, default=str, sort_keys=True))
+    finally:
+        await db.close()
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(_audit_cli())
