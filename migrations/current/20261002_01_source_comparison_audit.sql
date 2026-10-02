@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS aios.claim_source_comparison_audit (
     ),
     audit_json jsonb NOT NULL,
     audited_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (claim_id, revision_key)
+    PRIMARY KEY (claim_id, revision_key, inference_request_id)
 );
 CREATE INDEX IF NOT EXISTS claim_source_comparison_audit_status_idx
     ON aios.claim_source_comparison_audit(verdict, audited_at DESC);
