@@ -62,7 +62,7 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
     if (re.search(r"\bwill\s+say\b", text) and predicate in {"say", "says", "said"}
             and (not obj or str(frame.get("modality") or "asserted").lower() in {"asserted", "actual"})):
         return IntegrityResult("incomplete", ("future_reported_speech_not_actual_event",))
-    if (re.search(r"\b(?:cant|cannot|can t)\s+metabolize\s+honesty\b", text)
+    if (re.search(r"\b(?:can.t|cannot|can t)\s+metabolize\s+honesty\b", text)
             and predicate == "metabolize"):
         return IntegrityResult("incomplete", ("figurative_literal_scope_unverified",))
     if "hunted look" in text and predicate in {"hunt", "hunted"}:
