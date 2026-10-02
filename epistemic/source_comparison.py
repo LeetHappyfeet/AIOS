@@ -22,7 +22,8 @@ def bounded_source_context(section: str, sentence: str, *, radius: int = 900) ->
     sentence = str(sentence or "").strip()
     anchor = section.find(sentence) if sentence else -1
     if anchor < 0:
-        return section[: 2 * radius]
+        # If the sentence is not located, never include unknown later material.
+        return sentence[: 2 * radius]
     lo = max(0, anchor - radius)
     # Never include later section text in a historical grounding window.
     hi = min(len(section), anchor + len(sentence))
