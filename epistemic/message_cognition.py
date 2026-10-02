@@ -9,7 +9,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v7"
+INTERPRETER_VERSION = "message-cognition-v8-source-owned"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -219,6 +219,11 @@ class ParsedCandidate:
     reason: str
 
 
+def _runtime_versions() -> dict[str, str]:
+    from aios_app.epistemic.runtime_versions import component_versions
+    return component_versions()
+
+
 def _sentences(text: str) -> list[str]:
     return [part.strip() for part in _SENTENCE_RE.split(text or "") if part.strip()]
 
@@ -278,6 +283,24 @@ def _clean_object(value: str) -> str:
     return text[:220].rstrip()
 
 
+def _bounded_goal_candidate(candidate: ParsedCandidate) -> ParsedCandidate:
+    """Do not combine a negated desire with a subsequent independent clause."""
+    objective = re.split(r"[,;]\s*(?:but|and)\b", candidate.object_text,
+                         maxsplit=1, flags=re.I)[0].strip()
+    return ParsedCandidate(candidate.kind, candidate.subject_text, candidate.predicate,
+                           objective, candidate.confidence, candidate.reason)
+
+
+def _goal_polarity(sentence: str, candidate: ParsedCandidate) -> int:
+    # Inspect the goal predicate, not negation in an unrelated following clause.
+    end = sentence.lower().find(candidate.object_text.lower()) if candidate.object_text else -1
+    lead = sentence[:end] if end >= 0 else sentence
+    return -1 if re.search(
+        r"\b(?:don't|doesn't|do not|does not|never|no longer)\s+"
+        r"(?:need|want|plan|intend|seek|decide|prepare)\b", lead, re.I
+    ) else 1
+
+
 def _goal_semantics(candidate: ParsedCandidate) -> tuple[str, str]:
     predicate = candidate.predicate.lower().strip()
     if predicate.startswith(("want", "need", "seek")):
@@ -329,7 +352,7 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
     if not _CAUSAL_DESIRE_RE.search(sentence):
         match = _GOAL_RE.search(sentence)
         if match and valid_goal_objective(match.group("object")):
-            return ParsedCandidate("GOAL", match.group("subject"), match.group("verb"), match.group("object"), 0.91, "goal_predicate")
+            return _bounded_goal_candidate(ParsedCandidate("GOAL", match.group("subject"), match.group("verb"), match.group("object"), 0.91, "goal_predicate"))
     if _RELATIONSHIP_RE.search(sentence):
         subject_match = _RELATIONSHIP_SUBJECT_RE.search(sentence)
         subject = subject_match.group("subject") if subject_match else None
@@ -400,7 +423,7 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         owner, character_owned = _resolve_subject(candidate.subject_text, character_id=character_id, speaker_id=speaker_id, viewpoint_id=viewpoint_id)
         if candidate.kind in {"MEMORY", "BELIEF", "GOAL", "RULE"} and not character_owned:
             continue
-        polarity = -1 if _NEGATION_RE.search(sentence) else 1
+        polarity = _goal_polarity(sentence, candidate) if candidate.kind == "GOAL" else (-1 if _NEGATION_RE.search(sentence) else 1)
         canonical = _canonical_text(candidate, owner=owner)
         objective = _clean_object(candidate.object_text) if candidate.kind == "GOAL" else None
         topic_key = cognition_topic_key(
@@ -604,6 +627,7 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
     )
     summary = {
         "unit_count": len(units), "kinds": sorted({unit.claim_kind for unit in units}),
+        "runtime_versions": _runtime_versions(),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
         "ambiguous_count": len(ambiguous), "enrichment_pending": bool(ambiguous),

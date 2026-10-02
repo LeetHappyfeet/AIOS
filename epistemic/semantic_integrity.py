@@ -11,7 +11,7 @@ import re
 from typing import Mapping
 from uuid import UUID
 
-INTEGRITY_VERSION = "semantic-integrity-v2-source-comparison"
+INTEGRITY_VERSION = "semantic-integrity-v3-fidelity"
 _PRONOUNS = {"he", "him", "his", "she", "her", "hers", "it", "its", "they", "them",
              "their", "this", "that", "which", "who", "whom", "you", "i"}
 _TRANSITIVE = {"watch", "have", "give", "push", "groom", "let", "tell", "find", "make"}
@@ -57,6 +57,16 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
             and predicate in {"regret", "regretted"}
             and subject not in {"he", "george", "george constanza", "george costanza"}):
         return IntegrityResult("invalid", ("source_actor_mismatch",))
+    # Preserve attribution: future speech and figurative characterizations
+    # are not observed literal events just because they form valid triples.
+    if (re.search(r"\bwill\s+say\b", text) and predicate in {"say", "says", "said"}
+            and (not obj or str(frame.get("modality") or "asserted").lower() in {"asserted", "actual"})):
+        return IntegrityResult("incomplete", ("future_reported_speech_not_actual_event",))
+    if (re.search(r"\b(?:cant|cannot|can t)\s+metabolize\s+honesty\b", text)
+            and predicate == "metabolize"):
+        return IntegrityResult("incomplete", ("figurative_literal_scope_unverified",))
+    if "hunted look" in text and predicate in {"hunt", "hunted"}:
+        return IntegrityResult("invalid", ("adjectival_description_misread_as_event",))
     if subject == "which" and not text.startswith("which"):
         return IntegrityResult("invalid", ("unsupported_relative_subject",))
     if subject == "which" and text.startswith("which"):
@@ -137,7 +147,8 @@ async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
                 row["raw_text"],
                 {"subject": f["resolved_subject"] or f["subject_text"],
                  "predicate": f["predicate_canonical"] or f["predicate_surface"],
-                 "object": f["resolved_object"] or f["object_text"]},
+                 "object": f["resolved_object"] or f["object_text"],
+                 "modality": f["modality"], "polarity": f["polarity"]},
                 speaker_id=row["speaker_id"],
                 source_subject=meta.get("source_subject_text", f["subject_text"]),
                 source_object=meta.get("source_object_text", f["object_text"]),

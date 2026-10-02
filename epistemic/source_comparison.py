@@ -24,7 +24,8 @@ def bounded_source_context(section: str, sentence: str, *, radius: int = 900) ->
     if anchor < 0:
         return section[: 2 * radius]
     lo = max(0, anchor - radius)
-    hi = min(len(section), anchor + len(sentence) + radius)
+    # Never include later section text in a historical grounding window.
+    hi = min(len(section), anchor + len(sentence))
     return section[lo:hi]
 
 
@@ -117,4 +118,5 @@ async def compare_claim_with_local_inference(db, *, claim_id: UUID,
         "proposed_correction": raw.get("proposed_correction")
         if isinstance(raw.get("proposed_correction"), dict) else None,
         "admission_effect": "none",
+        "verification_version": "source-compare-v2-preceding-context",
     }
