@@ -18,7 +18,7 @@ def test_audit_prompt_distinguishes_request_from_adopted_goal():
         speaker="George Constanza", recipient="Renamon",
         frames=[{"subject": "renamon", "predicate": "need", "object": None}],
     )
-    assert "not approval" in prompt
+    assert "not approval" in prompt.lower()
     assert "George Constanza" in prompt
     assert "goal adopted" in prompt
     assert "But you need to leave" in prompt
