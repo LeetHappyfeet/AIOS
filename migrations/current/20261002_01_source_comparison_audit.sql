@@ -16,3 +16,8 @@ CREATE TABLE IF NOT EXISTS aios.claim_source_comparison_audit (
 );
 CREATE INDEX IF NOT EXISTS claim_source_comparison_audit_status_idx
     ON aios.claim_source_comparison_audit(verdict, audited_at DESC);
+
+-- Capture the versions loaded by the process that enrolled each experiment.
+-- Historical per-evaluation versions remain in signals.runtime_versions.
+ALTER TABLE aios.character_participation_experiment
+    ADD COLUMN IF NOT EXISTS runtime_versions jsonb NOT NULL DEFAULT '{}'::jsonb;
