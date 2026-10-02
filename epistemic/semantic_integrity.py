@@ -11,10 +11,11 @@ import re
 from typing import Mapping
 from uuid import UUID
 
-INTEGRITY_VERSION = "semantic-integrity-v1"
+INTEGRITY_VERSION = "semantic-integrity-v2-source-comparison"
 _PRONOUNS = {"he", "him", "his", "she", "her", "hers", "it", "its", "they", "them",
              "their", "this", "that", "which", "who", "whom", "you", "i"}
 _TRANSITIVE = {"watch", "have", "give", "push", "groom", "let", "tell", "find", "make"}
+_DISCOURSE_SUBJECTS = {"either", "neither", "both", "someone", "something", "anything", "whatever"}
 _PATTERN = re.compile(r"[a-z]+(?:'[a-z]+)?")
 
 @dataclass(frozen=True)
@@ -42,6 +43,20 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
         return IntegrityResult("incomplete", ("missing_predicate",))
     if not subject or subject == "_":
         return IntegrityResult("incomplete", ("missing_subject",))
+    # The source comparison must catch plausible triples that discard the
+    # actual speech act or actor. Abstain on unresolved discourse, do not
+    # promote malformed but schema-compliant representations.
+    if subject in _DISCOURSE_SUBJECTS:
+        return IntegrityResult("incomplete", ("unresolved_discourse_subject",))
+    if re.search(r"\bgoing\s+to\s+need\b", text) and predicate in {"go", "going"}:
+        return IntegrityResult("invalid", ("future_auxiliary_misread_as_action",))
+    if (re.search(r"\bneed(?:s|ed)?\s+to\s+\w+", text)
+            and predicate in {"need", "needs"} and not obj):
+        return IntegrityResult("incomplete", ("modal_action_argument_lost",))
+    if (re.search(r"\b(?:he|george)\b[^.!?]*\bregretted\b", text)
+            and predicate in {"regret", "regretted"}
+            and subject not in {"he", "george", "george constanza", "george costanza"}):
+        return IntegrityResult("invalid", ("source_actor_mismatch",))
     if subject == "which" and not text.startswith("which"):
         return IntegrityResult("invalid", ("unsupported_relative_subject",))
     if subject == "which" and text.startswith("which"):
@@ -90,14 +105,14 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
         return IntegrityResult("incomplete", ("missing_expected_argument",))
     return IntegrityResult("valid")
 
-def revision_key(source: str, frames: list[dict], *, version: str = INTEGRITY_VERSION) -> str:
-    material = json.dumps([version, source, frames], sort_keys=True, default=str)
+def revision_key(source: str, frames: list[dict], *, version: str = INTEGRITY_VERSION, context_digest: str = "") -> str:
+    material = json.dumps([version, source, frames, context_digest], sort_keys=True, default=str)
     return hashlib.sha256(material.encode()).hexdigest()
 
 async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
     """Persist a durable receipt for the currently selected frame revision."""
     row = await db.fetchrow(
-        """SELECT cc.raw_text, dn.speaker_id
+        """SELECT cc.raw_text, dn.speaker_id, ds.content AS source_section, dn.node_id
            FROM aios.claim_candidate cc
            JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
            JOIN aios.document_section ds ON ds.section_id=es.section_id
@@ -135,7 +150,14 @@ async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
                  "predicate": f["predicate_canonical"] or f["predicate_surface"],
                  "object": f["resolved_object"] or f["object_text"],
                  "polarity": f["polarity"], "modality": f["modality"]} for f in frames]
-    revision = revision_key(row["raw_text"], snapshot)
+    # Bind the receipt to its containing source paragraph and DAG coordinate.
+    # Changing the paragraph invalidates the receipt without inventing referents.
+    section_digest = hashlib.sha256(str(row["source_section"] or "").encode()).hexdigest()
+    snapshot.append({"source_context": {
+        "dag_node_id": str(row["node_id"]), "section_sha256": section_digest,
+        "comparison_policy": INTEGRITY_VERSION,
+    }})
+    revision = revision_key(row["raw_text"], snapshot, context_digest=section_digest)
     await db.execute(
         """INSERT INTO aios.claim_semantic_integrity
              (claim_id, revision_key, validator_version, status, reason_codes, source_text, frame_snapshot)
