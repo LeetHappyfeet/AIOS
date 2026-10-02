@@ -55,3 +55,34 @@ def test_future_commitment_cannot_be_downgraded_to_immediate():
 def test_commitment_requires_a_specific_enough_objective():
     assert not _specific_commitment_objective("go", "commitment")
     assert _specific_commitment_objective("go to bookstore", "commitment")
+
+
+
+def test_george_request_does_not_become_renamon_goal():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "But you need to leave before my mother sees you.",
+        character_id="Renamon", speaker_id="George Constanza",
+        speaker_role="user", viewpoint_id="George Constanza",
+    )
+    assert not any(unit.claim_kind == "GOAL" for unit in units)
+
+
+def test_external_named_goal_is_not_adopted():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "Renamon needs to leave.",
+        character_id="Renamon", speaker_id="George Constanza",
+        speaker_role="user", viewpoint_id="George Constanza",
+    )
+    assert not any(unit.claim_kind == "GOAL" for unit in units)
+
+
+def test_self_authored_goal_remains_admissible():
+    from aios_app.epistemic.message_cognition import interpret_message
+    units = interpret_message(
+        "I want to learn chemistry.",
+        character_id="Renamon", speaker_id="Renamon",
+        speaker_role="character", viewpoint_id="Renamon",
+    )
+    assert any(unit.claim_kind == "GOAL" and unit.meta["character_owned"] for unit in units)
