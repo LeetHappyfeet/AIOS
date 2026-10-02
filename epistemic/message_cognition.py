@@ -390,6 +390,13 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         candidate = _parse_sentence(sentence)
         if candidate is None:
             continue
+        # An external request addressed to the character is not an adopted goal.
+        # The fast-path goal writer requires self-authored intention evidence.
+        if candidate.kind == "GOAL" and (
+            str(candidate.subject_text or "").casefold() == "you"
+            or not _same_identity(speaker_id, character_id)
+        ):
+            continue
         owner, character_owned = _resolve_subject(candidate.subject_text, character_id=character_id, speaker_id=speaker_id, viewpoint_id=viewpoint_id)
         if candidate.kind in {"MEMORY", "BELIEF", "GOAL", "RULE"} and not character_owned:
             continue
