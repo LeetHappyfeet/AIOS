@@ -153,10 +153,6 @@ async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
     # Bind the receipt to its containing source paragraph and DAG coordinate.
     # Changing the paragraph invalidates the receipt without inventing referents.
     section_digest = hashlib.sha256(str(row["source_section"] or "").encode()).hexdigest()
-    snapshot.append({"source_context": {
-        "dag_node_id": str(row["node_id"]), "section_sha256": section_digest,
-        "comparison_policy": INTEGRITY_VERSION,
-    }})
     revision = revision_key(row["raw_text"], snapshot, context_digest=section_digest)
     await db.execute(
         """INSERT INTO aios.claim_semantic_integrity
