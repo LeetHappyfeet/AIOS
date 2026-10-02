@@ -351,8 +351,12 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
         return ParsedCandidate("RULE", match.group("subject"), match.group("verb"), match.group("object"), 0.93, "deontic_predicate")
     if not _CAUSAL_DESIRE_RE.search(sentence):
         match = _GOAL_RE.search(sentence)
-        if match and valid_goal_objective(match.group("object")):
-            return _bounded_goal_candidate(ParsedCandidate("GOAL", match.group("subject"), match.group("verb"), match.group("object"), 0.91, "goal_predicate"))
+        if match:
+            bounded = _bounded_goal_candidate(ParsedCandidate(
+                "GOAL", match.group("subject"), match.group("verb"),
+                match.group("object"), 0.91, "goal_predicate"))
+            if valid_goal_objective(bounded.object_text):
+                return bounded
     if _RELATIONSHIP_RE.search(sentence):
         subject_match = _RELATIONSHIP_SUBJECT_RE.search(sentence)
         subject = subject_match.group("subject") if subject_match else None
