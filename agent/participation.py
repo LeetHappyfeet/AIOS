@@ -12,6 +12,7 @@ from typing import Any
 
 POLICY_VERSION = "participation-shadow-v1"
 COMPARISON_VERSION = "participation-shadow-v2"
+V3_VERSION = "participation-shadow-v3-scene"
 RELEVANCE_FACETS = {"value", "values", "interest", "interests", "preference",
                     "preferences", "personality", "role", "constraint"}
 logger = logging.getLogger("aios.participation")
@@ -146,6 +147,55 @@ def propose_v2(claim: dict, context: dict, *, recurrence: int | None = None,
                         "unknown": sorted(set(unknown)), "missing_snapshot_fields": missing}}
 
 
+def propose_v3(claim: dict, context: dict, *, recurrence: int | None = None,
+               conflicts: list | None = None) -> dict:
+    """Third, shadow-only cold-start policy; does not modify memory admission."""
+    v2 = propose_v2(claim, context, recurrence=recurrence, conflicts=conflicts)
+    result = {**v2, "policy_version": V3_VERSION,
+              "reasons": list(v2["reasons"]), "signals": dict(v2["signals"])}
+    involvement = result["signals"]["involvement"]
+    source = str(claim.get("source_sentence") or "").casefold()
+    predicate = str(claim.get("predicate_norm") or "").casefold()
+    subject = str(claim.get("subject_norm") or "").strip().casefold()
+    names = {str(n).strip().casefold() for n in context.get("names", []) if n}
+    self_claim = bool(involvement["authorship"] and subject in names)
+    participant_claim = bool(involvement["claim_participation"])
+    valid = str(claim.get("semantic_integrity_status") or "").casefold() == "valid"
+    usable = result["signals"]["representation_quality"]["usable"]
+    category = None
+    if valid and usable and source and self_claim:
+        if predicate in {"go", "leave", "stay", "refuse", "decline"} and re.search(
+            r"\b(?:not going anywhere|won't leave|will not leave|refus(?:e|ed)|not leaving)\b", source
+        ):
+            category = "expressed_refusal"
+        elif predicate in {"like", "want", "need", "request", "ask"} and re.search(
+            r"\b(?:i'd like|i would like|i want|i need|i request)\b", source
+        ):
+            category = "direct_request"
+        elif predicate in {"accept", "agree", "reject", "decide", "commit"} and re.search(
+            r"\b(?:accept|agree|reject|decide|commit)\b", source
+        ):
+            category = "expressed_decision"
+        elif predicate in {"be", "identity"} and re.search(
+            r"\bi(?:'m| am)\s+(?:a|the)\s+(?:tenant|renter|guest|visitor)\b", source
+        ):
+            category = "situational_role_claim"
+    if valid and usable and participant_claim and not category:
+        if predicate in {"give", "allow", "agree", "accept"} and re.search(
+            r"\b(?:thirty seconds|30 seconds|give me \d+|deal terms)\b", source
+        ):
+            category = "negotiation_terms"
+    result["signals"]["scene_consequence"] = {
+        "supported": bool(category), "category": category,
+        "source_bound": bool(source), "actor_grounded": self_claim or participant_claim,
+        "epistemic_effect": "none",
+    }
+    if category:
+        result["reasons"].append("scene_consequence:" + category)
+        result["population"] = "foreground"
+    return result
+
+
 class ParticipationService:
     def __init__(self, db):
         self.db = db
@@ -243,7 +293,8 @@ class ParticipationService:
                             p.subject_norm,p.predicate_norm,p.object_norm,o.dag_node_id,o.source_key,
                             cc.raw_text AS source_sentence,c.claim_kind,c.target_character_id,c.speaker_id,
                             c.resolved_at,ck.epistemic_status,ck.claim_id AS acquired_claim,
-                            si.status AS semantic_integrity_status
+                            si.status AS semantic_integrity_status,
+                            si.validator_version AS integrity_validator_version
                             FROM aios.character_participation_pending q
                             JOIN aios.character_participation_experiment x USING(experiment_id)
                             JOIN aios.character_instance ci ON ci.instance_id=x.instance_id
@@ -297,7 +348,13 @@ class ParticipationService:
                         comparison = propose_v2(dict(item), context, recurrence=int(independent),
                                                 conflicts=[r['conflict_id'] for r in conflicts])
                         comparison["evaluation_mode"] = "paired_live"
+                        v3 = propose_v3(dict(item), context, recurrence=int(independent),
+                                        conflicts=[r['conflict_id'] for r in conflicts])
+                        v3["evaluation_mode"] = "paired_live"
                         result["signals"]["comparison"] = comparison
+                        result["signals"]["comparison_v3"] = v3
+                        from aios_app.epistemic.runtime_versions import component_versions
+                        result["signals"]["runtime_versions"] = component_versions()
                         snapshot = json.dumps(context,default=str,sort_keys=True)
                         await con.execute("""INSERT INTO aios.character_participation_evaluation
                             (experiment_id,claim_id,instance_id,proposition_id,policy_version,population,
@@ -308,7 +365,8 @@ class ParticipationService:
                             json.dumps({key: item.get(key) for key in (
                                 "canonical_text","subject_norm","predicate_norm","object_norm","observed_at",
                                 "speaker_id","target_character_id","source_sentence","dag_node_id","source_key",
-                                "claim_kind","resolved_at","epistemic_status","semantic_integrity_status")},default=str),snapshot,
+                                "claim_kind","resolved_at","epistemic_status","semantic_integrity_status",
+                                "integrity_validator_version")},default=str),snapshot,
                             hashlib.sha256(snapshot.encode()).hexdigest(),(time.monotonic()-started)*1000)
                         await con.execute("UPDATE aios.character_participation_pending SET status='evaluated',last_error=NULL WHERE experiment_id=$1 AND claim_id=$2", *args)
                         processed += 1
@@ -347,19 +405,29 @@ class ParticipationService:
                 if not await con.fetchval("SELECT 1 FROM aios.character_participation_experiment WHERE instance_id=$1 AND experiment_id=$2", instance_id, experiment_id):
                     raise LookupError("Experiment not found for instance")
                 rows = await con.fetch("""SELECT * FROM aios.character_participation_evaluation
-                    WHERE instance_id=$1 AND experiment_id=$2 AND NOT (signals ? 'comparison')
+                    WHERE instance_id=$1 AND experiment_id=$2 AND NOT (signals ? 'comparison_v3')
                     ORDER BY evaluated_at,claim_id LIMIT $3 FOR UPDATE SKIP LOCKED""",
                     instance_id,experiment_id,max(1,min(limit,100)))
                 for row in rows:
                     signals = json_value(row["signals"])
-                    result = propose_v2(json_value(row["claim_snapshot"]),json_value(row["context_snapshot"]),
-                        recurrence=None, conflicts=signals.get("conflict_ids"))
-                    result["evaluation_mode"] = "frozen_legacy_replay"
+                    snap = json_value(row["claim_snapshot"])
+                    ctx = json_value(row["context_snapshot"])
+                    existing = json_value(signals.get("comparison") or {})
+                    independent = existing.get("signals", {}).get("independent_occurrences_capped_at_four")
+                    v2 = propose_v2(snap, ctx, recurrence=independent,
+                                    conflicts=signals.get("conflict_ids"))
+                    v2["evaluation_mode"] = "frozen_snapshot_replay"
+                    v3 = propose_v3(snap, ctx, recurrence=independent,
+                                    conflicts=signals.get("conflict_ids"))
+                    v3["evaluation_mode"] = "frozen_snapshot_replay"
                     await con.execute("""UPDATE aios.character_participation_evaluation
-                        SET signals=jsonb_set(signals,'{comparison}',$3::jsonb)
-                        WHERE experiment_id=$1 AND claim_id=$2""", experiment_id,row["claim_id"],json.dumps(result))
-                return {"shadow": True, "compared": len(rows), "policy_version": COMPARISON_VERSION,
-                        "note": "Legacy snapshots lack source involvement and independent recurrence; neither is inferred."}
+                        SET signals=jsonb_set(
+                            jsonb_set(signals,'{comparison}',COALESCE(signals->'comparison',$3::jsonb)),
+                            '{comparison_v3}',$4::jsonb)
+                        WHERE experiment_id=$1 AND claim_id=$2""",
+                        experiment_id,row["claim_id"],json.dumps(v2),json.dumps(v3))
+                return {"shadow": True, "compared": len(rows), "policy_version": V3_VERSION,
+                        "note": "Frozen snapshots; V1/V2 results retained; missing inputs remain unknown."}
 
     async def inspect(self, instance_id, experiment_id, *, limit=50):
         exp = await self.db.fetchrow("SELECT * FROM aios.character_participation_experiment WHERE instance_id=$1 AND experiment_id=$2",instance_id,experiment_id)
@@ -375,11 +443,18 @@ class ParticipationService:
             FROM aios.character_participation_evaluation
             WHERE experiment_id=$1 AND signals ? 'comparison'
             GROUP BY 1,2,3""",experiment_id)
+        v3comparisons = await self.db.fetch("""SELECT population AS baseline_population,
+             signals->'comparison_v3'->>'population' AS comparison_population,
+             signals->'comparison_v3'->>'evaluation_mode' AS evaluation_mode,count(*) AS count
+             FROM aios.character_participation_evaluation
+             WHERE experiment_id=$1 AND signals ? 'comparison_v3'
+             GROUP BY 1,2,3""",experiment_id)
         total = sum(int(r['count']) for r in populations)
         foreground = sum(int(r['count']) for r in populations if r['population']=='foreground')
         return {'shadow':True,'experiment':dict(exp),'queue':[dict(r) for r in counts],
                 'populations':[dict(r) for r in populations],
                 'comparison_version':COMPARISON_VERSION,'comparisons':[dict(r) for r in comparisons],
+                 'comparison_v3_version':V3_VERSION,'comparisons_v3':[dict(r) for r in v3comparisons],
                 'proposed_foreground_share':foreground/total if total else None,
                 'evaluations':[{**dict(r), **{k:json_value(r[k]) for k in (
                     'reasons','signals','claim_snapshot','context_snapshot')}} for r in rows],
