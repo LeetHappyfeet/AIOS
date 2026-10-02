@@ -105,6 +105,7 @@ pytest -q \
   tests/test_message_cognition_enrichment.py \
   tests/test_participation_v2.py \
   tests/test_participation_v3.py \
+  tests/test_runtime_version_manifest.py \
   tests/test_participation_shadow.py
 \`\`\`
 
