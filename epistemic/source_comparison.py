@@ -143,7 +143,7 @@ async def audit_claim_with_local_inference(db, *, claim_id: UUID,
            SELECT $1, si.revision_key, $3, $4, $5, $6, $7::jsonb
            FROM aios.claim_semantic_integrity si
            WHERE si.claim_id=$1 AND si.revision_key=$2
-           ON CONFLICT (claim_id, revision_key) DO UPDATE
+           ON CONFLICT (claim_id, revision_key, inference_request_id) DO UPDATE
            SET comparison_version=EXCLUDED.comparison_version,
                inference_request_id=EXCLUDED.inference_request_id,
                verdict=EXCLUDED.verdict,
