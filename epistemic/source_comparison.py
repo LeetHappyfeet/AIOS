@@ -98,6 +98,11 @@ async def compare_claim_with_local_inference(db, *, claim_id: UUID,
     verdict = str(raw.get("verdict") or "").lower()
     if verdict not in _ALLOWED:
         verdict = "ambiguous"
+    # An alleged evidence quote must be traceable to the supplied source.
+    quote = str(raw.get("evidence_quote") or "")[:300]
+    if quote and quote not in str(source["raw_text"] or "") and quote not in bounded_source_context(context, str(source["raw_text"] or "")):
+        quote = ""
+        verdict = "ambiguous"
     return {
         "claim_id": str(claim_id),
         "source_node_id": str(source["node_id"]),
@@ -108,7 +113,7 @@ async def compare_claim_with_local_inference(db, *, claim_id: UUID,
             str(code)[:80] for code in (raw.get("reason_codes") or [])
             if isinstance(code, str)
         ][:8] if isinstance(raw.get("reason_codes"), list) else [],
-        "evidence_quote": str(raw.get("evidence_quote") or "")[:300],
+        "evidence_quote": quote,
         "proposed_correction": raw.get("proposed_correction")
         if isinstance(raw.get("proposed_correction"), dict) else None,
         "admission_effect": "none",
