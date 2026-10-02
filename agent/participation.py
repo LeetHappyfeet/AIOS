@@ -212,10 +212,13 @@ class ParticipationService:
                 await con.execute("SET LOCAL statement_timeout='2000ms'")
                 if not await con.fetchval("SELECT 1 FROM aios.character_instance WHERE instance_id=$1", instance_id):
                     raise LookupError("Unknown instance")
+                from aios_app.epistemic.runtime_versions import component_versions
+                manifest = component_versions()
                 exp = await con.fetchrow("""INSERT INTO aios.character_participation_experiment
-                    (instance_id,policy_version,since_at,until_at,max_claims)
-                    VALUES($1,$2,$3,$4,$5) RETURNING *""", instance_id, POLICY_VERSION,
-                    since_at, now + timedelta(minutes=duration_minutes), max_claims)
+                    (instance_id,policy_version,since_at,until_at,max_claims,runtime_versions)
+                    VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING *""", instance_id, POLICY_VERSION,
+                    since_at, now + timedelta(minutes=duration_minutes), max_claims,
+                    json.dumps(manifest))
                 rows = await con.fetch("""INSERT INTO aios.character_participation_pending(experiment_id,claim_id)
                     SELECT $1,ck.claim_id FROM aios.character_knowledge ck
                     WHERE ck.instance_id=$2 AND ck.updated_at BETWEEN $3 AND $4
@@ -467,6 +470,8 @@ async def run_worker(*, once=False):
     db = Database(settings.db_dsn,min_size=1,max_size=2)
     await db.connect()
     try:
+        from aios_app.epistemic.runtime_versions import component_versions
+        logger.info("Participation worker runtime versions: %s", component_versions())
         while True:
             try:
                 count = await ParticipationService(db).process_pending()
