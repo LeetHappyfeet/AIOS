@@ -11,7 +11,7 @@ def _reservation_returns() -> dict[int, list[str] | None]:
     function = next(
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == "_semantic_stage_reservation"
     )
 
