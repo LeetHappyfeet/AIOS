@@ -9,7 +9,9 @@ def test_component_version_manifest_reflects_loaded_code():
     assert versions["message_cognition"] == message_cognition.INTERPRETER_VERSION
     assert versions["semantic_integrity"] == semantic_integrity.INTEGRITY_VERSION
     assert versions["participation_v3"] == participation.V3_VERSION
-    assert versions["message_cognition"] == "message-cognition-v8-source-owned"
+    assert versions["message_cognition"] == "message-cognition-v8-source-owned+epistemic-scope-v1"
+    assert message_cognition.BASE_INTERPRETER_VERSION == "message-cognition-v8-source-owned"
+    assert message_cognition.SCOPE_POLICY_VERSION == "epistemic-scope-v1"
     assert versions["semantic_integrity"] == "semantic-integrity-v3-fidelity"
 
 
