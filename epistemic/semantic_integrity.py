@@ -16,7 +16,7 @@ _PRONOUNS = {"he", "him", "his", "she", "her", "hers", "it", "its", "they", "the
              "their", "this", "that", "which", "who", "whom", "you", "i"}
 _TRANSITIVE = {"watch", "have", "give", "push", "groom", "let", "tell", "find", "make", "prefer"}
 _DISCOURSE_SUBJECTS = {"either", "neither", "both", "someone", "something", "anything", "whatever"}
-_PATTERN = re.compile(r"[a-z]+(?:'[a-z]+)?")
+_PATTERN = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
 
 @dataclass(frozen=True)
 class IntegrityResult:
@@ -65,6 +65,10 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
         return IntegrityResult("invalid", ("future_auxiliary_misread_as_action",))
     if observed and re.search(r"\b(?:will|shall|going to|gonna|'ll)\s+[a-z]+\b", text):
         reasons.append("future_or_intended_modality_lost")
+    if observed and re.search(r"\b(?:can|could|cannot|can't|couldn't)\s+[a-z]+\b", text):
+        reasons.append("ability_or_possibility_modality_lost")
+    if re.search(r"\b(?:fell|fall|fallen)\s+through\b", text) and predicate in {"fall", "fell"}:
+        reasons.append("figurative_or_incomplete_fall_through")
     if observed and re.search(r"\b(?:if|unless|provided that)\b", text):
         reasons.append("conditional_scope_not_preserved")
     if observed and re.search(r"\byou\s+(?:do not|don t|don't|must|should|will|are going to)\b", source.casefold()):
