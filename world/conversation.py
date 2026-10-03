@@ -27,14 +27,22 @@ async def ensure_participant(
     controller_ref: str | None = None, participant_role: str = "participant",
     character_id: str | None = None, meta: dict | None = None,
 ) -> UUID:
-    character_id = character_id or await resolve_character_identity(db, source_actor_id)
+    # Human users are conversation actors, not automatically cognitive characters.
+    # A display-name collision must never grant a human a character's instance.
+    if actor_type == "user":
+        character_id = None
+    elif character_id is None:
+        character_id = await resolve_character_identity(db, source_actor_id)
     row = await db.execute_returning_row(
         """INSERT INTO aios.conversation_participant(
              timeline_id,character_id,source_actor_id,actor_type,controller_type,
              controller_ref,participant_role,meta)
            VALUES($1,$2,$3,$4::aios.actor_type,$5,$6,$7,$8::jsonb)
            ON CONFLICT (timeline_id,source_actor_id) DO UPDATE SET
-             character_id=COALESCE(aios.conversation_participant.character_id,EXCLUDED.character_id),
+             character_id=CASE WHEN EXCLUDED.actor_type='user'::aios.actor_type
+               THEN NULL ELSE COALESCE(aios.conversation_participant.character_id,EXCLUDED.character_id) END,
+             character_instance_id=CASE WHEN EXCLUDED.actor_type='user'::aios.actor_type
+               THEN NULL ELSE aios.conversation_participant.character_instance_id END,
              actor_type=EXCLUDED.actor_type,
              controller_type=COALESCE(aios.conversation_participant.controller_type,EXCLUDED.controller_type),
              controller_ref=COALESCE(aios.conversation_participant.controller_ref,EXCLUDED.controller_ref),
@@ -70,6 +78,7 @@ async def bind_available_instance(db: Database, *, participant_id: UUID) -> UUID
              ),
              updated_at=now()
            WHERE cp.participant_id=$1
+             AND cp.actor_type='character'::aios.actor_type
              AND cp.character_id IS NOT NULL
              AND cp.character_instance_id IS NULL
              AND EXISTS (
