@@ -211,6 +211,12 @@ class InferenceBroker:
             ) < (
                 SELECT max_concurrency FROM aios.inference_provider WHERE provider_id=$3::uuid
             )
+              AND ($2::uuid IS NULL OR NOT EXISTS (
+                  SELECT 1 FROM aios.inference_request previous
+                  WHERE previous.instance_id=$1 AND previous.worker_class=$4
+                    AND previous.task_id=$2::uuid AND previous.status='running'
+                    AND (previous.lease_expires_at IS NULL OR previous.lease_expires_at > now())
+              ))
             RETURNING request_id
             """,
             request.instance_id, request.task_id, provider.provider_id,
