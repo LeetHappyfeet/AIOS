@@ -81,3 +81,56 @@ def test_hot_scope_window_is_consistent_across_select_and_enqueue():
     assert "first_dirty_at=CASE" in source
     migration = Path("migrations/current/20261003_03_rdf_scope_dirty_window.sql").read_text()
     assert "ADD COLUMN IF NOT EXISTS first_dirty_at" in migration
+
+
+@pytest.mark.asyncio
+async def test_unchanged_authority_does_not_issue_second_fuseki_update():
+    from aios_app.rdf.epistemic_writer import _project_observation_authority
+
+    class ReceiptDb:
+        def __init__(self):
+            self.fingerprint = None
+            self.acks = 0
+
+        async def fetchrow(self, sql, *args):
+            return (
+                {"projection_hash": self.fingerprint}
+                if self.fingerprint is not None else None
+            )
+
+        async def execute(self, sql, *args):
+            self.fingerprint = args[3]
+            self.acks += 1
+
+    class Fuseki:
+        def __init__(self):
+            self.writes = []
+
+        def update(self, dataset, sparql):
+            self.writes.append((dataset, sparql))
+
+    authority = {
+        "origin_kind": "self_utterance",
+        "epistemic_mode": "subjective",
+        "authority_state": "admitted",
+        "authority_rank": 1,
+        "lineage_key": "source:test",
+        "predicate_class": "observation",
+        "policy_version": "test-v1",
+        "authorized_uses": ["character_memory"],
+    }
+    db, fuseki = ReceiptDb(), Fuseki()
+    args = dict(
+        dataset="char", graph_iri="urn:test:char",
+        observation_iri="urn:test:observation",
+        prefix="char", namespace="urn:aios:char#", authority=authority,
+    )
+    await _project_observation_authority(db, fuseki, **args)
+    await _project_observation_authority(db, fuseki, **args)
+    assert len(fuseki.writes) == 1
+    assert db.acks == 1
+    await _project_observation_authority(
+        db, fuseki, **{**args, "authority": {**authority, "authority_state": "revised"}}
+    )
+    assert len(fuseki.writes) == 2
+    assert db.acks == 2
