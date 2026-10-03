@@ -79,3 +79,34 @@ async def recover_missing_cognition(db, *, instance_id: UUID,
               "more_possible": len(nodes) == limit}
     logger.info("Cognition recovery %s instance=%s", result, instance_id)
     return result
+
+
+
+async def _cli() -> None:
+    """Operator recovery of old gaps without a new roleplay turn."""
+    import argparse
+    import json
+    from aios_app.config import settings
+    from aios_app.db import Database
+
+    parser = argparse.ArgumentParser(description="Recover missing DAG message cognition")
+    parser.add_argument("--instance-id", required=True, type=UUID)
+    parser.add_argument("--max-batches", type=int, default=8)
+    args = parser.parse_args()
+    if not 1 <= args.max_batches <= 64:
+        parser.error("--max-batches must be 1..64")
+    db = Database(settings.db_dsn, min_size=1, max_size=2)
+    await db.connect()
+    try:
+        for _ in range(args.max_batches):
+            report = await recover_missing_cognition(db, instance_id=args.instance_id)
+            print(json.dumps(report, sort_keys=True), flush=True)
+            if not report["more_possible"] or report["committed"] == 0:
+                break
+    finally:
+        await db.close()
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(_cli())
