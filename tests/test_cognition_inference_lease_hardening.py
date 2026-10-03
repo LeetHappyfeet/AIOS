@@ -96,20 +96,22 @@ def test_pending_receipt_exposes_latest_attempt_type(monkeypatch, status, expect
     assert result["goal_reconciliation"] is None
 
 
-def test_broker_sql_scopes_active_task_uniqueness_to_instance_and_worker():
+def test_broker_sql_scopes_active_source_uniqueness_to_instance_and_worker():
     import inspect
     source=inspect.getsource(broker.InferenceBroker._attempt)
-    assert "previous.task_id=$2::uuid" in source
+    assert "previous.source_node_id=$11::uuid" in source
+    assert "instance_id, task_id, source_node_id, provider_id" in source
     assert "previous.instance_id=$1 AND previous.worker_class=$4" in source
     assert "previous.lease_expires_at > now()" in source
 
 
-def test_enricher_assigns_node_task_id_and_checks_existing_lease():
+def test_enricher_assigns_source_node_and_checks_existing_lease():
     import inspect
     from aios_app.epistemic.message_cognition_enrichment import MessageCognitionEnricher
     source=inspect.getsource(MessageCognitionEnricher.run)
-    assert "task_id=node_id" in source
-    assert "AND task_id=$2 AND status='running'" in source
+    assert "source_node_id=node_id" in source
+    assert "task_id=node_id" not in source
+    assert "AND source_node_id=$2 AND status='running'" in source
     assert "lease_expires_at IS NULL OR lease_expires_at > now()" in source
 
 
