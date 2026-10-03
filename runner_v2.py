@@ -95,13 +95,31 @@ async def handle_message_cognition_enrichment(db: Database, job: Dict[str, Any])
 
 base.JOB_HANDLERS["message_cognition_enrichment"] = handle_message_cognition_enrichment
 
+
+async def handle_message_cognition_catchup(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.epistemic.cognition_catchup import recover_missing_cognition
+    payload = job.get("payload") or {}
+    if not payload.get("instance_id"):
+        raise ValueError("message_cognition_catchup requires instance_id")
+    instance_id = UUID(str(payload["instance_id"]))
+    # The worker is bounded by both pass count and per-pass node count. A
+    # subsequent live source turn can resume from persisted commit receipts.
+    for _ in range(8):
+        report = await recover_missing_cognition(db, instance_id=instance_id, limit=32)
+        if not report["more_possible"] or report["committed"] == 0:
+            break
+
+
+base.JOB_HANDLERS["message_cognition_catchup"] = handle_message_cognition_catchup
+
 _original_resolve_partition_key = base._resolve_partition_key
 
 
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
-    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment"} and payload.get("instance_id"):
+    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup"} and payload.get("instance_id"):
         return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])
