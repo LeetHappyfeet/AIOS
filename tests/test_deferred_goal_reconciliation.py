@@ -117,9 +117,9 @@ def test_immediate_historical_action_is_not_managed_as_future_goal(monkeypatch):
 
 
 def test_pipeline_holds_replay_until_source_and_inference_complete():
-    from pathlib import Path
-    code = (Path(__file__).resolve().parents[1] / "runner_v2.py").read_text(encoding="utf-8")
+    from aios_app.epistemic.cognition_catchup import finish_deferred_cognition
+    code = inspect.getsource(finish_deferred_cognition)
     assert "missing_cognition_nodes" in code
     assert "deferred_enrichment_nodes" in code
-    assert code.index("if await deferred_enrichment_nodes") < code.index(
-        "reconcile_deferred_goals")
+    assert code.index("if remaining:") < code.index("reconcile_deferred_goals")
+    assert "source_inference_unavailable" in code
