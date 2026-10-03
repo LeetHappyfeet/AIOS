@@ -1,8 +1,9 @@
-from aios_app.epistemic.message_cognition import INTERPRETER_VERSION, interpret_message, question_semantics
+from aios_app.epistemic import message_cognition as cognition
+from aios_app.epistemic.message_cognition import question_semantics
 
 
 def _interpret(text: str, *, speaker: str = "Shego_001", viewpoint: str = "Shego_001"):
-    return interpret_message(
+    return cognition.interpret_message(
         text,
         character_id="Shego_001",
         speaker_id=speaker,
@@ -27,7 +28,7 @@ def test_second_person_other_speaker_maps_to_active_character():
     units = _interpret("You are digital now.", speaker="Ren-119", viewpoint="Ren-119")
     states = [unit for unit in units if unit.claim_kind == "STATE"]
     assert len(states) == 1
-    assert states[0].meta["character_owned"] is True
+    assert states[0].meta["character_owned"] is False
 
 
 def test_question_does_not_become_goal():
@@ -94,8 +95,12 @@ def test_relationship_observation_can_cross_speaker_boundary():
     assert relationships[0].meta["character_owned"] is False
 
 
-def test_v7_interpreter_version_forces_old_commit_refresh():
-    assert INTERPRETER_VERSION == "message-cognition-v7"
+def test_effective_interpreter_version_includes_scope_policy():
+    from aios_app.epistemic.epistemic_scope import install_message_cognition_scope_guard
+    install_message_cognition_scope_guard(cognition)
+    assert cognition.INTERPRETER_VERSION == (
+        "message-cognition-v8-source-owned+epistemic-scope-v1"
+    )
 
 
 def test_event_does_not_promote_first_token_to_subject():
@@ -135,7 +140,7 @@ def test_question_semantics_does_not_turn_external_fact_question_into_self_memor
 
 def test_question_semantics_remains_nonpersistent():
     text = "What is it about sleeves that interests you so much?"
-    assert interpret_message(
+    assert cognition.interpret_message(
         text,
         character_id="Renamon",
         speaker_id="Mia",
