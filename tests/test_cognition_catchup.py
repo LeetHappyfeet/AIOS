@@ -14,10 +14,10 @@ from aios_app.epistemic.epistemic_scope import install_message_cognition_scope_g
 
 def test_effective_version_is_base_plus_scope_not_legacy_v4():
     install_message_cognition_scope_guard(message_cognition)
-    assert message_cognition.BASE_INTERPRETER_VERSION == "message-cognition-v10-temporal-intent"
+    assert message_cognition.BASE_INTERPRETER_VERSION == "message-cognition-v11-source-goal-admission"
     assert message_cognition.SCOPE_POLICY_VERSION == "epistemic-scope-v1"
     assert message_cognition.INTERPRETER_VERSION == (
-        "message-cognition-v10-temporal-intent+epistemic-scope-v1"
+        "message-cognition-v11-source-goal-admission+epistemic-scope-v1"
     )
 
 
