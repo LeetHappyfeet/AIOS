@@ -523,7 +523,7 @@ class ParticipationService:
                 if not await con.fetchval("SELECT 1 FROM aios.character_participation_experiment WHERE instance_id=$1 AND experiment_id=$2", instance_id, experiment_id):
                     raise LookupError("Experiment not found for instance")
                 rows = await con.fetch("""SELECT * FROM aios.character_participation_evaluation
-                    WHERE instance_id=$1 AND experiment_id=$2 AND NOT (signals ? 'comparison_v3')
+                    WHERE instance_id=$1 AND experiment_id=$2 AND NOT (signals ? 'comparison_v4')
                     ORDER BY evaluated_at,claim_id LIMIT $3 FOR UPDATE SKIP LOCKED""",
                     instance_id,experiment_id,max(1,min(limit,100)))
                 for row in rows:
@@ -538,13 +538,19 @@ class ParticipationService:
                     v3 = propose_v3(snap, ctx, recurrence=independent,
                                     conflicts=signals.get("conflict_ids"))
                     v3["evaluation_mode"] = "frozen_snapshot_replay"
+                    v4 = propose_v4(snap, ctx, recurrence=independent,
+                                    conflicts=signals.get("conflict_ids"))
+                    v4["evaluation_mode"] = "frozen_snapshot_replay"
                     await con.execute("""UPDATE aios.character_participation_evaluation
                         SET signals=jsonb_set(
-                            jsonb_set(signals,'{comparison}',COALESCE(signals->'comparison',$3::jsonb)),
-                            '{comparison_v3}',$4::jsonb)
+                             jsonb_set(
+                               jsonb_set(signals,'{comparison}',COALESCE(signals->'comparison',$3::jsonb)),
+                               '{comparison_v3}',COALESCE(signals->'comparison_v3',$4::jsonb)),
+                             '{comparison_v4}',$5::jsonb)
                         WHERE experiment_id=$1 AND claim_id=$2""",
-                        experiment_id,row["claim_id"],json.dumps(v2),json.dumps(v3))
-                return {"shadow": True, "compared": len(rows), "policy_version": V3_VERSION,
+                        experiment_id,row["claim_id"],json.dumps(v2),
+                        json.dumps(v3),json.dumps(v4))
+                return {"shadow": True, "compared": len(rows), "policy_version": V4_VERSION,
                         "note": "Frozen snapshots; V1/V2 results retained; missing inputs remain unknown."}
 
     async def inspect(self, instance_id, experiment_id, *, limit=50):
