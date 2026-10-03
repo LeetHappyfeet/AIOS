@@ -58,7 +58,9 @@ def test_unresolved_references_remain_auditable_not_active(source,objective):
     decision=review_goal_source(source_text=source,objective=objective)
     assert decision.decision=="unresolved_reference"
     diagnostics=[]
-    assert not goals(source, diagnostics) if "handle it" not in source else True
+    if "handle it" not in source:
+        assert not goals(source, diagnostics)
+        assert any("unresolved_reference" in entry["reason"] for entry in diagnostics)
 
 
 def test_direct_immediate_bag_action_is_scene_only():
@@ -76,7 +78,8 @@ def test_source_attribution_does_not_depend_on_message_owner():
 def test_canonical_rendering_is_not_used_as_source():
     decision=review_goal_source(
         source_text="Her gesture that said I will put this down.",
-        objective="put this down", match_span=(22, 42),
+        objective="put this down",
+        match_span=(len("Her gesture that said "), len("Her gesture that said I will put this down")),
     )
     assert decision.decision=="nonliteral_statement"
 
