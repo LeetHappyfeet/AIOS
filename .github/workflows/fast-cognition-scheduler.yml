@@ -20,6 +20,7 @@ jobs:
         run: |
           python -m py_compile \
             epistemic/message_cognition.py \
+            epistemic/goal_source_admission.py \
             epistemic/epistemic_scope.py \
             epistemic/message_cognition_enrichment.py \
             inference/broker.py \
@@ -45,6 +46,7 @@ jobs:
             tests/test_deferred_goal_reconciliation.py \
             tests/test_goal_admission_flow_v9.py \
             tests/test_cognition_v10_temporal_intention.py \
+            tests/test_cognition_v11_source_admission.py \
             tests/test_experiment6_fidelity_v4.py \
             tests/test_participation_v4_source_roles.py \
             tests/test_cognition_diagnostics.py \
@@ -67,6 +69,7 @@ jobs:
               tests/test_deferred_goal_reconciliation.py \
               tests/test_goal_admission_flow_v9.py \
               tests/test_cognition_v10_temporal_intention.py \
+              tests/test_cognition_v11_source_admission.py \
               tests/test_experiment6_fidelity_v4.py \
               tests/test_participation_v4_source_roles.py \
               tests/test_cognition_diagnostics.py \
