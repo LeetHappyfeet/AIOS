@@ -238,6 +238,13 @@ async def enqueue_job(
 
     row = await db.execute_returning_row(
         """
+        WITH cognition_enqueue_guard AS MATERIALIZED (
+            SELECT CASE WHEN $1='message_cognition_catchup'
+                THEN pg_advisory_xact_lock(
+                    hashtext('pipeline-cognition-catchup:' ||
+                        COALESCE(($2::jsonb->>'instance_id'), ''))
+                ) ELSE NULL END AS locked
+        )
         INSERT INTO aios.pipeline_job (
             job_type,
             payload,
@@ -254,13 +261,7 @@ async def enqueue_job(
         SELECT
             $1, $2::jsonb, $3, COALESCE($4, now()), 'queued',
             $5, $6, $7, $8, $9, $10
-        FROM (
-            SELECT CASE WHEN $1='message_cognition_catchup'
-                THEN pg_advisory_xact_lock(
-                    hashtext('pipeline-cognition-catchup:' ||
-                        COALESCE(($2::jsonb->>'instance_id'), ''))
-                ) ELSE NULL END AS locked
-        ) cognition_enqueue_guard
+        FROM cognition_enqueue_guard
         WHERE ($1 <> 'message_cognition_catchup' OR NOT EXISTS (
             SELECT 1 FROM aios.pipeline_job existing
             WHERE existing.job_type='message_cognition_catchup'
