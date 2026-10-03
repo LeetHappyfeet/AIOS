@@ -292,9 +292,13 @@ class MessageCognitionEnricher:
         await self.db.execute(
             """UPDATE aios.message_cognitive_commit
                SET summary=summary || jsonb_build_object(
-                   'enrichment_pending',false,'enrichment_request_id',$3::text,
-                   'enrichment_admitted',$4::integer),
+                   'enrichment_pending',false,'enrichment_deferred',false,
+                   'enrichment_request_id',$3::text,'enrichment_admitted',$4::integer,
+                   'enrichment_rejections',$5::jsonb,
+                   'goal_projection_deferred',$6::boolean),
                    enrichment_completed_at=now()
                WHERE instance_id=$1 AND node_id=$2""",
-            instance_id,node_id,str(result.request_id),admitted)
+            instance_id,node_id,str(result.request_id),admitted,
+            json.dumps(rejection_reasons),
+            bool(summary.get("goal_projection_deferred") or historical_goal_seen))
         return admitted
