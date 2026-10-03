@@ -26,7 +26,7 @@ _CAUSAL_DESIRE_RE = re.compile(
 
 _SUBJECT = r"(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
 _COMMITMENT_RE = re.compile(
-    r"\b(?P<subject>I)\s+(?P<verb>will|'ll|am\s+going\s+to|'m\s+going\s+to)\s+"
+    r"\b(?P<subject>I)(?:\s+(?P<verb>will|am\s+going\s+to)|(?P<shortverb>'ll|'m\s+going\s+to))\s+"
     r"(?P<object>[^.!?]{3,220})", re.I,
 )
 _REFUSAL_RE = re.compile(
@@ -717,6 +717,7 @@ async def _commit_message_cognition_locked(
         "candidate_audit_version": "cognition-candidate-audit-v1",
         "candidate_rejections": candidate_diagnostics,
         "candidate_rejection_count": len(candidate_diagnostics),
+        "candidate_audit_complete": len(candidate_diagnostics) < 32,
         "runtime_versions": _runtime_versions(),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
