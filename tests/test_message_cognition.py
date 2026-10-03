@@ -24,7 +24,7 @@ def test_first_person_goal_owned_by_character():
     assert goals[0].meta["objective"] == "to get out of this computer"
 
 
-def test_second_person_other_speaker_maps_to_active_character():
+def test_second_person_other_speaker_is_not_character_authored():
     units = _interpret("You are digital now.", speaker="Ren-119", viewpoint="Ren-119")
     states = [unit for unit in units if unit.claim_kind == "STATE"]
     assert len(states) == 1
