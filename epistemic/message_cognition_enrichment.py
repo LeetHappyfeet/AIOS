@@ -34,6 +34,9 @@ def _specific_commitment_objective(objective: str, intent_type: str) -> bool:
     """Reject one-word commitment objects such as an ungrounded ``go``."""
     if intent_type != "commitment":
         return True
+    normalized = " ".join(objective.casefold().split())
+    if normalized in {"do it", "go there", "learn how", "handle it", "make it happen"}:
+        return False
     return len(re.findall(r"[A-Za-z0-9]+", objective)) >= 2
 
 
@@ -109,7 +112,7 @@ class MessageCognitionEnricher:
             "character in these excerpts. Do not invent motives. A GOAL requires an intention, "
             "commitment, plan, chosen objective, or persistent desire belonging to the character; "
             "requests for another person to act are not the character's goal unless the character "
-            "is explicitly trying to cause that outcome. Distinguish BELIEF, STATE, RELATIONSHIP, "
+            "is explicitly trying to cause that outcome. Do not turn an expressed refusal into "            "a positive task. A conditional offer is not accepted until the character adopts "            "it. A short agreement can adopt only a concrete prior offer, never an invented one. "            "Distinguish BELIEF, STATE, RELATIONSHIP, "
             "RULE, EVENT, GOAL, or NONE. For GOAL only, also classify intent_type as "
             "desire|objective|plan|commitment|immediate_intention and horizon as "
             "immediate|scene|session|persistent, and provide objective as a concise but "
