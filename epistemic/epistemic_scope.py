@@ -150,6 +150,12 @@ def install_message_cognition_scope_guard(module) -> None:
         # Preserve the fast path's hard bound after clause expansion.
         return units[: module.MAX_UNITS]
 
-    module.INTERPRETER_VERSION = "message-cognition-v4"
+    # This wrapper is a policy installed around the loaded base interpreter.
+    # Never relabel an updated implementation as an older unrelated revision.
+    module.BASE_INTERPRETER_VERSION = module.INTERPRETER_VERSION
+    module.SCOPE_POLICY_VERSION = "epistemic-scope-v1"
+    module.INTERPRETER_VERSION = (
+        f"{module.BASE_INTERPRETER_VERSION}+{module.SCOPE_POLICY_VERSION}"
+    )
     module.interpret_message = guarded_interpret_message
     module._epistemic_scope_guard_installed = True
