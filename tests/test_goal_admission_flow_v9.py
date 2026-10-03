@@ -33,6 +33,12 @@ class FlowDB:
             return list(rows)
         return []
 
+    async def fetchval(self, sql, *args):
+        self.calls.append(("fetchval", sql, args))
+        if "source_head_node_id" in sql:
+            return args[0] if len(args) > 1 else None
+        return None
+
     async def fetchrow(self, sql, *args):
         self.calls.append(("fetchrow", sql, args))
         return None
