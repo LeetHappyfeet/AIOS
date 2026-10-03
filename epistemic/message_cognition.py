@@ -3,13 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from aios_app.epistemic.goal_source_admission import review_goal_source, ADMISSION_VERSION
 from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v10-temporal-intent"
+INTERPRETER_VERSION = "message-cognition-v11-source-goal-admission"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -236,6 +238,7 @@ class ParsedCandidate:
     object_text: str
     confidence: float
     reason: str
+    match_span: tuple[int, int] | None = None
 
 
 def _runtime_versions() -> dict[str, str]:
@@ -309,7 +312,8 @@ def _bounded_goal_candidate(candidate: ParsedCandidate) -> ParsedCandidate:
     objective = re.split(r"[,;]\s*(?:but|and)\b", candidate.object_text,
                          maxsplit=1, flags=re.I)[0].strip()
     return ParsedCandidate(candidate.kind, candidate.subject_text, candidate.predicate,
-                           objective, candidate.confidence, candidate.reason)
+                           objective, candidate.confidence, candidate.reason,
+                           candidate.match_span)
 
 
 def _goal_polarity(sentence: str, candidate: ParsedCandidate) -> int:
@@ -391,7 +395,7 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
                 "GOAL", match.group("subject"), match.group("verb"),
                 match.group("object"), 0.91, "goal_predicate"))
             if valid_goal_objective(bounded.object_text):
-                return bounded
+                return replace(bounded, match_span=match.span())
     # Future/duration-bounded progressive is prospective; an unbounded
     # progressive is merely an ongoing observation.
     progressive = _BOUNDED_PROGRESSIVE_RE.search(sentence)
@@ -405,7 +409,7 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
             lemma + " " + progressive.group("object"), 0.82,
             "bounded_progressive_commitment"))
         if valid_goal_objective(action.object_text):
-            return action
+            return replace(action, match_span=progressive.span())
     # Recognize a self-authored future action but do not interpret an
     # auxiliary such as "going to need" as a commitment to perform "go".
     if not re.search(r"\b(?:if|unless|provided\s+that)\b", sentence, re.I):
@@ -420,7 +424,7 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
                     and not re.search(r"(?i)\b(?:how|something|whatever)$", action.object_text)
                     and not re.match(r"(?i)^(?:do|take|handle|make) it$", action.object_text)
                     and not re.match(r"(?i)^need\s+(?:to\s+)?", action.object_text)):
-                return action
+                return replace(action, match_span=match.span())
     if _RELATIONSHIP_RE.search(sentence):
         subject_match = _RELATIONSHIP_SUBJECT_RE.search(sentence)
         subject = subject_match.group("subject") if subject_match else None
@@ -500,6 +504,16 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
                           sentence) else "no_supported_candidate")
             reject(index, reason, sentence)
             continue
+        if candidate.kind == "GOAL":
+            intent_type, candidate_horizon = _goal_semantics(candidate)
+            admission = review_goal_source(
+                source_text=sentence, objective=candidate.object_text,
+                parse_reason=candidate.reason, horizon=candidate_horizon,
+                match_span=candidate.match_span,
+            )
+            if not admission.managed:
+                reject(index, admission.decision + ":" + admission.reason, sentence)
+                continue
         # An external request addressed to the character is not an adopted goal.
         # The fast-path goal writer requires self-authored intention evidence.
         if candidate.kind == "GOAL" and (
@@ -554,6 +568,9 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
                 "sentence_index": index, "source_text": sentence[:500],
                 "predicate": candidate.predicate.lower(), "object": _clean_object(candidate.object_text),
                 "parse_reason": candidate.reason,
+                "source_span": list(candidate.match_span) if candidate.match_span else None,
+                "goal_admission_version": ADMISSION_VERSION if candidate.kind == "GOAL" else None,
+                "goal_admission_status": "admit" if candidate.kind == "GOAL" else None,
                 "scene_position": (
                     "refusal" if candidate.reason == "expressed_scene_refusal" else None
                 ),
@@ -849,6 +866,9 @@ async def _commit_message_cognition_locked(
                 intent_type=unit.meta.get("intent_type"),
                 horizon=unit.meta.get("horizon"),
                 objective=unit.meta.get("objective"),
+                source_text=unit.meta.get("source_text"),
+                parse_reason=unit.meta.get("parse_reason"),
+                source_span=unit.meta.get("source_span"),
                 refresh_scene=False,
             )
     await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
