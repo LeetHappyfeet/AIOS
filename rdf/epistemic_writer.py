@@ -464,11 +464,11 @@ async def compact_character_world_epistemic_shadows(
         """,
         DATASET, GRAPH_IRI, RECEIPT_PREDICATE, limit,
     )
+    pending: list[tuple[object, str]] = []
     for row in rows:
         obs_iri = f"urn:aios:observation:{row['observation_id']}"
         prop_iri = f"urn:aios:proposition:{row['proposition_id']}"
         sparql = f"""
-PREFIX world: <urn:aios:world#>
 DELETE WHERE {{
   GRAPH <{GRAPH_IRI}> {{ <{obs_iri}> ?p ?o . }}
 }};
@@ -485,17 +485,40 @@ WHERE {{
   }}
 }}
 """.strip()
-        fuseki.update(DATASET, sparql)
-        await db.execute(
-            """
-            DELETE FROM aios.rdf_promotion_log
-            WHERE claim_id=$1
-              AND rdf_dataset=$2
-              AND rdf_graph=$3
-              AND rdf_predicate=$4
-            """,
-            row["claim_id"], DATASET, GRAPH_IRI, RECEIPT_PREDICATE,
+        pending.append((row["claim_id"], sparql))
+        if len(pending) >= 20:
+            # One bounded Fuseki transaction per batch. Never acknowledge a
+            # receipt before its batch successfully reaches the derived graph.
+            fuseki.update(
+                DATASET,
+                "PREFIX world: <urn:aios:world#>\n"
+                + ";\n".join(statement for _, statement in pending),
+            )
+            for claim_id, _ in pending:
+                await db.execute(
+                    """
+                    DELETE FROM aios.rdf_promotion_log
+                    WHERE claim_id=$1 AND rdf_dataset=$2
+                      AND rdf_graph=$3 AND rdf_predicate=$4
+                    """,
+                    claim_id, DATASET, GRAPH_IRI, RECEIPT_PREDICATE,
+                )
+            pending.clear()
+    if pending:
+        fuseki.update(
+            DATASET,
+            "PREFIX world: <urn:aios:world#>\n"
+            + ";\n".join(statement for _, statement in pending),
         )
+        for claim_id, _ in pending:
+            await db.execute(
+                """
+                DELETE FROM aios.rdf_promotion_log
+                WHERE claim_id=$1 AND rdf_dataset=$2
+                  AND rdf_graph=$3 AND rdf_predicate=$4
+                """,
+                claim_id, DATASET, GRAPH_IRI, RECEIPT_PREDICATE,
+            )
     return len(rows)
 
 
