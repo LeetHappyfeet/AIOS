@@ -125,6 +125,7 @@ def install_message_cognition_scope_guard(module) -> None:
         speaker_id: str | None,
         speaker_role: str | None,
         viewpoint_id: str | None,
+        diagnostics: list[dict] | None = None,
     ):
         units = []
         for sentence in module._sentences(text):
@@ -132,6 +133,11 @@ def install_message_cognition_scope_guard(module) -> None:
             for clause in split_strong_clauses(sentence):
                 scope = effective_scope(clause, sentence_scope)
                 if scope in NONASSERTIVE_SCOPES:
+                    if diagnostics is not None and len(diagnostics) < 32:
+                        diagnostics.append({
+                            "reason": "nonassertive_scope:" + scope,
+                            "source_excerpt": clause[:240],
+                        })
                     continue
                 clause_units = original(
                     clause,
@@ -139,6 +145,7 @@ def install_message_cognition_scope_guard(module) -> None:
                     speaker_id=speaker_id,
                     speaker_role=speaker_role,
                     viewpoint_id=viewpoint_id,
+                    diagnostics=diagnostics,
                 )
                 for unit in clause_units:
                     meta = dict(unit.meta)
