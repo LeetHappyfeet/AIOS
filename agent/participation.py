@@ -245,7 +245,7 @@ def propose_v4(claim: dict, context: dict, *, recurrence: int | None = None,
             speech_act = "refusal"
         elif re.search(r"\bi(?: will|'ll| am going to|'m going to)\s+\w+", source):
             speech_act = "self_commitment" if narrator and actor else "reported_commitment"
-        elif re.search(r"\byou\s+(?:do not|don't|must|should|will|are giving|give)\b", source):
+        elif re.search(r"\byou(?:\s+(?:do not|don't|must|should|will|give)|'re\s+giving|\s+are\s+giving)\b", source):
             speech_act = "proposed_terms"
         elif re.search(r"\bi(?: want| need|'d like| would like)\b", source):
             speech_act = "request_or_desire" if narrator else "reported_desire"
