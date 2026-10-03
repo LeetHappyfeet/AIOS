@@ -76,6 +76,41 @@ async def missing_cognition_nodes(db, *, instance_id: UUID, limit: int = BATCH_L
     )
 
 
+async def deferred_enrichment_nodes(db, *, instance_id: UUID, limit: int = 4):
+    """Only current-branch historical messages with unfinished inference."""
+    if not 1 <= limit <= 4:
+        raise ValueError("Historical enrichment batch limit must be 1..4")
+    return await db.fetch(
+        """WITH RECURSIVE source_chain AS (
+             SELECT head.node_id,head.timeline_id,
+                    ARRAY[head.node_id]::uuid[] AS visited,0 AS depth
+             FROM aios.character_runtime_state rs
+             JOIN aios.dag_node head
+               ON head.node_id=rs.source_head_node_id
+              AND head.timeline_id=rs.source_timeline_id
+             WHERE rs.instance_id=$1
+             UNION ALL
+             SELECT parent.node_id,parent.timeline_id,
+                    chain.visited||parent.node_id,chain.depth+1
+             FROM source_chain chain
+             JOIN aios.dag_edge de
+               ON de.timeline_id=chain.timeline_id AND de.child_node_id=chain.node_id
+             JOIN aios.dag_node parent
+               ON parent.node_id=de.parent_node_id AND parent.timeline_id=de.timeline_id
+             WHERE chain.depth<4096 AND NOT parent.node_id=ANY(chain.visited)
+           )
+           SELECT c.node_id,c.event_id
+           FROM aios.message_cognitive_commit c
+           JOIN source_chain chain ON chain.node_id=c.node_id
+           WHERE c.instance_id=$1
+             AND c.summary->>'historical_catchup'='true'
+             AND c.summary->>'enrichment_deferred'='true'
+             AND c.summary->>'enrichment_pending'='true'
+           ORDER BY c.event_id,c.node_id LIMIT $2""",
+        instance_id, limit,
+    )
+
+
 async def recover_missing_cognition(db, *, instance_id: UUID,
                                     limit: int = BATCH_LIMIT) -> dict:
     """A single bounded pass. Repeated passes resume from commit receipts."""
