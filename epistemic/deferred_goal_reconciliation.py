@@ -36,7 +36,7 @@ async def reconcile_deferred_goals(db, *, instance_id: UUID, limit: int = LIMIT)
             current = await con.fetchrow(
                 """SELECT rs.source_timeline_id,rs.source_head_node_id
                    FROM aios.character_runtime_state rs
-                   WHERE rs.instance_id=$1 FOR SHARE""", instance_id,
+                   WHERE rs.instance_id=$1 FOR UPDATE""", instance_id,
             )
             if not current or not current["source_head_node_id"]:
                 return counts
@@ -93,7 +93,10 @@ async def reconcile_deferred_goals(db, *, instance_id: UUID, limit: int = LIMIT)
                 meta = _meta(unit["meta"])
                 topic = str(unit["topic_key"] or "")
                 status = "rejected"
-                if not topic or not valid_goal_objective(meta.get("objective") or unit["text"]):
+                if meta.get("horizon") == "immediate":
+                    counts["rejected"] += 1
+                    status = "immediate_action_not_managed_goal"
+                elif not topic or not valid_goal_objective(meta.get("objective") or unit["text"]):
                     counts["rejected"] += 1
                     status = "invalid_objective"
                 elif latest.get(topic, (None,None,None))[2] != str(unit["unit_id"]):
