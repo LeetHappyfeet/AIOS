@@ -619,7 +619,13 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
                ci.character_id
         FROM aios.dag_node dn
         JOIN aios.character_instance ci ON ci.instance_id=$1
+        JOIN aios.character_runtime_state rs ON rs.instance_id=ci.instance_id
+        JOIN aios.dag_node live_head
+          ON live_head.node_id=rs.source_head_node_id
+         AND live_head.timeline_id=rs.source_timeline_id
         WHERE dn.node_id=$2
+          AND dn.timeline_id=rs.source_timeline_id
+          AND dn.event_id<=live_head.event_id
         """,
         instance_id, node_id,
     )
@@ -627,6 +633,10 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
         return False
     text = str(row["message_text"] or "").strip()
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    live_head = await con.fetchval(
+        "SELECT source_head_node_id=$2 FROM aios.character_runtime_state WHERE instance_id=$1",
+        instance_id, node_id,
+    )
     existing = await con.fetchrow(
         "SELECT commit_id, source_text_hash, interpreter_version FROM aios.message_cognitive_commit WHERE instance_id=$1 AND node_id=$2",
         instance_id, node_id,
@@ -647,6 +657,10 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
         "runtime_versions": _runtime_versions(),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
+        "historical_catchup": not bool(live_head),
+        "goal_projection_deferred": bool(not live_head and any(
+            u.claim_kind == "GOAL" and u.meta.get("character_owned") for u in units
+        )),
         "ambiguous_count": len(ambiguous), "enrichment_pending": bool(ambiguous),
     }
     commit_row = await con.fetchrow(
@@ -687,7 +701,11 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
             con, instance_id=instance_id, unit_id=unit_row["unit_id"], claim_kind=unit.claim_kind,
             topic_key=unit.topic_key, polarity=unit.polarity,
         )
-        if unit.claim_kind == "GOAL" and bool(unit.meta.get("character_owned")):
+        if (live_head and unit.claim_kind == "GOAL"
+                and bool(unit.meta.get("character_owned"))):
+            # Older recovered evidence is persisted as a unit but cannot
+            # retroactively override a newer goal. A separate chronological
+            # goal lifecycle replay will adjudicate it in the next patch.
             await CharacterGoalService(con).reconcile_evidence(
                 instance_id=instance_id,
                 text=unit.text,
