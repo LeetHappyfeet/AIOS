@@ -7,7 +7,7 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
-from aios_app.epistemic.message_cognition import cognition_topic_key
+from aios_app.epistemic.message_cognition import cognition_topic_key, _same_identity
 from aios_app.inference import InferenceBroker, InferenceRequest, InferenceUnavailable
 from aios_app.config import settings
 from aios_app.agent.temporal import TemporalTriggerStore, resolve_goal_time_expression
@@ -64,7 +64,20 @@ class MessageCognitionEnricher:
         )
         summary=CharacterGoalService._json_object(row["summary"])
         sentences=list(summary.get("ambiguous_sentences") or [])[:4]
+        historical=bool(summary.get("historical_catchup"))
         if not sentences or not summary.get("enrichment_pending"):
+            return 0
+        # Only character-authored excerpts may generate owned cognition.
+        if not _same_identity(row["speaker_id"],row["character_id"]):
+            await self.db.execute(
+                """UPDATE aios.message_cognitive_commit
+                   SET summary=summary || jsonb_build_object(
+                     'enrichment_pending',false,'enrichment_deferred',false,
+                     'enrichment_rejection','external_speaker_not_character_authority'),
+                     enrichment_completed_at=now()
+                   WHERE instance_id=$1 AND node_id=$2""",
+                instance_id,node_id,
+            )
             return 0
 
         # A short character reply may refer to a plan offered in the parent
@@ -132,6 +145,8 @@ class MessageCognitionEnricher:
         raw=result.response.raw
         units=raw.get("units") if isinstance(raw,dict) else None
         admitted=0
+        historical_goal_seen=False
+        rejection_reasons=[]
         if isinstance(units,list):
             for item in units[:4]:
                 if not isinstance(item,dict):
