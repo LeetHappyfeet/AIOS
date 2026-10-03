@@ -385,7 +385,11 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
             action = _bounded_goal_candidate(ParsedCandidate(
                 "GOAL", match.group("subject"), "commit",
                 match.group("object"), 0.86, "explicit_self_commitment"))
+            words = re.findall(r"[A-Za-z0-9]+", action.object_text)
             if (valid_goal_objective(action.object_text)
+                    and len(words) >= 2
+                    and not re.search(r"(?i)\b(?:how|something|whatever)$", action.object_text)
+                    and not re.match(r"(?i)^(?:do|take|handle|make) it$", action.object_text)
                     and not re.match(r"(?i)^need\s+(?:to\s+)?", action.object_text)):
                 return action
     if _RELATIONSHIP_RE.search(sentence):
@@ -478,7 +482,11 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         if candidate.kind in {"MEMORY", "BELIEF", "GOAL", "RULE"} and not character_owned:
             reject(index, "character_ownership_unresolved", sentence)
             continue
-        polarity = _goal_polarity(sentence, candidate) if candidate.kind == "GOAL" else (-1 if _NEGATION_RE.search(sentence) else 1)
+        polarity = (
+            1 if candidate.reason == "expressed_scene_refusal"
+            else _goal_polarity(sentence, candidate) if candidate.kind == "GOAL"
+            else (-1 if _NEGATION_RE.search(sentence) else 1)
+        )
         canonical = _canonical_text(candidate, owner=owner)
         objective = _clean_object(candidate.object_text) if candidate.kind == "GOAL" else None
         topic_key = cognition_topic_key(
