@@ -1,8 +1,8 @@
-# Experiment 5 — source-DAG cognition catch-up (first of two patches)
+# Experiment 5 — source-DAG cognition catch-up and V9 goal admission
 
 This patch responds to experiment
 `9d8bdc27-2e2e-44a2-a4f3-ca666830c592`,
-Renamon instance `cce90979-aac6-4333-b2b9-772d73158a5b`.
+a newly created character instance.
 Events **9–14** have ordinary extracted claims but no
 `message_cognitive_commit`; events 15, 30 and 31 do have V4-stamped commits.
 The V4 stamp was caused by `install_message_cognition_scope_guard` resetting
@@ -11,12 +11,12 @@ the effective version on top of the V8 implementation.
 ## Changes
 
 - The effective interpreter version is now
-  `message-cognition-v8-source-owned+epistemic-scope-v1`.
+  `message-cognition-v9-candidate-admission+epistemic-scope-v1`.
   The separate `BASE_INTERPRETER_VERSION` and `SCOPE_POLICY_VERSION` name the
   implementation and installed wrapper. New commit idempotency and runtime
   manifests use the effective version. Existing historical V4 receipts are
   retained; this gap scan does **not** silently destructively recompute them.
-- Fast cognition does not treat George's "You know what, ..." as Renamon's
+- Fast cognition does not treat another speaker's "You know what, ..." as the character's
   BELIEF and does not automatically adopt externally addressed second-person
   statements as character-owned BELIEF/STATE/RULE/GOAL.
 - The live-head cognition barrier is unchanged. After source advance, a
@@ -27,7 +27,7 @@ the effective version on top of the V8 implementation.
   passes (256 nodes). Source timeline, exact character instance, perception,
   DAG ancestry, current head time bound, and pinned source-head identity are
   checked within the commit transaction. Work uses the
-  FAST_SQL/BACKGROUND lane with instance partitioning.
+  GLOBAL/BACKGROUND lane with instance partitioning.
 - Historical nodes may recover cognitive units, but their GOAL materialization,
   enrichment inference, and polarity supersession are **deferred**. They
   cannot change the current goal or project an older scene over the current
@@ -57,7 +57,7 @@ manual recovery command is also available:
 ```bash
 cd ~/AIOS/aios_app/beta
 python -m aios_app.epistemic.cognition_catchup \
-  --instance-id cce90979-aac6-4333-b2b9-772d73158a5b \
+  --instance-id INSTANCE_UUID_HERE \
   --max-batches 8
 ```
 
@@ -65,19 +65,26 @@ It prints one JSON receipt per bounded batch. Inspect completion by joining
 the same source DAG nodes against `message_cognitive_commit` as in the
 Experiment 5 diagnosis. The queue-index migration above is required before processing the new job type.
 
-## Deliberately reserved for patch two (before the next experiment)
+## Second patch: source-owned goal admission and retrospective reconciliation
 
-Do NOT interpret successful gap recovery as proof that goals are repaired.
-The next patch is the separately proposed goal lifecycle and admission pass:
-audit actual Renamon-authored candidates, differentiate explicit goals from
-refusals and conditional adoption, make rejection reasons visible, and
-chronologically adjudicate the historical `goal_projection_deferred` and
-`enrichment_deferred` records before checking authoritative
-`character_agent_goal`, participation context, and HUD retrieval.
+The second patch is implemented in V9. Generic self-authored commitments can
+create managed goals; explicit refusals are recorded as scene positions rather
+than automatically becoming action plans. Candidate rejection reasons and the
+zero-unit outcome are persisted with every newly committed cognition receipt.
 
-Also distinguish successfully processed zero-unit messages from skipped
-messages; a zero-unit receipt is legitimate but should carry candidate
-rejection diagnostics in the next patch.
+Historical enrichment is bounded and source attributed. The local model's
+proposals are reviewed before deferred goals become authoritative. Catch-up
+reconciles current-branch evidence in source order, skips older observations
+superseded by later intentions, and refuses to overwrite later or terminal
+managed goals. If the local inference endpoint is unavailable, completion
+returns an explicit `source_inference_unavailable` status instead of silently
+promoting unresolved evidence.
+
+The manual command above now also performs bounded enrichment and
+historical goal reconciliation after the DAG gaps have been recovered.
+
+See `docs/cognition_goal_admission_v9.md` for detailed diagnostics and
+validation queries.
 
 ## Focused regression commands (run after the second patch, as planned)
 
@@ -88,7 +95,7 @@ pytest -q \
   tests/test_epistemic_scope.py \
   tests/test_message_cognition_idempotency.py \
   tests/test_hud_readiness.py \
-  tests/test_runtime_version_manifest.py
+  tests/test_runtime_version_manifest.py \\\n  tests/test_cognition_admission_v9.py \\\n  tests/test_deferred_goal_reconciliation.py \\\n  tests/test_goal_admission_flow_v9.py
 ```
 
 Version-upgrade replay of existing V4 commits must be a separate opt-in
