@@ -95,7 +95,11 @@ def review_candidate_source(item: dict, excerpt: str, *,
     if kind == "GOAL":
         admission = review_goal_source(
             source_text=excerpt, objective=objective,
-            horizon=str(item.get("horizon") or ""),
+            horizon=_effective_goal_horizon(
+                str(item.get("horizon") or "").casefold(),
+                str(item.get("intent_type") or "").casefold(),
+                excerpt,
+            ),
         )
         if not admission.managed:
             return "source_admission:" + admission.decision + ":" + admission.reason
