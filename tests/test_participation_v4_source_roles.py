@@ -62,6 +62,17 @@ def test_current_character_goals_not_assumed_present_in_historical_past():
     assert v4["population"] != "foreground"
 
 
+def test_legacy_experiment_snapshot_is_not_mistaken_for_live_context():
+    ctx={**CONTEXT,
+         "coverage":{"temporal_basis":"evaluation_time_not_historical"},
+         "goals":[{"goal_id":"future_goal","goal_text":"repair the receiver"}]}
+    c=claim("The receiver was repaired.",subject="the receiver",
+            predicate="repair",speaker="Speaker_B")
+    v4=propose_v4(c,ctx,recurrence=1)
+    assert v4["signals"]["goal_ids"] == []
+    assert "historical_relevance_not_reconstructible" in v4["signals"]["unknown"]
+
+
 def test_v4_is_additive_and_does_not_mutate_v1_v2_v3():
     c=claim("The lamps are bright.",subject="the lamps",predicate="be")
     before=(propose(c,CONTEXT),propose_v2(c,CONTEXT),
