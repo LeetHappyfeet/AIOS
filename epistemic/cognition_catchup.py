@@ -163,9 +163,32 @@ async def finish_deferred_cognition(db, *, instance_id: UUID,
     after_ids = {str(node["node_id"]) for node in remaining}
     completed = len(before_ids - after_ids)
     if remaining:
+        # Do not conflate a missing provider with a syntactically invalid
+        # response. Report the latest persisted attempt without disclosing
+        # prompts, provider secrets or model-generated narrative.
+        latest = await db.fetchrow(
+            """SELECT request_id,status,validation_error,error,created_at
+               FROM aios.inference_request
+               WHERE instance_id=$1 AND worker_class='message_cognition'
+                 AND created_at >= now()-interval '10 minutes'
+               ORDER BY created_at DESC LIMIT 1""", instance_id,
+        )
+        outcome = "source_inference_pending" if completed else (
+            "source_inference_invalid_response" if latest and latest["status"] == "invalid"
+            else "source_inference_failed" if latest and latest["status"] == "failed"
+            else "source_inference_unavailable"
+        )
         return {
-            "status": "source_inference_pending" if completed else "source_inference_unavailable",
-            "enrichment_completed": completed, "goal_reconciliation": None,
+            "status": outcome, "enrichment_completed": completed,
+            "remaining_enrichment_sample": len(remaining),
+            "latest_inference": ({
+                "request_id": str(latest["request_id"]),
+                "status": latest["status"],
+                "validation_error": latest["validation_error"],
+                "error": latest["error"],
+                "created_at": str(latest["created_at"]),
+            } if latest else None),
+            "goal_reconciliation": None,
         }
     from aios_app.epistemic.deferred_goal_reconciliation import reconcile_deferred_goals
     outcome = await reconcile_deferred_goals(
