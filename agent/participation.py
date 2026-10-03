@@ -208,7 +208,7 @@ def propose_v4(claim: dict, context: dict, *, recurrence: int | None = None,
     """
     coverage = context.get("coverage") or {}
     basis = coverage.get("temporal_basis")
-    retrospective = basis == "retrospective_snapshot_unverified"
+    retrospective = basis in {"retrospective_snapshot_unverified", "evaluation_time_not_historical"}
     effective = {**context}
     if retrospective:
         effective.update(goals=[], facets=[], relationships=[])
@@ -351,7 +351,8 @@ class ParticipationService:
             "SELECT source_head_node_id FROM aios.character_runtime_state WHERE instance_id=$1",
             row["instance_id"],
         )
-        live_source = source_head is not None and str(source_head) == str(row.get("dag_node_id"))
+        claim_node = row.get("dag_node_id")
+        live_source = claim_node is not None and source_head is not None and str(source_head) == str(claim_node)
         goal_rows = await con.fetch("""SELECT goal_id,goal_text,status,meta,updated_at
             FROM aios.character_agent_goal WHERE instance_id=$1
             ORDER BY (status='active') DESC,priority,created_at,goal_id LIMIT 65""", row["instance_id"])
@@ -376,7 +377,9 @@ class ParticipationService:
                 "goals": goals, "facets": facets, "relationships": relationships,
                 "coverage": {
                     "captured_at": datetime.now(timezone.utc).isoformat(),
-                    "temporal_basis": "live_head_snapshot" if live_source else "retrospective_snapshot_unverified",
+                    "temporal_basis": ("current_state_audit" if claim_node is None else
+                                       "live_head_snapshot" if live_source else
+                                       "retrospective_snapshot_unverified"),
                     "source_node_id": str(row.get("dag_node_id") or ""),
                     "runtime_head_node_id": str(source_head) if source_head else None,
                     "goals": {"scope": "instance", "instance_id": str(row["instance_id"]),
