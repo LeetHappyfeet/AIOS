@@ -157,7 +157,7 @@ async def finish_deferred_cognition(db, *, instance_id: UUID,
         for node in awaiting:
             await enricher.run(instance_id=instance_id, node_id=node["node_id"])
     remaining = await deferred_enrichment_nodes(
-        db, instance_id=instance_id, limit=1,
+        db, instance_id=instance_id, limit=enrichment_limit,
     )
     before_ids = {str(node["node_id"]) for node in awaiting}
     after_ids = {str(node["node_id"]) for node in remaining}
