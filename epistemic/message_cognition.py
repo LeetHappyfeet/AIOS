@@ -568,7 +568,10 @@ async def _reconcile_unit(db: Any, *, instance_id: UUID, unit_id: UUID, claim_ki
     return previous_id
 
 
-async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: UUID) -> bool:
+async def commit_message_cognition(
+    db: Database, *, instance_id: UUID, node_id: UUID,
+    expected_head_node_id: UUID | None = None,
+) -> bool:
     # The same live node can be scheduled concurrently by activation/HUD work.
     # Serialize the full rebuild so DELETE + ordinal INSERT is one atomic owner.
     lock_key = f"message-cognition::{instance_id}::{node_id}"
@@ -579,7 +582,8 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
                 lock_key,
             )
             committed = await _commit_message_cognition_locked(
-                con, instance_id=instance_id, node_id=node_id
+                con, instance_id=instance_id, node_id=node_id,
+                expected_head_node_id=expected_head_node_id,
             )
     if committed:
         row = await db.fetchrow(
@@ -613,7 +617,10 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
     return committed
 
 
-async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_id: UUID) -> bool:
+async def _commit_message_cognition_locked(
+    con: Any, *, instance_id: UUID, node_id: UUID,
+    expected_head_node_id: UUID | None = None,
+) -> bool:
     # Re-read only after acquiring the lock. A competing worker may have
     # completed this exact cognition commit while we were waiting.
     row = await con.fetchrow(
@@ -631,8 +638,10 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
         WHERE dn.node_id=$2
           AND dn.timeline_id=rs.source_timeline_id
           AND dn.event_id<=live_head.event_id
+          AND ($3::uuid IS NULL OR rs.source_head_node_id=$3)
+        FOR SHARE OF rs
         """,
-        instance_id, node_id,
+        instance_id, node_id, expected_head_node_id,
     )
     if not row:
         return False
