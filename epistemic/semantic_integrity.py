@@ -133,8 +133,17 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
     if original_subject in feminine | masculine and subject not in feminine | masculine:
         # Cross-sentence person references require a separate referent receipt;
         # do not assert invalidity merely because a name is absent locally.
-        return IntegrityResult("invalid", tuple(sorted(set(reasons)))) if reasons else IntegrityResult(
-            "incomplete", ("third_person_reference_requires_grounding",))
+        # An unresolved third-person referent and a lost modifier are
+        # incomplete evidence, not evidence that the stated actor is false.
+        hard = {"subject_gender_contradicts_source",
+                "object_gender_contradicts_source",
+                "distinct_source_participants_collapsed",
+                "unjustified_neutral_pronoun_resolution",
+                "environmental_subject_replaced_with_entity"}
+        return IntegrityResult(
+            "invalid" if set(reasons) & hard else "incomplete",
+            tuple(sorted(set(reasons) | {"third_person_reference_requires_grounding"})),
+        )
     if reasons:
         hard = {"environmental_subject_replaced_with_entity",
                 "subject_gender_contradicts_source",
