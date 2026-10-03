@@ -61,6 +61,14 @@ def _ingest_out(*, event_id, node_id, timeline_id, disposition, source_head_node
 async def ingest_message(db, req: IngestIn) -> IngestOut:
     """Persist one chat message with end-to-end replay idempotency."""
     message_text = req.text
+    # Actor IDs are the unique keys of conversation_participant per timeline.
+    # Never collapse a human speaker and a character into the same participant.
+    if req.character_id and req.user_name and req.character_id == req.user_name:
+        raise HTTPException(status_code=422, detail="user and character actor IDs must be distinct")
+    if req.speaker_type == "user" and req.speaker_id == req.character_id:
+        raise HTTPException(status_code=422, detail="user speaker_id collides with character actor ID")
+    if req.speaker_type == "character" and req.speaker_id == req.user_name:
+        raise HTTPException(status_code=422, detail="character speaker_id collides with user actor ID")
     if req.viewpoint_id:
         resolved_viewpoint_id = req.viewpoint_id
     elif req.speaker_type == "character":
@@ -265,7 +273,8 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                 actor_type=actor_type,
                 controller_type=controller_type,
                 controller_ref=actor_id if controller_type == "human" else f"character:{actor_id}",
-                participant_role="primary" if actor_id == req.character_id else "participant",
+                participant_role="primary" if actor_id == req.character_id and actor_type == "character" else "participant",
+                character_id=req.character_id if actor_id == req.character_id and actor_type == "character" else None,
                 meta={"source": client_source, "live_ingest": True},
             )
             await bind_available_instance(db, participant_id=participant_id)
