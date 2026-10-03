@@ -16,7 +16,7 @@ ADMISSION_VERSION = "goal-source-admission-v1"
 _FIGURATIVE_LEAD = re.compile(
     r"\b(?:gesture|glance|look|expression|silence|movement|relocation|"
     r"posture|smile|nod|shrug|eyes?|face|tail|body language)\b"
-    r".{0,150}?\b(?:that|which)\s+"
+    r".{0,150}?\b(?:(?:that|which)\s+)?"
     r"(?:said|suggested|implied|seemed\s+to\s+say|might\s+have\s+said)\b",
     re.I | re.S,
 )
