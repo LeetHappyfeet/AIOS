@@ -17,6 +17,7 @@ from .protocol import (
     StructuredInferenceResponse,
     StructuredResponseError,
     extract_json_object,
+    extract_inference_payload,
     validate_structured_response,
 )
 
@@ -270,7 +271,11 @@ class InferenceBroker:
                     expression="", actions=(), raw=payload
                 )
             else:
-                payload = extract_json_object(text)
+                if (request.output_schema or {}).get("x-aios-envelope") == "cognition-units-v1" and request.allowed_actions != {}:
+                    raise StructuredResponseError("cognition envelope requires no-action request")
+                payload, envelope_kind = extract_inference_payload(
+                    text, output_schema=request.output_schema,
+                )
                 structured = validate_structured_response(
                     payload, allowed_actions=request.allowed_actions
                 )
@@ -282,7 +287,12 @@ class InferenceBroker:
                     latency_ms=$4, completed_at=now(), updated_at=now()
                 WHERE request_id=$1
                 """,
-                request_id, text, json.dumps(structured.raw), latency_ms,
+                request_id, text, json.dumps(
+                    {**structured.raw, "_aios_response_envelope": envelope_kind}
+                    if not request.choice_keys and
+                       (request.output_schema or {}).get("x-aios-envelope") == "cognition-units-v1"
+                    else structured.raw
+                ), latency_ms,
             )
             await self.providers.record_health(provider.provider_id, ok=True)
             return InferenceResult(
