@@ -86,6 +86,8 @@ def test_need_is_not_recast_as_future_performed_action():
 def test_negative_goal_does_not_cancel_unrelated_positive_clause():
     units = extract("I don't want to announce anything, but I will repair the receiver.")
     goals = [u for u in units if u.claim_kind == "GOAL"]
-    assert goals
+    assert len(goals) == 2
     assert goals[0].polarity == -1
     assert "repair the receiver" not in goals[0].meta["objective"]
+    assert goals[1].polarity == 1
+    assert "repair the receiver" in goals[1].meta["objective"]
