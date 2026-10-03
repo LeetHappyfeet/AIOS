@@ -251,19 +251,21 @@ async def enqueue_job(
             foreground_node_id,
             foreground_until
         )
-        VALUES (
-            $1,
-            $2::jsonb,
-            $3,
-            COALESCE($4, now()),
-            'queued',
-            $5,
-            $6,
-            $7,
-            $8,
-            $9,
-            $10
-        )
+        SELECT
+            $1, $2::jsonb, $3, COALESCE($4, now()), 'queued',
+            $5, $6, $7, $8, $9, $10
+        FROM (
+            SELECT pg_advisory_xact_lock(
+                hashtext('pipeline-cognition-catchup:' ||
+                    COALESCE(($2::jsonb->>'instance_id'), ''))
+            ) AS locked
+        ) cognition_enqueue_guard
+        WHERE ($1 <> 'message_cognition_catchup' OR NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job existing
+            WHERE existing.job_type='message_cognition_catchup'
+              AND existing.payload->>'instance_id'=$2::jsonb->>'instance_id'
+              AND existing.status IN ('queued','running')
+        ))
         ON CONFLICT DO NOTHING
         RETURNING job_id
         """,
