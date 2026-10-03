@@ -5,6 +5,8 @@ from uuid import UUID
 from .contracts import InquiryDemand
 
 _V11_REASONS = {
+    "unresolved_reference:objective_contains_unresolved_reference": "unresolved_reference",
+    "attribution_unresolved:missing_source_text": "attribution_unresolved",
     "source_admission:unresolved_reference:objective_contains_unresolved_reference":
         "unresolved_reference",
     "source_admission:attribution_unresolved:missing_source_text":

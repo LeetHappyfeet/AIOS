@@ -380,8 +380,17 @@ class CognitiveOperationEngine:
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
         if op.get("operation_type")=="inquiry.resolve":
-            # Retrieval is not completion of the original cognitive episode,
-            # source integrity, or a goal. Resume only an explicit caller.
+            # Searching is not goal progress or source admission. Still close
+            # the opportunity and record the thread receipt so it cannot stick
+            # in 'selected' or 'working' indefinitely.
+            if op.get("opportunity_id"):
+                await self.db.execute(
+                    """UPDATE aios.character_cognitive_opportunity
+                       SET status='executed',resolved_at=now(),updated_at=now()
+                       WHERE opportunity_id=$1""",op["opportunity_id"])
+            from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
+            await CognitiveLifecycleReconciler(self.db).reconcile_operation(
+                operation=op,result=result,terminal_status="inquiry_observation")
             await self._resume_source_task(op,status="succeeded",result=result)
             return
         if op.get("source_node_id"):

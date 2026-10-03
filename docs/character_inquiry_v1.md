@@ -8,9 +8,10 @@ post-enrichment V11 shadow diagnostics.
 
 ## Integration
 
-- V11 parser and goal source admission remain unchanged. Completed enrichment
-  diagnostics with exact reason codes for unresolved reference/attribution are
-  enqueued into a BACKGROUND shadow job. The shadow job only runs source-local
+- V11 parser and goal source admission remain unchanged. Both fast-parser
+  candidate_rejections and completed enrichment diagnostics with exact reason
+  codes for unresolved reference/attribution are discovered by an independent
+  BACKGROUND shadow scan/job. The shadow job only runs source-local
   DAG ancestry; its results cannot amend a goal.
 - The same InquiryDemand/InquiryEvidence contract is available to downstream
   character cognition using evidence_scope=character_accessible.

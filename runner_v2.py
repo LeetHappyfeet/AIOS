@@ -783,6 +783,7 @@ async def _deferred_cognition_recovery_loop(
 ) -> None:
     """Independent restart recovery: no dependency on a surviving catch-up job."""
     from aios_app.epistemic.cognition_recovery_sweep import enqueue_abandoned_enrichment
+    from aios_app.epistemic.inquiry.shadow import enqueue_v11_inquiry_shadow
     from aios_app.inference.providers import InferenceProviderStore
 
     db = Database(settings.db_dsn, min_size=1, max_size=2)
@@ -794,10 +795,11 @@ async def _deferred_cognition_recovery_loop(
                 # currently executing; only expired leases may be mutated.
                 reaped = await InferenceProviderStore(db).reap_stale_requests()
                 enqueued = await enqueue_abandoned_enrichment(db, limit=16)
-                if reaped or enqueued:
+                shadowed = await enqueue_v11_inquiry_shadow(db, limit=8)
+                if reaped or enqueued or shadowed:
                     logger.info(
-                        "Deferred cognition sweep reaped=%s enqueued=%s",
-                        reaped, enqueued,
+                        "Deferred cognition sweep reaped=%s enqueued=%s inquiry=%s",
+                        reaped, enqueued, shadowed,
                     )
             except Exception:
                 logger.exception("Failed deferred cognition recovery sweep")
