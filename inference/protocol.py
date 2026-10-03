@@ -42,6 +42,41 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return decoded
 
 
+COGNITION_UNITS_ENVELOPE = "cognition-units-v1"
+
+
+def extract_inference_payload(text: str, *, output_schema: Mapping[str, Any] | None = None
+                              ) -> tuple[dict[str, Any], str]:
+    """Only opt-in cognition-unit requests may wrap bounded bare arrays.
+
+    The broker persists response_text unchanged. Every other worker retains
+    strict object-root validation. No scalar, mixed or nested arrays are coerced.
+    """
+    schema = output_schema or {}
+    if schema.get("x-aios-envelope") != COGNITION_UNITS_ENVELOPE:
+        return extract_json_object(text), "object"
+    if schema.get("type") != "object" or (
+        (schema.get("properties") or {}).get("units") or {}
+    ).get("type") != "array":
+        raise StructuredResponseError("invalid cognition-units response schema")
+    value = text.strip()
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise StructuredResponseError(f"response is not valid JSON: {exc}") from exc
+    if isinstance(decoded, dict):
+        if not isinstance(decoded.get("units"), list):
+            raise StructuredResponseError("cognition response units must be an array")
+        return decoded, "object"
+    if isinstance(decoded, list) and len(decoded) <= 4 and all(
+        isinstance(unit, dict) for unit in decoded
+    ):
+        return {"units": decoded}, "bare_units_array_normalized"
+    raise StructuredResponseError(
+        f"unsupported cognition response root: {type(decoded).__name__}"
+    )
+
+
 def validate_structured_response(
     payload: Mapping[str, Any],
     *,
