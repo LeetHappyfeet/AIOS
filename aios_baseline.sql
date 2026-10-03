@@ -4555,6 +4555,16 @@ CREATE TABLE aios.observation_proposition (
 -- Name: pipeline_job; Type: TABLE; Schema: aios; Owner: -
 --
 
+-- RDF authority receipt: cache only successfully published, RDF-visible state.
+CREATE TABLE aios.rdf_observation_authority_projection (
+    rdf_dataset text NOT NULL,
+    rdf_graph text NOT NULL,
+    observation_iri text NOT NULL,
+    projection_hash text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (rdf_dataset, rdf_graph, observation_iri)
+);
+
 CREATE TABLE aios.pipeline_job (
     job_id uuid DEFAULT gen_random_uuid() NOT NULL,
     job_type text NOT NULL,
