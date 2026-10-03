@@ -279,6 +279,11 @@ class InferenceBroker:
                 structured = validate_structured_response(
                     payload, allowed_actions=request.allowed_actions
                 )
+                if (request.output_schema or {}).get("x-aios-envelope") == "cognition-units-v1":
+                    structured = StructuredInferenceResponse(
+                        expression=structured.expression, actions=structured.actions,
+                        raw={**structured.raw, "_aios_response_envelope": envelope_kind},
+                    )
             latency_ms = int((time.monotonic() - started) * 1000)
             await self.db.execute(
                 """
@@ -287,12 +292,7 @@ class InferenceBroker:
                     latency_ms=$4, completed_at=now(), updated_at=now()
                 WHERE request_id=$1
                 """,
-                request_id, text, json.dumps(
-                    {**structured.raw, "_aios_response_envelope": envelope_kind}
-                    if not request.choice_keys and
-                       (request.output_schema or {}).get("x-aios-envelope") == "cognition-units-v1"
-                    else structured.raw
-                ), latency_ms,
+                request_id, text, json.dumps(structured.raw), latency_ms,
             )
             await self.providers.record_health(provider.provider_id, ok=True)
             return InferenceResult(
