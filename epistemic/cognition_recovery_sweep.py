@@ -78,7 +78,8 @@ async def discover_abandoned_enrichment(db, *, limit: int = SWEEP_LIMIT):
         )
           AND NOT EXISTS (
             SELECT 1 FROM (
-                SELECT ir.created_at, ir.status,
+                SELECT COALESCE(ir.completed_at,ir.created_at) AS attempt_finished_at,
+                       ir.status,
                        (SELECT count(*) FROM aios.inference_request previous
                         WHERE previous.instance_id=ir.instance_id
                           AND previous.worker_class='message_cognition'
@@ -91,7 +92,7 @@ async def discover_abandoned_enrichment(db, *, limit: int = SWEEP_LIMIT):
                 ORDER BY ir.created_at DESC LIMIT 1
             ) last
             WHERE last.status IN ('failed','invalid')
-              AND last.created_at + (
+              AND last.attempt_finished_at + (
                 LEAST(900, 60 * power(2, LEAST(last.recent_failures,4))) *
                 interval '1 second'
               ) > now()
