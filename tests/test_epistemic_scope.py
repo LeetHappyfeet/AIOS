@@ -27,7 +27,7 @@ def test_scope_classifier_marks_supposition_and_condition():
 
 def test_fast_cognition_does_not_promote_hypothetical_belief():
     install_message_cognition_scope_guard(cognition)
-    assert cognition.INTERPRETER_VERSION == "message-cognition-v9-candidate-admission+epistemic-scope-v1"
+    assert cognition.INTERPRETER_VERSION == "message-cognition-v10-temporal-intent+epistemic-scope-v1"
     units = _cognition("Let's say I believe you.")
     assert not any(unit.claim_kind == "BELIEF" for unit in units)
 
