@@ -347,13 +347,14 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
 
 
 def _parse_sentence(sentence: str) -> ParsedCandidate | None:
+    sentence = sentence.replace('’', "'")
     # Discourse marker is not a knowledge assertion by the addressee.
     if _DISCOURSE_MARKER_RE.search(sentence):
         return None
     if _QUESTION_RE.search(sentence):
         return None
     if _REFUSAL_RE.search(sentence):
-        return ParsedCandidate("STATE", "I", "refuse", "to leave",
+        return ParsedCandidate("STATE", "I", "refuses", "to leave",
                                0.89, "expressed_scene_refusal")
     match = _MEMORY_RE.search(sentence)
     if match:
@@ -569,7 +570,7 @@ def ambiguous_cognition_sentences(
         # Dialogue/action prose with first-person commitment, future intent,
         # offers/agreements, or self-development language is high-value enough
         # to adjudicate. This is candidate generation, never goal authority.
-        lower=clean.lower()
+        lower=clean.lower().replace("’", "'")
         signals=(
             "i'll ","i will ","i'm going to ","i am going to ","i should ",
             "i could ","my goal","my plan","counter-offer","standing offer",
