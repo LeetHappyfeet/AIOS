@@ -71,7 +71,6 @@ async def advance_matching_runtime_source_cursor(
                 """SELECT character_instance_id
                    FROM aios.conversation_participant
                    WHERE timeline_id=$1 AND character_id=$2 AND active
-                     AND actor_type='character'::aios.actor_type
                    ORDER BY participant_id""",
                 source_timeline_id, character_id,
             )
