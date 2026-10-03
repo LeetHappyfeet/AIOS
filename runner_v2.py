@@ -109,25 +109,20 @@ async def handle_message_cognition_catchup(db: Database, job: Dict[str, Any]) ->
         report = await recover_missing_cognition(db, instance_id=instance_id, limit=32)
         if not report["more_possible"] or report["committed"] == 0:
             break
-    from aios_app.epistemic.cognition_catchup import (
-        missing_cognition_nodes, deferred_enrichment_nodes,
-    )
-    if await missing_cognition_nodes(db, instance_id=instance_id, limit=1):
-        return
-    from aios_app.epistemic.message_cognition_enrichment import MessageCognitionEnricher
-    enricher = MessageCognitionEnricher(db)
-    for node in await deferred_enrichment_nodes(db, instance_id=instance_id, limit=4):
-        await enricher.run(instance_id=instance_id, node_id=node["node_id"])
-    if await deferred_enrichment_nodes(db, instance_id=instance_id, limit=1):
-        logger.info("Historical goal replay deferred: source inference remains pending instance=%s",
-                    instance_id)
-        return
-    from aios_app.epistemic.deferred_goal_reconciliation import reconcile_deferred_goals
-    for _ in range(8):
-        result = await reconcile_deferred_goals(db, instance_id=instance_id, limit=64)
-        if not result["remaining"] or not result["considered"]:
+    from aios_app.epistemic.cognition_catchup import finish_deferred_cognition
+    for _ in range(2):
+        outcome = await finish_deferred_cognition(db, instance_id=instance_id)
+        logger.info("Cognition history completion instance=%s result=%s",
+                    instance_id, outcome)
+        if outcome["status"] not in {
+            "source_inference_pending", "goal_reconciliation_pending"
+        }:
             break
-
+        if outcome["status"] == "source_inference_pending" and not outcome["enrichment_completed"]:
+            break
+        reviewed = outcome.get("goal_reconciliation") or {}
+        if outcome["status"] == "goal_reconciliation_pending" and not reviewed.get("considered"):
+            break
 
 base.JOB_HANDLERS["message_cognition_catchup"] = handle_message_cognition_catchup
 
