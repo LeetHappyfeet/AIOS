@@ -116,6 +116,31 @@ def test_immediate_historical_action_is_not_managed_as_future_goal(monkeypatch):
     )
 
 
+def test_legacy_figurative_v10_unit_cannot_be_promoted_by_historical_replay(monkeypatch):
+    """A stored candidate from the old parser is evidence, not goal authority."""
+    from aios_app.epistemic.goals import CharacterGoalService
+
+    async def forbid(self, **_kwargs):
+        raise AssertionError("Legacy nonliteral GOAL reached lifecycle admission")
+
+    monkeypatch.setattr(CharacterGoalService, "reconcile_evidence", forbid)
+    old=make_unit(20)
+    old["meta"].update({
+        "source_text": "a deliberate relocation that said *I will put this down in a minute.*",
+        "objective": "put this down in a minute",
+        "parse_reason": "explicit_self_commitment",
+    })
+    db=FakeDB([old])
+    result=asyncio.run(reconcile_deferred_goals(db,instance_id=uuid4()))
+    assert result["rejected"]==1
+    assert result["applied"]==0
+    statuses=[args[1] for sql,args in db.executed
+              if "UPDATE aios.message_cognitive_unit" in sql]
+    assert statuses == [
+        "source_admission:nonliteral_statement:narrator_implied_or_imagined_first_person"
+    ]
+
+
 def test_pipeline_holds_replay_until_source_and_inference_complete():
     from aios_app.epistemic.cognition_catchup import finish_deferred_cognition
     code = inspect.getsource(finish_deferred_cognition)
