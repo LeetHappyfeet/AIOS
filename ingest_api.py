@@ -398,6 +398,14 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             detail=f"DAG ingestion failed for event_id={event_id}: {exc}",
         ) from exc
 
+    # An event is replay-complete only after structural projection and source
+    # adoption have finished. A prior error must not poison future replays.
+    await db.execute(
+        """UPDATE aios.ingest_event
+           SET process_status='processed', process_error=NULL, processed_at=now()
+           WHERE event_id=$1""",
+        event_id,
+    )
     return _ingest_out(
         event_id=event_id,
         node_id=node_id,
