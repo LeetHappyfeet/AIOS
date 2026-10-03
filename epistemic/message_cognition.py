@@ -599,7 +599,12 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
                 await CharacterSceneProjector(db).refresh(
                     instance_id, source_head_node_id=node_id
                 )
-        if summary.get("ambiguous_sentences") and summary.get("enrichment_pending"):
+        # Historical catch-up only persists candidate evidence. Its goal and
+        # enrichment consequences require the chronological reconciliation
+        # stage, rather than mutating current character state out of order.
+        if (not summary.get("historical_catchup")
+                and summary.get("ambiguous_sentences")
+                and summary.get("enrichment_pending")):
             from aios_app.pipeline.jobs import enqueue_job
             await enqueue_job(
                 db,job_type="message_cognition_enrichment",
@@ -658,6 +663,7 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
         "historical_catchup": not bool(live_head),
+        "enrichment_deferred": bool(not live_head and ambiguous),
         "goal_projection_deferred": bool(not live_head and any(
             u.claim_kind == "GOAL" and u.meta.get("character_owned") for u in units
         )),
