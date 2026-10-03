@@ -172,6 +172,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                   SELECT 1 FROM aios.ingest_event ie
                   WHERE ie.event_id=$1
                     AND ie.process_status IS DISTINCT FROM 'error'
+                    AND ie.process_error IS DISTINCT FROM 'participant_binding_pending'
               )
             ORDER BY created_at, node_id
             LIMIT 1
@@ -402,9 +403,11 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
     # adoption have finished. A prior error must not poison future replays.
     await db.execute(
         """UPDATE aios.ingest_event
-           SET process_status=CASE WHEN rdf_processed_at IS NOT NULL THEN 'done'::aios.process_status ELSE 'processing'::aios.process_status END, process_error=NULL
+           SET process_status=CASE WHEN rdf_processed_at IS NOT NULL THEN 'done'::aios.process_status ELSE 'processing'::aios.process_status END,
+               process_error=CASE WHEN $2 THEN NULL ELSE 'participant_binding_pending' END
            WHERE event_id=$1""",
         event_id,
+        bool(affected_instance_ids),
     )
     return _ingest_out(
         event_id=event_id,
