@@ -146,7 +146,7 @@ class MessageCognitionEnricher:
         active = await self.db.fetchrow(
             """SELECT request_id FROM aios.inference_request
                WHERE instance_id=$1 AND worker_class='message_cognition'
-                 AND task_id=$2 AND status='running'
+                 AND source_node_id=$2 AND status='running'
                  AND (lease_expires_at IS NULL OR lease_expires_at > now())
                ORDER BY created_at DESC LIMIT 1""",
             instance_id, node_id,
@@ -210,14 +210,25 @@ class MessageCognitionEnricher:
         try:
             result=await self.broker.infer(InferenceRequest(
                 instance_id=instance_id,worker_class="message_cognition",
-                task_id=node_id,
+                source_node_id=node_id,
                 prompt=prompt,allowed_actions={},output_schema={"type":"object",
                     "properties":{"units":{"type":"array"}},
                     "x-aios-envelope":"cognition-units-v1"},
                 temperature=0.0,max_tokens=450))
         except InferenceUnavailable:
-            # Optional enrichment must never make deterministic cognition fail.
+            # An unavailable remote endpoint must not make deterministic
+            # message cognition fail or release the historical review barrier.
             return 0
+        except Exception:
+            # Host-owned persistence/schema faults are not provider failures.
+            # Preserve the pending source receipt and surface the traceback
+            # to the pipeline runner rather than silently retrying forever.
+            import logging
+            logging.getLogger(__name__).exception(
+                "Historical cognition inference admission failed instance=%s node=%s",
+                instance_id, node_id,
+            )
+            raise
 
         raw=result.response.raw
         units=raw.get("units") if isinstance(raw,dict) else None
