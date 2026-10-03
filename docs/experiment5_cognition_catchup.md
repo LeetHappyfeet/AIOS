@@ -25,7 +25,8 @@ the effective version on top of the V8 implementation.
   commit. An existing zero-unit commit counts as handled.
 - Each pass processes at most 32 nodes; a worker invocation runs up to eight
   passes (256 nodes). Source timeline, exact character instance, perception,
-  DAG ancestry, and current head time bound are checked. Work uses the
+  DAG ancestry, current head time bound, and pinned source-head identity are
+  checked within the commit transaction. Work uses the
   FAST_SQL/BACKGROUND lane with instance partitioning.
 - Historical nodes may recover cognitive units, but their GOAL materialization,
   enrichment inference, and polarity supersession are **deferred**. They
