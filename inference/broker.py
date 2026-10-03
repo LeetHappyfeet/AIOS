@@ -30,12 +30,21 @@ class InferenceProviderBusy(RuntimeError):
     pass
 
 
+class InferenceProviderExecutionError(RuntimeError):
+    """Remote endpoint/transport failure, unlike an AIOS database failure."""
+
+
+class InferencePersistenceError(RuntimeError):
+    """Host-owned SQL/admission failure; must not damage provider health."""
+
+
 @dataclass(frozen=True)
 class InferenceRequest:
     instance_id: UUID
     worker_class: str
     prompt: str
     task_id: UUID | None = None
+    source_node_id: UUID | None = None
     context_state_version: int | None = None
     hud_profile_name: str | None = None
     allowed_actions: Mapping[str, Mapping[str, Any]] | None = None
@@ -179,11 +188,15 @@ class InferenceBroker:
             except (StructuredResponseError, InferenceProviderBusy) as exc:
                 last_error = exc
                 continue
-            except Exception as exc:
+            except InferenceProviderExecutionError as exc:
                 last_error = exc
                 await self.providers.record_health(
                     provider.provider_id, ok=False, error=str(exc)[:1000]
                 )
+            except (InferencePersistenceError, Exception):
+                # SQL, schema and host-side programming faults are not evidence
+                # of an unhealthy donated inference provider. Preserve traceback.
+                raise
         raise InferenceUnavailable(
             f"All inference providers failed for '{request.worker_class}': {last_error}"
         )
@@ -192,17 +205,18 @@ class InferenceBroker:
         self, provider: InferenceProvider, request: InferenceRequest
     ) -> InferenceResult:
         prompt_hash = hashlib.sha256(request.prompt.encode("utf-8")).hexdigest()
-        row = await self.db.execute_returning_row(
-            """
+        try:
+            row = await self.db.execute_returning_row(
+                """
             WITH provider_lock AS (
                 SELECT pg_advisory_xact_lock(hashtext(($3::uuid)::text))
             )
             INSERT INTO aios.inference_request (
-                instance_id, task_id, provider_id, worker_class, model,
+                instance_id, task_id, source_node_id, provider_id, worker_class, model,
                 context_state_version, hud_profile_name, prompt_hash,
                 allowed_actions, output_schema, status, attempts, started_at
             )
-            SELECT $1,$2,$3::uuid,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'running',1,now()
+            SELECT $1,$2,$11::uuid,$3::uuid,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'running',1,now()
             FROM provider_lock
             WHERE (
                 SELECT count(*) FROM aios.inference_request r
@@ -211,10 +225,10 @@ class InferenceBroker:
             ) < (
                 SELECT max_concurrency FROM aios.inference_provider WHERE provider_id=$3::uuid
             )
-              AND ($2::uuid IS NULL OR NOT EXISTS (
+              AND ($11::uuid IS NULL OR NOT EXISTS (
                   SELECT 1 FROM aios.inference_request previous
                   WHERE previous.instance_id=$1 AND previous.worker_class=$4
-                    AND previous.task_id=$2::uuid AND previous.status='running'
+                    AND previous.source_node_id=$11::uuid AND previous.status='running'
                     AND (previous.lease_expires_at IS NULL OR previous.lease_expires_at > now())
               ))
             RETURNING request_id
@@ -223,8 +237,13 @@ class InferenceBroker:
             request.worker_class, provider.model, request.context_state_version,
             request.hud_profile_name, prompt_hash,
             json.dumps(dict(request.allowed_actions or {})),
-            json.dumps(dict(request.output_schema)) if request.output_schema else None,
-        )
+                json.dumps(dict(request.output_schema)) if request.output_schema else None,
+                request.source_node_id,
+            )
+        except Exception as exc:
+            raise InferencePersistenceError(
+                "AIOS could not persist the inference request (check schema migration and source/task identity)"
+            ) from exc
         if not row:
             raise InferenceProviderBusy(f"Provider '{provider.provider_key}' reached concurrency limit")
         request_id = row["request_id"]
@@ -250,7 +269,10 @@ class InferenceBroker:
                     )
         lease_task = asyncio.create_task(renew_lease())
         try:
-            text = await self.client.complete(provider, request)
+            try:
+                text = await self.client.complete(provider, request)
+            except Exception as exc:
+                raise InferenceProviderExecutionError(str(exc)) from exc
             if request.choice_keys:
                 raw_choice = text.strip()
                 # The control protocol remains host-owned. Accept either the
