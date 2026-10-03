@@ -9,7 +9,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v8-source-owned"
+INTERPRETER_VERSION = "message-cognition-v9-candidate-admission"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -268,7 +268,7 @@ def _resolve_subject(subject: str | None, *, character_id: str, speaker_id: str 
         owner = speaker_id or viewpoint_id
         return owner, _same_identity(owner, character_id)
     if raw == "you":
-        # An external speaker addressing Renamon is not authoring Renamon's
+        # An external speaker addressing a character is not authoring that character's
         # beliefs, memories, rules, or goals. Preserve attributed source text.
         if speaker_id and not _same_identity(speaker_id, character_id):
             return character_id, False
@@ -337,7 +337,7 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
         return f"{subject} {predicate} {obj}."
     if candidate.kind == "GOAL":
         # Goal text is a presentation of semantic intent, not a grammatical
-        # rewrite of the source sentence. This avoids "I want" -> "Renamon want".
+        # rewrite of the source sentence. This avoids rendering an uninflected predicate for the character name.
         intent_type, _ = _goal_semantics(candidate)
         verb = "wants" if intent_type == "desire" else "intends"
         return f"{subject} {verb} {obj}."
@@ -468,6 +468,12 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
             reject(index, "external_goal_not_adopted", sentence)
             continue
         owner, character_owned = _resolve_subject(candidate.subject_text, character_id=character_id, speaker_id=speaker_id, viewpoint_id=viewpoint_id)
+        if not _same_identity(speaker_id, character_id) and candidate.kind in {
+            "MEMORY", "BELIEF", "RULE", "STATE", "RELATIONSHIP",
+        }:
+            # Externally attributed testimony is not self-authored subjective
+            # character state; retain observable claims with unowned provenance.
+            character_owned = False
         if candidate.kind in {"MEMORY", "BELIEF", "GOAL", "RULE"} and not character_owned:
             reject(index, "character_ownership_unresolved", sentence)
             continue
