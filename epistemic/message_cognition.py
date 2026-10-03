@@ -30,7 +30,7 @@ _COMMITMENT_RE = re.compile(
     r"(?P<object>[^.!?]{3,220})", re.I,
 )
 _REFUSAL_RE = re.compile(
-    r"\bI\s+(?:am\s+not|'m\s+not)\s+going\s+anywhere\b|"
+    r"\bI(?:\s+am\s+not|'m\s+not)\s+going\s+anywhere\b|"
     r"\bI\s+(?:will\s+not|won't|refuse\s+to)\s+leave\b", re.I,
 )
 _DISCOURSE_MARKER_RE = re.compile(r"\byou\s+know\s+what\s*[,—:]", re.I)
