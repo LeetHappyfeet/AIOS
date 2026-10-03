@@ -7,6 +7,7 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
+from aios_app.epistemic.goal_source_admission import review_goal_source
 from aios_app.epistemic.message_cognition import cognition_topic_key, _same_identity
 from aios_app.inference import InferenceBroker, InferenceRequest, InferenceUnavailable
 from aios_app.config import settings
@@ -91,6 +92,13 @@ def review_candidate_source(item: dict, excerpt: str, *,
         objective_words = _lexical_words(objective)
         if objective_words and len(objective_words & evidence) < max(1, min(2, len(objective_words))):
             return "objective_not_grounded_in_source"
+    if kind == "GOAL":
+        admission = review_goal_source(
+            source_text=excerpt, objective=objective,
+            horizon=str(item.get("horizon") or ""),
+        )
+        if not admission.managed:
+            return "source_admission:" + admission.decision + ":" + admission.reason
     # Prevent fluent hallucinated statements with no lexical source support.
     if len(words) >= 2 and not (words & evidence):
         return "candidate_text_not_grounded_in_source"
@@ -356,7 +364,8 @@ class MessageCognitionEnricher:
                         instance_id=instance_id,text=text,topic_key=topic,polarity=polarity,
                         source_node_id=node_id,source_unit_id=unit["unit_id"],
                         confidence=confidence,salience=.86,intent_type=intent_type,
-                        horizon=horizon,objective=objective)
+                        horizon=horizon,objective=objective,
+                        source_text=sentences[source_index])
                     if (goal is not None and polarity > 0 and goal.goal_id is not None
                             and schedule_decision == "schedule"
                             and intent_type in {"objective", "plan", "commitment"}
