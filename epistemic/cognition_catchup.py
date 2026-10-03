@@ -196,6 +196,20 @@ async def _cli() -> None:
             print(json.dumps(report, sort_keys=True), flush=True)
             if not report["more_possible"] or report["committed"] == 0:
                 break
+        for _ in range(args.max_batches):
+            finished = await finish_deferred_cognition(
+                db, instance_id=args.instance_id,
+            )
+            print(json.dumps(finished, default=str, sort_keys=True), flush=True)
+            if finished["status"] not in {
+                "source_inference_pending", "goal_reconciliation_pending",
+            }:
+                break
+            if finished["status"] == "source_inference_pending" and not finished["enrichment_completed"]:
+                break
+            reviewed = finished.get("goal_reconciliation") or {}
+            if finished["status"] == "goal_reconciliation_pending" and not reviewed.get("considered"):
+                break
     finally:
         await db.close()
 
