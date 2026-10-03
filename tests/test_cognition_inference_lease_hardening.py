@@ -111,3 +111,51 @@ def test_enricher_assigns_node_task_id_and_checks_existing_lease():
     assert "task_id=node_id" in source
     assert "AND task_id=$2 AND status='running'" in source
     assert "lease_expires_at IS NULL OR lease_expires_at > now()" in source
+
+
+
+def test_scheduler_queues_delayed_retry_without_creating_second_active_inference(monkeypatch):
+    from aios_app import runner_v2
+    instance=uuid4()
+    calls=[]
+    class DB:
+        async def fetchrow(self,sql,*args):
+            assert "status='queued'" in sql
+            return None
+    async def recovery(_db,*,instance_id,limit):
+        return {"more_possible":False,"committed":0}
+    async def finish(_db,*,instance_id):
+        return {"status":"source_inference_running","enrichment_completed":0}
+    async def enqueue(_db,**kwargs):
+        calls.append(kwargs)
+    from aios_app.epistemic import cognition_catchup
+    monkeypatch.setattr(cognition_catchup,"recover_missing_cognition",recovery)
+    monkeypatch.setattr(cognition_catchup,"finish_deferred_cognition",finish)
+    monkeypatch.setattr(runner_v2,"enqueue_job",enqueue)
+    asyncio.run(runner_v2.handle_message_cognition_catchup(
+        DB(),{"payload":{"instance_id":str(instance),"retry_count":1}},
+    ))
+    assert len(calls)==1
+    assert calls[0]["job_type"]=="message_cognition_catchup"
+    assert calls[0]["payload"]["retry_count"]==2
+    assert calls[0]["run_after"] is not None
+
+
+def test_scheduler_does_not_duplicate_queued_followup(monkeypatch):
+    from aios_app import runner_v2
+    instance=uuid4()
+    class DB:
+        async def fetchrow(self,sql,*args):
+            return {"job_id":uuid4()}
+    async def recovery(*_args,**_kwargs):
+        return {"more_possible":False,"committed":0}
+    async def finish(*_args,**_kwargs):
+        return {"status":"source_inference_unavailable","enrichment_completed":0}
+    async def enqueue(*_args,**_kwargs):
+        raise AssertionError("already queued")
+    monkeypatch.setattr(cognition_catchup,"recover_missing_cognition",recovery)
+    monkeypatch.setattr(cognition_catchup,"finish_deferred_cognition",finish)
+    monkeypatch.setattr(runner_v2,"enqueue_job",enqueue)
+    asyncio.run(runner_v2.handle_message_cognition_catchup(
+        DB(),{"payload":{"instance_id":str(instance)}},
+    ))
