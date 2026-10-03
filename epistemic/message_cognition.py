@@ -31,7 +31,9 @@ _COMMITMENT_RE = re.compile(
 )
 _REFUSAL_RE = re.compile(
     r"\bI(?:\s+am\s+not|'m\s+not)\s+going\s+anywhere\b|"
-    r"\bI\s+(?:will\s+not|won't|refuse\s+to)\s+leave\b", re.I,
+    r"\bI(?:\s+will\s+not|\s+won't|\s+refuse\s+to|"
+    r"\s+am\s+not\s+going\s+to|'m\s+not\s+going\s+to)"
+    r"\s+(?P<refused>[^.!?]{3,160})", re.I,
 )
 _DISCOURSE_MARKER_RE = re.compile(r"\byou\s+know\s+what\s*[,—:]", re.I)
 _GOAL_RE = re.compile(
@@ -355,8 +357,11 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
         return None
     if _QUESTION_RE.search(sentence):
         return None
-    if _REFUSAL_RE.search(sentence):
-        return ParsedCandidate("STATE", "I", "refuses", "to leave",
+    refused = _REFUSAL_RE.search(sentence)
+    if refused:
+        action = _clean_object(refused.group("refused") or "leave")
+        action = re.sub(r"(?i)^to\s+", "", action)
+        return ParsedCandidate("STATE", "I", "refuses", "to " + action,
                                0.89, "expressed_scene_refusal")
     match = _MEMORY_RE.search(sentence)
     if match:
