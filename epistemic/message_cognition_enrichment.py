@@ -159,8 +159,10 @@ class MessageCognitionEnricher:
                 except (TypeError,ValueError): source_index=-1
                 polarity=-1 if int(item.get("polarity",1) or 1)<0 else 1
                 if kind not in _ALLOWED_KINDS or not text or confidence<0.72:
+                    rejection_reasons.append({"source_index":source_index,"reason":"kind_text_or_confidence"})
                     continue
                 if source_index<0 or source_index>=len(sentences):
+                    rejection_reasons.append({"source_index":source_index,"reason":"unbound_source_index"})
                     continue
                 intent_type=str(item.get("intent_type") or "").lower() if kind=="GOAL" else ""
                 horizon=str(item.get("horizon") or "").lower() if kind=="GOAL" else ""
@@ -170,10 +172,12 @@ class MessageCognitionEnricher:
                         horizon, intent_type, sentences[source_index]
                     )
                     if intent_type not in {"desire","objective","plan","commitment","immediate_intention"}:
+                        rejection_reasons.append({"source_index":source_index,"reason":"unsupported_intent_type"})
                         continue
                     if (horizon not in {"immediate","scene","session","persistent"}
                             or not valid_goal_objective(objective)
                             or not _specific_commitment_objective(objective,intent_type)):
+                        rejection_reasons.append({"source_index":source_index,"reason":"invalid_horizon_or_objective"})
                         continue
                 schedule = item.get("schedule") if kind == "GOAL" else None
                 schedule_decision = (
@@ -249,6 +253,9 @@ class MessageCognitionEnricher:
                 else:
                     admitted += 1
                 if kind=="GOAL" and horizon not in {"immediate"}:
+                    if historical:
+                        historical_goal_seen=True
+                        continue
                     goal = await CharacterGoalService(self.db).reconcile_evidence(
                         instance_id=instance_id,text=text,topic_key=topic,polarity=polarity,
                         source_node_id=node_id,source_unit_id=unit["unit_id"],
