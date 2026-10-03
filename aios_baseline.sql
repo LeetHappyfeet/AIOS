@@ -839,18 +839,19 @@ BEGIN
         INSERT INTO aios.semantic_scope_projection_state (
             scope_key, scope_kind,
             dirty_version, projected_version,
-            status, dirty_at, updated_at
+            status, dirty_at, first_dirty_at, updated_at
         )
         VALUES (
             v_scope_key, 'character',
             1, 0,
-            'dirty', now(), now()
+            'dirty', now(), now(), now()
         )
         ON CONFLICT (scope_key) DO UPDATE
         SET scope_kind='character',
             dirty_version=aios.semantic_scope_projection_state.dirty_version + 1,
             status='dirty',
             dirty_at=now(),
+            first_dirty_at=CASE WHEN aios.semantic_scope_projection_state.dirty_version > aios.semantic_scope_projection_state.projected_version THEN COALESCE(aios.semantic_scope_projection_state.first_dirty_at, now()) ELSE now() END,
             last_error=NULL,
             updated_at=now();
     END IF;
