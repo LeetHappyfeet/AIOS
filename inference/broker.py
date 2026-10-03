@@ -193,7 +193,7 @@ class InferenceBroker:
                 await self.providers.record_health(
                     provider.provider_id, ok=False, error=str(exc)[:1000]
                 )
-            except (InferencePersistenceError, Exception):
+            except Exception:
                 # SQL, schema and host-side programming faults are not evidence
                 # of an unhealthy donated inference provider. Preserve traceback.
                 raise
@@ -233,10 +233,10 @@ class InferenceBroker:
               ))
             RETURNING request_id
             """,
-            request.instance_id, request.task_id, provider.provider_id,
-            request.worker_class, provider.model, request.context_state_version,
-            request.hud_profile_name, prompt_hash,
-            json.dumps(dict(request.allowed_actions or {})),
+                request.instance_id, request.task_id, provider.provider_id,
+                request.worker_class, provider.model, request.context_state_version,
+                request.hud_profile_name, prompt_hash,
+                json.dumps(dict(request.allowed_actions or {})),
                 json.dumps(dict(request.output_schema)) if request.output_schema else None,
                 request.source_node_id,
             )
