@@ -23,7 +23,8 @@ async def missing_cognition_nodes(db, *, instance_id: UUID, limit: int = BATCH_L
     return await db.fetch(
         """WITH RECURSIVE source_chain AS (
              SELECT head.node_id,head.timeline_id,head.event_id,
-                    ARRAY[head.node_id]::uuid[] AS visited,0 AS depth
+                    ARRAY[head.node_id]::uuid[] AS visited,0 AS depth,
+                    head.node_id AS root_node_id
              FROM aios.character_runtime_state rs
              JOIN aios.dag_node head
                ON head.node_id=rs.source_head_node_id
@@ -31,7 +32,8 @@ async def missing_cognition_nodes(db, *, instance_id: UUID, limit: int = BATCH_L
              WHERE rs.instance_id=$1
              UNION ALL
              SELECT parent.node_id,parent.timeline_id,parent.event_id,
-                    chain.visited || parent.node_id,chain.depth+1
+                    chain.visited || parent.node_id,chain.depth+1,
+                    chain.root_node_id
              FROM source_chain chain
              JOIN aios.dag_edge edge
                ON edge.timeline_id=chain.timeline_id
@@ -42,7 +44,7 @@ async def missing_cognition_nodes(db, *, instance_id: UUID, limit: int = BATCH_L
              WHERE chain.depth<4096
                AND NOT parent.node_id=ANY(chain.visited)
            )
-           SELECT DISTINCT dn.node_id,dn.event_id
+           SELECT DISTINCT dn.node_id,dn.event_id,chain.root_node_id
            FROM source_chain chain
            JOIN aios.dag_node dn ON dn.node_id=chain.node_id
            JOIN aios.character_runtime_state rs
@@ -84,6 +86,7 @@ async def recover_missing_cognition(db, *, instance_id: UUID,
         try:
             if await commit_message_cognition(
                 db, instance_id=instance_id, node_id=node["node_id"],
+                expected_head_node_id=node.get("root_node_id"),
             ):
                 committed += 1
             else:
