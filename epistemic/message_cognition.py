@@ -340,6 +340,8 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
         # rewrite of the source sentence. This avoids rendering an uninflected predicate for the character name.
         intent_type, _ = _goal_semantics(candidate)
         verb = "wants" if intent_type == "desire" else "intends"
+        if intent_type == "commitment" and not obj.casefold().startswith("to "):
+            obj = "to " + obj
         return f"{subject} {verb} {obj}."
     if candidate.kind in {"RULE", "STATE"}:
         return f"{subject} {predicate} {obj}."
