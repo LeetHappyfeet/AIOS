@@ -68,7 +68,7 @@ _RELATIONSHIP_RE = re.compile(
 )
 _RELATIONSHIP_SUBJECT_RE = re.compile(
     r"(?:^|[\s\"'“‘(])(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
-    r"(?=\s+(?:am|is|are|was|were|be|being|become|became|remain|remains|trust|trusts|distrust|distrusts|work|works)\b|"
+    r"(?=\s+(?:am|is|are|was|were|be|being|become|became|remain|remains|trust|trusts|distrust|distrusts|work|works|offer|offers|offered|help|helps|helped)\b|"
     r"(?:['’](?:m|re|s|ve|d|ll))\b)",
     re.I,
 )
@@ -402,10 +402,17 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
     if match and _STATE_TERMS_RE.search(match.group("object")):
         return ParsedCandidate("STATE", match.group("subject"), match.group("verb"), match.group("object"), 0.86, "bounded_state_predicate")
     if _EVENT_RE.search(sentence):
-        # Sentence position is not entity resolution. Narrative prose such as
-        # "Beneath..." or "The collar..." must remain owner-unresolved rather
-        # than promoting the first token to a semantic subject.
-        return ParsedCandidate("EVENT", None, "event", sentence, 0.70, "event_predicate")
+        # Explicit leading pronouns have a grammatical actor. Other narrative
+        # openings (prepositions, description, location) remain unresolved.
+        lead = re.match(
+            r"^\s*[\"'*]*(?P<actor>I|he|she|they|we)\s+"
+            r"(?:tried|attempted|arrived|left|moved|entered|escaped|attacked|"
+            r"fought|gave|took|opened|closed|activated|deactivated|created|"
+            r"destroyed|transferred|rescued|captured|released|changed|"
+            r"returned|appeared|vanished)\b", sentence, re.I,
+        )
+        subject = lead.group("actor") if lead else None
+        return ParsedCandidate("EVENT", subject, "event", sentence, 0.70, "event_predicate")
     return None
 
 
