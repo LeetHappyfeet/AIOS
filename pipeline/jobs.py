@@ -411,10 +411,18 @@ async def fetch_next_job(
                      AND q.created_at <= now() - interval '5 minutes'
                     THEN 0 ELSE 1
                 END ASC,
+                -- Aged RDF maintenance must eventually outrank continuously
+                -- replenished DEFAULT projection work. Before aging, prefer
+                -- DEFAULT to preserve observation publication responsiveness.
                 CASE
                     WHEN $1::text = 'RDF'
                      AND q.scheduling_lane = 'BACKGROUND'
-                    THEN 1 ELSE 0
+                     AND q.created_at <= now() - interval '2 minutes'
+                    THEN -1
+                    WHEN $1::text = 'RDF'
+                     AND q.scheduling_lane = 'BACKGROUND'
+                    THEN 1
+                    ELSE 0
                 END ASC,
                 CASE
                     WHEN $5::boolean
