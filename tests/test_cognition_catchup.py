@@ -70,6 +70,7 @@ def test_gap_scan_is_ancestry_and_perception_scoped():
     assert "WITH RECURSIVE source_chain" in db.query
     assert "edge.parent_node_id" in db.query
     assert "chain.visited" in db.query
+    assert "chain.root_node_id" in db.query
     assert "mp.perceived" in db.query
     assert "c.instance_id=rs.instance_id" in db.query
     assert "NOT EXISTS" in db.query
@@ -90,7 +91,9 @@ def test_scan_rejects_unbounded_batch(limit):
 
 def test_recovery_processes_missing_events_in_source_order(monkeypatch):
     instance = uuid4()
-    nodes = [{"node_id": uuid4(), "event_id": event_id}
+    pinned_head = uuid4()
+    nodes = [{"node_id": uuid4(), "event_id": event_id,
+              "root_node_id": pinned_head}
              for event_id in (9, 10, 11, 12, 13, 14)]
     called = []
 
@@ -99,7 +102,8 @@ def test_recovery_processes_missing_events_in_source_order(monkeypatch):
         assert limit == 32
         return nodes
 
-    async def fake_commit(_db, *, instance_id, node_id):
+    async def fake_commit(_db, *, instance_id, node_id, expected_head_node_id=None):
+        assert expected_head_node_id == pinned_head
         called.append(node_id)
         return True
 
@@ -131,4 +135,6 @@ def test_historical_recovery_cannot_move_current_cursor():
     assert "source_head_node_id=$2" in cursor
     assert "cognitive_ready_event_id <= $3" in cursor
     assert "historical_catchup" in commit
+    assert "expected_head_node_id" in commit
+    assert "FOR SHARE OF rs" in commit
     assert "if live_head:" in commit
