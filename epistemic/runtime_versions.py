@@ -17,4 +17,5 @@ def component_versions() -> dict[str, str]:
         "participation_primary": participation.POLICY_VERSION,
         "participation_v2": participation.COMPARISON_VERSION,
         "participation_v3": participation.V3_VERSION,
+        "participation_v4": participation.V4_VERSION,
     }
