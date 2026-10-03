@@ -664,6 +664,7 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
         "historical_catchup": not bool(live_head),
         "enrichment_deferred": bool(not live_head and ambiguous),
+        "polarity_reconciliation_deferred": not bool(live_head),
         "goal_projection_deferred": bool(not live_head and any(
             u.claim_kind == "GOAL" and u.meta.get("character_owned") for u in units
         )),
@@ -703,10 +704,14 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
             commit_id, ordinal, unit.claim_kind, unit.text, unit.topic_key, unit.polarity,
             unit.salience, unit.confidence, json.dumps(unit.meta),
         )
-        await _reconcile_unit(
-            con, instance_id=instance_id, unit_id=unit_row["unit_id"], claim_kind=unit.claim_kind,
-            topic_key=unit.topic_key, polarity=unit.polarity,
-        )
+        if live_head:
+            await _reconcile_unit(
+                con, instance_id=instance_id, unit_id=unit_row["unit_id"],
+                claim_kind=unit.claim_kind, topic_key=unit.topic_key,
+                polarity=unit.polarity,
+            )
+        # Historical units remain active as source evidence, but cannot
+        # supersede newer live cognitive units out of temporal order.
         if (live_head and unit.claim_kind == "GOAL"
                 and bool(unit.meta.get("character_owned"))):
             # Older recovered evidence is persisted as a unit but cannot
