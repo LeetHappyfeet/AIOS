@@ -137,6 +137,44 @@ async def recover_missing_cognition(db, *, instance_id: UUID,
 
 
 
+async def finish_deferred_cognition(db, *, instance_id: UUID,
+                                    enrichment_limit: int = 4,
+                                    goal_batch_limit: int = 64) -> dict:
+    """Complete historical inference before making recovered goals authoritative.
+
+    The API returns explicit pending/blocked states; unavailable local inference
+    must never silently turn an unreviewed source into authoritative memory.
+    """
+    if await missing_cognition_nodes(db, instance_id=instance_id, limit=1):
+        return {"status": "source_cognition_pending", "enrichment_completed": 0,
+                "goal_reconciliation": None}
+    awaiting = await deferred_enrichment_nodes(
+        db, instance_id=instance_id, limit=enrichment_limit,
+    )
+    if awaiting:
+        from aios_app.epistemic.message_cognition_enrichment import MessageCognitionEnricher
+        enricher = MessageCognitionEnricher(db)
+        for node in awaiting:
+            await enricher.run(instance_id=instance_id, node_id=node["node_id"])
+    remaining = await deferred_enrichment_nodes(
+        db, instance_id=instance_id, limit=1,
+    )
+    before_ids = {str(node["node_id"]) for node in awaiting}
+    after_ids = {str(node["node_id"]) for node in remaining}
+    completed = len(before_ids - after_ids)
+    if remaining:
+        return {
+            "status": "source_inference_pending" if completed else "source_inference_unavailable",
+            "enrichment_completed": completed, "goal_reconciliation": None,
+        }
+    from aios_app.epistemic.deferred_goal_reconciliation import reconcile_deferred_goals
+    outcome = await reconcile_deferred_goals(
+        db, instance_id=instance_id, limit=goal_batch_limit,
+    )
+    return {"status": "goal_reconciliation_pending" if outcome["remaining"] else "ready",
+            "enrichment_completed": completed, "goal_reconciliation": outcome}
+
+
 async def _cli() -> None:
     """Operator recovery of old gaps without a new roleplay turn."""
     import argparse
