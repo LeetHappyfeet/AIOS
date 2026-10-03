@@ -20,6 +20,10 @@ jobs:
         run: |
           python -m py_compile \
             epistemic/message_cognition.py \
+            epistemic/epistemic_scope.py \
+            epistemic/message_cognition_enrichment.py \
+            epistemic/cognition_catchup.py \
+            epistemic/deferred_goal_reconciliation.py \
             epistemic/semantic_interpreter.py \
             epistemic/knowledge.py \
             epistemic/normalizer.py \
@@ -30,6 +34,10 @@ jobs:
             runner.py \
             runner_v2.py \
             tests/test_message_cognition.py \
+            tests/test_cognition_admission_v9.py \
+            tests/test_cognition_catchup.py \
+            tests/test_deferred_goal_reconciliation.py \
+            tests/test_goal_admission_flow_v9.py \
             tests/test_hud_semantic_regressions.py \
             tests/test_knowledge_admission.py \
             tests/test_runner_stage_scheduling.py
@@ -40,6 +48,10 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" \
             python -m pytest -q \
               tests/test_message_cognition.py \
+              tests/test_cognition_admission_v9.py \
+              tests/test_cognition_catchup.py \
+              tests/test_deferred_goal_reconciliation.py \
+              tests/test_goal_admission_flow_v9.py \
               tests/test_hud_semantic_regressions.py \
               tests/test_knowledge_admission.py \
               tests/test_runner_stage_scheduling.py
