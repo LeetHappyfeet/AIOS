@@ -402,7 +402,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
     # adoption have finished. A prior error must not poison future replays.
     await db.execute(
         """UPDATE aios.ingest_event
-           SET process_status='processed', process_error=NULL, processed_at=now()
+           SET process_status=CASE WHEN rdf_processed_at IS NOT NULL THEN 'done'::aios.process_status ELSE 'processing'::aios.process_status END, process_error=NULL
            WHERE event_id=$1""",
         event_id,
     )
