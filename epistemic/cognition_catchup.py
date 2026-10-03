@@ -148,9 +148,40 @@ async def finish_deferred_cognition(db, *, instance_id: UUID,
     if await missing_cognition_nodes(db, instance_id=instance_id, limit=1):
         return {"status": "source_cognition_pending", "enrichment_completed": 0,
                 "goal_reconciliation": None}
+    # Reap only actually expired leases. Never mutate an active request
+    # merely because its HTTP connection seems idle (large local models can
+    # legitimately run until the configured timeout).
+    from aios_app.inference.providers import InferenceProviderStore
+    reaped = await InferenceProviderStore(db).reap_stale_requests()
     awaiting = await deferred_enrichment_nodes(
         db, instance_id=instance_id, limit=enrichment_limit,
     )
+    # Older requests may have no task_id; serialize catch-up at instance
+    # scope while any valid message-cognition lease is outstanding.
+    active = await db.fetchrow(
+        """SELECT request_id,task_id,status,created_at,lease_expires_at,
+                  last_progress_at
+           FROM aios.inference_request
+           WHERE instance_id=$1 AND worker_class='message_cognition'
+             AND status='running'
+             AND (lease_expires_at IS NULL OR lease_expires_at > now())
+           ORDER BY created_at ASC LIMIT 1""", instance_id,
+    )
+    if awaiting and active:
+        return {
+            "status": "source_inference_running",
+            "enrichment_completed": 0, "remaining_enrichment_sample": len(awaiting),
+            "reaped_expired_requests": reaped,
+            "latest_inference": {
+                "request_id": str(active["request_id"]),
+                "task_id": str(active["task_id"]) if active["task_id"] else None,
+                "status": "running",
+                "created_at": str(active["created_at"]),
+                "lease_expires_at": str(active["lease_expires_at"]),
+                "last_progress_at": str(active["last_progress_at"]),
+            },
+            "goal_reconciliation": None,
+        }
     if awaiting:
         from aios_app.epistemic.message_cognition_enrichment import MessageCognitionEnricher
         enricher = MessageCognitionEnricher(db)
@@ -174,13 +205,15 @@ async def finish_deferred_cognition(db, *, instance_id: UUID,
                ORDER BY created_at DESC LIMIT 1""", instance_id,
         )
         outcome = "source_inference_pending" if completed else (
-            "source_inference_invalid_response" if latest and latest["status"] == "invalid"
+            "source_inference_running" if latest and latest["status"] == "running"
+            else "source_inference_invalid_response" if latest and latest["status"] == "invalid"
             else "source_inference_failed" if latest and latest["status"] == "failed"
             else "source_inference_unavailable"
         )
         return {
             "status": outcome, "enrichment_completed": completed,
             "remaining_enrichment_sample": len(remaining),
+            "reaped_expired_requests": reaped,
             "latest_inference": ({
                 "request_id": str(latest["request_id"]),
                 "status": latest["status"],
