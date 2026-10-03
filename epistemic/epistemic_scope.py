@@ -43,14 +43,14 @@ _QUESTION_RE = re.compile(r"\?\s*[\"'”’\)\]]*\s*$")
 # Only split when the right side begins like an explicit finite clause. This
 # keeps ordinary parenthetical/emphatic dashes intact. Contracted auxiliaries
 # count as finite clauses too (I'm, you're, she's, we've, they'll, etc.).
-_STRONG_BOUNDARY_RE = re.compile(r"\s*(?:—|;|\s--\s)\s*")
+_STRONG_BOUNDARY_RE = re.compile(r"\s*(?:—|;|\s--\s|,\s+but\s+)\s*")
 _INDEPENDENT_RIGHT_RE = re.compile(
     r"^(?:[\"'“‘]*)\s*(?:"
     r"(?:I|you|he|she|we|they|it)(?:(?:'|’)(?:m|re|s|ve|d|ll))?"
     r"|[A-Z][A-Za-z0-9_-]*"
     r")\s+"
     r"(?:am|is|are|was|were|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must|not|"
-    r"[A-Za-z]+(?:s|ed))\b",
+    r"[A-Za-z]+(?:s|ed)|[A-Za-z]{2,})\b",
     re.I,
 )
 
