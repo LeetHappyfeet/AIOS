@@ -9,10 +9,11 @@ def test_component_version_manifest_reflects_loaded_code():
     assert versions["message_cognition"] == message_cognition.INTERPRETER_VERSION
     assert versions["semantic_integrity"] == semantic_integrity.INTEGRITY_VERSION
     assert versions["participation_v3"] == participation.V3_VERSION
-    assert versions["message_cognition"] == "message-cognition-v9-candidate-admission+epistemic-scope-v1"
-    assert message_cognition.BASE_INTERPRETER_VERSION == "message-cognition-v9-candidate-admission"
+    assert versions["participation_v4"] == participation.V4_VERSION
+    assert versions["message_cognition"] == "message-cognition-v10-temporal-intent+epistemic-scope-v1"
+    assert message_cognition.BASE_INTERPRETER_VERSION == "message-cognition-v10-temporal-intent"
     assert message_cognition.SCOPE_POLICY_VERSION == "epistemic-scope-v1"
-    assert versions["semantic_integrity"] == "semantic-integrity-v3-fidelity"
+    assert versions["semantic_integrity"] == "semantic-integrity-v4-source-coverage"
 
 
 def test_experiment_and_cognition_persist_runtime_provenance():
