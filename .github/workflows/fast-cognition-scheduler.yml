@@ -44,6 +44,7 @@ jobs:
             tests/test_cognition_v10_temporal_intention.py \
             tests/test_experiment6_fidelity_v4.py \
             tests/test_participation_v4_source_roles.py \
+            tests/test_cognition_diagnostics.py \
             tests/test_hud_semantic_regressions.py \
             tests/test_knowledge_admission.py \
             tests/test_runner_stage_scheduling.py
@@ -61,6 +62,7 @@ jobs:
               tests/test_cognition_v10_temporal_intention.py \
               tests/test_experiment6_fidelity_v4.py \
               tests/test_participation_v4_source_roles.py \
+              tests/test_cognition_diagnostics.py \
               tests/test_semantic_integrity_experiment.py \
               tests/test_runtime_version_manifest.py \
               tests/test_hud_semantic_regressions.py \
