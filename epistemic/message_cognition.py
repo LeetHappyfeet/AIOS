@@ -517,7 +517,11 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
                 "semantic_owner": owner, "character_owned": character_owned,
                 "sentence_index": index, "source_text": sentence[:500],
                 "predicate": candidate.predicate.lower(), "object": _clean_object(candidate.object_text),
-                "parse_reason": candidate.reason, "persistence": _PERSISTENCE[candidate.kind],
+                "parse_reason": candidate.reason,
+                "scene_position": (
+                    "refusal" if candidate.reason == "expressed_scene_refusal" else None
+                ),
+                "persistence": _PERSISTENCE[candidate.kind],
                 "parse_confidence": confidence, "epistemic_confidence": 0.72 if character_owned else 0.58,
                 **goal_meta,
             },
@@ -730,6 +734,11 @@ async def _commit_message_cognition_locked(
     summary = {
         "unit_count": len(units), "kinds": sorted({unit.claim_kind for unit in units}),
         "candidate_audit_version": "cognition-candidate-audit-v1",
+        "candidate_outcome": (
+            "explicit_units" if units else
+            "bounded_enrichment_pending" if ambiguous else
+            "zero_units_explained"
+        ),
         "candidate_rejections": candidate_diagnostics,
         "candidate_rejection_count": len(candidate_diagnostics),
         "candidate_audit_complete": len(candidate_diagnostics) < 32,
