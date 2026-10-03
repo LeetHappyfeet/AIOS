@@ -431,7 +431,7 @@ def _score_candidate(candidate: ParsedCandidate, *, character_owned: bool, index
     return max(0.0, min(1.0, score))
 
 
-def interpret_message(text: str, *, character_id: str, speaker_id: str | None, speaker_role: str | None, viewpoint_id: str | None) -> list[CognitiveUnit]:
+def interpret_message(text: str, *, character_id: str, speaker_id: str | None, speaker_role: str | None, viewpoint_id: str | None, diagnostics: list[dict] | None = None) -> list[CognitiveUnit]:
     sentences = _sentences(text)
     if not sentences:
         return []
@@ -439,13 +439,25 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
     ranked: list[tuple[float, int, CognitiveUnit]] = []
     seen_sources: set[str] = set()
     seen_semantics: set[tuple[str, str, int]] = set()
+    def reject(index: int, reason: str, source: str) -> None:
+        if diagnostics is not None and len(diagnostics) < 32:
+            diagnostics.append({"sentence_index": index, "reason": reason,
+                                "source_excerpt": source[:240]})
+
     for index, sentence in enumerate(sentences):
         normalized_source = " ".join(_WORD_RE.findall(sentence.lower()))
         if not normalized_source or normalized_source in seen_sources:
+            reject(index, "empty_or_duplicate", sentence)
             continue
         seen_sources.add(normalized_source)
         candidate = _parse_sentence(sentence)
         if candidate is None:
+            reason = ("question" if _QUESTION_RE.search(sentence) else
+                      "discourse_marker" if _DISCOURSE_MARKER_RE.search(sentence) else
+                      "ambiguous_intention_or_agreement" if re.search(
+                          r"(?i)\b(?:deal|agreed|accept|rather|going to need)\b",
+                          sentence) else "no_supported_candidate")
+            reject(index, reason, sentence)
             continue
         # An external request addressed to the character is not an adopted goal.
         # The fast-path goal writer requires self-authored intention evidence.
@@ -453,9 +465,11 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
             str(candidate.subject_text or "").casefold() == "you"
             or not _same_identity(speaker_id, character_id)
         ):
+            reject(index, "external_goal_not_adopted", sentence)
             continue
         owner, character_owned = _resolve_subject(candidate.subject_text, character_id=character_id, speaker_id=speaker_id, viewpoint_id=viewpoint_id)
         if candidate.kind in {"MEMORY", "BELIEF", "GOAL", "RULE"} and not character_owned:
+            reject(index, "character_ownership_unresolved", sentence)
             continue
         polarity = _goal_polarity(sentence, candidate) if candidate.kind == "GOAL" else (-1 if _NEGATION_RE.search(sentence) else 1)
         canonical = _canonical_text(candidate, owner=owner)
@@ -466,6 +480,7 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         )
         semantic_key = (candidate.kind, topic_key, polarity)
         if semantic_key in seen_semantics:
+            reject(index, "duplicate_semantic_candidate", sentence)
             continue
         seen_semantics.add(semantic_key)
         salience = _score_candidate(candidate, character_owned=character_owned, index=index, total=len(sentences))
@@ -495,6 +510,9 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         ranked.append((salience, index, unit))
     ranked.sort(key=lambda value: (-value[0], value[1]))
     selected = ranked[:MAX_UNITS]
+    if len(ranked) > MAX_UNITS:
+        for _, index, unit in ranked[MAX_UNITS:]:
+            reject(index, "unit_budget_exceeded", str(unit.meta.get("source_text") or ""))
     selected.sort(key=lambda value: value[1])
     return [unit for _, _, unit in selected]
 
@@ -549,6 +567,7 @@ def ambiguous_cognition_sentences(
         signals=(
             "i'll ","i will ","i'm going to ","i am going to ","i should ",
             "i could ","my goal","my plan","counter-offer","standing offer",
+            "deal.","deal,","agreed.","agreed,","i accept","i'm going to need",
             "i'm learning","i am learning","i'd rather","i would rather",
         )
         if explicit_timer_goal or any(signal in lower for signal in signals):
@@ -683,9 +702,11 @@ async def _commit_message_cognition_locked(
     if existing and existing["source_text_hash"] == digest and existing["interpreter_version"] == INTERPRETER_VERSION:
         await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
         return True
+    candidate_diagnostics: list[dict] = []
     units = interpret_message(
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
         speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
+        diagnostics=candidate_diagnostics,
     )
     ambiguous = ambiguous_cognition_sentences(
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
@@ -693,6 +714,9 @@ async def _commit_message_cognition_locked(
     )
     summary = {
         "unit_count": len(units), "kinds": sorted({unit.claim_kind for unit in units}),
+        "candidate_audit_version": "cognition-candidate-audit-v1",
+        "candidate_rejections": candidate_diagnostics,
+        "candidate_rejection_count": len(candidate_diagnostics),
         "runtime_versions": _runtime_versions(),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
