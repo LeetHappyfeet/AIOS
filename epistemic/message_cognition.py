@@ -259,8 +259,10 @@ def _resolve_subject(subject: str | None, *, character_id: str, speaker_id: str 
         owner = speaker_id or viewpoint_id
         return owner, _same_identity(owner, character_id)
     if raw == "you":
+        # An external speaker addressing Renamon is not authoring Renamon's
+        # beliefs, memories, rules, or goals. Preserve attributed source text.
         if speaker_id and not _same_identity(speaker_id, character_id):
-            return character_id, True
+            return character_id, False
         return "other", False
     if raw in {"she", "he", "they", "it"}:
         if viewpoint_aliases & character_aliases:
@@ -334,6 +336,9 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
 
 
 def _parse_sentence(sentence: str) -> ParsedCandidate | None:
+    # Discourse marker is not a knowledge assertion by the addressee.
+    if re.search(r"\byou\s+know\s+what\s*[,—:]", sentence, re.I):
+        return None
     if _QUESTION_RE.search(sentence):
         return None
     match = _MEMORY_RE.search(sentence)
@@ -582,10 +587,18 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
                WHERE instance_id=$1 AND node_id=$2""",instance_id,node_id)
         summary = CharacterGoalService._json_object(row["summary"]) if row else {}
         if "GOAL" in summary.get("kinds", []):
-            # Goal reconciliation above runs on the transaction connection.
-            # Scene projection must happen only after commit, using Database.
-            from aios_app.epistemic.scene_resolver import CharacterSceneProjector
-            await CharacterSceneProjector(db).refresh(instance_id)
+            # Replaying an old source node can recover an intention without
+            # writing a historical scene over the current HUD head.
+            live = await db.fetchval(
+                "SELECT 1 FROM aios.character_hud_readiness "
+                "WHERE instance_id=$1 AND source_head_node_id=$2",
+                instance_id, node_id,
+            )
+            if live:
+                from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+                await CharacterSceneProjector(db).refresh(
+                    instance_id, source_head_node_id=node_id
+                )
         if summary.get("ambiguous_sentences") and summary.get("enrichment_pending"):
             from aios_app.pipeline.jobs import enqueue_job
             await enqueue_job(
@@ -709,7 +722,8 @@ async def _advance_cognitive_cursor_on_connection(
         UPDATE aios.character_hud_readiness
         SET cognitive_ready_node_id=$2, cognitive_ready_event_id=$3,
             retrieval_ready_node_id=$2, retrieval_ready_event_id=$3, updated_at=now()
-        WHERE instance_id=$1
+        WHERE instance_id=$1 AND source_head_node_id=$2
+          AND (cognitive_ready_event_id IS NULL OR cognitive_ready_event_id <= $3)
         """,
         instance_id, node_id, event_id,
     )
@@ -721,7 +735,8 @@ async def _advance_cognitive_cursor(db: Database, *, instance_id: UUID, node_id:
         UPDATE aios.character_hud_readiness
         SET cognitive_ready_node_id=$2, cognitive_ready_event_id=$3,
             retrieval_ready_node_id=$2, retrieval_ready_event_id=$3, updated_at=now()
-        WHERE instance_id=$1
+        WHERE instance_id=$1 AND source_head_node_id=$2
+          AND (cognitive_ready_event_id IS NULL OR cognitive_ready_event_id <= $3)
         """,
         instance_id, node_id, event_id,
     )
