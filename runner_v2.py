@@ -110,6 +110,7 @@ async def handle_message_cognition_catchup(db: Database, job: Dict[str, Any]) ->
         if not report["more_possible"] or report["committed"] == 0:
             break
     from aios_app.epistemic.cognition_catchup import finish_deferred_cognition
+    outcome = None
     for _ in range(2):
         outcome = await finish_deferred_cognition(db, instance_id=instance_id)
         logger.info("Cognition history completion instance=%s result=%s",
@@ -123,6 +124,33 @@ async def handle_message_cognition_catchup(db: Database, job: Dict[str, Any]) ->
         reviewed = outcome.get("goal_reconciliation") or {}
         if outcome["status"] == "goal_reconciliation_pending" and not reviewed.get("considered"):
             break
+    # A completed pipeline job cannot resume itself after DNS or provider
+    # recovery. Schedule bounded, delayed continuation without tight loops.
+    if outcome and outcome["status"] in {
+        "source_inference_running", "source_inference_pending",
+        "source_inference_failed", "source_inference_invalid_response",
+        "source_inference_unavailable", "goal_reconciliation_pending",
+    }:
+        from datetime import datetime, timedelta, timezone
+        retry_count = max(0, min(12, int(payload.get("retry_count") or 0)))
+        delay = min(900, 60 * (2 ** min(retry_count, 4)))
+        if outcome["status"] == "source_inference_running":
+            delay = max(120, delay)
+        existing = await db.fetchrow(
+            """SELECT job_id FROM aios.pipeline_job
+               WHERE job_type='message_cognition_catchup'
+                 AND payload->>'instance_id'=$1
+                 AND status='queued'
+               LIMIT 1""", str(instance_id),
+        )
+        if not existing:
+            await enqueue_job(
+                db, job_type="message_cognition_catchup",
+                payload={"instance_id": str(instance_id),
+                         "retry_count": min(retry_count + 1, 12)},
+                priority=65,
+                run_after=datetime.now(timezone.utc) + timedelta(seconds=delay),
+            )
 
 base.JOB_HANDLERS["message_cognition_catchup"] = handle_message_cognition_catchup
 
