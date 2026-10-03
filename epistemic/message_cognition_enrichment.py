@@ -40,6 +40,63 @@ def _specific_commitment_objective(objective: str, intent_type: str) -> bool:
     return len(re.findall(r"[A-Za-z0-9]+", objective)) >= 2
 
 
+ENRICHMENT_ADMISSION_VERSION = "bounded-enrichment-admission-v2-source"
+
+
+def _lexical_words(value: str) -> set[str]:
+    return {word for word in re.findall(r"[a-z0-9]+", value.casefold())
+            if len(word) >= 3 and word not in {
+                "the", "and", "for", "you", "your", "that", "this", "with",
+                "from", "have", "will", "not", "are", "was", "were", "into",
+            }}
+
+
+def review_candidate_source(item: dict, excerpt: str, *,
+                            parent_context: str = "") -> str | None:
+    """Conservative source-bound admission; no inferred goal authority.
+
+    A parent's actual utterance can provide context to future adjudication,
+    but never transfers its terms into a one-word acceptance automatically.
+    Rejected candidates remain in the per-commit audit for later review.
+    """
+    kind = str(item.get("kind") or "").upper()
+    text = " ".join(str(item.get("text") or "").split())
+    objective = " ".join(str(item.get("objective") or "").split())
+    source = excerpt.casefold().replace("’", "'")
+    words = _lexical_words(text)
+    evidence = _lexical_words(excerpt)
+    if kind == "GOAL":
+        # The source snippet must support the candidate's own lexical
+        # assertion; an agreement token alone does not establish its terms.
+        if re.fullmatch(r"[\W]*(?:deal|okay|ok|agreed|fine|yes|sure)[\W]*",
+                        text.casefold()):
+            return "elliptical_agreement_requires_explicit_adoption"
+        if re.search(r"\b(?:deal|agreed|okay|ok|fine|yes|sure)\b", source) and (
+            len(words - {"deal", "agreed", "okay", "fine", "yes", "sure"}) == 0
+        ):
+            return "elliptical_agreement_requires_explicit_adoption"
+        # Refusal and avoidance can be meaningful scene state, but must not
+        # automatically create a positive managed task to pursue the negation.
+        if (re.search(r"\b(?:won't|will not|not going to|rather not|don't want|do not want|refuse to)\b", source)
+                and re.search(r"\b(?:not|avoid|refus|don't|won't)\b", (text + " " + objective).casefold())):
+            return "refusal_or_avoidance_not_positive_goal"
+        # A present request for another party's furniture or permission is
+        # not a self-authored durable plan without explicit own action.
+        if (str(item.get("horizon") or "").casefold() == "immediate"
+                and re.search(r"\b(?:going to need|need|want)\s+(?:the|a|an)\s+\w+", source)
+                and not re.search(r"\b(?:i'll|i will|i'm going to)\s+(?:get|take|move|bring|fetch|do|make)\b", source)):
+            return "immediate_request_not_managed_goal"
+        # Never admit an objective created almost entirely from other
+        # dialogue: substantive objective anchors must appear in the source.
+        objective_words = _lexical_words(objective)
+        if objective_words and len(objective_words & evidence) < max(1, min(2, len(objective_words))):
+            return "objective_not_grounded_in_source"
+    # Prevent fluent hallucinated statements with no lexical source support.
+    if len(words) >= 2 and not (words & evidence):
+        return "candidate_text_not_grounded_in_source"
+    return None
+
+
 class MessageCognitionEnricher:
     """Bounded LLM adjudication for semantic units missed by the cheap parser.
 
@@ -139,7 +196,9 @@ class MessageCognitionEnricher:
         try:
             result=await self.broker.infer(InferenceRequest(
                 instance_id=instance_id,worker_class="message_cognition",
-                prompt=prompt,allowed_actions={},output_schema={"type":"object"},
+                prompt=prompt,allowed_actions={},output_schema={"type":"object",
+                    "properties":{"units":{"type":"array"}},
+                    "x-aios-envelope":"cognition-units-v1"},
                 temperature=0.0,max_tokens=450))
         except InferenceUnavailable:
             # Optional enrichment must never make deterministic cognition fail.
@@ -166,6 +225,14 @@ class MessageCognitionEnricher:
                     continue
                 if source_index<0 or source_index>=len(sentences):
                     rejection_reasons.append({"source_index":source_index,"reason":"unbound_source_index"})
+                    continue
+                source_rejection = review_candidate_source(
+                    item, sentences[source_index], parent_context=parent_context,
+                )
+                if source_rejection:
+                    rejection_reasons.append({"source_index":source_index,
+                                              "reason":source_rejection,
+                                              "admission_version":ENRICHMENT_ADMISSION_VERSION})
                     continue
                 intent_type=str(item.get("intent_type") or "").lower() if kind=="GOAL" else ""
                 horizon=str(item.get("horizon") or "").lower() if kind=="GOAL" else ""
@@ -298,10 +365,14 @@ class MessageCognitionEnricher:
                    'enrichment_pending',false,'enrichment_deferred',false,
                    'enrichment_request_id',$3::text,'enrichment_admitted',$4::integer,
                    'enrichment_rejections',$5::jsonb,
+                   'enrichment_admission_version','bounded-enrichment-admission-v2-source',
+                   'enrichment_response_envelope',$7::text,
                    'goal_projection_deferred',$6::boolean),
                    enrichment_completed_at=now()
                WHERE instance_id=$1 AND node_id=$2""",
             instance_id,node_id,str(result.request_id),admitted,
             json.dumps(rejection_reasons),
-            bool(summary.get("goal_projection_deferred") or historical_goal_seen))
+            bool(summary.get("goal_projection_deferred") or historical_goal_seen),
+            str(result.response.raw.get("_aios_response_envelope") or
+                "see_inference_request_response_json"))
         return admitted
