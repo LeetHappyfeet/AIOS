@@ -62,6 +62,8 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "goal_formulation_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
     "message_cognition_enrichment": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
     "message_cognition_catchup": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
+    "character_inquiry_shadow": JobSpec(ResourceClass.FAST_SQL, "instance_id", True),
+    "character_inquiry_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
 }
 
 
@@ -74,7 +76,8 @@ def job_spec(job_type: str) -> JobSpec:
 
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
-    if job_type == "message_cognition_catchup":
+    if job_type in {"message_cognition_catchup","character_inquiry_shadow",
+                    "character_inquiry_inference"}:
         return SchedulingLane.BACKGROUND
     if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "goal_formulation_inference", "message_cognition_enrichment"}:
         return SchedulingLane.LIVE

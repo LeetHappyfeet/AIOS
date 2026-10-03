@@ -84,6 +84,32 @@ async def handle_goal_formulation_inference(db: Database, job: Dict[str, Any]) -
 
 base.JOB_HANDLERS["goal_formulation_inference"] = handle_goal_formulation_inference
 
+
+async def handle_character_inquiry_inference(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.cognitive_operations import CognitiveOperationEngine
+    operation_id = (job.get("payload") or {}).get("operation_id")
+    if not operation_id:
+        raise ValueError("character_inquiry_inference requires operation_id")
+    await CognitiveOperationEngine(db).complete_inquiry(UUID(str(operation_id)))
+
+
+base.JOB_HANDLERS["character_inquiry_inference"] = handle_character_inquiry_inference
+
+
+async def handle_character_inquiry_shadow(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.epistemic.inquiry.shadow import scan_v11_rejections
+    payload = job.get("payload") or {}
+    if not payload.get("instance_id") or not payload.get("node_id"):
+        raise ValueError("character_inquiry_shadow needs instance_id and node_id")
+    await scan_v11_rejections(
+        db, instance_id=UUID(str(payload["instance_id"])),
+        node_id=UUID(str(payload["node_id"])))
+
+
+base.JOB_HANDLERS["character_inquiry_shadow"] = handle_character_inquiry_shadow
+
 async def handle_message_cognition_enrichment(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
     from aios_app.epistemic.message_cognition_enrichment import MessageCognitionEnricher
@@ -93,6 +119,23 @@ async def handle_message_cognition_enrichment(db: Database, job: Dict[str, Any])
     await MessageCognitionEnricher(db).run(
         instance_id=UUID(str(payload["instance_id"])),
         node_id=UUID(str(payload["node_id"])))
+    # Post-enrichment shadow diagnostic is independently queued; lookup never
+    # blocks parser admission or historical completion.
+    try:
+        completed = await db.fetchrow(
+            """SELECT summary FROM aios.message_cognitive_commit
+               WHERE instance_id=$1 AND node_id=$2
+                 AND enrichment_completed_at IS NOT NULL""",
+            UUID(str(payload["instance_id"])),UUID(str(payload["node_id"])))
+        summary = str(completed["summary"]) if completed else ""
+        if ("source_admission:unresolved_reference:" in summary or
+                "source_admission:attribution_unresolved:" in summary):
+            await enqueue_job(
+                db,job_type="character_inquiry_shadow",
+                payload={"instance_id":str(payload["instance_id"]),
+                         "node_id":str(payload["node_id"])},priority=35)
+    except Exception:
+        logger.exception("Optional source inquiry shadow enqueue failed")
 
 base.JOB_HANDLERS["message_cognition_enrichment"] = handle_message_cognition_enrichment
 
@@ -161,7 +204,7 @@ _original_resolve_partition_key = base._resolve_partition_key
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
-    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup"} and payload.get("instance_id"):
+    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference"} and payload.get("instance_id"):
         return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])

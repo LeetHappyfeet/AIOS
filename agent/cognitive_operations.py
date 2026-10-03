@@ -62,6 +62,48 @@ class CognitiveOperationEngine:
                     instance_id=op["instance_id"],query=str(payload.get("query") or ""),limit=8)
                 await self._finish(op,{"kind":"inquiry","research_id":str(found.research_id),
                                        "status":found.status,"hits":found.reference_context()})
+            elif kind=="inquiry.resolve":
+                from aios_app.epistemic.inquiry.contracts import InquiryDemand
+                from aios_app.epistemic.inquiry.service import CharacterInquiryService
+                payload=self._mapping(op["input"])
+                if isinstance(payload.get("demand"), dict):
+                    demand=InquiryDemand.from_dict(payload["demand"])
+                    if demand.instance_id != op["instance_id"]:
+                        raise PermissionError("inquiry instance mismatch")
+                else:
+                    question=str(payload.get("query") or payload.get("focus") or "").strip()[:600]
+                    demand=InquiryDemand(
+                        instance_id=op["instance_id"], source_node_id=op.get("source_node_id"),
+                        origin="character_cognition", uncertainty_kind="explicit_question",
+                        question=question, evidence_scope="character_accessible",
+                        evidence_revision=f"{op.get('source_state_version')}:{op.get('source_node_id')}")
+                service=CharacterInquiryService(self.db)
+                receipt=await service.resolve(
+                    demand,allow_model=bool(payload.get("allow_model",False)))
+                if (receipt.get("plan_eligible") and
+                        await service.claim_plan(UUID(receipt["inquiry_id"]))):
+                    await self.db.execute(
+                        """UPDATE aios.character_cognitive_operation SET
+                           status='waiting_inference',result=$2::jsonb,updated_at=now()
+                           WHERE operation_id=$1 AND status='running'""",
+                        op["operation_id"],json.dumps(receipt))
+                    job_id=await enqueue_job(
+                        self.db,job_type="character_inquiry_inference",
+                        payload={"instance_id":str(op["instance_id"]),
+                                 "operation_id":str(op["operation_id"])},priority=140)
+                    if job_id is None:
+                        await self.db.execute(
+                            """UPDATE aios.character_inquiry SET status=$2,updated_at=now()
+                               WHERE inquiry_id=$1 AND status='planning'""",
+                            UUID(receipt["inquiry_id"]),receipt["status"])
+                        await self.db.execute(
+                            """UPDATE aios.character_cognitive_operation SET status='running'
+                               WHERE operation_id=$1 AND status='waiting_inference'""",
+                            op["operation_id"])
+                        await self._finish(op,{"kind":"inquiry",**receipt,
+                                              "planner_status":"not_queued"})
+                else:
+                    await self._finish(op,{"kind":"inquiry",**receipt})
             elif kind in {"reflection.review","planning.review","executive.review"}:
                 await self._queue_decision(op)
             elif kind=="planning.form_goal":
@@ -75,6 +117,30 @@ class CognitiveOperationEngine:
         except Exception as exc:
             await self._fail(op, exc)
             raise
+
+    async def complete_inquiry(self, operation_id: UUID) -> None:
+        """Run the optional planner off the deterministic cognitive-operation lane."""
+        row=await self.db.fetchrow(
+            """SELECT * FROM aios.character_cognitive_operation
+               WHERE operation_id=$1 AND status='waiting_inference'
+                 AND operation_type='inquiry.resolve'""",operation_id)
+        if not row:
+            return
+        op=dict(row)
+        receipt=self._mapping(op.get("result"))
+        if not receipt.get("inquiry_id"):
+            await self._fail(op,ValueError("missing inquiry audit identifier"))
+            return
+        from aios_app.epistemic.inquiry.service import CharacterInquiryService
+        result=await CharacterInquiryService(self.db).plan_and_retry(
+            UUID(str(receipt["inquiry_id"])))
+        changed=await self.db.execute_returning_row(
+            """UPDATE aios.character_cognitive_operation SET status='running',
+                      updated_at=now()
+               WHERE operation_id=$1 AND status='waiting_inference'
+               RETURNING operation_id""",operation_id)
+        if changed:
+            await self._finish(op,{"kind":"inquiry",**result})
 
     async def form_goal(self, operation_id: UUID) -> None:
         """One bounded planning inference, executed in the isolated inference lane."""
@@ -313,6 +379,11 @@ class CognitiveOperationEngine:
         await self._finish_side_effects(op,result)
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
+        if op.get("operation_type")=="inquiry.resolve":
+            # Retrieval is not completion of the original cognitive episode,
+            # source integrity, or a goal. Resume only an explicit caller.
+            await self._resume_source_task(op,status="succeeded",result=result)
+            return
         if op.get("source_node_id"):
             from aios_app.agent.admission import AutonomyAdmissionService
             await AutonomyAdmissionService(self.db).mark_episode_succeeded(
