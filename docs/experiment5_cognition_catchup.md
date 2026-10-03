@@ -37,8 +37,21 @@ the effective version on top of the V8 implementation.
 
 ## Explicit offline recovery (no new roleplay turn)
 
-After pulling and restarting the pipeline workers, a bounded manual recovery
-command is also available:
+**Apply the queue-index migration before restarting workers.** Existing
+`ux_pipeline_job_global_active` would otherwise treat all instance-only
+catch-up jobs as one global job, incorrectly suppressing other characters.
+The migration preserves uniqueness for ordinary global jobs and introduces
+`ux_pipeline_job_cognition_catchup_active` keyed by actual instance:
+
+```bash
+cd ~/AIOS/aios_app/beta
+psql 'postgresql://aios:aios@127.0.0.1:5432/aiosdb_fresh_test' \\
+  -v ON_ERROR_STOP=1 \\
+  -f migrations/current/20261003_01_cognition_catchup_queue.sql
+```
+
+After pulling, applying the migration and restarting workers, a bounded
+manual recovery command is also available:
 
 \`\`\`bash
 cd ~/AIOS/aios_app/beta
@@ -49,7 +62,7 @@ python -m aios_app.epistemic.cognition_catchup \
 
 It prints one JSON receipt per bounded batch. Inspect completion by joining
 the same source DAG nodes against \`message_cognitive_commit\` as in the
-Experiment 5 diagnosis. No migration is required for this first patch.
+Experiment 5 diagnosis. The queue-index migration above is required before processing the new job type.
 
 ## Deliberately reserved for patch two (before the next experiment)
 
