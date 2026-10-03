@@ -29,7 +29,11 @@ def test_explicit_positive_and_contracted_commitments():
 
 
 def test_refusal_is_scene_position_not_new_actionable_goal():
-    for line in ("I'm not going anywhere.", "I won't leave."):
+    for line in (
+        "I'm not going anywhere.", "I won't leave.",
+        "I will not disclose the details.",
+        "I'm not going to sign the contract.",
+    ):
         units = extract(line)
         assert not any(u.claim_kind == "GOAL" for u in units)
         assert any(u.claim_kind == "STATE" and u.polarity == 1
