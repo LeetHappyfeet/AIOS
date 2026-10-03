@@ -5185,6 +5185,7 @@ CREATE TABLE aios.semantic_scope_projection_state (
     projected_version bigint DEFAULT 0 NOT NULL,
     status text DEFAULT 'dirty'::text NOT NULL,
     dirty_at timestamp with time zone,
+    first_dirty_at timestamp with time zone,
     projected_at timestamp with time zone,
     last_error text,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
