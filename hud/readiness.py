@@ -140,9 +140,7 @@ async def mark_matching_runtime_dirty(
             instance_id=instance_id,
             node_id=source_head_node_id,
         )
-        await enqueue_cognition_catchup(
-            db, instance_id=instance_id, node_id=source_head_node_id,
-        )
+        await enqueue_cognition_catchup(db, instance_id=instance_id)
         from aios_app.world.conversation import reconcile_runtime_observations
         try:
             await reconcile_runtime_observations(db, instance_id=instance_id)
@@ -356,14 +354,12 @@ async def _enqueue_live_job(
     return True
 
 
-async def enqueue_cognition_catchup(
-    db: Database, *, instance_id: UUID, node_id: UUID,
-) -> None:
-    """Repair missing ancestors; source-head node keys active-job dedup."""
+async def enqueue_cognition_catchup(db: Database, *, instance_id: UUID) -> None:
+    """Repair missing ancestors; queued/running jobs deduplicate per instance."""
     await enqueue_job(
         db,
         job_type="message_cognition_catchup",
-        payload={"instance_id": str(instance_id), "node_id": str(node_id)},
+        payload={"instance_id": str(instance_id)},
         priority=65,
     )
 
