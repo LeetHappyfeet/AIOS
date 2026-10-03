@@ -17,6 +17,7 @@ from aios_app.pipeline.jobs import enqueue_job
 logger = logging.getLogger("aios.pipeline.runner")
 
 RDF_PROJECTION_SCHEDULER_SECONDS = 5.0
+COGNITION_RECOVERY_SCHEDULER_SECONDS = 60.0
 
 
 async def handle_project_semantic_scope(db: Database, job: Dict[str, Any]) -> None:
@@ -733,6 +734,35 @@ async def _projection_scheduler_loop() -> None:
         await db.close()
 
 
+
+async def _deferred_cognition_recovery_loop(
+    interval: float = COGNITION_RECOVERY_SCHEDULER_SECONDS,
+) -> None:
+    """Independent restart recovery: no dependency on a surviving catch-up job."""
+    from aios_app.epistemic.cognition_recovery_sweep import enqueue_abandoned_enrichment
+    from aios_app.inference.providers import InferenceProviderStore
+
+    db = Database(settings.db_dsn, min_size=1, max_size=2)
+    await db.connect()
+    try:
+        while True:
+            try:
+                # Inference leases are reclaimed even when no catch-up is
+                # currently executing; only expired leases may be mutated.
+                reaped = await InferenceProviderStore(db).reap_stale_requests()
+                enqueued = await enqueue_abandoned_enrichment(db, limit=16)
+                if reaped or enqueued:
+                    logger.info(
+                        "Deferred cognition sweep reaped=%s enqueued=%s",
+                        reaped, enqueued,
+                    )
+            except Exception:
+                logger.exception("Failed deferred cognition recovery sweep")
+            await asyncio.sleep(interval)
+    finally:
+        await db.close()
+
+
 async def run_runner(poll_interval: float = 1.0) -> None:
     projector = asyncio.create_task(
         _projection_scheduler_loop(),
@@ -742,12 +772,19 @@ async def run_runner(poll_interval: float = 1.0) -> None:
         _pipeline_telemetry_loop(),
         name="pipeline-telemetry",
     )
+    cognition_recovery = asyncio.create_task(
+        _deferred_cognition_recovery_loop(),
+        name="deferred-cognition-recovery-scheduler",
+    )
     try:
         await base.run_runner(poll_interval=poll_interval)
     finally:
         projector.cancel()
         telemetry.cancel()
-        await asyncio.gather(projector, telemetry, return_exceptions=True)
+        cognition_recovery.cancel()
+        await asyncio.gather(
+            projector, telemetry, cognition_recovery, return_exceptions=True,
+        )
 
 
 if __name__ == "__main__":
