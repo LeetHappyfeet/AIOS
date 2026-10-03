@@ -140,6 +140,20 @@ class MessageCognitionEnricher:
             )
             return 0
 
+        # A still-leased inference for this source has admission authority.
+        # Repeated scheduler or manual catch-up invocations must not start
+        # a second review (nor release the historical projection barrier).
+        active = await self.db.fetchrow(
+            """SELECT request_id FROM aios.inference_request
+               WHERE instance_id=$1 AND worker_class='message_cognition'
+                 AND task_id=$2 AND status='running'
+                 AND (lease_expires_at IS NULL OR lease_expires_at > now())
+               ORDER BY created_at DESC LIMIT 1""",
+            instance_id, node_id,
+        )
+        if active:
+            return 0
+
         # A short character reply may refer to a plan offered in the parent
         # turn. Read only the actual DAG parent and expose it as neutral context.
         parent = await self.db.fetchrow(
@@ -196,6 +210,7 @@ class MessageCognitionEnricher:
         try:
             result=await self.broker.infer(InferenceRequest(
                 instance_id=instance_id,worker_class="message_cognition",
+                task_id=node_id,
                 prompt=prompt,allowed_actions={},output_schema={"type":"object",
                     "properties":{"units":{"type":"array"}},
                     "x-aios-envelope":"cognition-units-v1"},
