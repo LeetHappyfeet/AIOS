@@ -18,6 +18,7 @@ RDF_DELTA_TARGET_BYTES = 512 * 1024
 RDF_DELTA_TARGET_OBJECTS = 128
 RDF_DB_PAGE_SIZE = 2000
 RDF_PROJECTION_QUIET_SECONDS = 30.0
+RDF_PROJECTION_MAX_AGE_SECONDS = 300.0
 RDF_PROJECTION_PRIORITY = 200
 
 
@@ -629,12 +630,15 @@ async def project_semantic_scope(
                (
                     dirty_at IS NULL
                     OR dirty_at <= now() - make_interval(secs => $2)
+                    OR COALESCE(projected_at, created_at)
+                       <= now() - make_interval(secs => $3)
                ) AS quiet_ready
         FROM aios.semantic_scope_projection_state
         WHERE scope_key=$1
         """,
         scope_key,
         RDF_PROJECTION_QUIET_SECONDS,
+        RDF_PROJECTION_MAX_AGE_SECONDS,
     )
     if not state:
         return {"scope_key": scope_key, "projected": False, "reason": "not_dirty"}
@@ -796,6 +800,8 @@ async def enqueue_dirty_scope_jobs(db: Database, *, limit: int = 64) -> int:
           AND (
                 s.dirty_at IS NULL
                 OR s.dirty_at <= now() - make_interval(secs => $2)
+                OR COALESCE(s.projected_at, s.created_at)
+                   <= now() - make_interval(secs => $3)
           )
           AND NOT EXISTS (
               SELECT 1
@@ -809,6 +815,7 @@ async def enqueue_dirty_scope_jobs(db: Database, *, limit: int = 64) -> int:
         """,
         limit,
         RDF_PROJECTION_QUIET_SECONDS,
+        RDF_PROJECTION_MAX_AGE_SECONDS,
     )
     if not rows:
         return 0
