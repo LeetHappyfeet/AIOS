@@ -80,7 +80,8 @@ def review_goal_source(
     suffix = source[match_span[1]:] if match_span is not None else source
     if (_FIGURATIVE_LEAD.search(prefix)
             or _NONLITERAL_LEAD.search(prefix)
-            or _AFTER_EMBEDDED_SPEECH.search(suffix)):
+            or _AFTER_EMBEDDED_SPEECH.search(suffix)
+            or _AFTER_EMBEDDED_SPEECH.search(source)):
         return GoalAdmission("nonliteral_statement",
                              "narrator_implied_or_imagined_first_person", "narration")
     if not action.strip():
