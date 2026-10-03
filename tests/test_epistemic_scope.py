@@ -4,12 +4,14 @@ from aios_app.epistemic.epistemic_scope import (
     classify_scope,
     split_strong_clauses,
 )
-from aios_app.epistemic.message_cognition import INTERPRETER_VERSION, interpret_message
+from aios_app.epistemic import message_cognition as cognition
+from aios_app.epistemic.epistemic_scope import install_message_cognition_scope_guard
 from aios_app.epistemic.semantic_frames import decompose_sentence
 
 
 def _cognition(text: str):
-    return interpret_message(
+    install_message_cognition_scope_guard(cognition)
+    return cognition.interpret_message(
         text,
         character_id="Shego_001",
         speaker_id="Shego_001",
@@ -24,7 +26,8 @@ def test_scope_classifier_marks_supposition_and_condition():
 
 
 def test_fast_cognition_does_not_promote_hypothetical_belief():
-    assert INTERPRETER_VERSION == "message-cognition-v7"
+    install_message_cognition_scope_guard(cognition)
+    assert cognition.INTERPRETER_VERSION == "message-cognition-v10-temporal-intent+epistemic-scope-v1"
     units = _cognition("Let's say I believe you.")
     assert not any(unit.claim_kind == "BELIEF" for unit in units)
 

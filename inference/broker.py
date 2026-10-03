@@ -17,6 +17,7 @@ from .protocol import (
     StructuredInferenceResponse,
     StructuredResponseError,
     extract_json_object,
+    extract_inference_payload,
     validate_structured_response,
 )
 
@@ -29,12 +30,21 @@ class InferenceProviderBusy(RuntimeError):
     pass
 
 
+class InferenceProviderExecutionError(RuntimeError):
+    """Remote endpoint/transport failure, unlike an AIOS database failure."""
+
+
+class InferencePersistenceError(RuntimeError):
+    """Host-owned SQL/admission failure; must not damage provider health."""
+
+
 @dataclass(frozen=True)
 class InferenceRequest:
     instance_id: UUID
     worker_class: str
     prompt: str
     task_id: UUID | None = None
+    source_node_id: UUID | None = None
     context_state_version: int | None = None
     hud_profile_name: str | None = None
     allowed_actions: Mapping[str, Mapping[str, Any]] | None = None
@@ -178,11 +188,15 @@ class InferenceBroker:
             except (StructuredResponseError, InferenceProviderBusy) as exc:
                 last_error = exc
                 continue
-            except Exception as exc:
+            except InferenceProviderExecutionError as exc:
                 last_error = exc
                 await self.providers.record_health(
                     provider.provider_id, ok=False, error=str(exc)[:1000]
                 )
+            except Exception:
+                # SQL, schema and host-side programming faults are not evidence
+                # of an unhealthy donated inference provider. Preserve traceback.
+                raise
         raise InferenceUnavailable(
             f"All inference providers failed for '{request.worker_class}': {last_error}"
         )
@@ -191,17 +205,18 @@ class InferenceBroker:
         self, provider: InferenceProvider, request: InferenceRequest
     ) -> InferenceResult:
         prompt_hash = hashlib.sha256(request.prompt.encode("utf-8")).hexdigest()
-        row = await self.db.execute_returning_row(
-            """
+        try:
+            row = await self.db.execute_returning_row(
+                """
             WITH provider_lock AS (
                 SELECT pg_advisory_xact_lock(hashtext(($3::uuid)::text))
             )
             INSERT INTO aios.inference_request (
-                instance_id, task_id, provider_id, worker_class, model,
+                instance_id, task_id, source_node_id, provider_id, worker_class, model,
                 context_state_version, hud_profile_name, prompt_hash,
                 allowed_actions, output_schema, status, attempts, started_at
             )
-            SELECT $1,$2,$3::uuid,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'running',1,now()
+            SELECT $1,$2,$11::uuid,$3::uuid,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'running',1,now()
             FROM provider_lock
             WHERE (
                 SELECT count(*) FROM aios.inference_request r
@@ -210,14 +225,25 @@ class InferenceBroker:
             ) < (
                 SELECT max_concurrency FROM aios.inference_provider WHERE provider_id=$3::uuid
             )
+              AND ($11::uuid IS NULL OR NOT EXISTS (
+                  SELECT 1 FROM aios.inference_request previous
+                  WHERE previous.instance_id=$1 AND previous.worker_class=$4
+                    AND previous.source_node_id=$11::uuid AND previous.status='running'
+                    AND (previous.lease_expires_at IS NULL OR previous.lease_expires_at > now())
+              ))
             RETURNING request_id
             """,
-            request.instance_id, request.task_id, provider.provider_id,
-            request.worker_class, provider.model, request.context_state_version,
-            request.hud_profile_name, prompt_hash,
-            json.dumps(dict(request.allowed_actions or {})),
-            json.dumps(dict(request.output_schema)) if request.output_schema else None,
-        )
+                request.instance_id, request.task_id, provider.provider_id,
+                request.worker_class, provider.model, request.context_state_version,
+                request.hud_profile_name, prompt_hash,
+                json.dumps(dict(request.allowed_actions or {})),
+                json.dumps(dict(request.output_schema)) if request.output_schema else None,
+                request.source_node_id,
+            )
+        except Exception as exc:
+            raise InferencePersistenceError(
+                "AIOS could not persist the inference request (check schema migration and source/task identity)"
+            ) from exc
         if not row:
             raise InferenceProviderBusy(f"Provider '{provider.provider_key}' reached concurrency limit")
         request_id = row["request_id"]
@@ -243,7 +269,10 @@ class InferenceBroker:
                     )
         lease_task = asyncio.create_task(renew_lease())
         try:
-            text = await self.client.complete(provider, request)
+            try:
+                text = await self.client.complete(provider, request)
+            except Exception as exc:
+                raise InferenceProviderExecutionError(str(exc)) from exc
             if request.choice_keys:
                 raw_choice = text.strip()
                 # The control protocol remains host-owned. Accept either the
@@ -270,10 +299,19 @@ class InferenceBroker:
                     expression="", actions=(), raw=payload
                 )
             else:
-                payload = extract_json_object(text)
+                if (request.output_schema or {}).get("x-aios-envelope") == "cognition-units-v1" and request.allowed_actions != {}:
+                    raise StructuredResponseError("cognition envelope requires no-action request")
+                payload, envelope_kind = extract_inference_payload(
+                    text, output_schema=request.output_schema,
+                )
                 structured = validate_structured_response(
                     payload, allowed_actions=request.allowed_actions
                 )
+                if (request.output_schema or {}).get("x-aios-envelope") == "cognition-units-v1":
+                    structured = StructuredInferenceResponse(
+                        expression=structured.expression, actions=structured.actions,
+                        raw={**structured.raw, "_aios_response_envelope": envelope_kind},
+                    )
             latency_ms = int((time.monotonic() - started) * 1000)
             await self.db.execute(
                 """

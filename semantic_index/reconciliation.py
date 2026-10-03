@@ -247,6 +247,8 @@ async def _semantic_event_evidence(db: Database, proposition_id: UUID) -> dict[s
         SELECT observation_id, claim_id, timeline_id, dag_node_id
         FROM aios.observation
         WHERE proposition_id=$1
+          AND aios.semantic_occurrence_topology_eligible(claim_id,proposition_id)
+          AND aios.semantic_claim_topology_admitted(claim_id)
         ORDER BY observed_at
         LIMIT 1
         """,
@@ -367,7 +369,7 @@ async def _resolve_semantic_event_pair(
             )
             VALUES ($1,$2,$3,$4,'active',$5,$6,$7::jsonb,now(),now())
             ON CONFLICT (event_key) DO UPDATE
-            SET confidence=GREATEST(aios.semantic_event.confidence, EXCLUDED.confidence),
+            SET status='active', confidence=GREATEST(aios.semantic_event.confidence, EXCLUDED.confidence),
                 updated_at=now()
             RETURNING semantic_event_id
             """,
@@ -488,6 +490,8 @@ async def reconcile_neighbor_relations_once(
         WHERE r.embedding_version=$1
           AND r.classifier_version=$2
           AND r.status='candidate'
+          AND aios.semantic_proposition_topology_admitted(r.proposition_id)
+          AND aios.semantic_proposition_topology_admitted(r.neighbor_proposition_id)
           AND (
               (r.relation <> 'SAME_EVENT' AND r.confidence >= $3)
               OR (
@@ -536,7 +540,7 @@ async def reconcile_neighbor_relations_once(
         NEIGHBOR_CLASSIFIER_VERSION,
         cfg.reconcile_relation_min_confidence,
         list(PAIR_EDGE_TYPES) + ["SAME_EVENT"],
-        cfg.batch_size,
+        getattr(cfg, "reconciliation_batch_size", cfg.batch_size),
     )
     written = 0
     affected_scopes: set[str] = set()
@@ -778,6 +782,25 @@ async def _retract_superseded_cluster_topology(
     return {str(row["scope_key"]) for row in rows}
 
 
+async def retract_superseded_clusters_once(
+    db: Database, cfg: SemanticIndexConfig,
+) -> int:
+    """Retire stale region pivots without creating or promoting clusters.
+
+    Node deletion cascades to derived edges and emits durable RDF deltas.
+    Mark affected receipts pending so projection failures remain retryable.
+    """
+    scopes = await _retract_superseded_cluster_topology(db)
+    if scopes:
+        await db.execute(
+            """UPDATE aios.semantic_reconciliation_receipt
+               SET rdf_dataset=NULL, rdf_graph=NULL, updated_at=now()
+               WHERE scope_key=ANY($1::text[])""",
+            sorted(scopes),
+        )
+    return len(scopes)
+
+
 async def reconcile_clusters_once(
     db: Database,
     fuseki: FusekiClient,
@@ -799,6 +822,10 @@ async def reconcile_clusters_once(
         JOIN aios.semantic_cluster_candidate c ON c.cluster_id=cc.cluster_id
         WHERE cc.classifier_version=$1
           AND cc.status='candidate'
+          AND c.status='candidate'
+          AND NOT EXISTS (SELECT 1 FROM aios.semantic_cluster_membership m
+              WHERE m.cluster_id=c.cluster_id
+                AND NOT aios.semantic_proposition_topology_admitted(m.proposition_id))
           AND cc.confidence >= $2
           AND cc.classification <> 'UNRESOLVED'
         ORDER BY cc.confidence DESC, cc.created_at
@@ -1049,6 +1076,13 @@ async def reconcile_boundaries_once(
         FROM aios.semantic_boundary_classification bc
         WHERE bc.classifier_version=$1
           AND bc.status='candidate'
+          AND EXISTS (SELECT 1 FROM aios.semantic_cluster_candidate c
+              WHERE c.cluster_id=bc.cluster_a_id AND c.status='candidate')
+          AND EXISTS (SELECT 1 FROM aios.semantic_cluster_candidate c
+              WHERE c.cluster_id=bc.cluster_b_id AND c.status='candidate')
+          AND NOT EXISTS (SELECT 1 FROM aios.semantic_cluster_membership m
+              WHERE m.cluster_id IN (bc.cluster_a_id,bc.cluster_b_id)
+                AND NOT aios.semantic_proposition_topology_admitted(m.proposition_id))
           AND bc.confidence >= $2
           AND bc.classification <> 'UNRESOLVED'
         ORDER BY bc.confidence DESC, bc.created_at
@@ -1267,6 +1301,11 @@ async def reconcile_semantic_structure_once(
     fuseki: FusekiClient,
     cfg: SemanticIndexConfig,
 ) -> int:
+    # Compatibility entry point for explicit full-structure consumers.
+    # The normal semantic loop calls the stages independently.
+    from .validation_adapter import record_new_relation_decisions
+    await record_new_relation_decisions(
+        db, limit=getattr(cfg, "validation_batch_size", max(100, cfg.batch_size * 4)))
     pair_count = await reconcile_neighbor_relations_once(db, fuseki, cfg)
     cluster_count = await reconcile_clusters_once(db, fuseki, cfg)
     boundary_count = await reconcile_boundaries_once(db, fuseki, cfg)

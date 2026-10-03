@@ -7,7 +7,8 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
-from aios_app.epistemic.message_cognition import cognition_topic_key
+from aios_app.epistemic.goal_source_admission import review_goal_source
+from aios_app.epistemic.message_cognition import cognition_topic_key, _same_identity
 from aios_app.inference import InferenceBroker, InferenceRequest, InferenceUnavailable
 from aios_app.config import settings
 from aios_app.agent.temporal import TemporalTriggerStore, resolve_goal_time_expression
@@ -34,7 +35,78 @@ def _specific_commitment_objective(objective: str, intent_type: str) -> bool:
     """Reject one-word commitment objects such as an ungrounded ``go``."""
     if intent_type != "commitment":
         return True
+    normalized = " ".join(objective.casefold().split())
+    if normalized in {"do it", "go there", "learn how", "handle it", "make it happen"}:
+        return False
     return len(re.findall(r"[A-Za-z0-9]+", objective)) >= 2
+
+
+ENRICHMENT_ADMISSION_VERSION = "bounded-enrichment-admission-v2-source"
+
+
+def _lexical_words(value: str) -> set[str]:
+    return {word for word in re.findall(r"[a-z0-9]+", value.casefold())
+            if len(word) >= 3 and word not in {
+                "the", "and", "for", "you", "your", "that", "this", "with",
+                "from", "have", "will", "not", "are", "was", "were", "into",
+            }}
+
+
+def review_candidate_source(item: dict, excerpt: str, *,
+                            parent_context: str = "") -> str | None:
+    """Conservative source-bound admission; no inferred goal authority.
+
+    A parent's actual utterance can provide context to future adjudication,
+    but never transfers its terms into a one-word acceptance automatically.
+    Rejected candidates remain in the per-commit audit for later review.
+    """
+    kind = str(item.get("kind") or "").upper()
+    text = " ".join(str(item.get("text") or "").split())
+    objective = " ".join(str(item.get("objective") or "").split())
+    source = excerpt.casefold().replace("’", "'")
+    words = _lexical_words(text)
+    evidence = _lexical_words(excerpt)
+    if kind == "GOAL":
+        # The source snippet must support the candidate's own lexical
+        # assertion; an agreement token alone does not establish its terms.
+        if re.fullmatch(r"[\W]*(?:deal|okay|ok|agreed|fine|yes|sure)[\W]*",
+                        text.casefold()):
+            return "elliptical_agreement_requires_explicit_adoption"
+        if re.search(r"\b(?:deal|agreed|okay|ok|fine|yes|sure)\b", source) and (
+            len(words - {"deal", "agreed", "okay", "fine", "yes", "sure"}) == 0
+        ):
+            return "elliptical_agreement_requires_explicit_adoption"
+        # Refusal and avoidance can be meaningful scene state, but must not
+        # automatically create a positive managed task to pursue the negation.
+        if (re.search(r"\b(?:won't|will not|not going to|rather not|don't want|do not want|refuse to)\b", source)
+                and re.search(r"\b(?:not|avoid|refus|don't|won't)\b", (text + " " + objective).casefold())):
+            return "refusal_or_avoidance_not_positive_goal"
+        # A present request for another party's furniture or permission is
+        # not a self-authored durable plan without explicit own action.
+        if (str(item.get("horizon") or "").casefold() == "immediate"
+                and re.search(r"\b(?:going to need|need|want)\s+(?:the|a|an)\s+\w+", source)
+                and not re.search(r"\b(?:i'll|i will|i'm going to)\s+(?:get|take|move|bring|fetch|do|make)\b", source)):
+            return "immediate_request_not_managed_goal"
+        # Never admit an objective created almost entirely from other
+        # dialogue: substantive objective anchors must appear in the source.
+        objective_words = _lexical_words(objective)
+        if objective_words and len(objective_words & evidence) < max(1, min(2, len(objective_words))):
+            return "objective_not_grounded_in_source"
+    if kind == "GOAL":
+        admission = review_goal_source(
+            source_text=excerpt, objective=objective,
+            horizon=_effective_goal_horizon(
+                str(item.get("horizon") or "").casefold(),
+                str(item.get("intent_type") or "").casefold(),
+                excerpt,
+            ),
+        )
+        if not admission.managed:
+            return "source_admission:" + admission.decision + ":" + admission.reason
+    # Prevent fluent hallucinated statements with no lexical source support.
+    if len(words) >= 2 and not (words & evidence):
+        return "candidate_text_not_grounded_in_source"
+    return None
 
 
 class MessageCognitionEnricher:
@@ -64,7 +136,34 @@ class MessageCognitionEnricher:
         )
         summary=CharacterGoalService._json_object(row["summary"])
         sentences=list(summary.get("ambiguous_sentences") or [])[:4]
+        historical=bool(summary.get("historical_catchup"))
         if not sentences or not summary.get("enrichment_pending"):
+            return 0
+        # Only character-authored excerpts may generate owned cognition.
+        if not _same_identity(row["speaker_id"],row["character_id"]):
+            await self.db.execute(
+                """UPDATE aios.message_cognitive_commit
+                   SET summary=summary || jsonb_build_object(
+                     'enrichment_pending',false,'enrichment_deferred',false,
+                     'enrichment_rejection','external_speaker_not_character_authority'),
+                     enrichment_completed_at=now()
+                   WHERE instance_id=$1 AND node_id=$2""",
+                instance_id,node_id,
+            )
+            return 0
+
+        # A still-leased inference for this source has admission authority.
+        # Repeated scheduler or manual catch-up invocations must not start
+        # a second review (nor release the historical projection barrier).
+        active = await self.db.fetchrow(
+            """SELECT request_id FROM aios.inference_request
+               WHERE instance_id=$1 AND worker_class='message_cognition'
+                 AND source_node_id=$2 AND status='running'
+                 AND (lease_expires_at IS NULL OR lease_expires_at > now())
+               ORDER BY created_at DESC LIMIT 1""",
+            instance_id, node_id,
+        )
+        if active:
             return 0
 
         # A short character reply may refer to a plan offered in the parent
@@ -96,7 +195,7 @@ class MessageCognitionEnricher:
             "character in these excerpts. Do not invent motives. A GOAL requires an intention, "
             "commitment, plan, chosen objective, or persistent desire belonging to the character; "
             "requests for another person to act are not the character's goal unless the character "
-            "is explicitly trying to cause that outcome. Distinguish BELIEF, STATE, RELATIONSHIP, "
+            "is explicitly trying to cause that outcome. Do not turn an expressed refusal into "            "a positive task. A conditional offer is not accepted until the character adopts "            "it. A short agreement can adopt only a concrete prior offer, never an invented one. "            "Distinguish BELIEF, STATE, RELATIONSHIP, "
             "RULE, EVENT, GOAL, or NONE. For GOAL only, also classify intent_type as "
             "desire|objective|plan|commitment|immediate_intention and horizon as "
             "immediate|scene|session|persistent, and provide objective as a concise but "
@@ -123,15 +222,31 @@ class MessageCognitionEnricher:
         try:
             result=await self.broker.infer(InferenceRequest(
                 instance_id=instance_id,worker_class="message_cognition",
-                prompt=prompt,allowed_actions={},output_schema={"type":"object"},
+                source_node_id=node_id,
+                prompt=prompt,allowed_actions={},output_schema={"type":"object",
+                    "properties":{"units":{"type":"array"}},
+                    "x-aios-envelope":"cognition-units-v1"},
                 temperature=0.0,max_tokens=450))
         except InferenceUnavailable:
-            # Optional enrichment must never make deterministic cognition fail.
+            # An unavailable remote endpoint must not make deterministic
+            # message cognition fail or release the historical review barrier.
             return 0
+        except Exception:
+            # Host-owned persistence/schema faults are not provider failures.
+            # Preserve the pending source receipt and surface the traceback
+            # to the pipeline runner rather than silently retrying forever.
+            import logging
+            logging.getLogger(__name__).exception(
+                "Historical cognition inference admission failed instance=%s node=%s",
+                instance_id, node_id,
+            )
+            raise
 
         raw=result.response.raw
         units=raw.get("units") if isinstance(raw,dict) else None
         admitted=0
+        historical_goal_seen=False
+        rejection_reasons=[]
         if isinstance(units,list):
             for item in units[:4]:
                 if not isinstance(item,dict):
@@ -144,8 +259,18 @@ class MessageCognitionEnricher:
                 except (TypeError,ValueError): source_index=-1
                 polarity=-1 if int(item.get("polarity",1) or 1)<0 else 1
                 if kind not in _ALLOWED_KINDS or not text or confidence<0.72:
+                    rejection_reasons.append({"source_index":source_index,"reason":"kind_text_or_confidence"})
                     continue
                 if source_index<0 or source_index>=len(sentences):
+                    rejection_reasons.append({"source_index":source_index,"reason":"unbound_source_index"})
+                    continue
+                source_rejection = review_candidate_source(
+                    item, sentences[source_index], parent_context=parent_context,
+                )
+                if source_rejection:
+                    rejection_reasons.append({"source_index":source_index,
+                                              "reason":source_rejection,
+                                              "admission_version":ENRICHMENT_ADMISSION_VERSION})
                     continue
                 intent_type=str(item.get("intent_type") or "").lower() if kind=="GOAL" else ""
                 horizon=str(item.get("horizon") or "").lower() if kind=="GOAL" else ""
@@ -155,10 +280,12 @@ class MessageCognitionEnricher:
                         horizon, intent_type, sentences[source_index]
                     )
                     if intent_type not in {"desire","objective","plan","commitment","immediate_intention"}:
+                        rejection_reasons.append({"source_index":source_index,"reason":"unsupported_intent_type"})
                         continue
                     if (horizon not in {"immediate","scene","session","persistent"}
                             or not valid_goal_objective(objective)
                             or not _specific_commitment_objective(objective,intent_type)):
+                        rejection_reasons.append({"source_index":source_index,"reason":"invalid_horizon_or_objective"})
                         continue
                 schedule = item.get("schedule") if kind == "GOAL" else None
                 schedule_decision = (
@@ -234,11 +361,15 @@ class MessageCognitionEnricher:
                 else:
                     admitted += 1
                 if kind=="GOAL" and horizon not in {"immediate"}:
+                    if historical:
+                        historical_goal_seen=True
+                        continue
                     goal = await CharacterGoalService(self.db).reconcile_evidence(
                         instance_id=instance_id,text=text,topic_key=topic,polarity=polarity,
                         source_node_id=node_id,source_unit_id=unit["unit_id"],
                         confidence=confidence,salience=.86,intent_type=intent_type,
-                        horizon=horizon,objective=objective)
+                        horizon=horizon,objective=objective,
+                        source_text=sentences[source_index])
                     if (goal is not None and polarity > 0 and goal.goal_id is not None
                             and schedule_decision == "schedule"
                             and intent_type in {"objective", "plan", "commitment"}
@@ -270,9 +401,17 @@ class MessageCognitionEnricher:
         await self.db.execute(
             """UPDATE aios.message_cognitive_commit
                SET summary=summary || jsonb_build_object(
-                   'enrichment_pending',false,'enrichment_request_id',$3::text,
-                   'enrichment_admitted',$4::integer),
+                   'enrichment_pending',false,'enrichment_deferred',false,
+                   'enrichment_request_id',$3::text,'enrichment_admitted',$4::integer,
+                   'enrichment_rejections',$5::jsonb,
+                   'enrichment_admission_version','bounded-enrichment-admission-v2-source',
+                   'enrichment_response_envelope',$7::text,
+                   'goal_projection_deferred',$6::boolean),
                    enrichment_completed_at=now()
                WHERE instance_id=$1 AND node_id=$2""",
-            instance_id,node_id,str(result.request_id),admitted)
+            instance_id,node_id,str(result.request_id),admitted,
+            json.dumps(rejection_reasons),
+            bool(summary.get("goal_projection_deferred") or historical_goal_seen),
+            str(result.response.raw.get("_aios_response_envelope") or
+                "see_inference_request_response_json"))
         return admitted

@@ -6,6 +6,8 @@ import json
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.epistemic.semantic_integrity import validate_claim
+from aios_app.epistemic.semantic_repair import repair_claim
 from aios_app.epistemic import normalizer_legacy as legacy
 from aios_app.epistemic.context_resolver import RESOLVER_VERSION
 from aios_app.epistemic import message_cognition as _message_cognition
@@ -103,7 +105,21 @@ async def _apply_epistemic_admission(db: Database, *, claim_id: UUID) -> None:
     )
 
 
-async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID:
+async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID | None:
+    # Source integrity is an admission condition, not a downstream attention hint.
+    receipt = await validate_claim(db, claim_id=claim_id)
+    if receipt.status != "valid":
+        receipt = await repair_claim(db, claim_id=claim_id, receipt=receipt)
+    if receipt.status != "valid":
+        # Preserve the source claim and frames, but revoke existing evidence.
+        # The same claim remains repairable without publishing another occurrence.
+        await db.execute(
+            """DELETE FROM aios.proposition_evidence pe
+               USING aios.observation o
+               WHERE pe.observation_id=o.observation_id AND o.claim_id=$1""",
+            claim_id,
+        )
+        return None
     proposition_id = await legacy.normalize_claim_once(db, claim_id=claim_id)
     await _apply_epistemic_admission(db, claim_id=claim_id)
 

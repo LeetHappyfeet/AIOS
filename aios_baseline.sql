@@ -839,18 +839,19 @@ BEGIN
         INSERT INTO aios.semantic_scope_projection_state (
             scope_key, scope_kind,
             dirty_version, projected_version,
-            status, dirty_at, updated_at
+            status, dirty_at, first_dirty_at, updated_at
         )
         VALUES (
             v_scope_key, 'character',
             1, 0,
-            'dirty', now(), now()
+            'dirty', now(), now(), now()
         )
         ON CONFLICT (scope_key) DO UPDATE
         SET scope_kind='character',
             dirty_version=aios.semantic_scope_projection_state.dirty_version + 1,
             status='dirty',
             dirty_at=now(),
+            first_dirty_at=CASE WHEN aios.semantic_scope_projection_state.dirty_version > aios.semantic_scope_projection_state.projected_version THEN COALESCE(aios.semantic_scope_projection_state.first_dirty_at, now()) ELSE now() END,
             last_error=NULL,
             updated_at=now();
     END IF;
@@ -4554,6 +4555,16 @@ CREATE TABLE aios.observation_proposition (
 -- Name: pipeline_job; Type: TABLE; Schema: aios; Owner: -
 --
 
+-- RDF authority receipt: cache only successfully published, RDF-visible state.
+CREATE TABLE aios.rdf_observation_authority_projection (
+    rdf_dataset text NOT NULL,
+    rdf_graph text NOT NULL,
+    observation_iri text NOT NULL,
+    projection_hash text NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (rdf_dataset, rdf_graph, observation_iri)
+);
+
 CREATE TABLE aios.pipeline_job (
     job_id uuid DEFAULT gen_random_uuid() NOT NULL,
     job_type text NOT NULL,
@@ -5185,6 +5196,7 @@ CREATE TABLE aios.semantic_scope_projection_state (
     projected_version bigint DEFAULT 0 NOT NULL,
     status text DEFAULT 'dirty'::text NOT NULL,
     dirty_at timestamp with time zone,
+    first_dirty_at timestamp with time zone,
     projected_at timestamp with time zone,
     last_error text,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -7714,7 +7726,7 @@ CREATE UNIQUE INDEX ux_pipeline_job_claim_active ON aios.pipeline_job USING btre
 -- Name: ux_pipeline_job_global_active; Type: INDEX; Schema: aios; Owner: -
 --
 
-CREATE UNIQUE INDEX ux_pipeline_job_global_active ON aios.pipeline_job USING btree (job_type) WHERE ((status = ANY (ARRAY['queued'::text, 'running'::text])) AND (NOT (payload ? 'node_id'::text)) AND (NOT (payload ? 'section_id'::text)) AND (NOT (payload ? 'claim_id'::text)) AND (NOT (payload ? 'character_id'::text)) AND (NOT (payload ? 'world_id'::text)) AND (NOT (payload ? 'assertion_id'::text)) AND (NOT (payload ? 'acquisition_id'::text)));
+CREATE UNIQUE INDEX ux_pipeline_job_global_active ON aios.pipeline_job USING btree (job_type) WHERE ((status = ANY (ARRAY['queued'::text, 'running'::text])) AND (NOT (payload ? 'node_id'::text)) AND (NOT (payload ? 'section_id'::text)) AND (NOT (payload ? 'claim_id'::text)) AND (NOT (payload ? 'character_id'::text)) AND (NOT (payload ? 'world_id'::text)) AND (NOT (payload ? 'assertion_id'::text)) AND (NOT (payload ? 'acquisition_id'::text)) AND (NOT (payload ? 'scope_key'::text)));
 
 
 --

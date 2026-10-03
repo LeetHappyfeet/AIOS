@@ -67,13 +67,18 @@ async def advance_matching_runtime_source_cursor(
                 raise RuntimeError(
                     "source cursor coordinate is invalid: live source timeline is not liminal"
                 )
-            participant = await con.fetchrow(
+            participants = await con.fetch(
                 """SELECT character_instance_id
                    FROM aios.conversation_participant
                    WHERE timeline_id=$1 AND character_id=$2 AND active
-                   LIMIT 1""",
+                   ORDER BY participant_id""",
                 source_timeline_id, character_id,
             )
+            bound_ids = {p["character_instance_id"] for p in participants
+                         if p["character_instance_id"] is not None}
+            if len(bound_ids) > 1:
+                raise RuntimeError("ambiguous conversation character instance binding")
+            participant = participants[0] if participants else None
             # Legacy timelines retain their original single-character contract.
             # On participant-aware timelines, an explicit instance binding is
             # authoritative: never substitute another instance merely because
@@ -89,13 +94,16 @@ async def advance_matching_runtime_source_cursor(
             if int(source["event_id"]) != int(source_head_event_id):
                 raise RuntimeError("source cursor event identity mismatch")
 
-            bound_instance_id = (
-                participant["character_instance_id"] if participant else None
-            )
+            bound_instance_id = next(iter(bound_ids), None)
             if participant and bound_instance_id is None:
-                raise RuntimeError(
-                    "conversation participant has no character instance binding"
+                # The source message is durable, but no runtime may perceive it
+                # until an exact participant -> instance binding is established.
+                logger.info(
+                    "Conversation participant has no character instance binding yet; "
+                    "source timeline %s character %s is pending adoption",
+                    source_timeline_id, character_id,
                 )
+                return []
 
             if bound_instance_id is not None:
                 rows = await con.fetch(

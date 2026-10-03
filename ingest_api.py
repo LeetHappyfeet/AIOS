@@ -61,6 +61,14 @@ def _ingest_out(*, event_id, node_id, timeline_id, disposition, source_head_node
 async def ingest_message(db, req: IngestIn) -> IngestOut:
     """Persist one chat message with end-to-end replay idempotency."""
     message_text = req.text
+    # Actor IDs are the unique keys of conversation_participant per timeline.
+    # Never collapse a human speaker and a character into the same participant.
+    if req.character_id and req.user_name and req.character_id == req.user_name:
+        raise HTTPException(status_code=422, detail="user and character actor IDs must be distinct")
+    if req.speaker_type == "user" and req.speaker_id == req.character_id:
+        raise HTTPException(status_code=422, detail="user speaker_id collides with character actor ID")
+    if req.speaker_type == "character" and req.speaker_id == req.user_name:
+        raise HTTPException(status_code=422, detail="character speaker_id collides with user actor ID")
     if req.viewpoint_id:
         resolved_viewpoint_id = req.viewpoint_id
     elif req.speaker_type == "character":
@@ -160,6 +168,12 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             SELECT node_id, timeline_id
             FROM aios.dag_node
             WHERE event_id=$1
+              AND EXISTS (
+                  SELECT 1 FROM aios.ingest_event ie
+                  WHERE ie.event_id=$1
+                    AND ie.process_status IS DISTINCT FROM 'error'
+                    AND ie.process_error IS DISTINCT FROM 'participant_binding_pending'
+              )
             ORDER BY created_at, node_id
             LIMIT 1
             """,
@@ -265,7 +279,8 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                 actor_type=actor_type,
                 controller_type=controller_type,
                 controller_ref=actor_id if controller_type == "human" else f"character:{actor_id}",
-                participant_role="primary" if actor_id == req.character_id else "participant",
+                participant_role="primary" if actor_id == req.character_id and actor_type == "character" else "participant",
+                character_id=req.character_id if actor_id == req.character_id and actor_type == "character" else None,
                 meta={"source": client_source, "live_ingest": True},
             )
             await bind_available_instance(db, participant_id=participant_id)
@@ -384,6 +399,16 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             detail=f"DAG ingestion failed for event_id={event_id}: {exc}",
         ) from exc
 
+    # An event is replay-complete only after structural projection and source
+    # adoption have finished. A prior error must not poison future replays.
+    await db.execute(
+        """UPDATE aios.ingest_event
+           SET process_status=CASE WHEN rdf_processed_at IS NOT NULL THEN 'done'::aios.process_status ELSE 'processing'::aios.process_status END,
+               process_error=CASE WHEN $2 THEN NULL ELSE 'participant_binding_pending' END
+           WHERE event_id=$1""",
+        event_id,
+        bool(affected_instance_ids),
+    )
     return _ingest_out(
         event_id=event_id,
         node_id=node_id,

@@ -19,6 +19,16 @@ STRICT_SINGLE_VALUE_PREDICATES = {
 }
 
 
+def has_structural_anchor(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Cheap discovery gate; it neither verifies nor collapses a relation."""
+    if any(a.get(key) and a[key] == b.get(key)
+           for key in ("subject_norm", "object_norm", "topic_key")):
+        return True
+    return bool(a.get("subject_norm") and a.get("object_norm")
+                and a["subject_norm"] == b.get("object_norm")
+                and a["object_norm"] == b.get("subject_norm"))
+
+
 def _contains_refinement(a: str | None, b: str | None) -> bool:
     """Return true when one normalized object phrase strictly contains the other."""
     if not a or not b:

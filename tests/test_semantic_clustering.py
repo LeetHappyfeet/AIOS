@@ -72,3 +72,31 @@ def test_related_edges_do_not_form_core_components():
         core_threshold=0.82,
         min_cluster_size=3,
     ) == []
+
+
+def test_indirect_positive_paths_cannot_join_contradictory_core_members():
+    edges = [Edge(u(a), u(b), .95 if (a,b) == (1,2) else .9, "SAME_TOPIC")
+             for a,b in [(1,2),(1,3),(1,4),(2,3),(2,4),(3,4)]]
+    edges = [edge for edge in edges if {edge.a,edge.b} != {u(1),u(2)}]
+    edges.append(Edge(u(1),u(2),.96,"CONTRADICTS"))
+    groups = _build_core_components(edges, core_threshold=.82, min_cluster_size=2)
+    assert groups
+    assert all(not {u(1),u(2)} <= group for group in groups)
+
+
+def test_fringe_conflict_with_any_member_blocks_attachment():
+    edges = [Edge(u(4),u(1),.9,"RELATED"), Edge(u(4),u(2),.9,"RELATED"),
+             Edge(u(4),u(3),.95,"CONTRADICTS")]
+    drafts, outliers = _attach_fringe([{u(1),u(2),u(3)}], edges,
+                                     attach_threshold=.76,min_attach_links=2)
+    assert u(4) in outliers
+    assert u(4) not in drafts[0].members
+
+
+def test_two_conflicting_fringe_members_do_not_both_attach():
+    edges = [Edge(u(n),u(c),.9,"RELATED") for n in [4,5] for c in [1,2]]
+    edges.append(Edge(u(4),u(5),.98,"CONTRADICTS"))
+    drafts, outliers = _attach_fringe([{u(1),u(2),u(3)}], edges,
+                                     attach_threshold=.76,min_attach_links=2)
+    assert drafts[0].fringe_members == {u(4)}
+    assert u(5) in outliers

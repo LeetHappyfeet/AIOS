@@ -43,14 +43,14 @@ _QUESTION_RE = re.compile(r"\?\s*[\"'”’\)\]]*\s*$")
 # Only split when the right side begins like an explicit finite clause. This
 # keeps ordinary parenthetical/emphatic dashes intact. Contracted auxiliaries
 # count as finite clauses too (I'm, you're, she's, we've, they'll, etc.).
-_STRONG_BOUNDARY_RE = re.compile(r"\s*(?:—|;|\s--\s)\s*")
+_STRONG_BOUNDARY_RE = re.compile(r"\s*(?:—|;|\s--\s|,\s+but\s+)\s*")
 _INDEPENDENT_RIGHT_RE = re.compile(
     r"^(?:[\"'“‘]*)\s*(?:"
     r"(?:I|you|he|she|we|they|it)(?:(?:'|’)(?:m|re|s|ve|d|ll))?"
     r"|[A-Z][A-Za-z0-9_-]*"
     r")\s+"
     r"(?:am|is|are|was|were|have|has|had|do|does|did|can|could|will|would|shall|should|may|might|must|not|"
-    r"[A-Za-z]+(?:s|ed))\b",
+    r"[A-Za-z]+(?:s|ed)|[A-Za-z]{2,})\b",
     re.I,
 )
 
@@ -125,6 +125,7 @@ def install_message_cognition_scope_guard(module) -> None:
         speaker_id: str | None,
         speaker_role: str | None,
         viewpoint_id: str | None,
+        diagnostics: list[dict] | None = None,
     ):
         units = []
         for sentence in module._sentences(text):
@@ -132,6 +133,11 @@ def install_message_cognition_scope_guard(module) -> None:
             for clause in split_strong_clauses(sentence):
                 scope = effective_scope(clause, sentence_scope)
                 if scope in NONASSERTIVE_SCOPES:
+                    if diagnostics is not None and len(diagnostics) < 32:
+                        diagnostics.append({
+                            "reason": "nonassertive_scope:" + scope,
+                            "source_excerpt": clause[:240],
+                        })
                     continue
                 clause_units = original(
                     clause,
@@ -139,6 +145,7 @@ def install_message_cognition_scope_guard(module) -> None:
                     speaker_id=speaker_id,
                     speaker_role=speaker_role,
                     viewpoint_id=viewpoint_id,
+                    diagnostics=diagnostics,
                 )
                 for unit in clause_units:
                     meta = dict(unit.meta)
@@ -150,6 +157,12 @@ def install_message_cognition_scope_guard(module) -> None:
         # Preserve the fast path's hard bound after clause expansion.
         return units[: module.MAX_UNITS]
 
-    module.INTERPRETER_VERSION = "message-cognition-v4"
+    # This wrapper is a policy installed around the loaded base interpreter.
+    # Never relabel an updated implementation as an older unrelated revision.
+    module.BASE_INTERPRETER_VERSION = module.INTERPRETER_VERSION
+    module.SCOPE_POLICY_VERSION = "epistemic-scope-v1"
+    module.INTERPRETER_VERSION = (
+        f"{module.BASE_INTERPRETER_VERSION}+{module.SCOPE_POLICY_VERSION}"
+    )
     module.interpret_message = guarded_interpret_message
     module._epistemic_scope_guard_installed = True

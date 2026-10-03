@@ -186,5 +186,5 @@ async def validated_neighbor_classifier(original, db, cfg) -> int:
     # Drain only when this classifier actually produced work; reconciliation
     # also drains the queue, including targeted stale-decision revalidation.
     if written:
-        await record_new_relation_decisions(db, limit=max(100, cfg.batch_size * 4))
+        await record_new_relation_decisions(db, limit=getattr(cfg, "validation_batch_size", max(100, cfg.batch_size * 4)))
     return written

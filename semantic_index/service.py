@@ -14,6 +14,7 @@ logger = logging.getLogger("aios.semantic_index")
 
 _EMBEDDER: Embedder | None = None
 _STORES: dict[str, QdrantStore] = {}
+VECTOR_MUTATION_LOCK = 867530901  # Shared by indexing and destructive quarantine.
 
 
 def _get_embedder(cfg: SemanticIndexConfig) -> Embedder:
@@ -60,6 +61,21 @@ def initialize_backend(cfg: SemanticIndexConfig, *, warmup: bool = True) -> None
     )
 
 
+def initialize_topology_backend(cfg: SemanticIndexConfig) -> None:
+    """Use existing collection dimensions; never load another embedding model."""
+    from qdrant_client import QdrantClient
+    client = QdrantClient(url=cfg.qdrant_url, api_key=cfg.qdrant_api_key, timeout=5)
+    try:
+        for collection in (cfg.proposition_collection, cfg.epistemic_collection):
+            vectors = client.get_collection(collection).config.params.vectors
+            if isinstance(vectors, dict):
+                raise RuntimeError("AIOS requires an unnamed dense vector collection")
+            _STORES[collection] = QdrantStore(cfg.qdrant_url, cfg.qdrant_api_key,
+                                            collection, vectors.size)
+    finally:
+        client.close()
+
+
 async def _mark_indexed(
     db: Database,
     cfg: SemanticIndexConfig,
@@ -91,6 +107,28 @@ async def _mark_indexed(
     )
 
 
+async def _write_proposition_points(db, cfg, collection, rows, points, hashes):
+    """Serialize point writes against quarantine; receipt follows acknowledged upsert."""
+    async with db.connection() as con:
+        async with con.transaction():
+            await con.execute("SELECT pg_advisory_xact_lock($1)", VECTOR_MUTATION_LOCK)
+            eligible = await con.fetch("""SELECT proposition_id FROM aios.proposition
+                WHERE proposition_id=ANY($1::uuid[])
+                  AND aios.semantic_proposition_topology_eligible(proposition_id)""",
+                list({r["proposition_id"] for r in rows}))
+            eligible_ids = {r["proposition_id"] for r in eligible}
+            batch = [(r,p,h) for r,p,h in zip(rows,points,hashes) if r["proposition_id"] in eligible_ids]
+            if not batch:
+                return 0
+            _get_store(cfg,collection).upsert([p for _,p,_ in batch])
+            for row, _, vector_hash in batch:
+                await _mark_indexed(con,cfg,
+                    object_type=row.get("object_type","proposition"),
+                    object_key=row.get("object_key",str(row["proposition_id"])),
+                    collection=collection,vector_hash=vector_hash)
+            return len(batch)
+
+
 async def index_source_sections_once(db: Database, cfg: SemanticIndexConfig) -> int:
     rows = await db.fetch(
         """
@@ -117,7 +155,7 @@ async def index_source_sections_once(db: Database, cfg: SemanticIndexConfig) -> 
                 AND s.embedding_model=$3
                 AND s.embedding_version=$4
           )
-        ORDER BY dn.created_at
+        ORDER BY dn.created_at DESC, ds.section_id DESC
         LIMIT $1
         """,
         cfg.batch_size, cfg.source_collection,
@@ -189,7 +227,7 @@ async def index_corpus_sections_once(db: Database, cfg: SemanticIndexConfig) -> 
                 AND s.embedding_model=$3
                 AND s.embedding_version=$4
           )
-        ORDER BY cs.created_at, cs.section_order
+        ORDER BY cs.created_at DESC, cs.section_id DESC
         LIMIT $1
         """,
         cfg.batch_size, cfg.source_collection,
@@ -261,6 +299,10 @@ async def index_semantic_frames_once(db: Database, cfg: SemanticIndexConfig) -> 
         FROM aios.claim_semantic_frame f
         LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=f.claim_id
         WHERE f.decomposer_version='semantic-frame-v2'
+          AND f.resolution_status='resolved'
+          AND EXISTS (SELECT 1 FROM aios.semantic_interpretation si
+              WHERE si.frame_id=f.frame_id AND si.claim_id=f.claim_id
+                AND si.standalone_semantic)
           AND NOT EXISTS (
               SELECT 1
               FROM aios.semantic_vector_index_state s
@@ -270,7 +312,7 @@ async def index_semantic_frames_once(db: Database, cfg: SemanticIndexConfig) -> 
                 AND s.embedding_model=$3
                 AND s.embedding_version=$4
           )
-        ORDER BY f.created_at, f.frame_index
+        ORDER BY f.created_at DESC, f.frame_id DESC
         LIMIT $1
         """,
         cfg.batch_size,
@@ -365,10 +407,12 @@ async def index_propositions_once(db: Database, cfg: SemanticIndexConfig) -> int
             FROM aios.observation o
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
             WHERE o.proposition_id=p.proposition_id
+              AND aios.semantic_occurrence_topology_eligible(o.claim_id,p.proposition_id)
             ORDER BY ccr.resolved_at DESC
             LIMIT 1
         ) ctx ON true
-        WHERE NOT EXISTS (
+        WHERE aios.semantic_proposition_topology_eligible(p.proposition_id)
+          AND NOT EXISTS (
             SELECT 1 FROM aios.semantic_vector_index_state s
             WHERE s.object_type='proposition'
               AND s.object_key=p.proposition_id::text
@@ -376,7 +420,7 @@ async def index_propositions_once(db: Database, cfg: SemanticIndexConfig) -> int
               AND s.embedding_model=$3
               AND s.embedding_version=$4
         )
-        ORDER BY p.created_at
+        ORDER BY p.created_at DESC, p.proposition_id DESC
         LIMIT $1
         """,
         cfg.batch_size, cfg.proposition_collection,
@@ -425,15 +469,9 @@ async def index_propositions_once(db: Database, cfg: SemanticIndexConfig) -> int
             id=str(row["proposition_id"]), vector=vector,
             payload={k:v for k,v in payload.items() if v is not None},
         ))
-    _get_store(cfg, cfg.proposition_collection).upsert(points)
-    for row, vector_hash in zip(rows, hashes):
-        await _mark_indexed(
-            db, cfg, object_type="proposition",
-            object_key=str(row["proposition_id"]),
-            collection=cfg.proposition_collection, vector_hash=vector_hash,
-        )
-    logger.info("Indexed %d normalized propositions into Qdrant [%s]", len(rows), cfg.proposition_collection)
-    return len(rows)
+    count = await _write_proposition_points(db,cfg,cfg.proposition_collection,rows,points,hashes)
+    logger.info("Indexed %d propositions into Qdrant [%s]",count,cfg.proposition_collection)
+    return count
 
 
 def _epistemic_point_id(object_key: str) -> str:
@@ -486,6 +524,7 @@ async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -
             ) ctx ON true
         ) e
         WHERE e.epistemic_status NOT IN ('rejected','superseded')
+          AND aios.semantic_proposition_topology_eligible(e.proposition_id)
           AND NOT EXISTS (
               SELECT 1 FROM aios.semantic_vector_index_state s
               WHERE s.object_type=e.object_type
@@ -495,7 +534,7 @@ async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -
                 AND s.embedding_version=$4
                 AND s.indexed_at >= e.updated_at
           )
-        ORDER BY e.updated_at
+        ORDER BY e.updated_at DESC, e.object_key DESC
         LIMIT $1
         """,
         cfg.batch_size, cfg.epistemic_collection,
@@ -538,20 +577,15 @@ async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -
             id=_epistemic_point_id(row["object_key"]), vector=vector,
             payload={k:v for k,v in payload.items() if v is not None},
         ))
-    _get_store(cfg, cfg.epistemic_collection).upsert(points)
-    for row, vector_hash in zip(rows, hashes):
-        await _mark_indexed(
-            db, cfg, object_type=row["object_type"], object_key=row["object_key"],
-            collection=cfg.epistemic_collection, vector_hash=vector_hash,
-        )
-    logger.info("Indexed %d epistemic objects into Qdrant [%s]", len(rows), cfg.epistemic_collection)
-    return len(rows)
+    count = await _write_proposition_points(db,cfg,cfg.epistemic_collection,rows,points,hashes)
+    logger.info("Indexed %d epistemic objects into Qdrant [%s]",count,cfg.epistemic_collection)
+    return count
 
 
 async def index_once(db: Database, cfg: SemanticIndexConfig) -> int:
+    propositions = await index_propositions_once(db, cfg)
+    frames = await index_semantic_frames_once(db, cfg)
+    epistemic = await index_epistemic_objects_once(db, cfg)
     source = await index_source_sections_once(db, cfg)
     source += await index_corpus_sections_once(db, cfg)
-    frames = await index_semantic_frames_once(db, cfg)
-    propositions = await index_propositions_once(db, cfg)
-    epistemic = await index_epistemic_objects_once(db, cfg)
     return source + frames + propositions + epistemic

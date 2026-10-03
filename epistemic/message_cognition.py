@@ -3,13 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from aios_app.epistemic.goal_source_admission import review_goal_source, ADMISSION_VERSION
 from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v7"
+INTERPRETER_VERSION = "message-cognition-v11-source-goal-admission"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -25,6 +27,25 @@ _CAUSAL_DESIRE_RE = re.compile(
 )
 
 _SUBJECT = r"(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
+_BOUNDED_PROGRESSIVE_RE = re.compile(
+    r"\bI(?:'m|\s+am)\s+(?P<verb>[a-z]+ing)\s+(?P<object>[^.!?]{3,180})", re.I,
+)
+_FUTURE_BOUND_RE = re.compile(
+    r"\b(?:tonight|tomorrow|next\s+(?:week|month|year)|"
+    r"(?:one|two|three|four|five|six|seven|eight|nine|\d+)\s+"
+    r"(?:night|day|week|month|year|hour)s?)\b", re.I,
+)
+_COMMITMENT_RE = re.compile(
+    r"\b(?P<subject>I)(?:\s+(?P<verb>will|am\s+going\s+to)|(?P<shortverb>'ll|'m\s+going\s+to))\s+"
+    r"(?P<object>[^.!?]{3,220})", re.I,
+)
+_REFUSAL_RE = re.compile(
+    r"\bI(?:\s+am\s+not|'m\s+not)\s+going\s+anywhere\b|"
+    r"\bI(?:\s+will\s+not|\s+won't|\s+refuse\s+to|"
+    r"\s+am\s+not\s+going\s+to|'m\s+not\s+going\s+to)"
+    r"\s+(?P<refused>[^.!?]{3,160})", re.I,
+)
+_DISCOURSE_MARKER_RE = re.compile(r"\byou\s+know\s+what\s*[,—:]", re.I)
 _GOAL_RE = re.compile(
     rf"\b{_SUBJECT}\s+(?:(?:do(?:es)?\s+not|don't|doesn't|no\s+longer)\s+)?"
     rf"(?P<verb>want(?:s|ed)?|intend(?:s|ed)?|plan(?:s|ned)?|need(?:s|ed)?|"
@@ -59,7 +80,7 @@ _RELATIONSHIP_RE = re.compile(
 )
 _RELATIONSHIP_SUBJECT_RE = re.compile(
     r"(?:^|[\s\"'“‘(])(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
-    r"(?=\s+(?:am|is|are|was|were|be|being|become|became|remain|remains|trust|trusts|distrust|distrusts|work|works)\b|"
+    r"(?=\s+(?:am|is|are|was|were|be|being|become|became|remain|remains|trust|trusts|distrust|distrusts|work|works|offer|offers|offered|help|helps|helped)\b|"
     r"(?:['’](?:m|re|s|ve|d|ll))\b)",
     re.I,
 )
@@ -217,6 +238,12 @@ class ParsedCandidate:
     object_text: str
     confidence: float
     reason: str
+    match_span: tuple[int, int] | None = None
+
+
+def _runtime_versions() -> dict[str, str]:
+    from aios_app.epistemic.runtime_versions import component_versions
+    return component_versions()
 
 
 def _sentences(text: str) -> list[str]:
@@ -254,8 +281,10 @@ def _resolve_subject(subject: str | None, *, character_id: str, speaker_id: str 
         owner = speaker_id or viewpoint_id
         return owner, _same_identity(owner, character_id)
     if raw == "you":
+        # An external speaker addressing a character is not authoring that character's
+        # beliefs, memories, rules, or goals. Preserve attributed source text.
         if speaker_id and not _same_identity(speaker_id, character_id):
-            return character_id, True
+            return character_id, False
         return "other", False
     if raw in {"she", "he", "they", "it"}:
         if viewpoint_aliases & character_aliases:
@@ -278,12 +307,33 @@ def _clean_object(value: str) -> str:
     return text[:220].rstrip()
 
 
+def _bounded_goal_candidate(candidate: ParsedCandidate) -> ParsedCandidate:
+    """Do not combine a negated desire with a subsequent independent clause."""
+    objective = re.split(r"[,;]\s*(?:but|and)\b", candidate.object_text,
+                         maxsplit=1, flags=re.I)[0].strip()
+    return ParsedCandidate(candidate.kind, candidate.subject_text, candidate.predicate,
+                           objective, candidate.confidence, candidate.reason,
+                           candidate.match_span)
+
+
+def _goal_polarity(sentence: str, candidate: ParsedCandidate) -> int:
+    # Inspect the goal predicate, not negation in an unrelated following clause.
+    end = sentence.lower().find(candidate.object_text.lower()) if candidate.object_text else -1
+    lead = sentence[:end] if end >= 0 else sentence
+    return -1 if re.search(
+        r"\b(?:don't|doesn't|do not|does not|never|no longer)\s+"
+        r"(?:need|want|plan|intend|seek|decide|prepare)\b", lead, re.I
+    ) else 1
+
+
 def _goal_semantics(candidate: ParsedCandidate) -> tuple[str, str]:
     predicate = candidate.predicate.lower().strip()
     if predicate.startswith(("want", "need", "seek")):
         return "desire", "session"
     if predicate.startswith(("plan", "prepare", "intend")):
         return "plan", "session"
+    if predicate.startswith("commit"):
+        return "commitment", "session"
     if predicate.startswith(("decide", "resolve")):
         return "objective", "session"
     return "objective", "session"
@@ -301,9 +351,11 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
         return f"{subject} {predicate} {obj}."
     if candidate.kind == "GOAL":
         # Goal text is a presentation of semantic intent, not a grammatical
-        # rewrite of the source sentence. This avoids "I want" -> "Renamon want".
+        # rewrite of the source sentence. This avoids rendering an uninflected predicate for the character name.
         intent_type, _ = _goal_semantics(candidate)
         verb = "wants" if intent_type == "desire" else "intends"
+        if intent_type == "commitment" and not obj.casefold().startswith("to "):
+            obj = "to " + obj
         return f"{subject} {verb} {obj}."
     if candidate.kind in {"RULE", "STATE"}:
         return f"{subject} {predicate} {obj}."
@@ -311,8 +363,18 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
 
 
 def _parse_sentence(sentence: str) -> ParsedCandidate | None:
+    sentence = sentence.replace('’', "'")
+    # Discourse marker is not a knowledge assertion by the addressee.
+    if _DISCOURSE_MARKER_RE.search(sentence):
+        return None
     if _QUESTION_RE.search(sentence):
         return None
+    refused = _REFUSAL_RE.search(sentence)
+    if refused:
+        action = _clean_object(refused.group("refused") or "leave")
+        action = re.sub(r"(?i)^to\s+", "", action)
+        return ParsedCandidate("STATE", "I", "refuses", "to " + action,
+                               0.89, "expressed_scene_refusal")
     match = _MEMORY_RE.search(sentence)
     if match:
         return ParsedCandidate("MEMORY", match.group("subject"), match.group("verb"), match.group("object"), 0.94, "memory_predicate")
@@ -328,8 +390,41 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
         return ParsedCandidate("RULE", match.group("subject"), match.group("verb"), match.group("object"), 0.93, "deontic_predicate")
     if not _CAUSAL_DESIRE_RE.search(sentence):
         match = _GOAL_RE.search(sentence)
-        if match and valid_goal_objective(match.group("object")):
-            return ParsedCandidate("GOAL", match.group("subject"), match.group("verb"), match.group("object"), 0.91, "goal_predicate")
+        if match:
+            bounded = _bounded_goal_candidate(ParsedCandidate(
+                "GOAL", match.group("subject"), match.group("verb"),
+                match.group("object"), 0.91, "goal_predicate"))
+            if valid_goal_objective(bounded.object_text):
+                return replace(bounded, match_span=match.span())
+    # Future/duration-bounded progressive is prospective; an unbounded
+    # progressive is merely an ongoing observation.
+    progressive = _BOUNDED_PROGRESSIVE_RE.search(sentence)
+    if progressive and _FUTURE_BOUND_RE.search(progressive.group("object")):
+        verb = progressive.group("verb").casefold()
+        lemma = verb[:-3]
+        if lemma in {"leav", "mov", "giv", "tak", "mak", "hav", "arriv"}:
+            lemma += "e"
+        action = _bounded_goal_candidate(ParsedCandidate(
+            "GOAL", "I", "commit",
+            lemma + " " + progressive.group("object"), 0.82,
+            "bounded_progressive_commitment"))
+        if valid_goal_objective(action.object_text):
+            return replace(action, match_span=progressive.span())
+    # Recognize a self-authored future action but do not interpret an
+    # auxiliary such as "going to need" as a commitment to perform "go".
+    if not re.search(r"\b(?:if|unless|provided\s+that)\b", sentence, re.I):
+        match = _COMMITMENT_RE.search(sentence)
+        if match:
+            action = _bounded_goal_candidate(ParsedCandidate(
+                "GOAL", match.group("subject"), "commit",
+                match.group("object"), 0.86, "explicit_self_commitment"))
+            words = re.findall(r"[A-Za-z0-9]+", action.object_text)
+            if (valid_goal_objective(action.object_text)
+                    and len(words) >= 2
+                    and not re.search(r"(?i)\b(?:how|something|whatever)$", action.object_text)
+                    and not re.match(r"(?i)^(?:do|take|handle|make) it$", action.object_text)
+                    and not re.match(r"(?i)^need\s+(?:to\s+)?", action.object_text)):
+                return replace(action, match_span=match.span())
     if _RELATIONSHIP_RE.search(sentence):
         subject_match = _RELATIONSHIP_SUBJECT_RE.search(sentence)
         subject = subject_match.group("subject") if subject_match else None
@@ -338,10 +433,17 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
     if match and _STATE_TERMS_RE.search(match.group("object")):
         return ParsedCandidate("STATE", match.group("subject"), match.group("verb"), match.group("object"), 0.86, "bounded_state_predicate")
     if _EVENT_RE.search(sentence):
-        # Sentence position is not entity resolution. Narrative prose such as
-        # "Beneath..." or "The collar..." must remain owner-unresolved rather
-        # than promoting the first token to a semantic subject.
-        return ParsedCandidate("EVENT", None, "event", sentence, 0.70, "event_predicate")
+        # Explicit leading pronouns have a grammatical actor. Other narrative
+        # openings (prepositions, description, location) remain unresolved.
+        lead = re.match(
+            r"^\s*[\"'*]*(?P<actor>I|he|she|they|we)\s+"
+            r"(?:tried|attempted|arrived|left|moved|entered|escaped|attacked|"
+            r"fought|gave|took|opened|closed|activated|deactivated|created|"
+            r"destroyed|transferred|rescued|captured|released|changed|"
+            r"returned|appeared|vanished)\b", sentence, re.I,
+        )
+        subject = lead.group("actor") if lead else None
+        return ParsedCandidate("EVENT", subject, "event", sentence, 0.70, "event_predicate")
     return None
 
 
@@ -374,7 +476,7 @@ def _score_candidate(candidate: ParsedCandidate, *, character_owned: bool, index
     return max(0.0, min(1.0, score))
 
 
-def interpret_message(text: str, *, character_id: str, speaker_id: str | None, speaker_role: str | None, viewpoint_id: str | None) -> list[CognitiveUnit]:
+def interpret_message(text: str, *, character_id: str, speaker_id: str | None, speaker_role: str | None, viewpoint_id: str | None, diagnostics: list[dict] | None = None) -> list[CognitiveUnit]:
     sentences = _sentences(text)
     if not sentences:
         return []
@@ -382,18 +484,59 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
     ranked: list[tuple[float, int, CognitiveUnit]] = []
     seen_sources: set[str] = set()
     seen_semantics: set[tuple[str, str, int]] = set()
+    def reject(index: int, reason: str, source: str) -> None:
+        if diagnostics is not None and len(diagnostics) < 32:
+            diagnostics.append({"sentence_index": index, "reason": reason,
+                                "source_excerpt": source[:240]})
+
     for index, sentence in enumerate(sentences):
         normalized_source = " ".join(_WORD_RE.findall(sentence.lower()))
         if not normalized_source or normalized_source in seen_sources:
+            reject(index, "empty_or_duplicate", sentence)
             continue
         seen_sources.add(normalized_source)
         candidate = _parse_sentence(sentence)
         if candidate is None:
+            reason = ("question" if _QUESTION_RE.search(sentence) else
+                      "discourse_marker" if _DISCOURSE_MARKER_RE.search(sentence) else
+                      "ambiguous_intention_or_agreement" if re.search(
+                          r"(?i)\b(?:deal|agreed|accept|rather|going to need)\b",
+                          sentence) else "no_supported_candidate")
+            reject(index, reason, sentence)
+            continue
+        if candidate.kind == "GOAL":
+            intent_type, candidate_horizon = _goal_semantics(candidate)
+            admission = review_goal_source(
+                source_text=sentence, objective=candidate.object_text,
+                parse_reason=candidate.reason, horizon=candidate_horizon,
+                match_span=candidate.match_span,
+            )
+            if not admission.managed:
+                reject(index, admission.decision + ":" + admission.reason, sentence)
+                continue
+        # An external request addressed to the character is not an adopted goal.
+        # The fast-path goal writer requires self-authored intention evidence.
+        if candidate.kind == "GOAL" and (
+            str(candidate.subject_text or "").casefold() == "you"
+            or not _same_identity(speaker_id, character_id)
+        ):
+            reject(index, "external_goal_not_adopted", sentence)
             continue
         owner, character_owned = _resolve_subject(candidate.subject_text, character_id=character_id, speaker_id=speaker_id, viewpoint_id=viewpoint_id)
+        if not _same_identity(speaker_id, character_id) and candidate.kind in {
+            "MEMORY", "BELIEF", "RULE", "STATE", "RELATIONSHIP",
+        }:
+            # Externally attributed testimony is not self-authored subjective
+            # character state; retain observable claims with unowned provenance.
+            character_owned = False
         if candidate.kind in {"MEMORY", "BELIEF", "GOAL", "RULE"} and not character_owned:
+            reject(index, "character_ownership_unresolved", sentence)
             continue
-        polarity = -1 if _NEGATION_RE.search(sentence) else 1
+        polarity = (
+            1 if candidate.reason == "expressed_scene_refusal"
+            else _goal_polarity(sentence, candidate) if candidate.kind == "GOAL"
+            else (-1 if _NEGATION_RE.search(sentence) else 1)
+        )
         canonical = _canonical_text(candidate, owner=owner)
         objective = _clean_object(candidate.object_text) if candidate.kind == "GOAL" else None
         topic_key = cognition_topic_key(
@@ -402,6 +545,7 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         )
         semantic_key = (candidate.kind, topic_key, polarity)
         if semantic_key in seen_semantics:
+            reject(index, "duplicate_semantic_candidate", sentence)
             continue
         seen_semantics.add(semantic_key)
         salience = _score_candidate(candidate, character_owned=character_owned, index=index, total=len(sentences))
@@ -423,7 +567,14 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
                 "semantic_owner": owner, "character_owned": character_owned,
                 "sentence_index": index, "source_text": sentence[:500],
                 "predicate": candidate.predicate.lower(), "object": _clean_object(candidate.object_text),
-                "parse_reason": candidate.reason, "persistence": _PERSISTENCE[candidate.kind],
+                "parse_reason": candidate.reason,
+                "source_span": list(candidate.match_span) if candidate.match_span else None,
+                "goal_admission_version": ADMISSION_VERSION if candidate.kind == "GOAL" else None,
+                "goal_admission_status": "admit" if candidate.kind == "GOAL" else None,
+                "scene_position": (
+                    "refusal" if candidate.reason == "expressed_scene_refusal" else None
+                ),
+                "persistence": _PERSISTENCE[candidate.kind],
                 "parse_confidence": confidence, "epistemic_confidence": 0.72 if character_owned else 0.58,
                 **goal_meta,
             },
@@ -431,6 +582,9 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         ranked.append((salience, index, unit))
     ranked.sort(key=lambda value: (-value[0], value[1]))
     selected = ranked[:MAX_UNITS]
+    if len(ranked) > MAX_UNITS:
+        for _, index, unit in ranked[MAX_UNITS:]:
+            reject(index, "unit_budget_exceeded", str(unit.meta.get("source_text") or ""))
     selected.sort(key=lambda value: value[1])
     return [unit for _, _, unit in selected]
 
@@ -481,10 +635,12 @@ def ambiguous_cognition_sentences(
         # Dialogue/action prose with first-person commitment, future intent,
         # offers/agreements, or self-development language is high-value enough
         # to adjudicate. This is candidate generation, never goal authority.
-        lower=clean.lower()
+        lower=clean.lower().replace("’", "'")
         signals=(
             "i'll ","i will ","i'm going to ","i am going to ","i should ",
             "i could ","my goal","my plan","counter-offer","standing offer",
+            "deal.","deal,","agreed.","agreed,","i accept","i'm going to need",
+            "prefer to ","rather know ","i'd just prefer ","i would prefer ",
             "i'm learning","i am learning","i'd rather","i would rather",
         )
         if explicit_timer_goal or any(signal in lower for signal in signals):
@@ -529,7 +685,10 @@ async def _reconcile_unit(db: Any, *, instance_id: UUID, unit_id: UUID, claim_ki
     return previous_id
 
 
-async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: UUID) -> bool:
+async def commit_message_cognition(
+    db: Database, *, instance_id: UUID, node_id: UUID,
+    expected_head_node_id: UUID | None = None,
+) -> bool:
     # The same live node can be scheduled concurrently by activation/HUD work.
     # Serialize the full rebuild so DELETE + ordinal INSERT is one atomic owner.
     lock_key = f"message-cognition::{instance_id}::{node_id}"
@@ -540,7 +699,8 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
                 lock_key,
             )
             committed = await _commit_message_cognition_locked(
-                con, instance_id=instance_id, node_id=node_id
+                con, instance_id=instance_id, node_id=node_id,
+                expected_head_node_id=expected_head_node_id,
             )
     if committed:
         row = await db.fetchrow(
@@ -548,11 +708,24 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
                WHERE instance_id=$1 AND node_id=$2""",instance_id,node_id)
         summary = CharacterGoalService._json_object(row["summary"]) if row else {}
         if "GOAL" in summary.get("kinds", []):
-            # Goal reconciliation above runs on the transaction connection.
-            # Scene projection must happen only after commit, using Database.
-            from aios_app.epistemic.scene_resolver import CharacterSceneProjector
-            await CharacterSceneProjector(db).refresh(instance_id)
-        if summary.get("ambiguous_sentences") and summary.get("enrichment_pending"):
+            # Replaying an old source node can recover an intention without
+            # writing a historical scene over the current HUD head.
+            live = await db.fetchval(
+                "SELECT 1 FROM aios.character_hud_readiness "
+                "WHERE instance_id=$1 AND source_head_node_id=$2",
+                instance_id, node_id,
+            )
+            if live:
+                from aios_app.epistemic.scene_resolver import CharacterSceneProjector
+                await CharacterSceneProjector(db).refresh(
+                    instance_id, source_head_node_id=node_id
+                )
+        # Historical catch-up only persists candidate evidence. Its goal and
+        # enrichment consequences require the chronological reconciliation
+        # stage, rather than mutating current character state out of order.
+        if (not summary.get("historical_catchup")
+                and summary.get("ambiguous_sentences")
+                and summary.get("enrichment_pending")):
             from aios_app.pipeline.jobs import enqueue_job
             await enqueue_job(
                 db,job_type="message_cognition_enrichment",
@@ -561,7 +734,10 @@ async def commit_message_cognition(db: Database, *, instance_id: UUID, node_id: 
     return committed
 
 
-async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_id: UUID) -> bool:
+async def _commit_message_cognition_locked(
+    con: Any, *, instance_id: UUID, node_id: UUID,
+    expected_head_node_id: UUID | None = None,
+) -> bool:
     # Re-read only after acquiring the lock. A competing worker may have
     # completed this exact cognition commit while we were waiting.
     row = await con.fetchrow(
@@ -572,14 +748,26 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
                ci.character_id
         FROM aios.dag_node dn
         JOIN aios.character_instance ci ON ci.instance_id=$1
+        JOIN aios.character_runtime_state rs ON rs.instance_id=ci.instance_id
+        JOIN aios.dag_node live_head
+          ON live_head.node_id=rs.source_head_node_id
+         AND live_head.timeline_id=rs.source_timeline_id
         WHERE dn.node_id=$2
+          AND dn.timeline_id=rs.source_timeline_id
+          AND dn.event_id<=live_head.event_id
+          AND ($3::uuid IS NULL OR rs.source_head_node_id=$3)
+        FOR SHARE OF rs
         """,
-        instance_id, node_id,
+        instance_id, node_id, expected_head_node_id,
     )
     if not row:
         return False
     text = str(row["message_text"] or "").strip()
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    live_head = await con.fetchval(
+        "SELECT source_head_node_id=$2 FROM aios.character_runtime_state WHERE instance_id=$1",
+        instance_id, node_id,
+    )
     existing = await con.fetchrow(
         "SELECT commit_id, source_text_hash, interpreter_version FROM aios.message_cognitive_commit WHERE instance_id=$1 AND node_id=$2",
         instance_id, node_id,
@@ -587,9 +775,11 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
     if existing and existing["source_text_hash"] == digest and existing["interpreter_version"] == INTERPRETER_VERSION:
         await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
         return True
+    candidate_diagnostics: list[dict] = []
     units = interpret_message(
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
         speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
+        diagnostics=candidate_diagnostics,
     )
     ambiguous = ambiguous_cognition_sentences(
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
@@ -597,8 +787,24 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
     )
     summary = {
         "unit_count": len(units), "kinds": sorted({unit.claim_kind for unit in units}),
+        "candidate_audit_version": "cognition-candidate-audit-v1",
+        "candidate_outcome": (
+            "explicit_units" if units else
+            "bounded_enrichment_pending" if ambiguous else
+            "zero_units_explained"
+        ),
+        "candidate_rejections": candidate_diagnostics,
+        "candidate_rejection_count": len(candidate_diagnostics),
+        "candidate_audit_complete": len(candidate_diagnostics) < 32,
+        "runtime_versions": _runtime_versions(),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
+        "historical_catchup": not bool(live_head),
+        "enrichment_deferred": bool(not live_head and ambiguous),
+        "polarity_reconciliation_deferred": not bool(live_head),
+        "goal_projection_deferred": bool(not live_head and any(
+            u.claim_kind == "GOAL" and u.meta.get("character_owned") for u in units
+        )),
         "ambiguous_count": len(ambiguous), "enrichment_pending": bool(ambiguous),
     }
     commit_row = await con.fetchrow(
@@ -635,11 +841,19 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
             commit_id, ordinal, unit.claim_kind, unit.text, unit.topic_key, unit.polarity,
             unit.salience, unit.confidence, json.dumps(unit.meta),
         )
-        await _reconcile_unit(
-            con, instance_id=instance_id, unit_id=unit_row["unit_id"], claim_kind=unit.claim_kind,
-            topic_key=unit.topic_key, polarity=unit.polarity,
-        )
-        if unit.claim_kind == "GOAL" and bool(unit.meta.get("character_owned")):
+        if live_head:
+            await _reconcile_unit(
+                con, instance_id=instance_id, unit_id=unit_row["unit_id"],
+                claim_kind=unit.claim_kind, topic_key=unit.topic_key,
+                polarity=unit.polarity,
+            )
+        # Historical units remain active as source evidence, but cannot
+        # supersede newer live cognitive units out of temporal order.
+        if (live_head and unit.claim_kind == "GOAL"
+                and bool(unit.meta.get("character_owned"))):
+            # Older recovered evidence is persisted as a unit but cannot
+            # retroactively override a newer goal. A separate chronological
+            # goal lifecycle replay will adjudicate it in the next patch.
             await CharacterGoalService(con).reconcile_evidence(
                 instance_id=instance_id,
                 text=unit.text,
@@ -652,6 +866,9 @@ async def _commit_message_cognition_locked(con: Any, *, instance_id: UUID, node_
                 intent_type=unit.meta.get("intent_type"),
                 horizon=unit.meta.get("horizon"),
                 objective=unit.meta.get("objective"),
+                source_text=unit.meta.get("source_text"),
+                parse_reason=unit.meta.get("parse_reason"),
+                source_span=unit.meta.get("source_span"),
                 refresh_scene=False,
             )
     await _advance_cognitive_cursor_on_connection(con, instance_id=instance_id, node_id=node_id, event_id=row["event_id"])
@@ -674,7 +891,8 @@ async def _advance_cognitive_cursor_on_connection(
         UPDATE aios.character_hud_readiness
         SET cognitive_ready_node_id=$2, cognitive_ready_event_id=$3,
             retrieval_ready_node_id=$2, retrieval_ready_event_id=$3, updated_at=now()
-        WHERE instance_id=$1
+        WHERE instance_id=$1 AND source_head_node_id=$2
+          AND (cognitive_ready_event_id IS NULL OR cognitive_ready_event_id <= $3)
         """,
         instance_id, node_id, event_id,
     )
@@ -686,7 +904,8 @@ async def _advance_cognitive_cursor(db: Database, *, instance_id: UUID, node_id:
         UPDATE aios.character_hud_readiness
         SET cognitive_ready_node_id=$2, cognitive_ready_event_id=$3,
             retrieval_ready_node_id=$2, retrieval_ready_event_id=$3, updated_at=now()
-        WHERE instance_id=$1
+        WHERE instance_id=$1 AND source_head_node_id=$2
+          AND (cognitive_ready_event_id IS NULL OR cognitive_ready_event_id <= $3)
         """,
         instance_id, node_id, event_id,
     )
@@ -724,3 +943,16 @@ async def mark_enrichment_ready(db: Database, *, instance_id: UUID, node_id: UUI
         "UPDATE aios.message_cognitive_commit SET enrichment_completed_at=now() WHERE instance_id=$1 AND node_id=$2",
         instance_id, node_id,
     )
+
+
+
+# Install the assertion/speech-act scope guard at the owning module boundary.
+# This avoids a direct fast-path caller extracting with an unwrapped interpreter
+# before an unrelated normalizer import mutates its effective version.
+def _install_scope_policy() -> None:
+    import sys
+    from aios_app.epistemic.epistemic_scope import install_message_cognition_scope_guard
+    install_message_cognition_scope_guard(sys.modules[__name__])
+
+
+_install_scope_policy()

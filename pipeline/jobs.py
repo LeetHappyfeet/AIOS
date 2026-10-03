@@ -95,7 +95,7 @@ async def _partition_key_for_enqueue(
         )
         return str(row["scope_key"]) if row else f"assertion:{assertion_id}"
 
-    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "goal_formulation_inference", "message_cognition_enrichment"} and payload.get("instance_id"):
+    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "goal_formulation_inference", "message_cognition_enrichment", "message_cognition_catchup"} and payload.get("instance_id"):
         return f"instance:{payload['instance_id']}"
 
     for key in ("world_id", "character_id", "section_id", "node_id"):
@@ -238,6 +238,13 @@ async def enqueue_job(
 
     row = await db.execute_returning_row(
         """
+        WITH cognition_enqueue_guard AS MATERIALIZED (
+            SELECT CASE WHEN $1='message_cognition_catchup'
+                THEN pg_advisory_xact_lock(
+                    hashtext('pipeline-cognition-catchup:' ||
+                        COALESCE(($2::jsonb->>'instance_id'), ''))
+                ) ELSE NULL END AS locked
+        )
         INSERT INTO aios.pipeline_job (
             job_type,
             payload,
@@ -251,19 +258,16 @@ async def enqueue_job(
             foreground_node_id,
             foreground_until
         )
-        VALUES (
-            $1,
-            $2::jsonb,
-            $3,
-            COALESCE($4, now()),
-            'queued',
-            $5,
-            $6,
-            $7,
-            $8,
-            $9,
-            $10
-        )
+        SELECT
+            $1, $2::jsonb, $3, COALESCE($4, now()), 'queued',
+            $5, $6, $7, $8, $9, $10
+        FROM cognition_enqueue_guard
+        WHERE ($1 <> 'message_cognition_catchup' OR NOT EXISTS (
+            SELECT 1 FROM aios.pipeline_job existing
+            WHERE existing.job_type='message_cognition_catchup'
+              AND existing.payload->>'instance_id'=$2::jsonb->>'instance_id'
+              AND existing.status='queued'
+        ))
         ON CONFLICT DO NOTHING
         RETURNING job_id
         """,
@@ -411,10 +415,18 @@ async def fetch_next_job(
                      AND q.created_at <= now() - interval '5 minutes'
                     THEN 0 ELSE 1
                 END ASC,
+                -- Aged RDF maintenance must eventually outrank continuously
+                -- replenished DEFAULT projection work. Before aging, prefer
+                -- DEFAULT to preserve observation publication responsiveness.
                 CASE
                     WHEN $1::text = 'RDF'
                      AND q.scheduling_lane = 'BACKGROUND'
-                    THEN 1 ELSE 0
+                     AND q.created_at <= now() - interval '2 minutes'
+                    THEN -1
+                    WHEN $1::text = 'RDF'
+                     AND q.scheduling_lane = 'BACKGROUND'
+                    THEN 1
+                    ELSE 0
                 END ASC,
                 CASE
                     WHEN $5::boolean

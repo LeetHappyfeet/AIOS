@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Optional
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.epistemic import message_cognition as _message_cognition
 from aios_app.epistemic.message_cognition import (
-    INTERPRETER_VERSION,
     commit_message_cognition,
     mark_enrichment_ready,
 )
@@ -14,6 +15,7 @@ from aios_app.pipeline.jobs import enqueue_job
 
 LIVE_PRIORITY = 15
 READY_STATUS = {"ready"}
+logger = logging.getLogger("aios.hud.readiness")
 
 
 async def ensure_readiness_row(
@@ -138,6 +140,12 @@ async def mark_matching_runtime_dirty(
             instance_id=instance_id,
             node_id=source_head_node_id,
         )
+        await enqueue_cognition_catchup(db, instance_id=instance_id)
+        from aios_app.world.conversation import reconcile_runtime_observations
+        try:
+            await reconcile_runtime_observations(db, instance_id=instance_id)
+        except Exception:
+            logger.exception("Observation recovery deferred for instance %s", instance_id)
     return instance_ids
 
 
@@ -213,7 +221,7 @@ async def source_node_retrieval_ready(
         """,
         instance_id,
         node_id,
-        INTERPRETER_VERSION,
+        _message_cognition.INTERPRETER_VERSION,
     )
     return bool(row)
 
@@ -344,6 +352,16 @@ async def _enqueue_live_job(
         return False
     await enqueue_job(db, job_type=job_type, payload=payload, priority=LIVE_PRIORITY)
     return True
+
+
+async def enqueue_cognition_catchup(db: Database, *, instance_id: UUID) -> None:
+    """Repair missing ancestors; queued/running jobs deduplicate per instance."""
+    await enqueue_job(
+        db,
+        job_type="message_cognition_catchup",
+        payload={"instance_id": str(instance_id)},
+        priority=65,
+    )
 
 
 async def enqueue_live_turn_work(

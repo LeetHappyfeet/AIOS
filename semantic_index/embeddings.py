@@ -4,10 +4,7 @@ from dataclasses import dataclass
 from typing import List
 import hashlib
 
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception:  # pragma: no cover
-    SentenceTransformer = None  # type: ignore
+SentenceTransformer = None  # Loaded only by the vector/query process.
 
 
 def stable_text_hash(text: str) -> str:
@@ -23,8 +20,13 @@ class Embedder:
     def load(self) -> None:
         if self._model is not None:
             return
+        global SentenceTransformer
         if SentenceTransformer is None:
-            raise RuntimeError("sentence-transformers is not installed")
+            try:
+                from sentence_transformers import SentenceTransformer as model_class
+            except ImportError as exc:
+                raise RuntimeError("sentence-transformers is not installed") from exc
+            SentenceTransformer = model_class
         self._model = SentenceTransformer(self.model_name, device=self.device)
 
     @property

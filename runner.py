@@ -700,6 +700,7 @@ async def _claim_for_worker(
     worker_index: int,
     claim_gate: asyncio.Lock,
     prefer_foreground: bool = True,
+    reserve_rdf_background: bool = False,
 ) -> Optional[Dict[str, Any]]:
     preferred: Optional[list[str]] = None
     fallback: Optional[list[str]] = None
@@ -709,6 +710,21 @@ async def _claim_for_worker(
         reserved_job_types = await _semantic_stage_reservation(db, worker_index)
 
     async with claim_gate:
+        # Reserve every fourth RDF claim for BACKGROUND when work is available.
+        # This reservation precedes foreground ranking and priority, preventing
+        # an unbounded DEFAULT observation feed from starving topology publication.
+        if resource_class == ResourceClass.RDF and reserve_rdf_background:
+            background_job = await fetch_next_job(
+                db,
+                worker_id=worker_id,
+                resource_class=resource_class.value,
+                lease_seconds=settings.pipeline_lease_seconds,
+                scheduling_lanes=[SchedulingLane.BACKGROUND.value],
+                prefer_uncontended=True,
+                prefer_foreground=False,
+            )
+            if background_job:
+                return background_job
         # First honor a stage reservation. This is deliberately narrower than
         # priority tweaking: if normalization is queued, worker 1 cannot be
         # captured by a large resolver backlog.
@@ -834,6 +850,7 @@ async def _resource_worker(
             worker_index=worker_index,
             claim_gate=claim_gate,
             prefer_foreground=(claims_since_backlog % 4 != 3),
+            reserve_rdf_background=(claims_since_backlog % 4 == 3),
         )
         if not job:
             await asyncio.sleep(poll_interval)

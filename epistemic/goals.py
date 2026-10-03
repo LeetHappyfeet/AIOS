@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.epistemic.goal_source_admission import review_goal_source
 
 
 def valid_goal_objective(value: str | None) -> bool:
@@ -391,6 +392,9 @@ class CharacterGoalService:
         intent_type: str | None = None,
         horizon: str | None = None,
         objective: str | None = None,
+        source_text: str | None = None,
+        parse_reason: str | None = None,
+        source_span: list[int] | tuple[int, int] | None = None,
         refresh_scene: bool = True,
     ) -> CognitiveGoal | None:
         """Project character-owned GOAL evidence into managed intention state.
@@ -404,6 +408,19 @@ class CharacterGoalService:
         clean = " ".join(str(text or "").split())
         if not topic or not clean or not valid_goal_objective(objective or clean):
             return None
+        # Shared lifecycle guard for live, deferred and enriched source units.
+        # External executive actions without a source excerpt keep their own
+        # preexisting authority; never assign authorship from canonical text.
+        if source_text is not None:
+            span = (tuple(source_span) if source_span is not None
+                    and len(source_span) == 2 else None)
+            admission = review_goal_source(
+                source_text=source_text, objective=objective or clean,
+                parse_reason=parse_reason, horizon=horizon,
+                match_span=span,
+            )
+            if not admission.managed:
+                return None
         rows = await self.db.fetch(
             """SELECT goal_id,goal_text,status,priority,meta
                FROM aios.character_agent_goal

@@ -17,6 +17,7 @@ from aios_app.pipeline.jobs import enqueue_job
 logger = logging.getLogger("aios.pipeline.runner")
 
 RDF_PROJECTION_SCHEDULER_SECONDS = 5.0
+COGNITION_RECOVERY_SCHEDULER_SECONDS = 60.0
 
 
 async def handle_project_semantic_scope(db: Database, job: Dict[str, Any]) -> None:
@@ -95,13 +96,72 @@ async def handle_message_cognition_enrichment(db: Database, job: Dict[str, Any])
 
 base.JOB_HANDLERS["message_cognition_enrichment"] = handle_message_cognition_enrichment
 
+
+async def handle_message_cognition_catchup(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.epistemic.cognition_catchup import recover_missing_cognition
+    payload = job.get("payload") or {}
+    if not payload.get("instance_id"):
+        raise ValueError("message_cognition_catchup requires instance_id")
+    instance_id = UUID(str(payload["instance_id"]))
+    # Do not infer the current goal state while a missing earlier source turn
+    # or a deferred model review may still contain a later withdrawal.
+    for _ in range(8):
+        report = await recover_missing_cognition(db, instance_id=instance_id, limit=32)
+        if not report["more_possible"] or report["committed"] == 0:
+            break
+    from aios_app.epistemic.cognition_catchup import finish_deferred_cognition
+    outcome = None
+    for _ in range(2):
+        outcome = await finish_deferred_cognition(db, instance_id=instance_id)
+        logger.info("Cognition history completion instance=%s result=%s",
+                    instance_id, outcome)
+        if outcome["status"] not in {
+            "source_inference_pending", "goal_reconciliation_pending"
+        }:
+            break
+        if outcome["status"] == "source_inference_pending" and not outcome["enrichment_completed"]:
+            break
+        reviewed = outcome.get("goal_reconciliation") or {}
+        if outcome["status"] == "goal_reconciliation_pending" and not reviewed.get("considered"):
+            break
+    # A completed pipeline job cannot resume itself after DNS or provider
+    # recovery. Schedule bounded, delayed continuation without tight loops.
+    if outcome and outcome["status"] in {
+        "source_inference_running", "source_inference_pending",
+        "source_inference_failed", "source_inference_invalid_response",
+        "source_inference_unavailable", "goal_reconciliation_pending",
+    }:
+        from datetime import datetime, timedelta, timezone
+        retry_count = max(0, min(12, int(payload.get("retry_count") or 0)))
+        delay = min(900, 60 * (2 ** min(retry_count, 4)))
+        if outcome["status"] == "source_inference_running":
+            delay = max(120, delay)
+        existing = await db.fetchrow(
+            """SELECT job_id FROM aios.pipeline_job
+               WHERE job_type='message_cognition_catchup'
+                 AND payload->>'instance_id'=$1
+                 AND status='queued'
+               LIMIT 1""", str(instance_id),
+        )
+        if not existing:
+            await enqueue_job(
+                db, job_type="message_cognition_catchup",
+                payload={"instance_id": str(instance_id),
+                         "retry_count": min(retry_count + 1, 12)},
+                priority=65,
+                run_after=datetime.now(timezone.utc) + timedelta(seconds=delay),
+            )
+
+base.JOB_HANDLERS["message_cognition_catchup"] = handle_message_cognition_catchup
+
 _original_resolve_partition_key = base._resolve_partition_key
 
 
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
-    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment"} and payload.get("instance_id"):
+    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup"} and payload.get("instance_id"):
         return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])
@@ -674,6 +734,35 @@ async def _projection_scheduler_loop() -> None:
         await db.close()
 
 
+
+async def _deferred_cognition_recovery_loop(
+    interval: float = COGNITION_RECOVERY_SCHEDULER_SECONDS,
+) -> None:
+    """Independent restart recovery: no dependency on a surviving catch-up job."""
+    from aios_app.epistemic.cognition_recovery_sweep import enqueue_abandoned_enrichment
+    from aios_app.inference.providers import InferenceProviderStore
+
+    db = Database(settings.db_dsn, min_size=1, max_size=2)
+    await db.connect()
+    try:
+        while True:
+            try:
+                # Inference leases are reclaimed even when no catch-up is
+                # currently executing; only expired leases may be mutated.
+                reaped = await InferenceProviderStore(db).reap_stale_requests()
+                enqueued = await enqueue_abandoned_enrichment(db, limit=16)
+                if reaped or enqueued:
+                    logger.info(
+                        "Deferred cognition sweep reaped=%s enqueued=%s",
+                        reaped, enqueued,
+                    )
+            except Exception:
+                logger.exception("Failed deferred cognition recovery sweep")
+            await asyncio.sleep(interval)
+    finally:
+        await db.close()
+
+
 async def run_runner(poll_interval: float = 1.0) -> None:
     projector = asyncio.create_task(
         _projection_scheduler_loop(),
@@ -683,12 +772,19 @@ async def run_runner(poll_interval: float = 1.0) -> None:
         _pipeline_telemetry_loop(),
         name="pipeline-telemetry",
     )
+    cognition_recovery = asyncio.create_task(
+        _deferred_cognition_recovery_loop(),
+        name="deferred-cognition-recovery-scheduler",
+    )
     try:
         await base.run_runner(poll_interval=poll_interval)
     finally:
         projector.cancel()
         telemetry.cancel()
-        await asyncio.gather(projector, telemetry, return_exceptions=True)
+        cognition_recovery.cancel()
+        await asyncio.gather(
+            projector, telemetry, cognition_recovery, return_exceptions=True,
+        )
 
 
 if __name__ == "__main__":

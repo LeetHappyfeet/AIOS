@@ -15,11 +15,22 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install narrow dependencies
-        run: python -m pip install --disable-pip-version-check pytest asyncpg requests qdrant-client pydantic python-dotenv
+        run: python -m pip install --disable-pip-version-check pytest asyncpg requests qdrant-client pydantic python-dotenv "spacy>=3.7,<4"
       - name: Compile fast cognition, knowledge admission, HUD, and scheduler modules
         run: |
           python -m py_compile \
             epistemic/message_cognition.py \
+            epistemic/goal_source_admission.py \
+            epistemic/epistemic_scope.py \
+            epistemic/message_cognition_enrichment.py \
+            inference/broker.py \
+            inference/protocol.py \
+            epistemic/cognition_catchup.py \
+            epistemic/cognition_recovery_sweep.py \
+            epistemic/deferred_goal_reconciliation.py \
+            epistemic/cognition_diagnostics.py \
+            epistemic/semantic_integrity.py \
+            agent/participation.py \
             epistemic/semantic_interpreter.py \
             epistemic/knowledge.py \
             epistemic/normalizer.py \
@@ -30,6 +41,19 @@ jobs:
             runner.py \
             runner_v2.py \
             tests/test_message_cognition.py \
+            tests/test_cognition_admission_v9.py \
+            tests/test_cognition_catchup.py \
+            tests/test_deferred_goal_reconciliation.py \
+            tests/test_goal_admission_flow_v9.py \
+            tests/test_cognition_v10_temporal_intention.py \
+            tests/test_cognition_v11_source_admission.py \
+            tests/test_experiment6_fidelity_v4.py \
+            tests/test_participation_v4_source_roles.py \
+            tests/test_cognition_diagnostics.py \
+            tests/test_cognition_envelope_admission_v2.py \
+            tests/test_cognition_inference_lease_hardening.py \
+            tests/test_cognition_recovery_sweep.py \
+            tests/test_inference_source_coordinate.py \
             tests/test_hud_semantic_regressions.py \
             tests/test_knowledge_admission.py \
             tests/test_runner_stage_scheduling.py
@@ -40,6 +64,21 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" \
             python -m pytest -q \
               tests/test_message_cognition.py \
+              tests/test_cognition_admission_v9.py \
+              tests/test_cognition_catchup.py \
+              tests/test_deferred_goal_reconciliation.py \
+              tests/test_goal_admission_flow_v9.py \
+              tests/test_cognition_v10_temporal_intention.py \
+              tests/test_cognition_v11_source_admission.py \
+              tests/test_experiment6_fidelity_v4.py \
+              tests/test_participation_v4_source_roles.py \
+              tests/test_cognition_diagnostics.py \
+              tests/test_cognition_envelope_admission_v2.py \
+              tests/test_cognition_inference_lease_hardening.py \
+              tests/test_cognition_recovery_sweep.py \
+              tests/test_inference_source_coordinate.py \
+              tests/test_semantic_integrity_experiment.py \
+              tests/test_runtime_version_manifest.py \
               tests/test_hud_semantic_regressions.py \
               tests/test_knowledge_admission.py \
               tests/test_runner_stage_scheduling.py

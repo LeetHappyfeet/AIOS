@@ -27,14 +27,28 @@ async def ensure_participant(
     controller_ref: str | None = None, participant_role: str = "participant",
     character_id: str | None = None, meta: dict | None = None,
 ) -> UUID:
-    character_id = character_id or await resolve_character_identity(db, source_actor_id)
+    # Source role and cognitive identity are independent. For a human source
+    # actor, require an exact canonical ID to avoid display-name collisions.
+    if character_id is None:
+        if actor_type == "user":
+            identity = await db.fetchrow(
+                "SELECT character_id FROM aios.character_identity WHERE character_id=$1",
+                source_actor_id,
+            )
+            character_id = str(identity["character_id"]) if identity else None
+        else:
+            character_id = await resolve_character_identity(db, source_actor_id)
     row = await db.execute_returning_row(
         """INSERT INTO aios.conversation_participant(
              timeline_id,character_id,source_actor_id,actor_type,controller_type,
              controller_ref,participant_role,meta)
            VALUES($1,$2,$3,$4::aios.actor_type,$5,$6,$7,$8::jsonb)
            ON CONFLICT (timeline_id,source_actor_id) DO UPDATE SET
-             character_id=COALESCE(aios.conversation_participant.character_id,EXCLUDED.character_id),
+             character_id=EXCLUDED.character_id,
+             character_instance_id=CASE
+               WHEN aios.conversation_participant.character_id IS NOT DISTINCT FROM EXCLUDED.character_id
+               THEN aios.conversation_participant.character_instance_id
+               ELSE NULL END,
              actor_type=EXCLUDED.actor_type,
              controller_type=COALESCE(aios.conversation_participant.controller_type,EXCLUDED.controller_type),
              controller_ref=COALESCE(aios.conversation_participant.controller_ref,EXCLUDED.controller_ref),
@@ -48,7 +62,7 @@ async def ensure_participant(
 
 
 async def bind_available_instance(db: Database, *, participant_id: UUID) -> UUID | None:
-    """Bind a participant to an existing runtime; never create a heavyweight runtime."""
+    """Preserve an existing binding; resolve new bindings within the conversation."""
     # PostgreSQL does not make the UPDATE target alias visible inside a
     # FROM/LATERAL item at this query level. Use a correlated scalar subquery,
     # which is explicitly allowed to read the target row's old values.
@@ -57,13 +71,21 @@ async def bind_available_instance(db: Database, *, participant_id: UUID) -> UUID
              character_instance_id=(
                SELECT ci.instance_id
                FROM aios.character_instance ci
+               JOIN aios.character_runtime_state rs ON rs.instance_id=ci.instance_id
+               JOIN aios.timeline rt ON rt.timeline_id=rs.timeline_id
+               JOIN aios.timeline st ON st.timeline_id=cp.timeline_id
                WHERE ci.character_id=cp.character_id
+                 AND rt.session_id IS NOT DISTINCT FROM st.session_id
+                 AND rt.user_name IS NOT DISTINCT FROM st.user_name
+                 AND rt.scope_key=st.scope_key
+                 AND (rs.source_timeline_id IS NULL OR rs.source_timeline_id=cp.timeline_id)
                ORDER BY ci.created_at DESC
                LIMIT 1
              ),
              updated_at=now()
            WHERE cp.participant_id=$1
              AND cp.character_id IS NOT NULL
+             AND cp.character_instance_id IS NULL
              AND EXISTS (
                SELECT 1 FROM aios.character_instance ci
                WHERE ci.character_id=cp.character_id
@@ -72,6 +94,58 @@ async def bind_available_instance(db: Database, *, participant_id: UUID) -> UUID
         participant_id,
     )
     return row["character_instance_id"] if row else None
+
+
+async def reconcile_runtime_observations(db: Database, *, instance_id: UUID) -> int:
+    """Recover bounded missing deliveries within this runtime's adopted source head."""
+    rows = await db.fetch_bounded(
+        """WITH missing AS (
+          SELECT o.*, ccr.character_instance_id AS origin_instance_id, ccr.claim_kind,
+                 dn.kind::text AS node_kind
+          FROM aios.character_runtime_state rs
+          JOIN aios.timeline rt ON rt.timeline_id=rs.timeline_id
+          JOIN aios.timeline st ON st.timeline_id=rs.source_timeline_id
+          JOIN aios.dag_node head ON head.node_id=rs.source_head_node_id
+            AND head.timeline_id=st.timeline_id
+          JOIN aios.dag_node dn ON dn.timeline_id=st.timeline_id
+            AND dn.event_id<=head.event_id
+          JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+          JOIN aios.observation o ON o.dag_node_id=dn.node_id AND o.timeline_id=st.timeline_id
+          LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
+          LEFT JOIN aios.claim_semantic_frame_projection sfp ON sfp.claim_id=o.claim_id
+          LEFT JOIN aios.claim_semantic_frame f ON f.frame_id=sfp.primary_frame_id
+          WHERE rs.instance_id=$1 AND o.proposition_id IS NOT NULL
+            AND rt.session_id IS NOT DISTINCT FROM st.session_id
+            AND rt.user_name IS NOT DISTINCT FROM st.user_name AND rt.scope_key=st.scope_key
+            AND dn.kind::text IN ('chat_message','observation') AND ie.superseded_at IS NULL
+            AND lower(COALESCE(f.modality,'asserted')) NOT IN
+              ('hypothetical','conditional','counterfactual','question')
+            AND EXISTS (
+              SELECT 1 FROM aios.message_participant mp
+              JOIN aios.conversation_participant cp ON cp.participant_id=mp.participant_id
+              WHERE mp.node_id=dn.node_id AND mp.perceived AND cp.active
+                AND cp.timeline_id=st.timeline_id AND cp.character_instance_id=rs.instance_id
+            )
+            AND NOT EXISTS (SELECT 1 FROM aios.knowledge_acquisition_event k
+              WHERE k.instance_id=$1 AND k.claim_id=o.claim_id AND k.proposition_id=o.proposition_id)
+          ORDER BY dn.event_id DESC,o.observation_id LIMIT 128
+          FOR UPDATE OF o SKIP LOCKED
+        )
+        INSERT INTO aios.knowledge_acquisition_event
+          (instance_id,proposition_id,claim_id,acquisition_mode,epistemic_status,
+           confidence,dag_node_id,meta)
+        SELECT $1,proposition_id,claim_id,
+          aios.acquisition_mode_for_perceiver(node_kind,origin_instance_id,$1),
+          CASE upper(COALESCE(claim_kind,'UNKNOWN'))
+            WHEN 'BELIEF' THEN 'believed' WHEN 'MEMORY' THEN 'remembered'
+            WHEN 'GOAL' THEN 'intended' WHEN 'RULE' THEN 'accepted_rule' ELSE 'observed' END,
+          1.0,dag_node_id,jsonb_build_object('acquisition_semantics','perceiver-v1',
+            'observation_id',observation_id,'source_key',source_key,'source_kind',source_kind,
+            'recovery','runtime-source-cursor-v1','evidence_origin_preserved',true,
+            'confidence_semantics','perception_delivery','semantic_confidence_separate',true)
+        FROM missing RETURNING acquisition_id""", instance_id,
+    )
+    return len(rows)
 
 
 async def record_message_participation(

@@ -18,6 +18,7 @@ RDF_DELTA_TARGET_BYTES = 512 * 1024
 RDF_DELTA_TARGET_OBJECTS = 128
 RDF_DB_PAGE_SIZE = 2000
 RDF_PROJECTION_QUIET_SECONDS = 30.0
+RDF_PROJECTION_MAX_AGE_SECONDS = 300.0
 RDF_PROJECTION_PRIORITY = 200
 
 
@@ -49,9 +50,9 @@ async def mark_scope_dirty(db: Database, *, decision: Any) -> int:
         """
         INSERT INTO aios.semantic_scope_projection_state (
             scope_key, scope_kind, rdf_dataset, rdf_graph,
-            dirty_version, projected_version, status, dirty_at
+            dirty_version, projected_version, status, dirty_at, first_dirty_at
         )
-        VALUES ($1,$2,$3,$4,1,0,'dirty',now())
+        VALUES ($1,$2,$3,$4,1,0,'dirty',now(),now())
         ON CONFLICT (scope_key) DO UPDATE
         SET scope_kind=EXCLUDED.scope_kind,
             rdf_dataset=EXCLUDED.rdf_dataset,
@@ -59,6 +60,12 @@ async def mark_scope_dirty(db: Database, *, decision: Any) -> int:
             dirty_version=aios.semantic_scope_projection_state.dirty_version + 1,
             status='dirty',
             dirty_at=now(),
+            first_dirty_at=CASE
+                WHEN aios.semantic_scope_projection_state.dirty_version >
+                     aios.semantic_scope_projection_state.projected_version
+                THEN COALESCE(aios.semantic_scope_projection_state.first_dirty_at, now())
+                ELSE now()
+            END,
             last_error=NULL,
             updated_at=now()
         RETURNING dirty_version
@@ -619,7 +626,7 @@ async def project_semantic_scope(
     state = await db.fetchrow(
         """
         SELECT scope_key, scope_kind, rdf_dataset, rdf_graph,
-               dirty_version, projected_version, dirty_at,
+               dirty_version, projected_version, dirty_at, first_dirty_at,
                rdf_change_cursor, rdf_delta_ready,
                COALESCE((
                    SELECT max(change_id)
@@ -629,12 +636,15 @@ async def project_semantic_scope(
                (
                     dirty_at IS NULL
                     OR dirty_at <= now() - make_interval(secs => $2)
+                    OR COALESCE(first_dirty_at, dirty_at)
+                       <= now() - make_interval(secs => $3)
                ) AS quiet_ready
         FROM aios.semantic_scope_projection_state
         WHERE scope_key=$1
         """,
         scope_key,
         RDF_PROJECTION_QUIET_SECONDS,
+        RDF_PROJECTION_MAX_AGE_SECONDS,
     )
     if not state:
         return {"scope_key": scope_key, "projected": False, "reason": "not_dirty"}
@@ -677,7 +687,8 @@ async def project_semantic_scope(
             SET projected_version=dirty_version,
                 rdf_change_cursor=GREATEST(rdf_change_cursor,$2),
                 rdf_delta_ready=true,
-                status='ready', projected_at=now(), last_error=NULL,
+                status='ready', first_dirty_at=NULL,
+                projected_at=now(), last_error=NULL,
                 updated_at=now()
             WHERE scope_key=$1
             """,
@@ -750,6 +761,8 @@ async def project_semantic_scope(
             rdf_change_cursor=GREATEST(rdf_change_cursor,$5),
             rdf_delta_ready=true,
             status=CASE WHEN dirty_version <= $4 THEN 'ready' ELSE 'dirty' END,
+            first_dirty_at=CASE WHEN dirty_version <= $4 THEN NULL
+                                ELSE first_dirty_at END,
             projected_at=now(),
             last_error=NULL,
             updated_at=now()
@@ -796,6 +809,8 @@ async def enqueue_dirty_scope_jobs(db: Database, *, limit: int = 64) -> int:
           AND (
                 s.dirty_at IS NULL
                 OR s.dirty_at <= now() - make_interval(secs => $2)
+                OR COALESCE(s.first_dirty_at, s.dirty_at)
+                   <= now() - make_interval(secs => $3)
           )
           AND NOT EXISTS (
               SELECT 1
@@ -809,6 +824,7 @@ async def enqueue_dirty_scope_jobs(db: Database, *, limit: int = 64) -> int:
         """,
         limit,
         RDF_PROJECTION_QUIET_SECONDS,
+        RDF_PROJECTION_MAX_AGE_SECONDS,
     )
     if not rows:
         return 0

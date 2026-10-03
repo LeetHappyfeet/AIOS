@@ -356,6 +356,7 @@ def _authority_insert_lines(prefix: str, authority) -> list[str]:
 
 
 async def _project_observation_authority(
+    db: Database,
     fuseki: FusekiClient,
     *,
     dataset: str,
@@ -367,6 +368,22 @@ async def _project_observation_authority(
 ) -> None:
     """Replace only authority predicates so old projection receipts can be upgraded."""
     if not authority:
+        return
+
+    # The receipt describes the last successfully replicated RDF-visible
+    # authority state. It deliberately excludes reconciliation timestamps.
+    fingerprint = hashlib.sha256(
+        "\n".join(_authority_insert_lines(prefix, authority)).encode("utf-8")
+    ).hexdigest()
+    previous = await db.fetchrow(
+        """
+        SELECT projection_hash
+        FROM aios.rdf_observation_authority_projection
+        WHERE rdf_dataset=$1 AND rdf_graph=$2 AND observation_iri=$3
+        """,
+        dataset, graph_iri, observation_iri,
+    )
+    if previous and previous["projection_hash"] == fingerprint:
         return
 
     predicates = (
@@ -406,6 +423,17 @@ INSERT DATA {{
 }}
 """.strip()
     fuseki.update(dataset, sparql)
+    # A failed Fuseki update never advances the receipt; retry is idempotent.
+    await db.execute(
+        """
+        INSERT INTO aios.rdf_observation_authority_projection
+            (rdf_dataset, rdf_graph, observation_iri, projection_hash, updated_at)
+        VALUES ($1,$2,$3,$4,now())
+        ON CONFLICT (rdf_dataset, rdf_graph, observation_iri)
+        DO UPDATE SET projection_hash=EXCLUDED.projection_hash, updated_at=now()
+        """,
+        dataset, graph_iri, observation_iri, fingerprint,
+    )
 
 
 async def compact_character_world_epistemic_shadows(
@@ -436,11 +464,11 @@ async def compact_character_world_epistemic_shadows(
         """,
         DATASET, GRAPH_IRI, RECEIPT_PREDICATE, limit,
     )
+    pending: list[tuple[object, str]] = []
     for row in rows:
         obs_iri = f"urn:aios:observation:{row['observation_id']}"
         prop_iri = f"urn:aios:proposition:{row['proposition_id']}"
         sparql = f"""
-PREFIX world: <urn:aios:world#>
 DELETE WHERE {{
   GRAPH <{GRAPH_IRI}> {{ <{obs_iri}> ?p ?o . }}
 }};
@@ -457,17 +485,40 @@ WHERE {{
   }}
 }}
 """.strip()
-        fuseki.update(DATASET, sparql)
-        await db.execute(
-            """
-            DELETE FROM aios.rdf_promotion_log
-            WHERE claim_id=$1
-              AND rdf_dataset=$2
-              AND rdf_graph=$3
-              AND rdf_predicate=$4
-            """,
-            row["claim_id"], DATASET, GRAPH_IRI, RECEIPT_PREDICATE,
+        pending.append((row["claim_id"], sparql))
+        if len(pending) >= 20:
+            # One bounded Fuseki transaction per batch. Never acknowledge a
+            # receipt before its batch successfully reaches the derived graph.
+            fuseki.update(
+                DATASET,
+                "PREFIX world: <urn:aios:world#>\n"
+                + ";\n".join(statement for _, statement in pending),
+            )
+            for claim_id, _ in pending:
+                await db.execute(
+                    """
+                    DELETE FROM aios.rdf_promotion_log
+                    WHERE claim_id=$1 AND rdf_dataset=$2
+                      AND rdf_graph=$3 AND rdf_predicate=$4
+                    """,
+                    claim_id, DATASET, GRAPH_IRI, RECEIPT_PREDICATE,
+                )
+            pending.clear()
+    if pending:
+        fuseki.update(
+            DATASET,
+            "PREFIX world: <urn:aios:world#>\n"
+            + ";\n".join(statement for _, statement in pending),
         )
+        for claim_id, _ in pending:
+            await db.execute(
+                """
+                DELETE FROM aios.rdf_promotion_log
+                WHERE claim_id=$1 AND rdf_dataset=$2
+                  AND rdf_graph=$3 AND rdf_predicate=$4
+                """,
+                claim_id, DATASET, GRAPH_IRI, RECEIPT_PREDICATE,
+            )
     return len(rows)
 
 
@@ -503,11 +554,12 @@ async def project_normalized_observation(
         JOIN aios.proposition p ON p.proposition_id=o.proposition_id
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
         WHERE o.claim_id=$1
+          AND aios.semantic_claim_topology_admitted(o.claim_id)
         """,
         claim_id,
     )
     if not row:
-        raise RuntimeError(f"claim {claim_id} has not been normalized")
+        return False
 
     perceiver_rows = await db.fetch(
         """
@@ -595,6 +647,7 @@ async def project_normalized_observation(
         # Refresh it independently of the legacy projection receipt so objective
         # observations gain the authority membrane when they are next projected.
         await _project_observation_authority(
+            db,
             fuseki,
             dataset=DATASET,
             graph_iri=GRAPH_IRI,
@@ -605,6 +658,7 @@ async def project_normalized_observation(
         )
     if character_id and char_graph and char_obs_iri:
         await _project_observation_authority(
+            db,
             fuseki,
             dataset="char",
             graph_iri=char_graph,

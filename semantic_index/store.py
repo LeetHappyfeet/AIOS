@@ -32,7 +32,7 @@ class QdrantStore:
     vector_dim: int
 
     def __post_init__(self) -> None:
-        self.client = QdrantClient(url=self.url, api_key=self.api_key)
+        self.client = QdrantClient(url=self.url, api_key=self.api_key, timeout=5)
 
     def ensure_collection(self) -> None:
         try:
@@ -72,12 +72,14 @@ class QdrantStore:
         *,
         top_k: int,
         qdrant_filter: qm.Filter | None = None,
+        score_threshold: float | None = None,
     ) -> list[tuple[str, float, dict[str, Any]]]:
         response = self.client.query_points(
             collection_name=self.collection,
             query=vector,
             limit=top_k,
             query_filter=qdrant_filter,
+            score_threshold=score_threshold,
             with_payload=True,
             with_vectors=False,
         )

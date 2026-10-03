@@ -18,7 +18,7 @@ logger = logging.getLogger("aios.epistemic.semantic_frames")
 # stages intentionally key on semantic-frame-v2. Perspective is a resolver
 # upgrade, not a new frame storage contract.
 DECOMPOSER_VERSION = "semantic-frame-v2"
-REFERENT_RESOLVER_VERSION = "local-dag-referent-v3"
+REFERENT_RESOLVER_VERSION = "local-dag-referent-v4-source-grounded"
 PERSPECTIVE_VERSION = "frame-perspective-v1"
 
 _NLP = None
@@ -380,6 +380,17 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
         # proposition-valued content. The normalizer must never lose a concrete
         # object merely because another clause is structurally attached.
         object_text = _phrase(object_token)
+        # Environmental/expletive 'it' must not inherit the last named person.
+        # Record the conventional weather subject, retaining the actual source
+        # span in metadata for subsequent integrity checks.
+        environmental_it = (
+            subject_token is not None
+            and subject_token.lower_ == "it"
+            and root.lemma_.lower() == "be"
+            and any(t.lower_ == "out" for t in root.sent)
+        )
+        if environmental_it:
+            subject = "outdoor conditions"
         named_entities = [
             {"text": ent.text, "label": ent.label_}
             for ent in doc.ents
@@ -417,6 +428,11 @@ def decompose_sentence(sentence: str) -> list[FrameDraft]:
                 "local_relative_antecedent": local_relative_antecedent,
                 "passive_reporting": passive_reporting,
                 "named_entities": named_entities,
+                "source_subject_text": _phrase(subject_token),
+                "source_predicate_text": root.text,
+                "source_object_text": _phrase(object_token),
+                "source_predicate_offset": int(root.idx),
+                "environmental_expletive": environmental_it,
                 "inside_direct_quote": _inside_quote(root, quote_spans),
                 "addressee_text": _find_addressee(root) if predicate in REPORTING_PREDICATES else None,
                 "clause_relation": root.dep_.lower() if root.dep_ != "ROOT" else None,
@@ -530,22 +546,17 @@ def _draft_antecedent_candidates(drafts: list[FrameDraft], before_index: int) ->
 
 
 def _choose_antecedent(value: Optional[str], candidates: list[dict]) -> tuple[Optional[str], Optional[str], float]:
+    """Abstain on ambiguous anaphora; proximity and PERSON type are not identity evidence.
+
+    In particular neutral 'it' can be an expletive, and he/she must not be
+    resolved against arbitrary preceding PERSON frames (which may themselves
+    have been misresolved). Explicit participant pivots are handled separately.
+    """
     clean = _norm(value)
     if clean not in PRONOUN_PERSON | PRONOUN_NEUTRAL:
         return value, None, 0.90 if value else 0.0
-    want_person = clean in PRONOUN_PERSON
-    for row in candidates:
-        pairs = [
-            (row.get("resolved_subject") or row.get("subject_text"), row.get("subject_entity_key"), row.get("subject_kind_guess")),
-            (row.get("resolved_object") or row.get("object_text"), row.get("object_entity_key"), row.get("object_kind_guess")),
-        ]
-        for text, entity_key, kind in pairs:
-            if not text:
-                continue
-            if want_person and kind == "PERSON":
-                return str(text), entity_key, 0.82
-            if not want_person and kind not in {None, "PERSON"}:
-                return str(text), entity_key, 0.68
+    # Preserve surface reference pending a source-grounded discourse resolver.
+    # Never manufacture a confident entity key from proximity alone.
     return value, None, 0.20
 
 

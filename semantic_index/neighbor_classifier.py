@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from aios_app.db import Database
@@ -10,7 +11,7 @@ from .relation_validator import validate_neighbor_relation
 
 logger = logging.getLogger("aios.semantic_neighbor_classifier")
 
-NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v5"
+NEIGHBOR_CLASSIFIER_VERSION = "semantic-neighbor-classifier-v6"
 
 
 def classify_neighbor_pair(
@@ -38,9 +39,31 @@ async def classify_neighbor_relations_once(
     db: Database,
     cfg: SemanticIndexConfig,
 ) -> int:
+    started = time.monotonic()
+    logger.debug("Semantic relation candidate query started")
     rows = await db.fetch(
         """
+        WITH pending AS MATERIALIZED (
+            SELECT snc.* FROM aios.semantic_neighbor_candidate snc
+            WHERE snc.embedding_version=$1 AND snc.status='candidate'
+              AND snc.classification_ready_at<=now()
+              AND snc.last_classifier_version IS DISTINCT FROM $2
+            ORDER BY snc.updated_at DESC,snc.proposition_id,snc.neighbor_proposition_id
+            LIMIT $3
+        ), supported AS MATERIALIZED (
+            SELECT snc.*, (snc.similarity >= $4 AND (
+                (NULLIF(pa.subject_norm,'') IS NOT NULL AND pa.subject_norm=pb.subject_norm)
+                OR (NULLIF(pa.object_norm,'') IS NOT NULL AND pa.object_norm=pb.object_norm)
+                OR (NULLIF(pa.topic_key,'') IS NOT NULL AND pa.topic_key=pb.topic_key)
+                OR (NULLIF(pa.subject_norm,'') IS NOT NULL AND NULLIF(pa.object_norm,'') IS NOT NULL
+                    AND pa.subject_norm=pb.object_norm AND pa.object_norm=pb.subject_norm)
+            )) AS structural_supported
+            FROM pending snc
+            JOIN aios.proposition pa ON pa.proposition_id=snc.proposition_id
+            JOIN aios.proposition pb ON pb.proposition_id=snc.neighbor_proposition_id
+        )
         SELECT
+            snc.structural_supported,
             snc.proposition_id,
             snc.neighbor_proposition_id,
             snc.similarity,
@@ -79,7 +102,7 @@ async def classify_neighbor_relations_once(
             cb.character_instance_id AS b_character_instance_id,
             cb.viewpoint_id AS b_viewpoint_id,
             pc.conflict_type
-        FROM aios.semantic_neighbor_candidate snc
+        FROM supported snc
         JOIN aios.proposition pa ON pa.proposition_id=snc.proposition_id
         JOIN aios.proposition pb ON pb.proposition_id=snc.neighbor_proposition_id
         LEFT JOIN LATERAL (
@@ -100,10 +123,13 @@ async def classify_neighbor_relations_once(
                 ccr.origin_character_id AS character_id,
                 ccr.character_instance_id,
                 ccr.viewpoint_id
-            FROM aios.observation o
+            FROM aios.observation_proposition op
+            JOIN aios.observation o ON o.observation_id=op.observation_id
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-            WHERE o.proposition_id=pa.proposition_id
-            ORDER BY ccr.resolved_at DESC
+            WHERE op.proposition_id=pa.proposition_id AND snc.structural_supported
+              AND aios.semantic_occurrence_topology_eligible(o.claim_id,pa.proposition_id)
+              AND aios.semantic_claim_topology_admitted(o.claim_id)
+            ORDER BY o.observed_at DESC,o.observation_id
             LIMIT 1
         ) ca ON true
         LEFT JOIN LATERAL (
@@ -124,16 +150,19 @@ async def classify_neighbor_relations_once(
                 ccr.origin_character_id AS character_id,
                 ccr.character_instance_id,
                 ccr.viewpoint_id
-            FROM aios.observation o
+            FROM aios.observation_proposition op
+            JOIN aios.observation o ON o.observation_id=op.observation_id
             JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-            WHERE o.proposition_id=pb.proposition_id
-            ORDER BY ccr.resolved_at DESC
+            WHERE op.proposition_id=pb.proposition_id AND snc.structural_supported
+              AND aios.semantic_occurrence_topology_eligible(o.claim_id,pb.proposition_id)
+              AND aios.semantic_claim_topology_admitted(o.claim_id)
+            ORDER BY o.observed_at DESC,o.observation_id
             LIMIT 1
         ) cb ON true
         LEFT JOIN LATERAL (
             SELECT conflict_type
             FROM aios.proposition_conflict pc
-            WHERE (
+            WHERE snc.structural_supported AND ((
                 pc.proposition_a_id=snc.proposition_id
                 AND pc.proposition_b_id=snc.neighbor_proposition_id
             )
@@ -141,29 +170,41 @@ async def classify_neighbor_relations_once(
                 pc.proposition_a_id=snc.neighbor_proposition_id
                 AND pc.proposition_b_id=snc.proposition_id
             )
+            )
             ORDER BY pc.strength DESC
             LIMIT 1
         ) pc ON true
-        WHERE snc.embedding_version=$1
-          AND snc.status='candidate'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM aios.semantic_neighbor_relation r
-              WHERE r.proposition_id=snc.proposition_id
-                AND r.neighbor_proposition_id=snc.neighbor_proposition_id
-                AND r.embedding_version=snc.embedding_version
-                AND r.classifier_version=$2
-          )
-        ORDER BY snc.updated_at
-        LIMIT $3
         """,
         cfg.embedding_version,
         NEIGHBOR_CLASSIFIER_VERSION,
-        cfg.batch_size,
+        getattr(cfg, "relation_batch_size", cfg.batch_size),
+        getattr(cfg, "neighbor_min_score", 0.72),
     )
 
+    query_seconds = time.monotonic() - started
+    logger.log(logging.INFO if rows or query_seconds >= 1.0 else logging.DEBUG,
+                "Semantic relation candidate query returned %d pairs in %.2fs",
+                len(rows), query_seconds)
+    classify_seconds = write_seconds = 0.0
     written = 0
+    culled = deferred = 0
     for row in rows:
+        row_started = time.monotonic()
+        pair = (row["proposition_id"], row["neighbor_proposition_id"], cfg.embedding_version)
+        if not row["structural_supported"]:
+            await db.execute("""UPDATE aios.semantic_neighbor_candidate
+                SET status='culled',relation_hint='no_structural_anchor'
+                WHERE proposition_id=$1 AND neighbor_proposition_id=$2 AND embedding_version=$3""", *pair)
+            culled += 1
+            continue
+        if not row["a_claim_id"] or not row["b_claim_id"]:
+            # Missing admitted context is not a negative relation. Keep it
+            # retryable without letting the newest unresolved pair pin a batch.
+            await db.execute("""UPDATE aios.semantic_neighbor_candidate
+                SET classification_ready_at=now()+interval '30 seconds'
+                WHERE proposition_id=$1 AND neighbor_proposition_id=$2 AND embedding_version=$3""", *pair)
+            deferred += 1
+            continue
         a = {
             "topic_key": row["a_topic_key"],
             "observation_id": str(row["a_observation_id"]) if row["a_observation_id"] else None,
@@ -218,6 +259,8 @@ async def classify_neighbor_relations_once(
             conflict_type=row["conflict_type"],
         )
 
+        classify_seconds += time.monotonic() - row_started
+        write_started = time.monotonic()
         inserted = await db.fetchrow(
             """
             INSERT INTO aios.semantic_neighbor_relation (
@@ -241,13 +284,19 @@ async def classify_neighbor_relations_once(
                 "proposition_b": b,
             }),
         )
+        write_seconds += time.monotonic() - write_started
+        # This small receipt prevents scanning already classified pairs with
+        # an anti-join for every pass. A new classifier version remains eligible.
+        await db.execute("""UPDATE aios.semantic_neighbor_candidate
+            SET last_classifier_version=$4
+            WHERE proposition_id=$1 AND neighbor_proposition_id=$2 AND embedding_version=$3""",
+            *pair,NEIGHBOR_CLASSIFIER_VERSION)
         if inserted:
             written += 1
 
-    if written:
-        logger.info(
-            "Classified %d semantic neighbor relations",
-            written,
-        )
+    logger.log(logging.INFO if written or culled or deferred or time.monotonic() - started >= 1.0 else logging.DEBUG,
+        "Classified %d semantic neighbor relations (culled=%d deferred=%d): query=%.2fs classify=%.2fs writes=%.2fs total=%.2fs",
+        written, culled, deferred, query_seconds, classify_seconds, write_seconds,
+        time.monotonic() - started,
+    )
     return written
-

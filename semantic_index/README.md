@@ -133,3 +133,163 @@ The authority rule remains unchanged: vector geometry discovers structure;
 classifiers interpret it; reconciliation may enrich derived topology/RDF; only
 the existing SQL/RDF epistemic and runtime layers decide truth, ownership,
 visibility, and actual branch creation.
+
+## Neighborhood inspection
+
+The **Semantic neighborhoods** control-plane tab is a read-only diagnostic. List
+current clusters, then enter a cluster ID; or choose `epistemic_objects_v1` and
+paste Qdrant point IDs. Set neighbors to expand around one seed. The API is:
+
+- `GET /semantic/clusters?limit=50&offset=0`
+- `POST /semantic/inspect`
+
+Example request:
+
+```json
+{"collection":"epistemic_objects_v1","point_ids":["<point UUID>"],"neighbors":100,"limit":200}
+```
+
+The response contains canonical propositions, ownership payloads, raw extracted
+claims, original sentences, source sections/messages, semantic frames, all paged
+observation contexts, and internal/boundary relation pairs with both texts,
+structural differences and verifier explanations. These are operator diagnostics;
+they do not grant character knowledge or alter truth, ownership or topology.
+Validation status is separate from advisory relation labels.
+
+Ownership points are counted separately from distinct propositions. Medoids use
+original vectors and one deterministically selected ownership vector per
+proposition, not projected display coordinates or ownership frequency. They are
+exact for the returned vector set, restricted to core candidates for stored
+clusters; paged cluster samples and missing vectors are explicitly reported.
+Diverse exemplars, contradictory endpoints and fringe IDs are also returned.
+Medoids are calculated on demand and are not new assertions or replacement
+memories. Existing region/edge labels remain the types for derived groups;
+behavioral patterns and additional automatic collapse are deferred pending
+inspection of evidence.
+
+Requests return at most 512 points and 2,000 edges, prioritize contradiction
+pairs, and report edge truncation. Evidence uses a per-proposition limit/offset
+(default 5, maximum 20), source/message excerpts are limited to 12,000 characters
+with original lengths, and each observation returns up to 32 frames plus a total
+frame count. Missing points and missing SQL propositions are explicit.
+
+Clustering v4 prevents known contradictory endpoints from sharing a core or
+attaching to the same fringe through indirect positive paths. Cluster metadata
+counts distinct proposition/context-value pairs across observations rather than
+selecting the last observation. Rebuilds track classifier inserts and validation
+evaluation/staleness as well as geometry, with a 30-second minimum interval
+(`AIOS_SEMANTIC_CLUSTER_MIN_INTERVAL_SECONDS`). Reconciliation timestamp writes
+alone do not retrigger clustering.
+
+New or re-indexed proposition vectors receive bounded neighbor discovery.
+New arrivals discover their older peers; unchanged historical nodes are not
+periodically searched again. Successful search receipts remain valid until
+that proposition vector changes.
+
+Choose a current cluster from the dropdown after listing clusters. With a
+positive neighbor count the UI first inspects the cluster, selects its sampled
+medoid, and expands around that actual Qdrant point. The selected seed and method
+are shown in the details. A cluster ID copied from the displayed current list
+into the point field is recognized as a cluster ID. Clicking a member row still
+selects a specific seed, clears the cluster field, and resets the member offset.
+For epistemic objects the selected point ID is distinct from the proposition ID.
+Validation and API errors are displayed in the result details without throwing
+Gradio exceptions; the neighbor count alone cannot identify a cluster or seed.
+
+
+### Incremental ingestion and explicit region analysis
+
+The independent topology worker runs neighbor discovery, relation classification,
+targeted validation, verified pair reconciliation, stale cluster cleanup, and
+RDF catch-up. It does not rebuild clusters or materialize global outliers.
+Validation drains once per cycle even when no new relation was classified.
+Package imports no longer replace classifier/reconciler functions.
+
+For deliberate maintenance or inspection, the existing global analysis remains
+available as a one-shot command (avoid running another region analysis at the
+same time):
+
+```bash
+python -m aios_app.semantic_index.cli --analyze-regions-once
+```
+
+This command still analyzes the full eligible graph; bounded scope selection
+and incremental candidate queues are follow-up work. Existing cluster results
+remain inspectable, and stale derived pivots are retired during normal ingestion.
+The scheduling migration adds retry/classification receipts and lookup indexes.
+Quarantine retains its existing deletion behavior, serialized against vector
+writes by a shared advisory lock. Raw observations and propositions remain intact.
+
+Independent environment budgets use these defaults:
+
+| Setting | Default with index batch 64 |
+| --- | ---: |
+| `AIOS_SEMANTIC_NEIGHBOR_BATCH_SIZE` | 8 |
+| `AIOS_SEMANTIC_RELATION_BATCH_SIZE` | 16 |
+| `AIOS_SEMANTIC_VALIDATION_BATCH_SIZE` | 256 |
+| `AIOS_SEMANTIC_RECONCILIATION_BATCH_SIZE` | 64 |
+
+Completed nonempty or slow stages log their count and elapsed time. Relation
+classification additionally logs candidate-query, classification, and write
+durations. These timings distinguish SQL cost from the separate validation drain.
+
+
+### Vector priority and independent topology maintenance
+
+Normal `python -m aios_app.launch` starts both workers automatically, in order:
+
+- **Semantic Index** owns the embedding model and query RPC. It processes newest
+  pending proposition vectors, semantic admission, overdue admission repair,
+  eligible frame vectors, character/world vectors, and a small source batch.
+  Cold corpus work runs last, only when the main vector streams are not saturated.
+- **Semantic Topology** starts after the vector backend is ready. It reuses the
+  existing collection dimensions and loads no embedding model. Neighbor discovery,
+  classification, validation, reconciliation, RDF catch-up, and quarantine run
+  independently of embedding/admission.
+
+For manual operation, run the existing vector command and a separate terminal:
+
+```bash
+python -m aios_app.semantic_index.cli --topology-only
+```
+
+The launcher reports `semantic` and `topology` independently. A topology timeout
+does not stop the vector worker or prevent the remaining topology stages from
+draining already verified work. Failed topology stages halve their next batch
+down to one and back off; completed rows keep durable receipts. SQL statements
+are cancelled at their configured deadlines. Stage budgets are cooperative:
+synchronous embedding/RDF/Qdrant calls finish or reach their HTTP timeout before
+an asyncio deadline can yield. Qdrant HTTP calls use a five-second timeout;
+the topology worker uses a five-second Fuseki timeout without internal retries.
+
+| Setting | Default |
+| --- | ---: |
+| `AIOS_SEMANTIC_INDEX_BATCH_SIZE` | 64 |
+| `AIOS_SEMANTIC_ADMISSION_BATCH_SIZE` | 8 |
+| `AIOS_SEMANTIC_BACKGROUND_BATCH_SIZE` | 8 |
+| `AIOS_SEMANTIC_NEIGHBOR_K` | 12 |
+| `AIOS_SEMANTIC_VECTOR_SQL_SECONDS` | 10 |
+| `AIOS_SEMANTIC_ADMISSION_STAGE_SECONDS` | 10 |
+| `AIOS_SEMANTIC_TOPOLOGY_SQL_SECONDS` | 5 |
+| `AIOS_SEMANTIC_TOPOLOGY_STAGE_SECONDS` | 10 |
+
+All embedding streams and pending admissions select newest first with stable
+tie breakers. Continuous new arrivals can delay historical backfill. Overdue
+admission repair retains oldest-first ordering so stalled evidence can progress.
+
+Neighbor search applies its score floor in Qdrant and checks admitted evidence
+in a single bounded SQL lookup. A hit needs a shared subject, object, topic, or
+actor/target reversal before becoming a typed-edge candidate. This intentionally
+reduces purely thematic connections; vector retrieval still has those vectors.
+Opposing claims with the same subject/object remain discoverable. Unchanged
+scores do not rewrite candidates or retrigger validation.
+
+Classifier batches are materialized **before** occurrence enrichment. Cheaply
+unsupported pairs are marked `culled`, with a reason, without a semantic assertion.
+Pairs awaiting admitted context defer for 30 seconds instead of pinning the
+newest batch. Classification receipts record the classifier version so upgrades
+can revisit existing candidates. Frames need resolved standalone interpretations
+before new frame-vector indexing; their underlying evidence is retained.
+
+The shadow participation policy remains observational and does not control any
+of these production gates.

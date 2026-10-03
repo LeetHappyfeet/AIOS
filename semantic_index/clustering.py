@@ -14,7 +14,7 @@ from .neighbor_classifier import NEIGHBOR_CLASSIFIER_VERSION
 
 logger = logging.getLogger("aios.semantic_clustering")
 
-ALGORITHM_VERSION = "semantic-cluster-v3"
+ALGORITHM_VERSION = "semantic-cluster-v5"
 
 # Only semantically interpreted relations that imply a coherent shared region
 # may fuse core components. Generic RELATED similarity is intentionally excluded:
@@ -142,14 +142,33 @@ def _build_core_components(
     ]
     bridge_indexes = _bridge_edge_indexes(strong_edges)
 
+    blocked: dict[UUID, set[UUID]] = {}
+    for edge in edges:
+        if edge.relation == "CONTRADICTS":
+            blocked.setdefault(edge.a, set()).add(edge.b)
+            blocked.setdefault(edge.b, set()).add(edge.a)
     uf = UnionFind()
-    for idx, edge in enumerate(strong_edges):
+    components: dict[UUID, set[UUID]] = {}
+    ordered = sorted(enumerate(strong_edges),
+                     key=lambda item: (-item[1].similarity, str(item[1].a), str(item[1].b)))
+    for idx, edge in ordered:
         # A single edge is insufficient evidence to fuse two semantic regions.
         # Removing bridges makes cores cycle/density supported instead of merely
         # connected.
         if idx in bridge_indexes:
             continue
+        uf.add(edge.a)
+        uf.add(edge.b)
+        ra, rb = uf.find(edge.a), uf.find(edge.b)
+        left = components.setdefault(ra, {edge.a})
+        right = components.setdefault(rb, {edge.b})
+        if ra == rb or any(blocked.get(node, set()) & right for node in left):
+            continue
+        combined = left | right
         uf.union(edge.a, edge.b)
+        components.pop(ra, None)
+        components.pop(rb, None)
+        components[uf.find(edge.a)] = combined
 
     groups: dict[UUID, set[UUID]] = {}
     for value in uf.parent:
@@ -194,11 +213,18 @@ def _attach_fringe(
     claimed = set().union(*(draft.members for draft in drafts)) if drafts else set()
     fringe_candidates = all_nodes - claimed
 
-    for node in fringe_candidates:
+    blocked: dict[UUID, set[UUID]] = {}
+    for edge in edges:
+        if edge.relation == "CONTRADICTS":
+            blocked.setdefault(edge.a, set()).add(edge.b)
+            blocked.setdefault(edge.b, set()).add(edge.a)
+    for node in sorted(fringe_candidates, key=str):
         best_idx: int | None = None
         best_score = 0.0
         best_link_count = 0
         for idx, draft in enumerate(drafts):
+            if blocked.get(node, set()) & draft.members:
+                continue
             links = [
                 score
                 for neighbor, score in adjacency.get(node, [])
@@ -305,27 +331,19 @@ async def _cluster_metadata(
             ctx.character_instance_id,
             ctx.world_id,
             ctx.timeline_id,
-            obs.source_domain,
-            obs.source_kind,
-            obs.observed_at
+            ctx.source_domain,
+            ctx.source_kind,
+            ctx.observed_at
         FROM aios.proposition p
         LEFT JOIN LATERAL (
             SELECT ccr.claim_kind, ccr.predicate_family,
                    ccr.origin_character_id, ccr.character_instance_id,
-                   ccr.world_id, ccr.timeline_id
+                   ccr.world_id, ccr.timeline_id,
+                   o.source_domain, o.source_kind, o.observed_at
             FROM aios.observation o
-            JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
+            LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
             WHERE o.proposition_id=p.proposition_id
-            ORDER BY ccr.resolved_at DESC
-            LIMIT 1
         ) ctx ON true
-        LEFT JOIN LATERAL (
-            SELECT o.source_domain, o.source_kind, o.observed_at
-            FROM aios.observation o
-            WHERE o.proposition_id=p.proposition_id
-            ORDER BY o.observed_at DESC
-            LIMIT 1
-        ) obs ON true
         WHERE p.proposition_id = ANY($1::uuid[])
         """,
         list(members),
@@ -333,11 +351,16 @@ async def _cluster_metadata(
 
     def counts(key: str) -> dict[str, int]:
         out: dict[str, int] = {}
+        seen: set[tuple[UUID, str]] = set()
         for row in rows:
             value = row[key]
             if value is None:
                 continue
             value = str(value)
+            identity = (row["proposition_id"], value)
+            if identity in seen:
+                continue
+            seen.add(identity)
             out[value] = out.get(value, 0) + 1
         return dict(
             sorted(out.items(), key=lambda item: (-item[1], item[0]))[:12]
@@ -400,9 +423,24 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
     )
     watermark = await db.fetchrow(
         """
-        SELECT MAX(analyzed_at) AS watermark
-        FROM aios.semantic_structure_state
-        WHERE embedding_version=$1
+        SELECT MAX(changed_at) AS watermark FROM (
+            SELECT interpreted_at AS changed_at FROM aios.semantic_interpretation
+            UNION ALL
+            SELECT analyzed_at AS changed_at FROM aios.semantic_structure_state
+            WHERE embedding_version=$1
+            UNION ALL
+            SELECT created_at FROM aios.semantic_neighbor_relation
+            WHERE embedding_version=$1
+            UNION ALL
+            SELECT GREATEST(d.evaluated_at,d.stale_at)
+            FROM aios.semantic_validation_decision d
+            WHERE d.decision_type IN ('proposition_relation','event_identity')
+              AND EXISTS (
+                SELECT 1 FROM aios.semantic_neighbor_candidate c
+                WHERE c.embedding_version=$1
+                  AND d.decision_key=c.proposition_id::text || ':' || c.neighbor_proposition_id::text
+              )
+        ) changes
         """,
         cfg.embedding_version,
     )
@@ -413,7 +451,8 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
     config_signature = _config_signature(cfg)
     previous = await db.fetchrow(
         """
-        SELECT structure_watermark
+        SELECT structure_watermark,
+               EXTRACT(EPOCH FROM now()-completed_at) AS age_seconds
         FROM aios.semantic_cluster_run
         WHERE embedding_version=$1
           AND algorithm_version=$2
@@ -429,6 +468,9 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
     if previous and previous["structure_watermark"] is not None:
         if previous["structure_watermark"] >= structure_watermark:
             return 0
+        # Coalesce relation/validation batches into bounded global rebuilds.
+        if float(previous["age_seconds"]) < cfg.cluster_min_interval_seconds:
+            return 0
 
     rows = await db.fetch(
         """
@@ -436,7 +478,13 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
             snc.proposition_id,
             snc.neighbor_proposition_id,
             snc.similarity,
-            nr.relation
+            CASE WHEN nr.relation='CONTRADICTS' THEN nr.relation
+            WHEN EXISTS (
+                SELECT 1 FROM aios.semantic_validation_decision d
+                WHERE d.decision_type IN ('proposition_relation','event_identity')
+                  AND d.decision_key=snc.proposition_id::text || ':' || snc.neighbor_proposition_id::text
+                  AND (d.status <> 'verified' OR d.selected_value IS DISTINCT FROM nr.relation)
+            ) THEN NULL ELSE nr.relation END AS relation
         FROM aios.semantic_neighbor_candidate snc
         LEFT JOIN aios.semantic_neighbor_relation nr
           ON nr.proposition_id=snc.proposition_id
@@ -446,7 +494,9 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
          AND nr.status IN ('candidate','reconciled')
         WHERE snc.embedding_version=$1
           AND snc.status='candidate'
-          AND snc.similarity >= $2
+          AND aios.semantic_proposition_topology_admitted(snc.proposition_id)
+          AND aios.semantic_proposition_topology_admitted(snc.neighbor_proposition_id)
+          AND (snc.similarity >= $2 OR nr.relation='CONTRADICTS')
         ORDER BY snc.similarity DESC
         """,
         cfg.embedding_version,
@@ -472,6 +522,7 @@ async def cluster_neighbors_once(db: Database, cfg: SemanticIndexConfig) -> int:
          AND s.qdrant_collection=$1
          AND s.embedding_model=$2
          AND s.embedding_version=$3
+        WHERE aios.semantic_proposition_topology_admitted(p.proposition_id)
         """,
         cfg.proposition_collection,
         cfg.embedding_model,

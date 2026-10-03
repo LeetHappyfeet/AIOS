@@ -1,5 +1,3 @@
-# aios/db.py
-
 import json
 import asyncpg
 from contextlib import asynccontextmanager
@@ -8,10 +6,12 @@ from uuid import UUID
 
 
 class Database:
-    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 24):
+    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 24,
+                 server_settings: dict[str, str] | None = None):
         self._dsn = dsn
         self._min_size = min_size
         self._max_size = max_size
+        self._server_settings = server_settings
         self.pool: Optional[asyncpg.Pool] = None
 
     # -------------------------------------------------
@@ -23,6 +23,7 @@ class Database:
             dsn=self._dsn,
             min_size=self._min_size,
             max_size=self._max_size,
+            server_settings=self._server_settings,
         )
 
     async def close(self) -> None:
@@ -50,6 +51,24 @@ class Database:
         assert self.pool
         async with self.pool.acquire() as con:
             return await con.fetch(sql, *args)
+
+    async def fetchval(self, sql: str, *args):
+        assert self.pool
+        async with self.pool.acquire() as con:
+            return await con.fetchval(sql, *args)
+
+    async def fetch_bounded(self, sql: str, *args, timeout_seconds: float = 5.0):
+        """Bound discovery SQL on its own session; restore settings on exit."""
+        assert self.pool
+        async with self.pool.acquire() as con:
+            async with con.transaction():
+                await con.execute(
+                    "SELECT set_config('statement_timeout', $1, true), "
+                    "set_config('lock_timeout', $2, true)",
+                    f"{max(1, int(timeout_seconds * 1000))}ms",
+                    f"{max(1, int(min(timeout_seconds, 1.0) * 1000))}ms",
+                )
+                return await con.fetch(sql, *args, timeout=timeout_seconds + 1.0)
 
     async def execute(self, sql: str, *args):
         assert self.pool

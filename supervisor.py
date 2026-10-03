@@ -1,10 +1,9 @@
-# aios_app/supervisor.py
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+import asyncpg
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List
 
@@ -43,8 +42,10 @@ def empty_payload(_): return {}
 # - exact reinforcement: already completed by suppression receipts
 # - exact novel: wait for a terminal vector admission decision
 # - vector reinforcement: completed by suppression receipts
-# - novel/refine/challenge/bypass: expand normally
+# - novel/refine/challenge: expand only with standalone occurrence support
+# - timeout/error/unavailable bypass: preserve evidence, retry admission
 ADMISSION_EXPANSION_SQL = """
+          AND aios.semantic_claim_topology_eligible(o.claim_id)
           AND EXISTS (
               SELECT 1
               FROM aios.semantic_exact_admission sea
@@ -57,8 +58,7 @@ ADMISSION_EXPANSION_SQL = """
                             SELECT 1 FROM aios.semantic_neighbor_admission sna
                             WHERE sna.claim_id=o.claim_id
                               AND sna.decision IN (
-                                  'reinforces','refines','challenges','novel',
-                                  'bypass_unavailable','bypass_timeout','bypass_error'
+                                  'reinforces','refines','challenges','novel'
                               )
                         )
                     )
@@ -235,6 +235,8 @@ STAGES: List[Stage] = [
         FROM aios.observation o
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
         WHERE upper(COALESCE(ccr.claim_kind,''))='EVENT'
+          AND EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=o.claim_id AND si.status='valid')
+          AND aios.semantic_claim_topology_admitted(o.claim_id)
           AND NOT EXISTS (
               SELECT 1 FROM aios.semantic_event_membership sem
               WHERE sem.observation_id=o.observation_id AND sem.status='active'
@@ -284,6 +286,8 @@ STAGES: List[Stage] = [
            AND dn.timeline_id=pfl.timeline_id
            AND dn.event_id BETWEEN pfl.first_event_id AND pfl.head_event_id
           WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL
+            AND aios.semantic_proposition_topology_admitted(kae.proposition_id)
+            AND (kae.claim_id IS NULL OR aios.semantic_claim_topology_admitted(kae.claim_id))
             AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
             AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.acquisition_id=kae.acquisition_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
             AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_character_acquisition_topology' AND pj.status IN ('queued','running') AND pj.payload->>'acquisition_id'=kae.acquisition_id::text)
@@ -339,6 +343,7 @@ STAGES: List[Stage] = [
     Stage("rdf_epistemic_project", "rdf_epistemic_project", _admission("""
         SELECT o.claim_id FROM aios.observation o JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node dn ON dn.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE ie.superseded_at IS NULL
+          AND EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=o.claim_id AND si.status='valid')
           /* ADMISSION_BARRIER */
           AND NOT EXISTS (SELECT 1 FROM aios.rdf_promotion_log rpl WHERE rpl.claim_id=o.claim_id AND rpl.rdf_dataset='world' AND rpl.rdf_graph='urn:aios:world:epistemic' AND rpl.rdf_predicate='world:observesProposition')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='rdf_epistemic_project' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
@@ -346,7 +351,7 @@ STAGES: List[Stage] = [
     """), claim_id_payload, 80, 64),
     Stage("backfill_semantic_proposition_leaves", "derive_claim_topology", """
         SELECT DISTINCT o.claim_id FROM aios.observation o JOIN aios.semantic_topology_projection stp ON stp.claim_id=o.claim_id JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node dn ON dn.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
-        WHERE ie.superseded_at IS NULL AND stp.projected_at IS NULL AND stp.resolver_version='semantic-topology-v1' AND stp.meta->>'reproject_reason'='semantic_proposition_leaves_20260909'
+        WHERE ie.superseded_at IS NULL AND aios.semantic_claim_topology_admitted(o.claim_id) AND stp.projected_at IS NULL AND stp.resolver_version='semantic-topology-v1' AND stp.meta->>'reproject_reason'='semantic_proposition_leaves_20260909'
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_node n WHERE n.scope_key=stp.scope_key AND n.node_type='PROPOSITION' AND n.proposition_id=o.proposition_id)
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
         ORDER BY o.claim_id LIMIT $1
@@ -354,6 +359,7 @@ STAGES: List[Stage] = [
     Stage("derive_claim_topology", "derive_claim_topology", _admission("""
         SELECT o.claim_id FROM aios.observation o JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id JOIN aios.claim_candidate cc ON cc.claim_id=o.claim_id JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node dn ON dn.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
         WHERE ie.superseded_at IS NULL
+          AND EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=o.claim_id AND si.status='valid')
           /* ADMISSION_BARRIER */
           AND NOT EXISTS (SELECT 1 FROM aios.semantic_topology_projection stp WHERE stp.claim_id=o.claim_id AND stp.projected_at IS NOT NULL AND stp.resolver_version='semantic-topology-v1')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='derive_claim_topology' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=o.claim_id::text)
@@ -446,7 +452,10 @@ def stage_admission_capacity(*, stage: Stage, total_queued: int, stage_queued: i
 
 
 async def enqueue_stage_jobs(db: Database, stage: Stage, *, batch_size: int) -> int:
-    rows: Iterable[Dict[str, object]] = await db.fetch(stage.eligibility_sql, batch_size)
+    rows: Iterable[Dict[str, object]] = await asyncio.wait_for(
+        db.fetch_bounded(stage.eligibility_sql, batch_size, timeout_seconds=5.0),
+        timeout=7.0,
+    )
     count = 0
     for row in rows:
         payload = stage.payload_builder(dict(row))
@@ -463,6 +472,7 @@ async def run_supervisor() -> None:
     db = Database(settings.db_dsn)
     await db.connect()
     last_foreground_refresh = 0.0
+    discovery_retry_at: Dict[str, float] = {}
     logger.info("AIOS supervisor started")
     try:
         while True:
@@ -523,6 +533,8 @@ async def run_supervisor() -> None:
             scheduled = 0
             for stage in sorted(STAGES, key=lambda value: value.priority):
                 if remaining <= 0: break
+                if time.monotonic() < discovery_retry_at.get(stage.name, 0.0):
+                    continue
                 stage_queued = queued_by_type.get(stage.job_type, 0)
                 allowed = stage_admission_capacity(stage=stage,total_queued=qcnt,stage_queued=stage_queued,batch_size=batch_size,remaining_cycle=remaining,soft_cap=max_queued_backlog,critical_reserve=critical_reserve)
                 if allowed <= 0: continue
@@ -530,6 +542,10 @@ async def run_supervisor() -> None:
                     n = await enqueue_stage_jobs(db, stage, batch_size=allowed)
                     scheduled += n; remaining -= n; qcnt += n
                     queued_by_type[stage.job_type] = stage_queued+n
+                except (asyncio.TimeoutError, asyncpg.QueryCanceledError,
+                        asyncpg.LockNotAvailableError):
+                    discovery_retry_at[stage.name] = time.monotonic() + 60.0
+                    logger.warning("Stage '%s' discovery exceeded its SQL/lock budget; retry in 60s", stage.name)
                 except Exception:
                     logger.exception("Stage '%s' enqueue failed", stage.name)
             if scheduled == 0: await asyncio.sleep(poll_interval)

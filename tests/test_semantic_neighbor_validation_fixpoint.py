@@ -3,7 +3,6 @@ from uuid import uuid4
 
 import pytest
 
-import aios_app.semantic_index as semantic_index
 from aios_app.epistemic.hypothesis_validation import apply_local_revalidation_invalidations
 from aios_app.semantic_index import neighbor_classifier
 
@@ -86,6 +85,12 @@ async def test_neighbor_classifier_counts_only_successful_insert(monkeypatch):
         "b_viewpoint_id": None,
         "conflict_type": None,
     }
+    row["structural_supported"] = True
+    for prefix in ("a","b"):
+        row[prefix+"_claim_id"] = uuid4()
+        row[prefix+"_observation_id"] = uuid4()
+        row[prefix+"_dag_node_id"] = None
+        row[prefix+"_semantic_confidence"] = None
     cfg = SimpleNamespace(
         embedding_version="test-embedding",
         batch_size=64,
@@ -98,10 +103,10 @@ async def test_neighbor_classifier_counts_only_successful_insert(monkeypatch):
     )
 
     conflict_db = RecordingDB(rows=[row], inserted=None)
-    written = await semantic_index._original_neighbor_classifier(conflict_db, cfg)
+    written = await neighbor_classifier.classify_neighbor_relations_once(conflict_db, cfg)
     assert written == 0
 
     inserted_db = RecordingDB(rows=[row], inserted={"inserted": 1})
-    written = await semantic_index._original_neighbor_classifier(inserted_db, cfg)
+    written = await neighbor_classifier.classify_neighbor_relations_once(inserted_db, cfg)
     assert written == 1
     assert "RETURNING 1 AS inserted" in inserted_db.fetchrow_calls[0][0]
