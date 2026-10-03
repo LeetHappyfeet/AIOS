@@ -623,6 +623,7 @@ def ambiguous_cognition_sentences(
             "i'll ","i will ","i'm going to ","i am going to ","i should ",
             "i could ","my goal","my plan","counter-offer","standing offer",
             "deal.","deal,","agreed.","agreed,","i accept","i'm going to need",
+            "prefer to ","rather know ","i'd just prefer ","i would prefer ",
             "i'm learning","i am learning","i'd rather","i would rather",
         )
         if explicit_timer_goal or any(signal in lower for signal in signals):
