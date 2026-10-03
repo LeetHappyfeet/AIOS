@@ -168,6 +168,11 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             SELECT node_id, timeline_id
             FROM aios.dag_node
             WHERE event_id=$1
+              AND EXISTS (
+                  SELECT 1 FROM aios.ingest_event ie
+                  WHERE ie.event_id=$1
+                    AND ie.process_status IS DISTINCT FROM 'error'
+              )
             ORDER BY created_at, node_id
             LIMIT 1
             """,
