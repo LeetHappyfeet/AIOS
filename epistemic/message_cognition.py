@@ -25,6 +25,15 @@ _CAUSAL_DESIRE_RE = re.compile(
 )
 
 _SUBJECT = r"(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
+_COMMITMENT_RE = re.compile(
+    r"\b(?P<subject>I)\s+(?P<verb>will|'ll|am\s+going\s+to|'m\s+going\s+to)\s+"
+    r"(?P<object>[^.!?]{3,220})", re.I,
+)
+_REFUSAL_RE = re.compile(
+    r"\bI\s+(?:am\s+not|'m\s+not)\s+going\s+anywhere\b|"
+    r"\bI\s+(?:will\s+not|won't|refuse\s+to)\s+leave\b", re.I,
+)
+_DISCOURSE_MARKER_RE = re.compile(r"\byou\s+know\s+what\s*[,—:]", re.I)
 _GOAL_RE = re.compile(
     rf"\b{_SUBJECT}\s+(?:(?:do(?:es)?\s+not|don't|doesn't|no\s+longer)\s+)?"
     rf"(?P<verb>want(?:s|ed)?|intend(?:s|ed)?|plan(?:s|ned)?|need(?:s|ed)?|"
@@ -309,6 +318,8 @@ def _goal_semantics(candidate: ParsedCandidate) -> tuple[str, str]:
         return "desire", "session"
     if predicate.startswith(("plan", "prepare", "intend")):
         return "plan", "session"
+    if predicate.startswith("commit"):
+        return "commitment", "session"
     if predicate.startswith(("decide", "resolve")):
         return "objective", "session"
     return "objective", "session"
@@ -337,10 +348,13 @@ def _canonical_text(candidate: ParsedCandidate, *, owner: str | None) -> str:
 
 def _parse_sentence(sentence: str) -> ParsedCandidate | None:
     # Discourse marker is not a knowledge assertion by the addressee.
-    if re.search(r"\byou\s+know\s+what\s*[,—:]", sentence, re.I):
+    if _DISCOURSE_MARKER_RE.search(sentence):
         return None
     if _QUESTION_RE.search(sentence):
         return None
+    if _REFUSAL_RE.search(sentence):
+        return ParsedCandidate("STATE", "I", "refuse", "to leave",
+                               0.89, "expressed_scene_refusal")
     match = _MEMORY_RE.search(sentence)
     if match:
         return ParsedCandidate("MEMORY", match.group("subject"), match.group("verb"), match.group("object"), 0.94, "memory_predicate")
@@ -362,6 +376,17 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
                 match.group("object"), 0.91, "goal_predicate"))
             if valid_goal_objective(bounded.object_text):
                 return bounded
+    # Recognize a self-authored future action but do not interpret an
+    # auxiliary such as "going to need" as a commitment to perform "go".
+    if not re.search(r"\b(?:if|unless|provided\s+that)\b", sentence, re.I):
+        match = _COMMITMENT_RE.search(sentence)
+        if match:
+            action = _bounded_goal_candidate(ParsedCandidate(
+                "GOAL", match.group("subject"), "commit",
+                match.group("object"), 0.86, "explicit_self_commitment"))
+            if (valid_goal_objective(action.object_text)
+                    and not re.match(r"(?i)^need\s+(?:to\s+)?", action.object_text)):
+                return action
     if _RELATIONSHIP_RE.search(sentence):
         subject_match = _RELATIONSHIP_SUBJECT_RE.search(sentence)
         subject = subject_match.group("subject") if subject_match else None
