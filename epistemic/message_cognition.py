@@ -9,7 +9,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v9-candidate-admission"
+INTERPRETER_VERSION = "message-cognition-v10-temporal-intent"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -25,6 +25,14 @@ _CAUSAL_DESIRE_RE = re.compile(
 )
 
 _SUBJECT = r"(?P<subject>I|you|she|he|they|we|it|[A-Za-z][A-Za-z0-9_-]{1,48})"
+_BOUNDED_PROGRESSIVE_RE = re.compile(
+    r"\bI(?:'m|\s+am)\s+(?P<verb>[a-z]+ing)\s+(?P<object>[^.!?]{3,180})", re.I,
+)
+_FUTURE_BOUND_RE = re.compile(
+    r"\b(?:tonight|tomorrow|next\s+(?:week|month|year)|"
+    r"(?:one|two|three|four|five|six|seven|eight|nine|\d+)\s+"
+    r"(?:night|day|week|month|year|hour)s?)\b", re.I,
+)
 _COMMITMENT_RE = re.compile(
     r"\b(?P<subject>I)(?:\s+(?P<verb>will|am\s+going\s+to)|(?P<shortverb>'ll|'m\s+going\s+to))\s+"
     r"(?P<object>[^.!?]{3,220})", re.I,
@@ -384,6 +392,20 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
                 match.group("object"), 0.91, "goal_predicate"))
             if valid_goal_objective(bounded.object_text):
                 return bounded
+    # Future/duration-bounded progressive is prospective; an unbounded
+    # progressive is merely an ongoing observation.
+    progressive = _BOUNDED_PROGRESSIVE_RE.search(sentence)
+    if progressive and _FUTURE_BOUND_RE.search(progressive.group("object")):
+        verb = progressive.group("verb").casefold()
+        lemma = verb[:-3]
+        if lemma in {"leav", "mov", "giv", "tak", "mak", "hav", "arriv"}:
+            lemma += "e"
+        action = _bounded_goal_candidate(ParsedCandidate(
+            "GOAL", "I", "commit",
+            lemma + " " + progressive.group("object"), 0.82,
+            "bounded_progressive_commitment"))
+        if valid_goal_objective(action.object_text):
+            return action
     # Recognize a self-authored future action but do not interpret an
     # auxiliary such as "going to need" as a commitment to perform "go".
     if not re.search(r"\b(?:if|unless|provided\s+that)\b", sentence, re.I):
