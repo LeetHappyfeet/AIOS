@@ -658,6 +658,7 @@ async def project_normalized_observation(
         )
     if character_id and char_graph and char_obs_iri:
         await _project_observation_authority(
+            db,
             fuseki,
             dataset="char",
             graph_iri=char_graph,
