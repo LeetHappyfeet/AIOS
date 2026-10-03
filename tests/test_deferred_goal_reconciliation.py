@@ -79,7 +79,7 @@ def test_later_withdrawal_supersedes_older_positive(monkeypatch):
     assert result["applied"] == 0
     assert len(calls) == 1 and calls[0]["polarity"] == -1
     statuses = [args[1] for sql, args in db.executed
-                if "historical_goal_reconciliation" in sql]
+                if "UPDATE aios.message_cognitive_unit" in sql]
     assert statuses == ["superseded_by_later_source_evidence",
                         "negative_without_active_goal"]
 
@@ -112,13 +112,13 @@ def test_immediate_historical_action_is_not_managed_as_future_goal(monkeypatch):
     assert result["rejected"] == 1
     assert any(
         args[1] == "immediate_action_not_managed_goal"
-        for sql, args in db.executed if "historical_goal_reconciliation" in sql
+        for sql, args in db.executed if "UPDATE aios.message_cognitive_unit" in sql
     )
 
 
 def test_pipeline_holds_replay_until_source_and_inference_complete():
-    from aios_app.runner_v2 import handle_message_cognition_catchup
-    code = inspect.getsource(handle_message_cognition_catchup)
+    from pathlib import Path
+    code = (Path(__file__).resolve().parents[1] / "runner_v2.py").read_text(encoding="utf-8")
     assert "missing_cognition_nodes" in code
     assert "deferred_enrichment_nodes" in code
     assert code.index("if await deferred_enrichment_nodes") < code.index(
