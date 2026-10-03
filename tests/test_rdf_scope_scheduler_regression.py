@@ -134,3 +134,20 @@ async def test_unchanged_authority_does_not_issue_second_fuseki_update():
     )
     assert len(fuseki.writes) == 2
     assert db.acks == 2
+
+
+def test_all_authority_projection_calls_supply_db_and_fuseki():
+    """Guard both /world and /char branches against argument drift."""
+    import ast
+    source = Path("rdf/epistemic_writer.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    calls = [
+        node for node in ast.walk(module)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_project_observation_authority"
+    ]
+    assert len(calls) == 2
+    for call in calls:
+        assert len(call.args) == 2
+        assert [arg.id for arg in call.args] == ["db", "fuseki"]
