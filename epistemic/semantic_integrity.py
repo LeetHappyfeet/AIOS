@@ -11,10 +11,10 @@ import re
 from typing import Mapping
 from uuid import UUID
 
-INTEGRITY_VERSION = "semantic-integrity-v3-fidelity"
+INTEGRITY_VERSION = "semantic-integrity-v4-source-coverage"
 _PRONOUNS = {"he", "him", "his", "she", "her", "hers", "it", "its", "they", "them",
              "their", "this", "that", "which", "who", "whom", "you", "i"}
-_TRANSITIVE = {"watch", "have", "give", "push", "groom", "let", "tell", "find", "make"}
+_TRANSITIVE = {"watch", "have", "give", "push", "groom", "let", "tell", "find", "make", "prefer"}
 _DISCOURSE_SUBJECTS = {"either", "neither", "both", "someone", "something", "anything", "whatever"}
 _PATTERN = re.compile(r"[a-z]+(?:'[a-z]+)?")
 
@@ -57,6 +57,34 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
             and predicate in {"regret", "regretted"}
             and subject not in {"he", "george", "george constanza", "george costanza"}):
         return IntegrityResult("invalid", ("source_actor_mismatch",))
+    # A valid-looking triple is not sufficient if its source speech act,
+    # temporal modifier or essential argument has disappeared.
+    modality = _norm(frame.get("modality"))
+    observed = modality in {"", "_", "asserted", "actual", "observed", "none"}
+    if re.search(r"\b(?:going to|gonna)\s+(?:ask|say|tell|need|work|repair|make|see)\b", text) and predicate in {"go", "going"}:
+        return IntegrityResult("invalid", ("future_auxiliary_misread_as_action",))
+    if observed and re.search(r"\b(?:will|shall|going to|gonna|'ll)\s+[a-z]+\b", text):
+        reasons.append("future_or_intended_modality_lost")
+    if observed and re.search(r"\b(?:if|unless|provided that)\b", text):
+        reasons.append("conditional_scope_not_preserved")
+    if observed and re.search(r"\byou\s+(?:do not|don t|don't|must|should|will|are going to)\b", source.casefold()):
+        reasons.append("directive_or_proposal_as_observed_event")
+    duration = re.search(r"\b(?:two|three|four|five|six|seven|eight|nine|\d+)\s+(?:night|day|hour|week|month|year|minute|second)s?\b", text)
+    if duration:
+        represented = _norm(" ".join(str(frame.get(k) or "") for k in
+                                   ("subject", "predicate", "object", "temporal")))
+        if duration.group(0) not in represented:
+            reasons.append("temporal_argument_lost")
+    if predicate in {"prefer", "want", "need", "request", "ask", "like"} and not obj:
+        reasons.append("intention_or_request_argument_lost")
+    if predicate in {"be", "stay", "remain"}:
+        missing = [term for term in ("here", "there", "tonight", "tomorrow", "inside",
+                                   "outside", "upstairs", "downstairs", "nearby")
+                   if re.search(r"\b" + term + r"\b", text)
+                   and not re.search(r"\b" + term + r"\b", _norm(" ".join(
+                       str(frame.get(k) or "") for k in ("object", "location", "temporal"))))]
+        if missing:
+            reasons.append("locative_or_temporal_argument_lost")
     # Preserve attribution: future speech and figurative characterizations
     # are not observed literal events just because they form valid triples.
     if (re.search(r"\bwill\s+say\b", text) and predicate in {"say", "says", "said"}
@@ -104,7 +132,13 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
         return IntegrityResult("invalid", tuple(sorted(set(reasons)))) if reasons else IntegrityResult(
             "incomplete", ("third_person_reference_requires_grounding",))
     if reasons:
-        return IntegrityResult("invalid", tuple(sorted(set(reasons))))
+        hard = {"environmental_subject_replaced_with_entity",
+                "subject_gender_contradicts_source",
+                "object_gender_contradicts_source",
+                "distinct_source_participants_collapsed",
+                "unjustified_neutral_pronoun_resolution"}
+        return IntegrityResult("invalid" if set(reasons) & hard else "incomplete",
+                               tuple(sorted(set(reasons))))
     if subject in {"it", "its", "this", "that"} and not (
         subject == "it" and re.search(r"\bit(?:'s| is)\s+\w+\s+out\b", source.casefold())
     ):
@@ -148,7 +182,8 @@ async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
                 {"subject": f["resolved_subject"] or f["subject_text"],
                  "predicate": f["predicate_canonical"] or f["predicate_surface"],
                  "object": f["resolved_object"] or f["object_text"],
-                 "modality": f["modality"], "polarity": f["polarity"]},
+                 "modality": f["modality"], "polarity": f["polarity"],
+                 "temporal": meta.get("temporal"), "location": meta.get("location")},
                 speaker_id=row["speaker_id"],
                 source_subject=meta.get("source_subject_text", f["subject_text"]),
                 source_object=meta.get("source_object_text", f["object_text"]),
