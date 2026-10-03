@@ -61,7 +61,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "internal_cognition_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
     "goal_formulation_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
     "message_cognition_enrichment": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
-    "message_cognition_catchup": JobSpec(ResourceClass.FAST_SQL, "instance_id", True),
+    "message_cognition_catchup": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
 }
 
 
