@@ -888,3 +888,16 @@ async def mark_enrichment_ready(db: Database, *, instance_id: UUID, node_id: UUI
         "UPDATE aios.message_cognitive_commit SET enrichment_completed_at=now() WHERE instance_id=$1 AND node_id=$2",
         instance_id, node_id,
     )
+
+
+
+# Install the assertion/speech-act scope guard at the owning module boundary.
+# This avoids a direct fast-path caller extracting with an unwrapped interpreter
+# before an unrelated normalizer import mutates its effective version.
+def _install_scope_policy() -> None:
+    import sys
+    from aios_app.epistemic.epistemic_scope import install_message_cognition_scope_guard
+    install_message_cognition_scope_guard(sys.modules[__name__])
+
+
+_install_scope_policy()
