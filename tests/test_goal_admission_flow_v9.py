@@ -43,6 +43,12 @@ class FlowDB:
 
     async def execute_returning_row(self, sql, *args):
         self.calls.append(("execute_returning_row", sql, args))
+        if "UPDATE aios.character_agent_goal" in sql:
+            row = next(r for r in self.rows if r["goal_id"] == args[0])
+            row["goal_text"] = args[2]
+            row["source_node_id"] = args[3]
+            row["meta"].update(json.loads(args[4]))
+            return row
         assert "INSERT INTO aios.character_agent_goal" in sql
         row = {
             "goal_id": uuid4(),
