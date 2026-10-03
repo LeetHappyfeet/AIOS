@@ -13,6 +13,7 @@ from typing import Any
 POLICY_VERSION = "participation-shadow-v1"
 COMPARISON_VERSION = "participation-shadow-v2"
 V3_VERSION = "participation-shadow-v3-scene"
+V4_VERSION = "participation-shadow-v4-source-roles"
 RELEVANCE_FACETS = {"value", "values", "interest", "interests", "preference",
                     "preferences", "personality", "role", "constraint"}
 logger = logging.getLogger("aios.participation")
@@ -196,6 +197,108 @@ def propose_v3(claim: dict, context: dict, *, recurrence: int | None = None,
     return result
 
 
+
+def propose_v4(claim: dict, context: dict, *, recurrence: int | None = None,
+               conflicts: list | None = None) -> dict:
+    """Role-separated, temporally honest fourth SHADOW policy.
+
+    The speaker is a narrator, not necessarily the actor, addressee, witness
+    or adopting party. Historical character state cannot be reconstructed
+    from a current snapshot; only source-local signals remain eligible then.
+    """
+    coverage = context.get("coverage") or {}
+    basis = coverage.get("temporal_basis")
+    retrospective = basis == "retrospective_snapshot_unverified"
+    effective = {**context}
+    if retrospective:
+        effective.update(goals=[], facets=[], relationships=[])
+    result = propose_v3(claim, effective, recurrence=recurrence, conflicts=conflicts)
+    result = {**result, "policy_version": V4_VERSION,
+              "reasons": list(result["reasons"]), "signals": dict(result["signals"])}
+    signals = result["signals"]
+    involvement = dict(signals["involvement"])
+    names = {str(n).strip().casefold() for n in context.get("names", []) if n}
+    speaker = str(claim.get("speaker_id") or "").strip().casefold()
+    subject = str(claim.get("subject_norm") or "").strip().casefold()
+    obj = str(claim.get("object_norm") or "").strip().casefold()
+    predicate = str(claim.get("predicate_norm") or "").strip().casefold()
+    source = str(claim.get("source_sentence") or "").strip().casefold().replace("’", "'")
+    actor = subject in names and bool(subject)
+    target = obj in names and bool(obj)
+    narrator = speaker in names and bool(speaker)
+    # Unknown visibility is not promoted to a positive first-person witness.
+    involvement.update({
+        "source_authorship_only": narrator and not actor and not target,
+        "actor": actor,
+        "target": target,
+        "witness": None,
+        "narrator": narrator,
+    })
+    valid = str(claim.get("semantic_integrity_status") or "").casefold() == "valid"
+    category = None
+    speech_act = "unknown"
+    adoption = "unknown"
+    if source:
+        if re.search(r"\b(?:if|unless|provided that)\b", source):
+            speech_act = "conditional"
+        elif re.search(r"\bi(?:'m not going| won't| will not| refuse)\b", source):
+            speech_act = "refusal"
+        elif re.search(r"\bi(?: will|'ll| am going to|'m going to)\s+\w+", source):
+            speech_act = "self_commitment" if narrator and actor else "reported_commitment"
+        elif re.search(r"\byou\s+(?:do not|don't|must|should|will|are giving|give)\b", source):
+            speech_act = "proposed_terms"
+        elif re.search(r"\bi(?: want| need|'d like| would like)\b", source):
+            speech_act = "request_or_desire" if narrator else "reported_desire"
+    if valid and signals["representation_quality"]["usable"]:
+        if narrator and actor:
+            if speech_act == "refusal" and predicate in {"go", "leave", "stay", "refuse", "decline"}:
+                category, adoption = "expressed_refusal", "self_asserted"
+            elif speech_act == "self_commitment" and predicate not in {"go", "going"}:
+                category, adoption = "owned_commitment", "self_asserted"
+            elif speech_act == "request_or_desire" and predicate in {"want", "need", "prefer", "ask", "request", "like"}:
+                category, adoption = "owned_request", "self_asserted"
+            elif predicate in {"accept", "agree", "decide", "reject"} and speech_act != "conditional":
+                category, adoption = "explicit_decision", "self_asserted"
+        elif not narrator and (actor or target):
+            # A proposal addressed to a character may demand attention, but
+            # never proves they accepted, acted or complied with the proposal.
+            if speech_act == "proposed_terms" and re.search(
+                r"\b(?:seconds?|minutes?|hours?|nights?|days?|email|offer|deal)\b", source
+            ):
+                category, adoption = "addressed_proposal", "unconfirmed"
+        # Entry of another scene participant is an *unverified candidate*
+        # without an explicit source-state dependency; no named-character rule.
+    scene = dict(signals["scene_consequence"])
+    scene.update({"category": category, "supported": bool(category),
+                  "adoption_status": adoption, "speech_act": speech_act,
+                  "actor_grounded": actor or target,
+                  "temporal_context": basis or "unspecified",
+                  "epistemic_effect": "none"})
+    signals["involvement"] = involvement
+    signals["scene_consequence"] = scene
+    signals["source_roles"] = {
+        "narrator": narrator, "actor": actor, "target": target,
+        "witness": None, "adopter": actor if adoption == "self_asserted" else None,
+    }
+    if retrospective:
+        signals["unknown"] = sorted(set(signals["unknown"]) |
+                                    {"historical_relevance_not_reconstructible"})
+    # Rebuild the decision: a source author alone is not a foreground reason.
+    source_relevance = bool(signals.get("goal_ids") or signals.get("facet_ids") or
+                            (conflicts or []) or
+                            (signals.get("relationship_ids") and (recurrence or 0) >= 2) or
+                            ((actor or target) and (recurrence or 0) >= 3))
+    foreground = valid and signals["representation_quality"]["usable"] and (
+        bool(category) or source_relevance)
+    result["population"] = "foreground" if foreground else "latent"
+    result["reasons"] = ([r for r in result["reasons"]
+                          if not r.startswith("scene_consequence:")] +
+                         (["scene_consequence:" + category] if category else []))
+    if narrator and not actor and not target:
+        result["reasons"].append("narrative_authorship_only")
+    return result
+
+
 class ParticipationService:
     def __init__(self, db):
         self.db = db
@@ -244,6 +347,11 @@ class ParticipationService:
 
     async def _context(self, con, row):
         # Read bounded excluded rows too, so empty relevance arrays are explainable.
+        source_head = await con.fetchval(
+            "SELECT source_head_node_id FROM aios.character_runtime_state WHERE instance_id=$1",
+            row["instance_id"],
+        )
+        live_source = source_head is not None and str(source_head) == str(row.get("dag_node_id"))
         goal_rows = await con.fetch("""SELECT goal_id,goal_text,status,meta,updated_at
             FROM aios.character_agent_goal WHERE instance_id=$1
             ORDER BY (status='active') DESC,priority,created_at,goal_id LIMIT 65""", row["instance_id"])
@@ -268,7 +376,9 @@ class ParticipationService:
                 "goals": goals, "facets": facets, "relationships": relationships,
                 "coverage": {
                     "captured_at": datetime.now(timezone.utc).isoformat(),
-                    "temporal_basis": "evaluation_time_not_historical",
+                    "temporal_basis": "live_head_snapshot" if live_source else "retrospective_snapshot_unverified",
+                    "source_node_id": str(row.get("dag_node_id") or ""),
+                    "runtime_head_node_id": str(source_head) if source_head else None,
                     "goals": {"scope": "instance", "instance_id": str(row["instance_id"]),
                               "eligible": len(goals), "sampled_rows": [dict(r) for r in goal_rows[:64]]},
                     "facets": {"scope": "character", "character_id": row["character_id"],
@@ -354,6 +464,11 @@ class ParticipationService:
                         v3 = propose_v3(dict(item), context, recurrence=int(independent),
                                         conflicts=[r['conflict_id'] for r in conflicts])
                         v3["evaluation_mode"] = "paired_live"
+                        v4 = propose_v4(dict(item), context, recurrence=int(independent),
+                                        conflicts=[r['conflict_id'] for r in conflicts])
+                        v4["evaluation_mode"] = ("paired_live" if context["coverage"]["temporal_basis"] == "live_head_snapshot"
+                                                 else "retrospective_source_only")
+                        result["signals"]["comparison_v4"] = v4
                         result["signals"]["comparison"] = comparison
                         result["signals"]["comparison_v3"] = v3
                         from aios_app.epistemic.runtime_versions import component_versions
@@ -452,12 +567,19 @@ class ParticipationService:
              FROM aios.character_participation_evaluation
              WHERE experiment_id=$1 AND signals ? 'comparison_v3'
              GROUP BY 1,2,3""",experiment_id)
+        v4comparisons = await self.db.fetch("""SELECT population AS baseline_population,
+             signals->'comparison_v4'->>'population' AS comparison_population,
+             signals->'comparison_v4'->>'evaluation_mode' AS evaluation_mode,count(*) AS count
+             FROM aios.character_participation_evaluation
+             WHERE experiment_id=$1 AND signals ? 'comparison_v4'
+             GROUP BY 1,2,3""",experiment_id)
         total = sum(int(r['count']) for r in populations)
         foreground = sum(int(r['count']) for r in populations if r['population']=='foreground')
         return {'shadow':True,'experiment':dict(exp),'queue':[dict(r) for r in counts],
                 'populations':[dict(r) for r in populations],
                 'comparison_version':COMPARISON_VERSION,'comparisons':[dict(r) for r in comparisons],
                  'comparison_v3_version':V3_VERSION,'comparisons_v3':[dict(r) for r in v3comparisons],
+                 'comparison_v4_version':V4_VERSION,'comparisons_v4':[dict(r) for r in v4comparisons],
                 'proposed_foreground_share':foreground/total if total else None,
                 'evaluations':[{**dict(r), **{k:json_value(r[k]) for k in (
                     'reasons','signals','claim_snapshot','context_snapshot')}} for r in rows],
