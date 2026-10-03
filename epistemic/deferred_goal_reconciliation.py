@@ -12,6 +12,7 @@ import logging
 from uuid import UUID
 
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
+from aios_app.epistemic.goal_source_admission import review_goal_source
 
 logger = logging.getLogger("aios.epistemic.deferred_goals")
 LIMIT = 64
@@ -93,9 +94,21 @@ async def reconcile_deferred_goals(db, *, instance_id: UUID, limit: int = LIMIT)
                 meta = _meta(unit["meta"])
                 topic = str(unit["topic_key"] or "")
                 status = "rejected"
+                admission = review_goal_source(
+                    source_text=str(meta.get("source_text") or ""),
+                    objective=str(meta.get("objective") or unit["text"]),
+                    parse_reason=meta.get("parse_reason"),
+                    horizon=meta.get("horizon"),
+                    match_span=tuple(meta["source_span"])
+                    if isinstance(meta.get("source_span"), (tuple,list))
+                    and len(meta["source_span"]) == 2 else None,
+                ) if meta.get("source_text") else None
                 if meta.get("horizon") == "immediate":
                     counts["rejected"] += 1
                     status = "immediate_action_not_managed_goal"
+                elif admission is not None and not admission.managed:
+                    counts["rejected"] += 1
+                    status = "source_admission:" + admission.decision + ":" + admission.reason
                 elif not topic or not valid_goal_objective(meta.get("objective") or unit["text"]):
                     counts["rejected"] += 1
                     status = "invalid_objective"
@@ -137,6 +150,9 @@ async def reconcile_deferred_goals(db, *, instance_id: UUID, limit: int = LIMIT)
                             intent_type=meta.get("intent_type"),
                             horizon=meta.get("horizon"),
                             objective=meta.get("objective"),
+                            source_text=meta.get("source_text"),
+                            parse_reason=meta.get("parse_reason"),
+                            source_span=meta.get("source_span"),
                             refresh_scene=False,
                         )
                         if result is not None:
