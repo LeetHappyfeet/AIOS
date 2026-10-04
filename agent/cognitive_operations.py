@@ -80,6 +80,15 @@ class CognitiveOperationEngine:
                 # corpus research, not copied into long-running goal state.
                 result.pop("references",None)
                 await self._finish(op,{"kind":"research_dossier",**result})
+            elif kind=="research.study":
+                from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+                payload=self._mapping(op["input"])
+                dossier_id=UUID(str(payload["dossier_id"]))
+                section_id=UUID(str(payload["section_id"]))
+                result=await ProgressiveResearchService(self.db).study(
+                    instance_id=op["instance_id"],dossier_id=dossier_id,
+                    request_id=op["operation_id"],section_ids=[section_id])
+                await self._finish(op,{"kind":"research_study",**result})
             elif kind=="inquiry.resolve":
                 from aios_app.epistemic.inquiry.contracts import InquiryDemand
                 from aios_app.epistemic.inquiry.service import CharacterInquiryService
@@ -410,7 +419,7 @@ class CognitiveOperationEngine:
         await self._finish_side_effects(op,result)
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
-        if op.get("operation_type") in {"inquiry.resolve","research.advance"}:
+        if op.get("operation_type") in {"inquiry.resolve","research.advance","research.study"}:
             # Searching is not goal progress or source admission. Still close
             # the opportunity and record the thread receipt so it cannot stick
             # in 'selected' or 'working' indefinitely.
