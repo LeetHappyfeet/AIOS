@@ -129,7 +129,10 @@ jobs:
             tests/ci_canonical_cold_start.py tests/test_runtime_version_manifest.py \
             tests/test_migration_transaction_contract.py \
             topic_atlas/__init__.py topic_atlas/collector.py topic_atlas/projection.py \
-            tests/test_topic_atlas.py tests/ci_topic_atlas_smoke.py
+            semantic_index/corpus_discovery.py semantic_index/query_local.py \
+            semantic_index/query.py semantic_index/query_server.py epistemic/research.py \
+            tests/test_topic_atlas.py tests/test_corpus_discovery_v2.py tests/ci_topic_atlas_smoke.py \
+            tests/test_corpus_discovery_v2.py tests/ci_corpus_discovery_v2.py
       - name: Exercise the complete production migrator twice and prove atomic rollback
         env:
           AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
@@ -142,6 +145,11 @@ jobs:
           AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
         run: |
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python tests/ci_topic_atlas_smoke.py
+      - name: Validate hybrid corpus ACL and lexical fallback in PostgreSQL
+        env:
+          AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
+        run: |
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python tests/ci_corpus_discovery_v2.py
       - name: Verify installed versus effective version manifest and transaction parser
         run: |
           mkdir -p "$RUNNER_TEMP/aios-pythonpath"
