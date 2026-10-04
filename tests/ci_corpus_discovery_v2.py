@@ -4,6 +4,9 @@ Runs AFTER ci_topic_atlas_smoke.py in the canonical cold-start CI database.
 Tests vector-only recall, ACL denies, fanwork exclusion and SQL lexical fallback.
 """
 import asyncio
+from types import SimpleNamespace
+
+from aios_app.semantic_index import corpus_discovery as cold_index
 from uuid import UUID
 
 from aios_app.config import settings
@@ -102,8 +105,55 @@ async def main():
         assert ids == {public_section},f"lexical fallback must preserve deny and fanwork exclusions: {ids}"
         assert "lexical" in fallback.hits[0].retrieval_methods
         assert await db.fetchval("SELECT count(*) FROM aios.source_consumption") == consumed_before
+
+        # Exercise the production SQL fingerprint/receipt queries against real
+        # PostgreSQL while replacing only external Qdrant and inference IO.
+        indexed_points = {}
+        deleted = []
+        class FakeEmbedder:
+            def embed(self,texts):
+                assert all("text: " in t for t in texts)
+                return [[0.1,0.2,0.3] for _ in texts]
+        class FakeClient:
+            def delete(self,*,collection_name,points_selector,wait):
+                assert collection_name=="corpus_sections_v2" and wait
+                deleted.extend(points_selector.points)
+        class FakeStore:
+            def __init__(self):
+                self.client=FakeClient()
+            def upsert(self,points):
+                for point in points: indexed_points[str(point.id)]=point
+        fake=FakeStore()
+        cold_index._get_embedder=lambda cfg:FakeEmbedder()
+        cold_index._get_store=lambda cfg,name:fake
+        cfg=SimpleNamespace(corpus_collection="corpus_sections_v2",
+            topic_collection="knowledge_topics_v1",embedding_model="test-model",
+            embedding_version="v1")
+        assert await cold_index.index_corpus_discovery_once(db,cfg,limit=32)>=4
+        assert str(public_section) in indexed_points
+        assert await cold_index.index_corpus_discovery_once(db,cfg,limit=32)==0
+        previous = await db.fetchval(
+            "SELECT source_fingerprint FROM aios.corpus_discovery_projection WHERE section_id=$1",
+            public_section)
+        await db.execute("UPDATE aios.corpus_section SET heading='Changed heading' WHERE section_id=$1",
+                         public_section)
+        assert await cold_index.index_corpus_discovery_once(db,cfg,limit=32)==1
+        current = await db.fetchval(
+            "SELECT source_fingerprint FROM aios.corpus_discovery_projection WHERE section_id=$1",
+            public_section)
+        assert previous!=current
+
+        await db.execute("DELETE FROM aios.corpus_section WHERE section_id=$1",public_section)
+        assert await db.fetchval(
+            "SELECT count(*) FROM aios.corpus_discovery_tombstone WHERE section_id=$1",
+            public_section)==1
+        assert await cold_index.prune_deleted_corpus_once(db,cfg,limit=32)>=1
+        assert str(public_section) in [str(value) for value in deleted]
+        assert await db.fetchval(
+            "SELECT count(*) FROM aios.corpus_discovery_tombstone WHERE section_id=$1",
+            public_section)==0
         # No source was materialized and no world assertion was created by search.
-        print("Corpus Discovery V2 PostgreSQL smoke PASS: semantic-only recall, denied sources, fanwork exclusion, SQL fallback and reference-only exposure")
+        print("Corpus Discovery V2 PostgreSQL smoke PASS: vector-only recall, ACL/fanwork, lexical fallback, real source-fingerprint refresh and deletion queue")
     finally:
         await db.close()
 
