@@ -104,6 +104,21 @@ STARTUP_STAGES = [
 ]
 
 
+# Participation policies are audit-only. Enable their independent consumer
+# explicitly for a controlled paired experiment; never make V4 live implicitly.
+if os.getenv("AIOS_PARTICIPATION_SHADOW_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}:
+    SERVICES.append({
+        "name": "Participation Shadow",
+        "cmd": [PYTHON, "-m", "aios_app.agent.participation"],
+        "required": False,
+        "startup_timeout": DEFAULT_STARTUP_TIMEOUT,
+        "readiness": {"type": "log", "marker": "AIOS_READY service=participation_shadow"},
+    })
+    STARTUP_STAGES.append(("Participation shadow evaluation", {"Participation Shadow"}))
+
+
 @dataclass
 class ServiceRuntime:
     spec: dict
