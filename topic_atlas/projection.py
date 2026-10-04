@@ -6,7 +6,6 @@ live in named graphs of the world dataset, separate from asserted world graphs.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 from urllib.parse import quote
@@ -172,7 +171,10 @@ async def project_topics_once(db, fuseki, *, limit: int = 4) -> int:
                ORDER BY source_topic_id,target_topic_id,relation_kind LIMIT $2""",
             row["topic_id"],MAX_GRAPH_RELATIONS)
         dataset,graph,sparql,digest = topic_rdf_update(row,aliases,relations)
-        await asyncio.to_thread(fuseki.update,dataset,sparql)
+        # Keep the synchronized Fuseki call inside the dedicated topology worker:
+        # cancelling a detached network thread could let a stale graph write
+        # finish after a newer revision had already been acknowledged.
+        fuseki.update(dataset,sparql)
         receipt = await db.fetchrow(
             """INSERT INTO aios.knowledge_topic_projection
                (topic_id,graph_revision,graph_hash,graph_dataset,graph_iri,graph_projected_at)
