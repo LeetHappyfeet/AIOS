@@ -24,6 +24,9 @@ class SemanticIndexConfig:
     topic_collection: str = os.getenv(
         "AIOS_QDRANT_TOPIC_COLLECTION", "knowledge_topics_v1"
     )
+    corpus_collection: str = os.getenv(
+        "AIOS_QDRANT_CORPUS_COLLECTION", "corpus_sections_v2"
+    )
 
     embedding_model: str = os.getenv(
         "AIOS_SEMANTIC_EMBEDDING_MODEL",
