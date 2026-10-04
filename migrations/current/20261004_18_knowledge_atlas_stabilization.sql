@@ -14,6 +14,14 @@ CREATE TABLE IF NOT EXISTS aios.character_research_tool_request (
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY(instance_id,source_node_id)
 );
+-- Re-evaluate historical receipt rows once under the corrected candidate
+-- display policy. Original claims, frames, observations and mentions stay in SQL;
+-- collector rebuilds only advisory links in bounded per-cycle batches.
+UPDATE aios.knowledge_topic_discovery_receipt
+SET source_revision='topic-hygiene-v2-replay'
+WHERE source_kind IN ('claim_candidate','semantic_frame','proposition_occurrence')
+  AND source_revision<>'deleted';
+
 COMMENT ON TABLE aios.character_research_tool_request IS
 'One host-verified request per character source DAG node. A tool intention is not a corpus acquisition.';
 COMMIT;
