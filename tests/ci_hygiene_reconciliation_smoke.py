@@ -82,6 +82,13 @@ CREATE TABLE aios.semantic_topology_node (
  topology_node_id uuid PRIMARY KEY,scope_key text NOT NULL,proposition_id uuid,
  node_type text NOT NULL,node_key text NOT NULL
 );
+CREATE FUNCTION aios.recompute_semantic_evidence_admission(p_acquisition uuid)
+RETURNS void LANGUAGE plpgsql AS $
+BEGIN
+ UPDATE aios.semantic_evidence_admission
+ SET status='active',reason='recomputed',confidence=0.6,updated_at=now()
+ WHERE acquisition_id=p_acquisition;
+END $;
 CREATE TABLE aios.semantic_scope_projection_state (
  scope_key text PRIMARY KEY,dirty_version bigint NOT NULL DEFAULT 0,
  projected_version bigint NOT NULL DEFAULT 0,status text NOT NULL DEFAULT 'ready',
@@ -119,6 +126,7 @@ async def main() -> None:
             "20261001_claim_semantic_integrity.sql",
             "20261003_07_semantic_hygiene_shadow.sql",
             "20261003_08_semantic_hygiene_reconciliation.sql",
+            "20261003_09_semantic_hygiene_revision_review.sql",
         ):
             await con.execute(
                 (Path("migrations/current") / name).read_text(encoding="utf-8")
@@ -297,8 +305,64 @@ async def main() -> None:
         assert await con.fetchval(
             "SELECT aios.semantic_proposition_topology_eligible($1)",PROP
         ) is True
+        # A new integrity revision cannot auto-reactivate the old rejection.
+        await con.execute(
+            """UPDATE aios.claim_semantic_integrity
+               SET revision_key='rev-mia-corrected',checked_at=now()
+               WHERE claim_id=$1""", CLAIM
+        )
+        assert await con.fetchval(
+            "SELECT aios.semantic_occurrence_topology_eligible($1,$2)", CLAIM, PROP
+        ) is False
+        await con.execute(
+            """UPDATE aios.semantic_evidence_admission
+               SET status='active',reason='recomputed',confidence=0.8
+               WHERE acquisition_id=$1""", acquisition
+        )
+        assert await con.fetchval(
+            "SELECT reason FROM aios.semantic_evidence_admission WHERE acquisition_id=$1",
+            acquisition,
+        ) == "hygiene_revision_requires_review"
+
+        # Release only after independently revalidating the revised source.
+        async with con.transaction():
+            await con.execute(
+                "SELECT set_config('aios.semantic_hygiene_apply_enabled','on',true)"
+            )
+            result = await con.fetchval(
+                "SELECT aios.supersede_semantic_hygiene_adjudication($1,'fixture-operator')",
+                proposal,
+            )
+            if isinstance(result,str): result=json.loads(result)
+            assert result["status"] == "superseded"
+        assert await con.fetchval(
+            "SELECT status FROM aios.semantic_evidence_admission WHERE acquisition_id=$1",
+            acquisition,
+        ) == "active"
+        assert await con.fetchval(
+            "SELECT aios.semantic_occurrence_topology_eligible($1,$2)", CLAIM, PROP
+        ) is True
+
+        # Old revision is an immutable tombstone: restoring the historical
+        # same erroneous extraction must not reintroduce it as active evidence.
+        await con.execute(
+            "UPDATE aios.claim_semantic_integrity SET revision_key=$2 WHERE claim_id=$1",
+            CLAIM, revision,
+        )
+        await con.execute(
+            """UPDATE aios.semantic_evidence_admission
+               SET status='active',reason='recomputed',confidence=0.8
+               WHERE acquisition_id=$1""", acquisition
+        )
+        assert await con.fetchval(
+            "SELECT status FROM aios.semantic_evidence_admission WHERE acquisition_id=$1",
+            acquisition,
+        ) == "suppressed"
+        assert await con.fetchval(
+            "SELECT aios.semantic_occurrence_topology_eligible($1,$2)", CLAIM, PROP
+        ) is False
         print("PASS: source-bound suppression, 10 descendant invalidations, "
-              "historical preservation, replay guard and independent support")
+              "historical preservation, revision review/release, replay guard and independent support")
     finally:
         await con.close()
 
