@@ -14,6 +14,10 @@ from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
 from aios_app.topic_atlas.collector import collect_topics_once
 from aios_app.topic_atlas.projection import index_topics_once, project_topics_once
+from .corpus_discovery import (
+    index_corpus_discovery_once, prune_deleted_corpus_once,
+    link_corpus_topics_once,
+)
 from .config import SemanticIndexConfig
 from .service import (
     index_source_sections_once, index_corpus_sections_once, index_semantic_frames_once,
@@ -66,6 +70,8 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
         "cluster_classified_per_s": round(totals["classified"] / elapsed, 2),
         "reconciled_per_s": round(totals["reconciled"] / elapsed, 2),
         "validated_per_s": round(totals.get("validated", 0) / elapsed, 2),
+        "corpus_indexed_per_s": round(totals.get("corpus_indexed", 0) / elapsed, 2),
+        "topic_coverage_per_s": round(totals.get("topic_coverage", 0) / elapsed, 2),
         "topics_collected_per_s": round(totals.get("topics_collected", 0) / elapsed, 2),
         "topics_indexed_per_s": round(totals.get("topics_indexed", 0) / elapsed, 2),
     }
@@ -146,14 +152,20 @@ async def _run_vector_stages(db, cfg, run_stage) -> dict[str, int]:
     epistemic = await run_stage("vector-epistemic", index_epistemic_objects_once, db, cfg)
     background_cfg = replace(cfg, batch_size=cfg.background_batch_size)
     source = await run_stage("vector-source", index_source_sections_once, db, background_cfg)
-    # Cold corpus embeddings only consume a small batch after the live streams.
-    corpus = 0
-    if max(propositions, frames, epistemic) < cfg.batch_size:
-        corpus = await run_stage("vector-corpus", index_corpus_sections_once, db, background_cfg)
+    # Cold corpus has its own collection and guaranteed background budget.
+    # The v1 shared-source corpus index is retained only for legacy/manual work.
+    retired_corpus = await run_stage("vector-corpus-prune", prune_deleted_corpus_once,
+                                     db, cfg, limit=cfg.background_batch_size)
+    corpus = await run_stage("vector-corpus-v2", index_corpus_discovery_once,
+                             db, cfg, limit=cfg.background_batch_size)
     topics = await run_stage("vector-topics", index_topics_once, db, cfg,
                              limit=cfg.background_batch_size)
+    coverage = await run_stage("vector-topic-coverage", link_corpus_topics_once,
+                               db, cfg, limit=min(2,cfg.background_batch_size))
     return {"propositions_indexed": propositions, "frames_indexed": frames,
-            "epistemic_indexed": epistemic, "source_indexed": source + corpus,
+            "epistemic_indexed": epistemic, "source_indexed": source,
+            "corpus_indexed": corpus, "corpus_pruned": retired_corpus,
+            "topic_coverage": coverage,
             "topics_indexed": topics, "admitted": admitted, "admission_bypassed": bypassed}
 
 
@@ -170,7 +182,8 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         window_started = time.monotonic()
         totals = {key: 0 for key in (
             "source_indexed", "frames_indexed", "propositions_indexed", "epistemic_indexed",
-            "admitted", "admission_bypassed", "topics_collected", "topics_indexed",
+            "admitted", "admission_bypassed", "topics_collected", "topics_indexed", "corpus_indexed",
+            "corpus_pruned", "topic_coverage",
             "structured", "neighbor_classified",
             "clustered", "classified", "reconciled", "validated")}
         last_batches = {}
