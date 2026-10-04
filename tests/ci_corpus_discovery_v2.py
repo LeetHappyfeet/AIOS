@@ -49,7 +49,7 @@ async def main():
             """INSERT INTO aios.corpus_scope(scope_key,display_name,access_class)
                VALUES ('atlas-stage2-public','Public','public'),
                       ('atlas-stage2-restricted','Restricted','restricted'),
-                      ('atlas-stage2-fanwork','Fanwork','public')
+                      ('atlas.stage2.fanwork','Fanwork','public')
                ON CONFLICT(scope_key) DO UPDATE
                SET access_class=EXCLUDED.access_class""")
         await db.execute(
@@ -77,7 +77,7 @@ async def main():
         _, fan_section = await _document(
             db,title="Fiction story",
             content="Woodland creative writing outside non-fanwork research.",
-            scopes=["atlas-stage2-public","atlas-stage2-fanwork"],idx=4)
+            scopes=["atlas-stage2-public","atlas.stage2.fanwork"],idx=4)
         # The previous code's broad public grant cannot override a deny row.
         await db.execute(
             """INSERT INTO aios.character_corpus_access
