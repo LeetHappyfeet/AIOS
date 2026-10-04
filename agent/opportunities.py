@@ -12,21 +12,32 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
 from aios_app.agent.cognitive_operation_registry import CognitiveOperationRegistry
+from aios_app.agent.goal_dependencies import GoalKnowledgeDependencyService
 from aios_app.agent.cognitive_subjects import (
     CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,
     GoalSubjectProjector, GoalKnowledgeDemandResolver,
 )
 
-def goal_research_operation(next_source: str, last_status: str | None,
-                            last_reason: str = "") -> str | None:
-    """Budgeted one-step progression, never a goal-completion decision."""
-    if next_source not in {"memory", "corpus"}:
+def goal_research_operation(
+    next_source: str, last_status: str | None, last_reason: str = "",
+    *, coverage_status: str = "missing", retrieval_state: str = "available",
+) -> str | None:
+    """One memory inquiry before a persistent dossier; never infer completion.
+
+    A retrieval timeout is not ignorance. Once a scoped inquiry has a terminal
+    result but the durable requirement is still unsatisfied, progress to Stage 3.
+    Availability/exhaustion of that dossier is checked separately.
+    """
+    if (retrieval_state == "unavailable" or coverage_status in {"sufficient","unavailable"}
+            or next_source not in {"memory","corpus"}):
         return None
-    if last_status in {"queued", "planning", "partial", "resolved", "conflicting"}:
+    if last_status in {"queued","planning","already_claimed"}:
         return None
-    if last_reason == "no_access":
-        return None  # Access can be re-evaluated when source/ACL state changes.
-    return "research.advance" if last_status == "unresolved" else "inquiry.resolve"
+    if last_status in {"unresolved","partial","resolved","conflicting"}:
+        return "research.advance"
+    if last_status is None:
+        return "inquiry.resolve"
+    return None
 
 
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
@@ -65,6 +76,7 @@ class CognitiveOpportunityService:
         self.subject_demand=SubjectKnowledgeDemandResolver()
         self.goal_subjects=GoalSubjectProjector(db)
         self.goal_demand=GoalKnowledgeDemandResolver(db)
+        self.goal_dependencies=GoalKnowledgeDependencyService(db)
         self.cognitive_operations=CognitiveOperationRegistry()
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
@@ -142,11 +154,19 @@ class CognitiveOpportunityService:
             if goal_subject is None:
                 continue
             demand=await self.goal_demand.resolve(
-                instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge))
+                instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge),
+                retrieval_unavailable=snapshot.topology_unavailable)
             goal_subject_demands[goal.goal_id]=(goal_subject,demand)
+            requirement=await self.goal_dependencies.reconcile(
+                instance_id=instance_id,goal_id=goal.goal_id,
+                question=goal_subject.question or f"What knowledge helps satisfy: {goal.text}?",
+                query_text=demand["query"],demand=demand,
+                source_node_id=source_node_id or context.source_head_node_id)
             last_status,last_reason=latest_goal_inquiry.get(goal.goal_id,(None,""))
             research_op=goal_research_operation(
-                demand["next_source"],last_status,last_reason)
+                demand["next_source"],last_status,last_reason,
+                coverage_status=demand["coverage_status"],
+                retrieval_state=demand["retrieval_state"])
             if research_op:
                 gap=max(0.0,1.0-float(demand["internal_coverage"]))
                 needs_dossier=research_op=="research.advance"
@@ -155,14 +175,18 @@ class CognitiveOpportunityService:
                     research_op,
                     {"query":demand["query"],"allow_model":False if needs_dossier else gap >= .75,
                      "focus":goal_subject.retrieval_text,
-                     "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id)},
+                     "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id),
+                     "requirement_id":str(requirement["requirement_id"])},
                     source_node_id or context.source_head_node_id,context,
                     relevance=.72,goal_affinity=.85,knowledge_gap=gap,novelty=.65,recency=1,
                     evidence=[{"kind":"goal_knowledge_demand","goal_id":str(goal.goal_id),
                                "internal_coverage":demand["internal_coverage"],
                                "coverage_source":demand["coverage_source"],
+                               "coverage_status":demand["coverage_status"],
+                               "retrieval_state":demand["retrieval_state"],
+                               "requirement_id":str(requirement["requirement_id"]),
                                "prior_inquiry_status":last_status}],
-                    key=f"goal-research:{goal.goal_id}",
+                    key=f"goal-research:{goal.goal_id}:{research_op}",
                     subject_id=goal_subject.subject_id))
 
         # Established topology recall is already character-relative and ranked.
