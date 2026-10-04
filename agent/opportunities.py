@@ -193,6 +193,9 @@ class CognitiveOpportunityService:
             """SELECT d.dossier_id,s.section_id,s.last_research_id
                FROM aios.character_research_dossier d
                JOIN aios.character_research_source s ON s.dossier_id=d.dossier_id
+               JOIN aios.corpus_section current_section
+                 ON current_section.section_id=s.section_id
+                AND md5(current_section.content)=s.source_text_digest
                JOIN aios.character_corpus_exposure exposure
                  ON exposure.research_id=s.last_research_id
                 AND exposure.section_id=s.section_id
