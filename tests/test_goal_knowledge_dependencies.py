@@ -134,6 +134,10 @@ def test_idle_dossier_reopens_only_on_new_index_or_scoped_acl_epoch():
             self.queries=[]
         async def fetchrow(self,sql,*args):
             self.queries.append(sql)
+            if "INSERT INTO aios.character_research_question" in sql:
+                self.inserts+=1
+                self.queued=1
+                return {"question_id":uuid4()}
             if "FROM aios.character_research_dossier d" in sql:
                 return {
                     "dossier_id":uuid4(), "question":"Women's sports media coverage",
@@ -141,10 +145,6 @@ def test_idle_dossier_reopens_only_on_new_index_or_scoped_acl_epoch():
                     "attempts":1, "last_completed_at":finished,
                     "sources":0, "queued":self.queued, "expired":0,
                 }
-            if "INSERT INTO aios.character_research_question" in sql:
-                self.inserts+=1
-                self.queued=1
-                return {"question_id":uuid4()}
             raise AssertionError(sql)
         async def fetchval(self,sql,*args):
             self.queries.append(sql)
