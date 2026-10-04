@@ -15,6 +15,39 @@ async def retire_invalid_candidates_once(db, *, limit: int = 16) -> int:
         """SELECT topic_id,display_label
            FROM aios.knowledge_topic
            WHERE status='candidate'
+             AND (display_label ~* '^[a-f0-9]{32,64}
+    bad=[r["topic_id"] for r in rows if normalize_label(r["display_label"]) is None][:limit]
+    if not bad:
+        return 0
+    return len(await db.fetch(
+        """UPDATE aios.knowledge_topic SET status='retired',
+                  vector_revision=vector_revision+1,graph_revision=graph_revision+1,
+                  updated_at=now()
+           WHERE topic_id=ANY($1::uuid[]) AND status='candidate'
+           RETURNING topic_id""",bad))
+
+                  OR display_label ~* '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}
+    bad=[r["topic_id"] for r in rows if normalize_label(r["display_label"]) is None][:limit]
+    if not bad:
+        return 0
+    return len(await db.fetch(
+        """UPDATE aios.knowledge_topic SET status='retired',
+                  vector_revision=vector_revision+1,graph_revision=graph_revision+1,
+                  updated_at=now()
+           WHERE topic_id=ANY($1::uuid[]) AND status='candidate'
+           RETURNING topic_id""",bad))
+
+                  OR display_label ~* '[[:space:]](and|or|of|the|with|for|to|in|at|a|an)
+    bad=[r["topic_id"] for r in rows if normalize_label(r["display_label"]) is None][:limit]
+    if not bad:
+        return 0
+    return len(await db.fetch(
+        """UPDATE aios.knowledge_topic SET status='retired',
+                  vector_revision=vector_revision+1,graph_revision=graph_revision+1,
+                  updated_at=now()
+           WHERE topic_id=ANY($1::uuid[]) AND status='candidate'
+           RETURNING topic_id""",bad))
+)
            ORDER BY updated_at,topic_id LIMIT $1""",
         max(1,min(int(limit)*12,512)))
     bad=[r["topic_id"] for r in rows if normalize_label(r["display_label"]) is None][:limit]
