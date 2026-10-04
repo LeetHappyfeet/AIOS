@@ -148,21 +148,18 @@ class ProgressiveResearchService:
         """Bounded retry signal only; it grants no access and admits no facts."""
         return await self.db.fetchval(
             """SELECT greatest(
-                 coalesce((SELECT max(indexed_at)
-                           FROM aios.corpus_discovery_projection),
-                          '-infinity'::timestamptz),
-                 coalesce((SELECT max(acl.updated_at)
-                           FROM aios.character_corpus_access acl
-                           JOIN aios.character_instance ci
-                             ON ci.character_id=acl.character_id
-                           WHERE ci.instance_id=$1),
-                          '-infinity'::timestamptz),
-                 coalesce((SELECT max(ckd.updated_at)
-                           FROM aios.character_knowledge_domain ckd
-                           JOIN aios.character_instance ci
-                             ON ci.character_id=ckd.character_id
-                           WHERE ci.instance_id=$1),
-                          '-infinity'::timestamptz)
+                 (SELECT max(indexed_at)
+                  FROM aios.corpus_discovery_projection),
+                 (SELECT max(acl.updated_at)
+                  FROM aios.character_corpus_access acl
+                  JOIN aios.character_instance ci
+                    ON ci.character_id=acl.character_id
+                  WHERE ci.instance_id=$1),
+                 (SELECT max(ckd.updated_at)
+                  FROM aios.character_knowledge_domain ckd
+                  JOIN aios.character_instance ci
+                    ON ci.character_id=ckd.character_id
+                  WHERE ci.instance_id=$1)
                )""",instance_id)
 
     async def available(self, *, instance_id: UUID, question: str) -> bool:
