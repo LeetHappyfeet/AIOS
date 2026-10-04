@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
@@ -8,8 +10,11 @@ from uuid import UUID
 
 from aios_app.corpus import consume_corpus_sections
 from aios_app.db import Database
+from aios_app.semantic_index.query import SemanticQueryService
 from aios_app.epistemic.weights import get_profile
 
+
+logger = logging.getLogger("aios.epistemic.research")
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,}")
 _STOPWORDS = frozenset({
@@ -295,6 +300,7 @@ class CorpusResearchHit:
     heading: str | None
     excerpt: str
     scopes: tuple[str, ...]
+    retrieval_methods: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -320,6 +326,7 @@ class CorpusResearchResult:
                 "text": hit.excerpt,
                 "score": hit.score,
                 "scopes": list(hit.scopes),
+                "retrieval_methods": list(hit.retrieval_methods),
                 "durable_knowledge": False,
             }
             for hit in self.hits
@@ -327,10 +334,11 @@ class CorpusResearchResult:
 
 
 class CorpusSearchService:
-    """Character-scoped deterministic full-text search over the cold corpus."""
+    """Hybrid topic/vector/lexical discovery; PostgreSQL remains the sole ACL gate."""
 
     def __init__(self, db: Database):
         self.db = db
+        self.semantic = SemanticQueryService()
 
     async def search(
         self,
@@ -397,116 +405,195 @@ class CorpusSearchService:
                 research_id, instance_id, character_id, query, terms, (), "no_access"
             )
 
+        # Internal ID-only Qdrant suggestions are never exposed directly. Even
+        # topic-vector and document-heading suggestions must pass the SQL ACL.
+        vector_sections: list[UUID] = []
+        suggested_topics: list[UUID] = []
+        try:
+            candidates = await asyncio.to_thread(
+                self.semantic.search_corpus_discovery, query, corpus_k=96, topic_k=12)
+            for kind, _score, payload in candidates:
+                try:
+                    if kind == "corpus" and len(vector_sections) < 96:
+                        section_id = UUID(str(payload["section_id"]))
+                        if section_id not in vector_sections:
+                            vector_sections.append(section_id)
+                    elif kind == "topic" and len(suggested_topics) < 12:
+                        topic_id = UUID(str(payload["topic_id"]))
+                        if topic_id not in suggested_topics:
+                            suggested_topics.append(topic_id)
+                except (TypeError,ValueError,KeyError):
+                    continue
+        except Exception as exc:
+            # Cold corpus remains usable when Qdrant or the embedding RPC is
+            # cold/unavailable; no ACL decision is made from vector errors.
+            logger.warning("Corpus semantic discovery unavailable; FTS fallback: %s",exc)
+
+        # Qdrant topic IDs are verified against active catalog SQL identities,
+        # then expanded only one relationship hop. Every resulting source still
+        # passes the *same* per-character ACL as full-text candidates.
+        related_sections = await self.db.fetch(
+            """
+            WITH verified AS (
+                SELECT t.topic_id
+                FROM aios.knowledge_topic t
+                WHERE t.topic_id=ANY($1::uuid[]) AND t.visibility='catalog'
+                  AND t.status IN ('candidate','registered','organized')
+                UNION
+                SELECT t.topic_id
+                FROM aios.knowledge_topic t
+                WHERE t.visibility='catalog'
+                  AND t.status IN ('candidate','registered','organized')
+                  AND (t.normalized_label=ANY($2::text[])
+                       OR t.normalized_label=lower($3)
+                       OR EXISTS (SELECT 1 FROM aios.knowledge_topic_alias a
+                                  WHERE a.topic_id=t.topic_id
+                                    AND a.normalized_alias=ANY($2::text[])))
+                LIMIT 24
+            ), expanded AS (
+                SELECT topic_id FROM verified
+                UNION
+                SELECT CASE WHEN r.source_topic_id=v.topic_id
+                             THEN r.target_topic_id ELSE r.source_topic_id END
+                FROM verified v
+                JOIN aios.knowledge_topic_relation r
+                  ON (r.source_topic_id=v.topic_id OR r.target_topic_id=v.topic_id)
+                 AND r.status IN ('verified','candidate')
+                JOIN aios.knowledge_topic target ON target.topic_id=
+                   CASE WHEN r.source_topic_id=v.topic_id
+                        THEN r.target_topic_id ELSE r.source_topic_id END
+                WHERE target.visibility='catalog' AND target.status<>'retired'
+                LIMIT 48
+            )
+            SELECT DISTINCT cs.section_id
+            FROM expanded e
+            JOIN aios.knowledge_topic_source ts ON ts.topic_id=e.topic_id
+              AND ts.status<>'rejected'
+            JOIN aios.corpus_section cs ON
+               (cs.section_id=ts.section_id OR
+                (ts.section_id IS NULL AND cs.document_id=ts.document_id))
+            ORDER BY cs.section_id LIMIT 96
+            """,
+            suggested_topics,list(terms),query.lower())
+        topic_sections = [row["section_id"] for row in related_sections]
+
+        # Reciprocal rank fusion over the union of SQL FTS, vector candidates
+        # and topic-linked source IDs. Access rules are applied *inside* the
+        # candidate SQL, never as an afterthought in Python.
         rows = await self.db.fetch(
             """
-            WITH q AS (
-                SELECT websearch_to_tsquery('english', $2) AS query
-            )
-            SELECT cs.section_id, cs.document_id, cd.title, cs.heading,
-                   ts_rank_cd(cs.search_vector, q.query)
-                   + CASE WHEN EXISTS (
-                       SELECT 1
-                       FROM aios.corpus_document_domain cdd
-                       JOIN aios.character_knowledge_domain ckd
-                         ON ckd.character_id=$1 AND ckd.enabled
-                        AND ckd.knowledge_domain=cdd.knowledge_domain
-                       WHERE cdd.document_id=cs.document_id
-                   ) THEN 0.15 ELSE 0.0 END
-                   + CASE WHEN EXISTS (
-                       SELECT 1 FROM aios.corpus_document_facet facet
-                       WHERE facet.document_id=cs.document_id
-                         AND lower(facet.facet_value) = ANY($4::text[])
-                   ) THEN 0.08 ELSE 0.0 END AS score,
-                   CASE
-                       WHEN length(cs.content) <= 1800 THEN cs.content
-                       ELSE left(cs.content, 1800)
-                   END AS excerpt,
-                   array_agg(DISTINCT cds.scope_key ORDER BY cds.scope_key) AS scopes
-            FROM aios.corpus_section cs
-            JOIN aios.corpus_document cd ON cd.document_id=cs.document_id
-            JOIN aios.corpus_document_scope cds ON cds.document_id=cs.document_id
-            CROSS JOIN q
-            WHERE cs.search_vector @@ q.query
-              AND ($5::boolean OR NOT EXISTS (
+            WITH q AS (SELECT websearch_to_tsquery('english',$2) AS query),
+            candidate AS (
+              SELECT cs.section_id,cs.document_id,cd.title,cs.heading,cs.content,
+                     cs.search_vector,
+                     CASE WHEN cs.search_vector @@ q.query
+                          THEN ts_rank_cd(cs.search_vector,q.query) ELSE 0.0 END
+                          AS lexical_score,
+                     array_position($6::uuid[],cs.section_id) AS semantic_rank,
+                     cs.section_id=ANY($7::uuid[]) AS topic_match,
+                     EXISTS (
+                        SELECT 1 FROM aios.corpus_document_domain cdd
+                        JOIN aios.character_knowledge_domain ckd
+                          ON ckd.character_id=$1 AND ckd.enabled
+                         AND ckd.knowledge_domain=cdd.knowledge_domain
+                        WHERE cdd.document_id=cs.document_id) AS domain_affinity,
+                     EXISTS (
+                        SELECT 1 FROM aios.corpus_document_facet facet
+                        WHERE facet.document_id=cs.document_id
+                          AND lower(facet.facet_value)=ANY($4::text[])) AS facet_match
+              FROM aios.corpus_section cs
+              JOIN aios.corpus_document cd ON cd.document_id=cs.document_id
+              CROSS JOIN q
+              WHERE (cs.search_vector @@ q.query OR cs.section_id=ANY($6::uuid[])
+                     OR cs.section_id=ANY($7::uuid[]))
+                AND ($5::boolean OR NOT EXISTS (
                   SELECT 1 FROM aios.corpus_document_scope fan_scope
                   WHERE fan_scope.document_id=cs.document_id
-                    AND fan_scope.scope_key ~ '(^|[.])fanwork([.]|$)'
-              ))
-              AND (
+                    AND fan_scope.scope_key ~ '(^|[.])fanwork([.]|$)'))
+                AND (
                   EXISTS (
-                      SELECT 1
-                      FROM aios.corpus_document_scope public_scope
-                      JOIN aios.corpus_scope scope_def
-                        ON scope_def.scope_key=public_scope.scope_key
-                       AND scope_def.access_class='public'
-                      WHERE public_scope.document_id=cs.document_id
-                  )
+                    SELECT 1 FROM aios.corpus_document_scope public_scope
+                    JOIN aios.corpus_scope scope_def ON scope_def.scope_key=public_scope.scope_key
+                      AND scope_def.access_class='public'
+                    WHERE public_scope.document_id=cs.document_id)
                   OR EXISTS (
-                      SELECT 1
-                      FROM aios.corpus_document_domain cdd
-                      JOIN aios.character_knowledge_domain ckd
-                        ON ckd.character_id=$1
-                       AND ckd.enabled
-                       AND ckd.knowledge_domain=cdd.knowledge_domain
-                      WHERE cdd.document_id=cs.document_id
-                  )
+                    SELECT 1 FROM aios.corpus_document_domain cdd
+                    JOIN aios.character_knowledge_domain ckd
+                      ON ckd.character_id=$1 AND ckd.enabled
+                     AND ckd.knowledge_domain=cdd.knowledge_domain
+                    WHERE cdd.document_id=cs.document_id)
                   OR EXISTS (
-                      SELECT 1
-                      FROM aios.corpus_document_collection domain_collection
-                      JOIN aios.corpus_source_profile domain_profile
-                        ON domain_profile.profile_id=domain_collection.profile_id
-                       AND domain_profile.enabled
-                      JOIN aios.corpus_scope domain_scope
-                        ON domain_scope.scope_key=domain_profile.scope_key
-                       AND domain_scope.access_class='domain'
-                      JOIN aios.character_knowledge_domain ckd
-                        ON ckd.character_id=$1
-                       AND ckd.enabled
-                       AND ckd.knowledge_domain=domain_profile.knowledge_domain
-                      WHERE domain_collection.document_id=cs.document_id
-                  )
+                    SELECT 1 FROM aios.corpus_document_collection domain_collection
+                    JOIN aios.corpus_source_profile domain_profile
+                      ON domain_profile.profile_id=domain_collection.profile_id
+                     AND domain_profile.enabled
+                    JOIN aios.corpus_scope domain_scope ON domain_scope.scope_key=domain_profile.scope_key
+                      AND domain_scope.access_class='domain'
+                    JOIN aios.character_knowledge_domain ckd
+                      ON ckd.character_id=$1 AND ckd.enabled
+                     AND ckd.knowledge_domain=domain_profile.knowledge_domain
+                    WHERE domain_collection.document_id=cs.document_id)
                   OR EXISTS (
-                      SELECT 1
-                      FROM aios.corpus_document_scope allowed_scope
-                      JOIN aios.character_corpus_access grant_row
-                        ON grant_row.character_id=$1
-                       AND grant_row.allowed
-                       AND (
-                            allowed_scope.scope_key=grant_row.scope_key
-                            OR left(
-                                allowed_scope.scope_key,
-                                length(grant_row.scope_key) + 1
-                            )=grant_row.scope_key || '.'
-                       )
-                      WHERE allowed_scope.document_id=cs.document_id
-                  )
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM aios.corpus_document_scope denied_scope
+                    SELECT 1 FROM aios.corpus_document_scope allowed_scope
+                    JOIN aios.character_corpus_access grant_row
+                      ON grant_row.character_id=$1 AND grant_row.allowed
+                     AND (allowed_scope.scope_key=grant_row.scope_key OR
+                          left(allowed_scope.scope_key,length(grant_row.scope_key)+1)=
+                            grant_row.scope_key || '.')
+                    WHERE allowed_scope.document_id=cs.document_id)
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM aios.corpus_document_scope denied_scope
                   JOIN aios.character_corpus_access deny_row
-                    ON deny_row.character_id=$1
-                   AND NOT deny_row.allowed
-                   AND (
-                        denied_scope.scope_key=deny_row.scope_key
-                        OR left(
-                            denied_scope.scope_key,
-                            length(deny_row.scope_key) + 1
-                        )=deny_row.scope_key || '.'
-                   )
-                  WHERE denied_scope.document_id=cs.document_id
-              )
-            GROUP BY cs.section_id, cs.document_id, cd.title, cs.heading,
-                     cs.search_vector, cs.content, q.query
-            ORDER BY score DESC, cs.section_id
-            LIMIT $3
+                    ON deny_row.character_id=$1 AND NOT deny_row.allowed
+                   AND (denied_scope.scope_key=deny_row.scope_key OR
+                        left(denied_scope.scope_key,length(deny_row.scope_key)+1)=
+                          deny_row.scope_key || '.')
+                  WHERE denied_scope.document_id=cs.document_id)
+            ), ranked AS (
+              SELECT candidate.*,
+                CASE WHEN lexical_score>0
+                     THEN row_number() OVER (ORDER BY lexical_score DESC,section_id)
+                     ELSE NULL END AS lexical_rank
+              FROM candidate
+            )
+            SELECT ranked.section_id,ranked.document_id,ranked.title,ranked.heading,
+               left(ranked.content,1800) AS excerpt,
+               COALESCE((SELECT array_agg(DISTINCT cds.scope_key ORDER BY cds.scope_key)
+                         FROM aios.corpus_document_scope cds
+                         WHERE cds.document_id=ranked.document_id),'{}'::text[]) AS scopes,
+               (CASE WHEN lexical_rank IS NOT NULL
+                      THEN 100.0/(60+lexical_rank) ELSE 0 END
+                + CASE WHEN semantic_rank IS NOT NULL
+                      THEN 100.0/(60+semantic_rank) ELSE 0 END
+                + CASE WHEN topic_match THEN 0.40 ELSE 0 END
+                + CASE WHEN domain_affinity THEN 0.10 ELSE 0 END
+                + CASE WHEN facet_match THEN 0.05 ELSE 0 END) AS score,
+               (lexical_rank IS NOT NULL) AS lexical_hit,
+               (semantic_rank IS NOT NULL) AS semantic_hit,
+               topic_match AS topic_hit
+            FROM ranked
+            ORDER BY score DESC,section_id LIMIT $3
             """,
-            character_id,
-            query,
-            bounded_limit,
-            list(terms),
-            include_fanwork,
+            character_id,query,max(64,min(256,bounded_limit*10)),
+            list(terms),include_fanwork,vector_sections,topic_sections,
         )
+        # Avoid a single long reference document crowding out independent sources.
+        selected = []
+        overflow = []
+        by_document = {}
+        for row in rows:
+            doc_id = row["document_id"]
+            if by_document.get(doc_id,0) < 2:
+                selected.append(row)
+                by_document[doc_id] = by_document.get(doc_id,0)+1
+            else:
+                overflow.append(row)
+            if len(selected)>=bounded_limit:
+                break
+        if len(selected)<bounded_limit:
+            selected.extend(overflow[:bounded_limit-len(selected)])
+        rows = selected
 
         hits = tuple(
             CorpusResearchHit(
@@ -517,6 +604,9 @@ class CorpusSearchService:
                 heading=row["heading"],
                 excerpt=row["excerpt"] or "",
                 scopes=tuple(row["scopes"] or ()),
+                retrieval_methods=tuple(kind for kind, present in (
+                    ("lexical",row["lexical_hit"]),("semantic",row["semantic_hit"]),
+                    ("topic",row["topic_hit"])) if present),
             )
             for row in rows
         )
@@ -537,7 +627,8 @@ class CorpusSearchService:
                 hit.section_id,
                 rank,
                 hit.score,
-                json.dumps({"scopes": list(hit.scopes)}),
+                json.dumps({"scopes": list(hit.scopes),
+                             "retrieval_methods": list(hit.retrieval_methods)}),
             )
 
         return CorpusResearchResult(
