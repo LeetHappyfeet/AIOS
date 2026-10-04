@@ -91,7 +91,21 @@ def _focus_terms(*values: Any) -> list[str]:
     if len(tokens) <= MAX_FOCUS_TERMS:
         return tokens
 
+    # Preserve a small number of anchors from the first two (usually short)
+    # query components. Uniform sampling alone can drop the actual named
+    # question when a long transcript is appended as the third component.
     priority = [word for word in tokens if "_" in word]
+    protected: set[str] = set(priority)
+    for value in values[:2]:
+        anchored = 0
+        for word in _WORD_RE.findall(str(value or "").lower()):
+            if len(word) < 3 or word in protected:
+                continue
+            protected.add(word)
+            priority.append(word)
+            anchored += 1
+            if anchored >= 5:
+                break
     priority_set = set(priority)
     ordinary = [word for word in tokens if word not in priority_set]
     remaining = MAX_FOCUS_TERMS - min(len(priority), MAX_FOCUS_TERMS)
