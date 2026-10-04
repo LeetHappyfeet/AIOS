@@ -181,7 +181,8 @@ class CognitiveOpportunityService:
                     gap=max(0,min(1,1-float(kd.get("coverage") or 0)))
                     proposals.append(self._p(
                         "knowledge_gap",f"Investigate {subject} progressively.","research.advance",
-                        {"query":subject,"focus":focus,"allow_model":False,source_node_id or context.source_head_node_id,
+                        {"query":subject,"focus":focus,"allow_model":False},
+                        source_node_id or context.source_head_node_id,
                         context,relevance=.65,knowledge_gap=gap,novelty=.7,recency=1,
                         evidence=[{"kind":"corpus_demand","reason":kd.get("reason")}],
                         key=f"research:{subject.lower()[:100]}"))
