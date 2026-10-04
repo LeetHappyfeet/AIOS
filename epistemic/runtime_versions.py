@@ -110,7 +110,7 @@ async def capture_runtime_manifest(db: Any, *, receipt_versions: dict[str, Any] 
         and all(key in migrations for key in INTEGRATION_MIGRATIONS)
     )
     chain_identity = hashlib.sha256(
-        "\\n".join(f"{name}:{digest}" for name, digest in sorted(migrations.items())).encode("utf-8")
+        "|".join(f"{name}:{digest}" for name, digest in sorted(migrations.items())).encode("utf-8")
     ).hexdigest()
     return {
         "manifest_version": MANIFEST_VERSION,
