@@ -72,6 +72,15 @@ async def main():
                JOIN aios.knowledge_topic t ON t.topic_id=ts.topic_id
                WHERE ts.document_id=$1 AND t.namespace='catalog:fiction.topic-atlas-ci'""",
             doc["document_id"]) == 2
+        assert await db.fetchval(
+            """SELECT count(*) FROM aios.knowledge_topic_relation r
+               JOIN aios.knowledge_topic_source ts ON ts.topic_id=r.source_topic_id
+                 AND ts.link_kind=r.source_kind AND ts.source_key=r.source_key
+               JOIN aios.knowledge_topic_mention dm ON dm.topic_id=r.target_topic_id
+               WHERE ts.document_id=$1 AND r.relation_kind='associated'
+                 AND r.status='candidate'
+                 AND dm.source_kind='knowledge_domain' AND dm.source_key=$2""",
+            doc["document_id"],str(parent["domain_id"])) == 2
         assert await db.fetchval("SELECT count(*) FROM aios.world_proposition_assertion") == before_world
 
         original = await db.fetchrow(
