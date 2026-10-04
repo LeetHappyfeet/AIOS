@@ -102,7 +102,22 @@ SELECT
    WHERE p.atom_id=$1) AS topology_nodes,
   (SELECT COUNT(*) FROM aios.semantic_anchor_edge ae
    JOIN aios.proposition p ON p.proposition_id=ae.proposition_id
-   WHERE p.atom_id=$1) AS topology_anchors
+   WHERE p.atom_id=$1) AS topology_anchors,
+  (SELECT COUNT(DISTINCT e.edge_id)
+   FROM aios.semantic_topology_edge e
+   WHERE e.parent_node_id IN (
+      SELECT n.topology_node_id FROM aios.semantic_topology_node n
+      JOIN aios.proposition p ON p.proposition_id=n.proposition_id
+      WHERE p.atom_id=$1
+   ) OR e.child_node_id IN (
+      SELECT n.topology_node_id FROM aios.semantic_topology_node n
+      JOIN aios.proposition p ON p.proposition_id=n.proposition_id
+      WHERE p.atom_id=$1
+   )) AS topology_edges_touching_nodes,
+  (SELECT COALESCE(jsonb_agg(DISTINCT n.scope_key),'[]'::jsonb)
+   FROM aios.semantic_topology_node n
+   JOIN aios.proposition p ON p.proposition_id=n.proposition_id
+   WHERE p.atom_id=$1) AS potentially_affected_scopes
 """
 
 def _json(value: Any) -> str:
@@ -153,6 +168,8 @@ def classify_candidate(atom: Any, provenance: list[dict[str, Any]],
         reasons.add("missing_expected_argument")
 
     for source in provenance:
+        if source.get("integrity_status") != "valid":
+            reasons.add("materialized_evidence_without_valid_receipt")
         meta = source["frame_meta"]
         if meta.get("standalone_semantic") is False and meta.get(
             "clause_relation"
@@ -178,7 +195,10 @@ def classify_candidate(atom: Any, provenance: list[dict[str, Any]],
         ):
             reasons.add("rdf_sql_representation_mismatch")
 
-    if truncated or "no_current_materialized_evidence" in reasons:
+    if truncated or reasons & {
+        "no_current_materialized_evidence",
+        "materialized_evidence_without_valid_receipt",
+    }:
         disposition = "needs_review"
     elif reasons & {
         "missing_core_semantic_component", "suspect_subject_boundary",
