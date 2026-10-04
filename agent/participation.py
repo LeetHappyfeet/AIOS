@@ -437,7 +437,9 @@ class ParticipationService:
                             p.subject_norm,p.predicate_norm,p.object_norm,o.dag_node_id,o.source_key,
                             cc.raw_text AS source_sentence,c.claim_kind,c.target_character_id,c.speaker_id,
                             c.resolved_at,ck.epistemic_status,ck.claim_id AS acquired_claim,
-                            si.status AS semantic_integrity_status,
+                            CASE WHEN si.status='valid'
+                                       AND NOT aios.semantic_integrity_claim_current(q.claim_id)
+                                 THEN 'incomplete' ELSE si.status END AS semantic_integrity_status,
                             si.validator_version AS integrity_validator_version
                             FROM aios.character_participation_pending q
                             JOIN aios.character_participation_experiment x USING(experiment_id)
