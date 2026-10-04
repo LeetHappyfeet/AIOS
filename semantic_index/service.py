@@ -589,5 +589,7 @@ async def index_once(db: Database, cfg: SemanticIndexConfig) -> int:
     frames = await index_semantic_frames_once(db, cfg)
     epistemic = await index_epistemic_objects_once(db, cfg)
     source = await index_source_sections_once(db, cfg)
-    source += await index_corpus_sections_once(db, cfg)
-    return source + frames + propositions + epistemic
+    # Cold corpus V2 is kept separate from live document/source vectors.
+    from .corpus_discovery import index_corpus_discovery_once
+    corpus = await index_corpus_discovery_once(db, cfg, limit=cfg.batch_size)
+    return source + corpus + frames + propositions + epistemic
