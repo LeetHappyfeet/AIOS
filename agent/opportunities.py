@@ -111,6 +111,16 @@ class CognitiveOpportunityService:
             if primary_subject else None
         )
         goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
+        active_goal_ids=[g.goal_id for g in goals if g.goal_id]
+        goal_inquiry_rows = (await self.db.fetch(
+            """SELECT DISTINCT ON (goal_id) goal_id,status
+               FROM aios.character_inquiry
+               WHERE instance_id=$1 AND goal_id=ANY($2::uuid[])
+                 AND evidence_scope='character_accessible'
+               ORDER BY goal_id,updated_at DESC,inquiry_id DESC""",
+            instance_id,active_goal_ids,
+        )) if active_goal_ids else []
+        latest_goal_inquiry={row["goal_id"]:str(row["status"]) for row in goal_inquiry_rows}
         for goal in goals:
             if not goal.goal_id:
                 continue
@@ -120,19 +130,23 @@ class CognitiveOpportunityService:
             demand=await self.goal_demand.resolve(
                 instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge))
             goal_subject_demands[goal.goal_id]=(goal_subject,demand)
-            if demand["next_source"]=="corpus":
+            if demand["next_source"] in {"corpus","memory"}:
                 gap=max(0.0,1.0-float(demand["internal_coverage"]))
+                # A previously unsuccessful local inquiry can progress to one
+                # bounded dossier cycle. Never equate a graph hit to knowledge.
+                needs_dossier=latest_goal_inquiry.get(goal.goal_id)=="unresolved"
                 proposals.append(self._p(
                     "knowledge_gap",f"Find knowledge needed for my goal: {goal.text}",
-                    "inquiry.resolve",
-                    {"query":demand["query"],"allow_model":gap >= .75,
+                    "research.advance" if needs_dossier else "inquiry.resolve",
+                    {"query":demand["query"],"allow_model":False if needs_dossier else gap >= .75,
                      "focus":goal_subject.retrieval_text,
                      "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id)},
                     source_node_id or context.source_head_node_id,context,
                     relevance=.72,goal_affinity=.85,knowledge_gap=gap,novelty=.65,recency=1,
                     evidence=[{"kind":"goal_knowledge_demand","goal_id":str(goal.goal_id),
                                "internal_coverage":demand["internal_coverage"],
-                               "coverage_source":demand["coverage_source"]}],
+                               "coverage_source":demand["coverage_source"],
+                               "prior_inquiry_status":latest_goal_inquiry.get(goal.goal_id)}],
                     key=f"goal-research:{goal.goal_id}",
                     subject_id=goal_subject.subject_id))
 

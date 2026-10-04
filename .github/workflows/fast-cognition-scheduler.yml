@@ -34,6 +34,10 @@ jobs:
             pipeline/job_registry.py \
             epistemic/message_cognition.py \
             epistemic/goal_source_admission.py \
+            epistemic/goal_formation_admission.py \
+            agent/cognitive_subjects.py \
+            agent/opportunities.py \
+            topic_atlas/research_dossier.py \
             epistemic/epistemic_scope.py \
             epistemic/message_cognition_enrichment.py \
             inference/broker.py \
@@ -54,6 +58,8 @@ jobs:
             runner.py \
             runner_v2.py \
             tests/test_character_inquiry.py \
+            tests/test_source_goal_formation_receipt.py \
+            tests/test_goal_knowledge_demand.py \
             tests/test_message_cognition.py \
             tests/test_cognition_admission_v9.py \
             tests/test_cognition_catchup.py \
@@ -78,6 +84,8 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" \
             python -m pytest -q \
               tests/test_character_inquiry.py \
+              tests/test_source_goal_formation_receipt.py \
+              tests/test_goal_knowledge_demand.py \
               tests/test_message_cognition.py \
               tests/test_cognition_admission_v9.py \
               tests/test_cognition_catchup.py \

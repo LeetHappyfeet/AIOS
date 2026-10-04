@@ -41,7 +41,8 @@ async def test_goal_demand_uses_character_topology_before_lexical_fallback():
     result = await GoalKnowledgeDemandResolver(FakeDB(rows)).resolve(
         instance_id=uuid4(), subject=subject(), known=[])
     assert result["coverage_source"] == "character_topology"
-    assert result["internal_coverage"] >= .67
+    assert result["internal_coverage"] == 0
+    assert result["topology_candidate_coverage"] >= .67
     assert result["next_source"] == "memory"
     assert result["topology_status"] == "candidate_only"
     assert result["knowledge_status"] == "unverified"

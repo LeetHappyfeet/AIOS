@@ -397,8 +397,11 @@ class GoalKnowledgeDemandResolver:
         # automatic research. This is a routing threshold, not proof that the
         # managed goal itself is complete.
         evidence_units = len(propositions) + max(0, len(structural) - len(propositions))
-        coverage = min(1.0, evidence_units / 3.0)
+        topology_candidate_coverage = min(1.0, evidence_units / 3.0)
         local = self.fallback.resolve(subject, known)
+        # Candidate graph nodes do not constitute current, eligible memory.
+        # The operative gap is based only on actually retrieved support.
+        coverage = local["internal_coverage"]
         # A topology count is not an admissible memory receipt. Even several
         # related topic nodes must not suppress retrieval when evidence is absent.
         next_source = local["next_source"] if local["matching"] else "memory"
@@ -410,6 +413,7 @@ class GoalKnowledgeDemandResolver:
             "query": query,
             "question": subject.question,
             "coverage_source": "character_topology",
+            "topology_candidate_coverage": topology_candidate_coverage,
             "topology_status": "candidate_only",
             "knowledge_status": "retrieved_support" if local["matching"] else "unverified",
             "topology": [
