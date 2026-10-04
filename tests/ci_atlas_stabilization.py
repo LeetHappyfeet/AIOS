@@ -14,10 +14,11 @@ async def main():
     await db.connect()
     try:
         key="ci-atlas-stable:"+str(uuid4())
+        namespace="ci.stabilization."+uuid4().hex
         row={
             "source_key":key,"source_revision":"revision-a","origin_key":key,
             "label":"Digital ecology","identifier":"Digital ecology",
-            "topic_kind":"concept","domain_key":"fiction.digimon",
+            "topic_kind":"concept","domain_key":namespace,
             "document_id":None,"section_id":None,"instance_id":None,
             "character_id":None,"world_id":None,
         }
