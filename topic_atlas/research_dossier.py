@@ -179,8 +179,27 @@ class ProgressiveResearchService:
         last_completed=row["last_completed_at"]
         if last_completed is None:
             return False
+        # Also notice explicit access grants for an already-indexed corpus.
+        # A global index change or scoped ACL change may justify ONE bounded
+        # new search; the actual section query must still enforce current ACL.
         epoch=await self.db.fetchval(
-            "SELECT max(indexed_at) FROM aios.corpus_discovery_projection")
+            """SELECT greatest(
+                 coalesce((SELECT max(indexed_at)
+                           FROM aios.corpus_discovery_projection),
+                          '-infinity'::timestamptz),
+                 coalesce((SELECT max(acl.updated_at)
+                           FROM aios.character_corpus_access acl
+                           JOIN aios.character_instance ci
+                             ON ci.character_id=acl.character_id
+                           WHERE ci.instance_id=$1),
+                          '-infinity'::timestamptz),
+                 coalesce((SELECT max(ckd.updated_at)
+                           FROM aios.character_knowledge_domain ckd
+                           JOIN aios.character_instance ci
+                             ON ci.character_id=ckd.character_id
+                           WHERE ci.instance_id=$1),
+                          '-infinity'::timestamptz)
+               )""",instance_id)
         if epoch is None or epoch<=last_completed:
             return False
         inserted=await self.db.fetchrow(
