@@ -1,5 +1,6 @@
 """Source-grounded semantic hygiene stays an auditable, read-only shadow pass."""
 import asyncio
+import json
 from pathlib import Path
 from uuid import UUID
 
@@ -126,7 +127,8 @@ class FakeDb:
                 "frame_index": 0, "subject_text": "Mia and",
                 "resolved_subject": "Mia and", "predicate_surface": "keep",
                 "predicate_canonical": "keep", "object_text": None,
-                "resolved_object": None, "modality": "asserted", "frame_meta": {},
+                "resolved_object": None, "modality": "asserted",
+                "frame_meta": '{"standalone_semantic":false,"clause_relation":"conj"}',
             }]
         raise AssertionError(sql)
 
@@ -165,6 +167,7 @@ def test_shadow_batch_only_writes_audit_and_cursor():
     assert len(db.audit_inserts) == len(db.cursor_updates) == 1
     assert db.audit_inserts[0][1][2] == POLICY_VERSION
     assert db.audit_inserts[0][1][4] == "repair_candidate"
+    assert "dependent_frame_requires_parent" in json.loads(db.audit_inserts[0][1][5])
     assert not fuseki.updates
 
 
