@@ -115,8 +115,11 @@ class ProgressiveResearchService:
             sources = await con.fetch(
                 """SELECT s.section_id,s.document_id,s.status,s.best_score,
                           s.retrieval_methods,s.first_seen_at,s.last_seen_at,
+                          doc.title,section.heading,left(section.content,600) AS excerpt,
                           sc.consumption_id,sc.status AS materialization_status
                    FROM aios.character_research_source s
+                   JOIN aios.corpus_section section ON section.section_id=s.section_id
+                   JOIN aios.corpus_document doc ON doc.document_id=s.document_id
                    LEFT JOIN aios.character_research_materialization sc
                      ON sc.dossier_id=s.dossier_id AND sc.section_id=s.section_id
                    WHERE s.dossier_id=$1
