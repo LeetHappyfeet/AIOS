@@ -84,11 +84,8 @@ async def capture_runtime_manifest(db: Any, *, receipt_versions: dict[str, Any] 
     )
     data = dict(row) if row else {}
     migration_rows = await db.fetch(
-        """SELECT migration_name, sha256
-           FROM aios.schema_migration
-           WHERE migration_name = ANY($1::text[])
-           ORDER BY migration_name""",
-        ["0001_aios_baseline", *INTEGRATION_MIGRATIONS],
+        """SELECT migration_name, sha256 FROM aios.schema_migration
+           ORDER BY migration_name"""
     )
     migrations = {r["migration_name"]: r["sha256"] for r in migration_rows}
     wrapper = data.get("belief_wrapper") or ""
@@ -108,7 +105,13 @@ async def capture_runtime_manifest(db: Any, *, receipt_versions: dict[str, Any] 
         "semantic-integrity-v4-source-coverage", "source_section_id",
         "source_section_digest", "source_sentence_digest", "source_node_id",
     )) and "semantic_integrity_claim_current" in acquisition
-    required_present = all(key in migrations for key in INTEGRATION_MIGRATIONS)
+    required_present = (
+        "0001_aios_baseline" in migrations
+        and all(key in migrations for key in INTEGRATION_MIGRATIONS)
+    )
+    chain_identity = hashlib.sha256(
+        "\\n".join(f"{name}:{digest}" for name, digest in sorted(migrations.items())).encode("utf-8")
+    ).hexdigest()
     return {
         "manifest_version": MANIFEST_VERSION,
         "installed_components": component_versions(),
@@ -150,5 +153,6 @@ async def capture_runtime_manifest(db: Any, *, receipt_versions: dict[str, Any] 
             "participation_v4": "comparison-only",
         },
         "migration_receipts": migrations,
+        "migration_chain_sha256": chain_identity,
         "receipt_versions": dict(receipt_versions or {}),
     }
