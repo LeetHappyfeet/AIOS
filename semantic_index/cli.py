@@ -51,7 +51,9 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
                        totals: dict[str, int], window_started: float,
                        admission_backlog: dict[str, int] | None = None) -> dict[str, Any]:
     elapsed = max(0.001, time.monotonic() - window_started)
-    total_indexed = totals["source_indexed"] + totals["frames_indexed"] + totals["propositions_indexed"] + totals["epistemic_indexed"]
+    total_indexed = sum(totals.get(name,0) for name in (
+        "source_indexed","frames_indexed","propositions_indexed","epistemic_indexed",
+        "corpus_indexed","topics_indexed"))
     saturated = [name for name, count in last_batches.items() if count >= cfg.batch_size]
     return {
         "service": "semantic_index", "state": state, "stage": stage,
@@ -135,7 +137,7 @@ async def analyze_regions_once() -> None:
         await db.close()
 
 
-async def _run_vector_stages(db, cfg, run_stage) -> dict[str, int]:
+async def _run_vector_stages(db, cfg, run_stage, *, run_corpus: bool = True) -> dict[str, int]:
     # Admission requires a canonical proposition vector. No topology or cleanup
     # operation may be inserted into this dependency chain.
     # Explicitly adjudicated retractions must not wait behind the larger
@@ -154,14 +156,19 @@ async def _run_vector_stages(db, cfg, run_stage) -> dict[str, int]:
     source = await run_stage("vector-source", index_source_sections_once, db, background_cfg)
     # Cold corpus has its own collection and guaranteed background budget.
     # The v1 shared-source corpus index is retained only for legacy/manual work.
-    retired_corpus = await run_stage("vector-corpus-prune", prune_deleted_corpus_once,
-                                     db, cfg, limit=cfg.background_batch_size)
-    corpus = await run_stage("vector-corpus-v2", index_corpus_discovery_once,
-                             db, cfg, limit=cfg.background_batch_size)
+    retired_corpus = 0
+    corpus = 0
+    coverage = 0
+    if run_corpus:
+        retired_corpus = await run_stage("vector-corpus-prune", prune_deleted_corpus_once,
+                                         db, cfg, limit=cfg.background_batch_size)
+        corpus = await run_stage("vector-corpus-v2", index_corpus_discovery_once,
+                                 db, cfg, limit=cfg.background_batch_size)
     topics = await run_stage("vector-topics", index_topics_once, db, cfg,
                              limit=cfg.background_batch_size)
-    coverage = await run_stage("vector-topic-coverage", link_corpus_topics_once,
-                               db, cfg, limit=min(2,cfg.background_batch_size))
+    if run_corpus:
+        coverage = await run_stage("vector-topic-coverage", link_corpus_topics_once,
+                                   db, cfg, limit=min(2,cfg.background_batch_size))
     return {"propositions_indexed": propositions, "frames_indexed": frames,
             "epistemic_indexed": epistemic, "source_indexed": source,
             "corpus_indexed": corpus, "corpus_pruned": retired_corpus,
@@ -191,6 +198,7 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         failed = []
         last_backlog_snapshot = 0.0
         last_topic_scan = 0.0
+        last_corpus_scan = 0.0
 
         async def run_stage(stage, func, *args, **kwargs):
             _emit_telemetry(_semantic_snapshot(
@@ -222,7 +230,11 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                                         limit=cfg.background_batch_size)
                 totals["topics_collected"] = sum(found.values()) if isinstance(found,dict) else 0
                 last_topic_scan = time.monotonic()
-            totals.update(await _run_vector_stages(db, cfg, run_stage))
+            corpus_due = time.monotonic()-last_corpus_scan >= cfg.corpus_refresh_seconds
+            totals.update(await _run_vector_stages(
+                db, cfg, run_stage, run_corpus=corpus_due))
+            if corpus_due:
+                last_corpus_scan=time.monotonic()
             last_batches = dict(totals)
             if time.monotonic() - last_backlog_snapshot >= 10:
                 try:
