@@ -21,6 +21,7 @@ from aios_app.agent.cognitive_subjects import (
 def goal_research_operation(
     next_source: str, last_status: str | None, last_reason: str = "",
     *, coverage_status: str = "missing", retrieval_state: str = "available",
+    access_changed: bool = False,
 ) -> str | None:
     """One memory inquiry before a persistent dossier; never infer completion.
 
@@ -31,6 +32,8 @@ def goal_research_operation(
     if (retrieval_state == "unavailable" or coverage_status in {"sufficient","unavailable"}
             or next_source not in {"memory","corpus"}):
         return None
+    if last_reason == "no_access" and not access_changed:
+        return None  # A newer index epoch (or explicit retry) must justify another lookup.
     if last_status in {"queued","planning","already_claimed"}:
         return None
     if last_status in {"unresolved","partial","resolved","conflicting"}:
@@ -137,7 +140,8 @@ class CognitiveOpportunityService:
         goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
         active_goal_ids=[g.goal_id for g in goals if g.goal_id]
         goal_inquiry_rows = (await self.db.fetch(
-            """SELECT DISTINCT ON (goal_id) goal_id,status,result->>'reason' AS reason
+            """SELECT DISTINCT ON (goal_id) goal_id,status,result->>'reason' AS reason,
+                      updated_at
                FROM aios.character_inquiry
                WHERE instance_id=$1 AND goal_id=ANY($2::uuid[])
                  AND evidence_scope='character_accessible'
@@ -145,8 +149,14 @@ class CognitiveOpportunityService:
             instance_id,active_goal_ids,
         )) if active_goal_ids else []
         latest_goal_inquiry={
-            row["goal_id"]:(str(row["status"]),str(row["reason"] or ""))
+            row["goal_id"]:(str(row["status"]),str(row["reason"] or ""),row["updated_at"])
             for row in goal_inquiry_rows}
+        # A prior no_access remains terminal until new reference-index work
+        # appears. One epoch lookup is shared by all active goal demands.
+        corpus_epoch=(await self.db.fetchval(
+            "SELECT max(indexed_at) FROM aios.corpus_discovery_projection")
+            if any(value[1]=="no_access" for value in latest_goal_inquiry.values())
+            else None)
         for goal in goals:
             if not goal.goal_id:
                 continue
@@ -162,11 +172,15 @@ class CognitiveOpportunityService:
                 question=goal_subject.question or f"What knowledge helps satisfy: {goal.text}?",
                 query_text=demand["query"],demand=demand,
                 source_node_id=source_node_id or context.source_head_node_id)
-            last_status,last_reason=latest_goal_inquiry.get(goal.goal_id,(None,""))
+            last_status,last_reason,inquiry_at=latest_goal_inquiry.get(
+                goal.goal_id,(None,"",None))
+            access_changed=bool(last_reason=="no_access" and corpus_epoch
+                                and inquiry_at and corpus_epoch>inquiry_at)
             research_op=goal_research_operation(
                 demand["next_source"],last_status,last_reason,
                 coverage_status=demand["coverage_status"],
-                retrieval_state=demand["retrieval_state"])
+                retrieval_state=demand["retrieval_state"],
+                access_changed=access_changed)
             if research_op:
                 gap=max(0.0,1.0-float(demand["internal_coverage"]))
                 needs_dossier=research_op=="research.advance"
