@@ -1,5 +1,11 @@
 # AIOS Semantic Index
 
+Topic Atlas V1 (provisional subjects, source receipts, scoped Qdrant vectors and
+separate Fuseki topic-navigation graphs) is documented in
+[Knowledge Topic Atlas V1](../docs/knowledge_topic_atlas_v1.md). It is a
+discovery catalogue, not semantic admission or an asserted RDF ontology.
+
+
 This subsystem replaces the former monolithic RAG sidecar.
 
 Qdrant is used in three distinct semantic roles:
