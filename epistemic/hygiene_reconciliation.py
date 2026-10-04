@@ -62,6 +62,30 @@ async def apply(db: Database, *, adjudication_id: UUID, actor: str) -> dict:
     return json.loads(payload) if isinstance(payload, str) else dict(payload)
 
 
+
+async def supersede(db: Database, *, adjudication_id: UUID, actor: str) -> dict:
+    """Explicitly release an old rejection after a different valid source revision."""
+    if os.getenv("AIOS_SEMANTIC_HYGIENE_APPLY_ENABLED", "0").lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        raise RuntimeError("Live semantic hygiene release is disabled")
+    if not actor.strip():
+        raise ValueError("A named operator is required")
+    async with db.connection() as con:
+        async with con.transaction():
+            await con.execute(
+                "SELECT set_config('aios.semantic_hygiene_apply_enabled','on',true)"
+            )
+            row = await con.fetchrow(
+                """SELECT aios.supersede_semantic_hygiene_adjudication(
+                       $1::uuid,$2::text
+                   ) AS result""",
+                adjudication_id, actor.strip(),
+            )
+    payload = row["result"]
+    return json.loads(payload) if isinstance(payload, str) else dict(payload)
+
+
 async def _cli() -> None:
     parser = argparse.ArgumentParser(
         description="Propose or explicitly apply one source-verified hygiene adjudication"
@@ -69,6 +93,7 @@ async def _cli() -> None:
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--propose-audit", type=UUID)
     actions.add_argument("--apply-id", type=UUID)
+    actions.add_argument("--supersede-id", type=UUID)
     parser.add_argument("--claim-id", type=UUID)
     parser.add_argument("--frame-id", type=UUID)
     parser.add_argument("--proposition-id", type=UUID)
@@ -98,8 +123,12 @@ async def _cli() -> None:
             }, indent=2))
         else:
             if not args.actor.strip():
-                parser.error("--apply-id requires a named --actor")
-            result = await apply(db, adjudication_id=args.apply_id, actor=args.actor)
+                parser.error("--apply-id/--supersede-id requires a named --actor")
+            if args.apply_id:
+                result = await apply(db, adjudication_id=args.apply_id, actor=args.actor)
+            else:
+                result = await supersede(db, adjudication_id=args.supersede_id,
+                                         actor=args.actor)
             print(json.dumps(result, default=str, indent=2))
     finally:
         await db.close()
