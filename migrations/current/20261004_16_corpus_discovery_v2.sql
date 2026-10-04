@@ -45,7 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_topic_source_section_status
     WHERE section_id IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION aios.bump_vector_topic_source_revision()
-RETURNS trigger LANGUAGE plpgsql AS $
+RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP='DELETE' THEN
         IF OLD.link_kind='vector_candidate' THEN
@@ -59,7 +59,7 @@ BEGIN
         END IF;
     END IF;
     RETURN NULL;
-END $;
+END $$;
 DROP TRIGGER IF EXISTS trg_vector_topic_source_revision ON aios.knowledge_topic_source;
 CREATE TRIGGER trg_vector_topic_source_revision
 AFTER INSERT OR DELETE ON aios.knowledge_topic_source
