@@ -60,7 +60,7 @@ async def _upsert_topic(con, *, namespace: str, visibility: str, owner: str | No
                         kind: str, label: str, identifier: str | None = None,
                         registered: bool = False):
     # Internal entity keys can be opaque while a frame's resolved name is
-    # readable. Preserve key provenance on the mention, but use a linguistic
+    # readable. Preserve the key in its originating frame; use a linguistic
     # topic identity rather than embedding/deduplicating an internal hash.
     canonical = normalize_label(identifier) or normalize_label(label)
     display = _WS.sub(" ", str(label).strip())
