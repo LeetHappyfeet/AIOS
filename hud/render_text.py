@@ -138,6 +138,12 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     last_change = working_scene.get("last_significant_change")
     if _scene_text(immediate_goal):
         scene_lines.append(f"Immediate managed goal: {_scene_text(immediate_goal)[:180]}")
+        if isinstance(immediate_goal, Mapping):
+            for requirement in (immediate_goal.get("knowledge_requirements") or [])[:2]:
+                status=str(requirement.get("coverage_status") or "unassessed")
+                count=len(requirement.get("dossier_ids") or [])
+                scene_lines.append(
+                    f"Goal knowledge: {status}; linked research dossiers: {count}")
     if _scene_text(pending_work):
         scene_lines.append(f"Pending work: {_scene_text(pending_work)}")
     # A pre-patch scene can still contain a copied DAG turn. Suppress it.
@@ -245,7 +251,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("\nOTHER ACTIVE GOALS:")
         for goal, text in rendered_goals:
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
-            lines.append(f"-{annotation} {text}")
+            requirements=(goal.get("knowledge_requirements") or []) if isinstance(goal, Mapping) else []
+            demand=f" [knowledge: {requirements[0].get('coverage_status', 'unassessed')}]" if requirements else ""
+            lines.append(f"-{annotation} {text}{demand}")
     scheduled_goals = frame.get("scheduled_goals") or []
     if scheduled_goals:
         lines.append("\nFUTURE GOALS (SCHEDULED FOR REVIEW):")
