@@ -23,3 +23,14 @@ def test_experiment_and_cognition_persist_runtime_provenance():
     assert "runtime_versions" in participation_source
     assert "comparison_v3" in participation_source
     assert "runtime_versions" in cognition_source
+
+
+def test_manifest_separates_effective_execution_from_shadow_comparators():
+    versions = component_versions()
+    assert versions["belief_materializer"] == "character-belief-v4-authority-family"
+    assert versions["belief_authority_base"] == "character-belief-v3-authority-lineage"
+    assert versions["belief_family_policy"] == "semantic-policy-v1"
+    assert versions["source_integrity_contract"] == "integrity-contract-v1"
+    assert versions["participation_live_admission"] == "none"
+    assert versions["participation_v4_execution"] == "shadow-comparison-only"
+    assert versions["participation_primary_execution"] == "shadow-v1-ledger-only"
