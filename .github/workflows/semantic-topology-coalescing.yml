@@ -31,6 +31,7 @@ jobs:
             tests/test_retrieval_source_provenance_contract.py \
             tests/test_participation_shadow_worker_integration.py \
             tests/test_cognitive_lifecycle.py \
+            tests/test_goal_review_source_contract.py \
             epistemic/belief_reconciliation.py \
             epistemic/reconciliation_stage.py \
             epistemic/retention.py \
@@ -63,7 +64,8 @@ jobs:
               tests/test_source_ownership_and_hud_provenance.py \
               tests/test_retrieval_source_provenance_contract.py \
               tests/test_participation_shadow_worker_integration.py \
-              tests/test_cognitive_lifecycle.py
+              tests/test_cognitive_lifecycle.py \
+              tests/test_goal_review_source_contract.py
 
   fresh-baseline-policy-contract:
     runs-on: ubuntu-latest
