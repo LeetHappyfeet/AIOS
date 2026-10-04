@@ -66,6 +66,12 @@ async def _upsert_topic(con, *, namespace: str, visibility: str, owner: str | No
              status,visibility,owner_character_id)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
            ON CONFLICT(topic_key) DO UPDATE SET
+             display_label=CASE WHEN EXCLUDED.status='registered'
+                                  THEN EXCLUDED.display_label
+                                  ELSE aios.knowledge_topic.display_label END,
+             updated_at=CASE WHEN EXCLUDED.status='registered'
+                               AND EXCLUDED.display_label IS DISTINCT FROM aios.knowledge_topic.display_label
+                               THEN now() ELSE aios.knowledge_topic.updated_at END,
              status=CASE WHEN aios.knowledge_topic.status='retired'
                             THEN EXCLUDED.status
                          WHEN EXCLUDED.status='registered'
@@ -74,12 +80,14 @@ async def _upsert_topic(con, *, namespace: str, visibility: str, owner: str | No
                          ELSE aios.knowledge_topic.status END,
              graph_revision=CASE WHEN aios.knowledge_topic.status='retired'
                             OR (EXCLUDED.status='registered'
-                                AND aios.knowledge_topic.status='candidate')
+                                AND (aios.knowledge_topic.status='candidate'
+                                     OR EXCLUDED.display_label IS DISTINCT FROM aios.knowledge_topic.display_label))
                        THEN aios.knowledge_topic.graph_revision+1
                        ELSE aios.knowledge_topic.graph_revision END,
              vector_revision=CASE WHEN aios.knowledge_topic.status='retired'
                             OR (EXCLUDED.status='registered'
-                                AND aios.knowledge_topic.status='candidate')
+                                AND (aios.knowledge_topic.status='candidate'
+                                     OR EXCLUDED.display_label IS DISTINCT FROM aios.knowledge_topic.display_label))
                        THEN aios.knowledge_topic.vector_revision+1
                        ELSE aios.knowledge_topic.vector_revision END
            RETURNING topic_id""",
@@ -111,7 +119,8 @@ _SOURCE_QUERIES = (
     ("knowledge_domain", """
       WITH s AS (
         SELECT d.domain_id::text source_key, d.domain_id::text origin_key,
-               md5(d.domain_key || '|' || d.display_name || '|' || d.enabled::text) source_revision,
+               md5(d.domain_key || '|' || d.display_name || '|' || d.enabled::text ||
+                   '|' || COALESCE(d.parent_domain_id::text,'')) source_revision,
                d.domain_key identifier, d.display_name label, d.domain_key,
                NULL::uuid document_id,NULL::uuid section_id,
                NULL::uuid claim_id,NULL::uuid instance_id,
