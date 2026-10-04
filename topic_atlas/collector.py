@@ -66,15 +66,20 @@ async def _upsert_topic(con, *, namespace: str, visibility: str, owner: str | No
              status,visibility,owner_character_id)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
            ON CONFLICT(topic_key) DO UPDATE SET
-             status=CASE WHEN EXCLUDED.status='registered'
-                       AND aios.knowledge_topic.status='candidate'
-                       THEN 'registered' ELSE aios.knowledge_topic.status END,
-             graph_revision=CASE WHEN EXCLUDED.status='registered'
-                       AND aios.knowledge_topic.status='candidate'
+             status=CASE WHEN aios.knowledge_topic.status='retired'
+                            THEN EXCLUDED.status
+                         WHEN EXCLUDED.status='registered'
+                           AND aios.knowledge_topic.status='candidate'
+                            THEN 'registered'
+                         ELSE aios.knowledge_topic.status END,
+             graph_revision=CASE WHEN aios.knowledge_topic.status='retired'
+                            OR (EXCLUDED.status='registered'
+                                AND aios.knowledge_topic.status='candidate')
                        THEN aios.knowledge_topic.graph_revision+1
                        ELSE aios.knowledge_topic.graph_revision END,
-             vector_revision=CASE WHEN EXCLUDED.status='registered'
-                       AND aios.knowledge_topic.status='candidate'
+             vector_revision=CASE WHEN aios.knowledge_topic.status='retired'
+                            OR (EXCLUDED.status='registered'
+                                AND aios.knowledge_topic.status='candidate')
                        THEN aios.knowledge_topic.vector_revision+1
                        ELSE aios.knowledge_topic.vector_revision END
            RETURNING topic_id""",
@@ -343,6 +348,17 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
                            ON CONFLICT(topic_id,character_id) DO UPDATE
                            SET distinct_origin_count=EXCLUDED.distinct_origin_count,
                                last_seen_at=now()""",topic_id,item["character_id"])
+            if affected:
+                # A revised source must not leave a now-orphaned candidate
+                # discoverable as if it were still mentioned.
+                await con.execute(
+                    """UPDATE aios.knowledge_topic t
+                       SET status='retired',vector_revision=vector_revision+1,
+                           graph_revision=graph_revision+1,updated_at=now()
+                       WHERE t.topic_id=ANY($1::uuid[]) AND t.status='candidate'
+                         AND NOT EXISTS (SELECT 1 FROM aios.knowledge_topic_mention m
+                                         WHERE m.topic_id=t.topic_id)""",
+                    list(affected))
             await con.execute(
                 """INSERT INTO aios.knowledge_topic_discovery_receipt
                    (source_kind,source_key,source_revision,outcome)
