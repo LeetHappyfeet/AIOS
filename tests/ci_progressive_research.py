@@ -10,6 +10,7 @@ from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.epistemic.research import CharacterResearchService
 from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+from aios_app.agent.goal_dependencies import GoalKnowledgeDependencyService
 
 
 class Candidates:
@@ -126,6 +127,46 @@ async def main():
             """SELECT count(*) FROM aios.character_goal_research_link
                WHERE instance_id=$1 AND goal_id=$2 AND dossier_id=$3""",
             instance["instance_id"],goal["goal_id"],linked_id)==1
+        dependencies=GoalKnowledgeDependencyService(db)
+        requirement=await dependencies.reconcile(
+            instance_id=instance["instance_id"],goal_id=goal["goal_id"],
+            question="Find verified digital ecology reference material",
+            query_text="digital ecology",requirement_key="reference:ecology",
+            demand={"coverage_status":"missing","internal_coverage":0,
+                    "retrieval_state":"available","topology_status":"empty",
+                    "coverage_source":"established_character_propositions"})
+        requirement_id=requirement["requirement_id"]
+        scoped=await svc.start(
+            instance_id=instance["instance_id"],
+            question="s3renamon goal inquiry",origin="goal",
+            goal_id=goal["goal_id"],requirement_id=requirement_id,
+            max_cycles=2)
+        assert scoped["linked_requirement_id"]==str(requirement_id)
+        assert UUID(scoped["dossier_id"])==linked_id
+        assert await db.fetchval(
+            """SELECT count(*) FROM aios.character_goal_research_requirement_link
+               WHERE instance_id=$1 AND goal_id=$2 AND requirement_id=$3
+                 AND dossier_id=$4""",
+            instance["instance_id"],goal["goal_id"],requirement_id,linked_id)==1
+        refreshed=await dependencies.reconcile(
+            instance_id=instance["instance_id"],goal_id=goal["goal_id"],
+            question="Find verified digital ecology reference material",
+            query_text="digital ecology",requirement_key="reference:ecology",
+            demand={"coverage_status":"partial","internal_coverage":.4,
+                    "retrieval_state":"available","coverage_source":"established_character_propositions",
+                    "evidence_ids":[str(uuid4())]})
+        assert refreshed["requirement_id"]==requirement_id
+        assert refreshed["coverage_status"]=="partial"
+        displayed=await dependencies.for_goals(
+            instance_id=instance["instance_id"],goal_ids=[goal["goal_id"]])
+        assert displayed[goal["goal_id"]][0]["dossier_ids"]==[str(linked_id)]
+        try:
+            await svc.start(instance_id=other["instance_id"],
+                            question="foreign requirement",origin="goal",
+                            goal_id=goal["goal_id"],requirement_id=requirement_id)
+            raise AssertionError("foreign requirement must not cross instance boundaries")
+        except PermissionError:
+            pass
         repeated=await svc.start(instance_id=instance["instance_id"],
                                  question="S3RENAMON GOAL INQUIRY",origin="goal",
                                  goal_id=goal["goal_id"],max_cycles=2)
