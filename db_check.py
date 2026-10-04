@@ -246,6 +246,19 @@ async def check_database() -> int:
             return 15
         print("OK: default belief policy and effective authority+family resolver")
         print("OK: strict V4 source identity, admission and invalidation contracts")
+        # Verify and report actual functions on THIS database; loaded Python
+        # constants and installed shadow comparator versions are not receipts.
+        from aios_app.epistemic.runtime_versions import capture_runtime_manifest
+        manifest = await capture_runtime_manifest(conn)
+        effective = manifest["effective_authority"]
+        if (effective["belief_executor"] == "unverified"
+                or effective["source_integrity_contract"] == "unverified"):
+            print(f"FAIL: effective runtime authority could not be verified: {effective['checks']}")
+            return 18
+        print("OK: effective belief authority:", effective["belief_executor"])
+        print("OK: current integrity contract:", effective["source_integrity_contract"])
+        print("Effective SQL fingerprints:", effective["sql_fingerprints"])
+        print("Migration receipt hashes:", manifest["migration_receipts"])
 
         hud_receipt = await conn.fetchval(
             """
