@@ -412,7 +412,7 @@ class CorpusSearchService:
         try:
             candidates = await asyncio.to_thread(
                 self.semantic.search_corpus_discovery,
-                re.sub(r"\\s+OR\\s+", " ", query, flags=re.IGNORECASE),
+                re.sub(r"\s+OR\s+", " ", query, flags=re.IGNORECASE),
                 corpus_k=96, topic_k=12)
             for kind, _score, payload in candidates:
                 try:
