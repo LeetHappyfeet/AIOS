@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 288" role="img" aria-labelledby="title desc">
+<title id="title">Integrating AIOS with an application and a language model</title>
+<desc id="desc">Your application records interactions through the HTTP API. AIOS persists experience and supplies a prepared HUD. Your selected language model generates a response, which the app sends back to AIOS.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#111a31"/><stop offset="1" stop-color="#122e43"/></linearGradient></defs>
+<rect width="1120" height="288" rx="22" fill="url(#bg)"/>
+<g font-family="Arial,Helvetica,sans-serif" text-anchor="middle">
+<rect x="45" y="60" width="268" height="158" rx="18" fill="#253451" stroke="#8299c4" stroke-width="2"/>
+<rect x="426" y="60" width="268" height="158" rx="18" fill="#1c4b62" stroke="#79d6e1" stroke-width="2.5"/>
+<rect x="807" y="60" width="268" height="158" rx="18" fill="#3c2d57" stroke="#c9a3f2" stroke-width="2"/>
+<g font-size="15" letter-spacing="3" fill="#ffffff" opacity=".65"><text x="179" y="93">01 / INPUT</text><text x="560" y="93">02 / CONTINUITY</text><text x="941" y="93">03 / GENERATION</text></g>
+<g font-size="29" font-weight="bold" fill="#ffffff"><text x="179" y="137">Your application</text><text x="560" y="137">AIOS</text><text x="941" y="137">Your LLM</text></g>
+<g font-size="16" fill="#deebf3"><text x="179" y="170">Game, chat or simulation</text><text x="560" y="170">Persistent state + HUD</text><text x="941" y="170">Any compatible model</text></g>
+<g stroke="#b0e5ed" stroke-width="3" fill="none"><path d="M321 127H416"/><path d="M702 127H797"/><path d="M416 127L406 120M416 127L406 134M797 127L787 120M797 127L787 134"/></g>
+<g font-size="14" fill="#b4d5e6"><text x="369" y="109">HTTP</text><text x="749" y="109">HUD</text></g>
+<path d="M941 229V253H179V229" stroke="#bfa9db" stroke-width="2" fill="none" stroke-dasharray="6 6"/>
+<g fill="#bfa9db"><path d="M172 236L179 226 186 236Z"/></g>
+<text x="560" y="245" fill="#e1d5f2" font-size="14">Record the generated reply as the next interaction</text>
+</g></svg>
