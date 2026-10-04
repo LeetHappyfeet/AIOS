@@ -66,6 +66,19 @@ def _epistemic_label(item: Mapping[str, Any]) -> str:
     return (" [" + " | ".join(bits) + "]") if bits else ""
 
 
+def _content_status(item: Mapping[str, Any]) -> str:
+    """A source-observation is not direct observation of derived content."""
+    status = str(item.get("epistemic_status") or "known").strip()
+    origin = str(item.get("origin_kind") or "").strip().replace("-", "_").lower()
+    mode = str(item.get("epistemic_mode") or "").strip().replace("-", "_").lower()
+    if origin in {"model_inference", "user_testimony", "character_testimony"} or mode in {
+        "inference", "testimony", "reported", "derived"
+    }:
+        if status.lower() in {"observed", "known"}:
+            return "reported/derived; underlying event not independently observed"
+    return status
+
+
 def _scene_text(value: Any) -> str:
     if isinstance(value, Mapping):
         return str(value.get("text") or value.get("label") or "").strip()
@@ -154,7 +167,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if memories:
         lines.append("\nACTIVE MEMORY:")
         for item in memories:
-            lines.append(f"-{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
+            provenance = _content_status(item)
+            qualifier = f" [{provenance}]" if provenance.startswith("reported/derived") else ""
+            lines.append(f"-{qualifier}{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
     retrieval_evidence = frame.get("retrieval_evidence") or {}
     if retrieval_evidence.get("route") == "character":
         status = str(retrieval_evidence.get("status") or "").strip().lower()
@@ -177,7 +192,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if beliefs:
         lines.append("\nKNOWLEDGE / BELIEFS:")
         for item in beliefs:
-            status = item.get("epistemic_status") or "known"
+            status = _content_status(item)
             confidence = item.get("effective_confidence")
             suffix = f" confidence={confidence:.2f}" if isinstance(confidence, (float, int)) else ""
             lines.append(f"- [{status}{suffix}]{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
