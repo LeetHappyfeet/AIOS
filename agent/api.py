@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from datetime import datetime
 from uuid import UUID
 
@@ -91,7 +91,131 @@ class OutcomeCorrectionIn(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+
+class ResearchOpenIn(BaseModel):
+    question: str = Field(min_length=3,max_length=600)
+    topic_id: UUID | None = None
+    max_cycles: int = Field(default=8,ge=1,le=16)
+    max_sections: int = Field(default=24,ge=1,le=48)
+    max_materializations: int = Field(default=4,ge=0,le=8)
+
+
+class ResearchAdvanceIn(BaseModel):
+    request_id: UUID
+    include_fanwork: bool = False
+
+
+class ResearchQuestionIn(BaseModel):
+    question: str = Field(min_length=3,max_length=600)
+
+
+class ResearchStudyIn(BaseModel):
+    request_id: UUID
+    section_ids: list[UUID] = Field(min_length=1,max_length=2)
+
+
+class ResearchStatusIn(BaseModel):
+    status: Literal["open","paused","closed"]
+
+
 def install_external_agency_routes(app, db) -> None:
+
+    # Research operations are instance-scoped and never write directly into /char.
+    # Every source-study submission is reauthorized by CharacterResearchService.
+    @app.post("/agent/instance/{instance_id}/research")
+    async def open_research_dossier(instance_id: UUID, req: ResearchOpenIn):
+        from fastapi import HTTPException
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        try:
+            return await ProgressiveResearchService(db).start(
+                instance_id=instance_id,question=req.question,topic_id=req.topic_id,
+                origin="manual",max_cycles=req.max_cycles,max_sections=req.max_sections,
+                max_materializations=req.max_materializations)
+        except LookupError as exc:
+            raise HTTPException(404,str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(403,str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409,str(exc)) from exc
+
+    @app.get("/agent/instance/{instance_id}/research")
+    async def list_research_dossiers(instance_id: UUID, limit: int = 12):
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        return {"dossiers":await ProgressiveResearchService(db).list_dossiers(
+            instance_id=instance_id,limit=limit)}
+
+    @app.get("/agent/instance/{instance_id}/research/{dossier_id}")
+    async def inspect_research_dossier(instance_id: UUID, dossier_id: UUID):
+        from fastapi import HTTPException
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        try:
+            return await ProgressiveResearchService(db).inspect(
+                instance_id=instance_id,dossier_id=dossier_id)
+        except LookupError as exc:
+            raise HTTPException(404,str(exc)) from exc
+
+    @app.post("/agent/instance/{instance_id}/research/{dossier_id}/advance")
+    async def advance_research_dossier(
+        instance_id: UUID, dossier_id: UUID, req: ResearchAdvanceIn
+    ):
+        from fastapi import HTTPException
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        try:
+            return await ProgressiveResearchService(db).advance(
+                instance_id=instance_id,dossier_id=dossier_id,
+                request_id=req.request_id,include_fanwork=req.include_fanwork)
+        except LookupError as exc:
+            raise HTTPException(404,str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(403,str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409,str(exc)) from exc
+
+    @app.post("/agent/instance/{instance_id}/research/{dossier_id}/question")
+    async def extend_research_dossier(
+        instance_id: UUID, dossier_id: UUID, req: ResearchQuestionIn
+    ):
+        from fastapi import HTTPException
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        try:
+            return await ProgressiveResearchService(db).add_question(
+                instance_id=instance_id,dossier_id=dossier_id,question=req.question)
+        except LookupError as exc:
+            raise HTTPException(404,str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409,str(exc)) from exc
+
+    @app.post("/agent/instance/{instance_id}/research/{dossier_id}/study")
+    async def study_research_sections(
+        instance_id: UUID, dossier_id: UUID, req: ResearchStudyIn
+    ):
+        from fastapi import HTTPException
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        try:
+            return await ProgressiveResearchService(db).study(
+                instance_id=instance_id,dossier_id=dossier_id,
+                request_id=req.request_id,section_ids=req.section_ids)
+        except LookupError as exc:
+            raise HTTPException(404,str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(403,str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409,str(exc)) from exc
+
+    @app.post("/agent/instance/{instance_id}/research/{dossier_id}/status")
+    async def change_research_dossier_status(
+        instance_id: UUID, dossier_id: UUID, req: ResearchStatusIn
+    ):
+        from fastapi import HTTPException
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        try:
+            return await ProgressiveResearchService(db).set_status(
+                instance_id=instance_id,dossier_id=dossier_id,status=req.status)
+        except LookupError as exc:
+            raise HTTPException(404,str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409,str(exc)) from exc
+
     @app.get("/agent/runtime/versions")
     async def inspect_effective_runtime_versions():
         """Installed code, effective SQL policy and receipt provenance are separate."""
