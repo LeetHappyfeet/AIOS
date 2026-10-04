@@ -12,7 +12,16 @@ import pytest
 from aios_app.agent.participation import ParticipationService
 
 
-def test_disposable_postgres_queue_and_worker():
+def test_disposable_postgres_queue_and_worker(monkeypatch):
+    # Narrow participation fixture: runtime manifest behavior itself is
+    # separately covered by the full canonical cold-start and P7 tests.
+    from aios_app.epistemic import runtime_versions
+    async def fixture_manifest(db, *, receipt_versions=None):
+        return {
+            "effective_authority": {"belief_executor": runtime_versions.BELIEF_EXECUTOR_VERSION},
+            "receipt_versions": dict(receipt_versions or {}),
+        }
+    monkeypatch.setattr(runtime_versions, "capture_runtime_manifest", fixture_manifest)
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("Disposable PostgreSQL test must run as an unprivileged user")
     pgserver = pytest.importorskip("pgserver")
@@ -41,6 +50,12 @@ def test_disposable_postgres_queue_and_worker():
                 await db.execute(definition)
                 await db.execute(f"ALTER TABLE aios.{table} ADD PRIMARY KEY ({key})")
             await db.execute("ALTER TABLE aios.observation ADD UNIQUE(claim_id)")
+            # The actual process_pending SELECT references the integrity
+            # relation/function even when this narrow fixture has no receipts.
+            await db.execute("""CREATE TABLE aios.claim_semantic_integrity(
+                 claim_id uuid PRIMARY KEY,status text,validator_version text)""")
+            await db.execute("""CREATE FUNCTION aios.semantic_integrity_claim_current(uuid)
+                RETURNS boolean LANGUAGE sql STABLE AS 'SELECT false'""")
             for filename, table in [
                 ("20260919_identity_kernel.sql", "character_identity_facet"),
                 ("20260919_identity_kernel.sql", "character_identity_candidate"),
