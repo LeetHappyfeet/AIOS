@@ -131,7 +131,7 @@ def _source_entry(row: Any) -> dict[str, Any]:
 
 
 def classify_candidate(atom: Any, provenance: list[dict[str, Any]],
-                       impact: Any, rdf_graphs: list[str],
+                       impact: Any, rdf_rows: list[dict[str, Any]],
                        *, truncated: bool = False) -> tuple[str, list[str]]:
     """Conservative signals for REVIEW, not an autonomous deletion decision."""
     subject = str(atom["subject_norm"] or "").strip().casefold()
@@ -164,10 +164,19 @@ def classify_candidate(atom: Any, provenance: list[dict[str, Any]],
         ):
             reasons.add("resultative_state_lost")
 
-    if int(impact["belief_states"] or 0) and not rdf_graphs:
+    if int(impact["belief_states"] or 0) and not rdf_rows:
         # A lagging /char projector can also cause this; never interpret as
         # evidence of a bad proposition by itself.
         reasons.add("rdf_not_observed_for_belief")
+
+    for rdf in rdf_rows:
+        if any(
+            str(rdf.get(key) or "").strip().casefold() != expected
+            for key, expected in (
+                ("subject", subject), ("predicate", predicate), ("object", obj),
+            )
+        ):
+            reasons.add("rdf_sql_representation_mismatch")
 
     if truncated or "no_current_materialized_evidence" in reasons:
         disposition = "needs_review"
@@ -188,8 +197,12 @@ def classify_candidate(atom: Any, provenance: list[dict[str, Any]],
     return disposition, sorted(reasons)
 
 
-def _rdf_presence(fuseki: FusekiClient, atoms: list[Any]) -> dict[str, list[str]]:
-    """One bounded read-only SPARQL query, restricted to DB-generated UUIDs."""
+def _rdf_snapshot(fuseki: FusekiClient, atoms: list[Any]) -> dict[str, list[dict[str, Any]]]:
+    """One bounded RDF read for both presence and serialized SQL value parity.
+
+    If Fuseki is unreachable the entire batch fails; a network failure is never
+    interpreted as an absent atom or a reason to prune.
+    """
     if not atoms:
         return {}
     iris = " ".join(
@@ -197,18 +210,27 @@ def _rdf_presence(fuseki: FusekiClient, atoms: list[Any]) -> dict[str, list[str]
         for row in atoms
     )
     sparql = (
-        "SELECT DISTINCT ?atom ?graph WHERE { VALUES ?atom { " + iris +
-        " } GRAPH ?graph { ?atom a <urn:aios:char#SemanticAtom> . } }"
+        "PREFIX char: <urn:aios:char#> "
+        "SELECT DISTINCT ?atom ?graph ?subject ?predicate ?object WHERE { "
+        "VALUES ?atom { " + iris + " } "
+        "GRAPH ?graph { ?atom a char:SemanticAtom . "
+        "OPTIONAL { ?atom char:normalizedSubject ?subject . } "
+        "OPTIONAL { ?atom char:normalizedPredicate ?predicate . } "
+        "OPTIONAL { ?atom char:normalizedObject ?object . } "
+        "} }"
     )
     result = fuseki.query("char", sparql)
-    found: dict[str, list[str]] = {}
+    found: dict[str, list[dict[str, Any]]] = {}
     for binding in result.get("results", {}).get("bindings", []):
         atom_iri = binding.get("atom", {}).get("value", "")
-        graph = binding.get("graph", {}).get("value", "")
         prefix = "urn:aios:semantic-atom:"
+        graph = binding.get("graph", {}).get("value", "")
         if atom_iri.startswith(prefix) and graph:
-            found.setdefault(atom_iri[len(prefix):], []).append(graph)
-    return {key: sorted(set(values)) for key, values in found.items()}
+            found.setdefault(atom_iri[len(prefix):], []).append({
+                key: binding.get(key, {}).get("value")
+                for key in ("graph", "subject", "predicate", "object")
+            })
+    return found
 
 
 async def run_shadow_batch(db: Database, fuseki: FusekiClient, *,
@@ -241,7 +263,7 @@ async def run_shadow_batch(db: Database, fuseki: FusekiClient, *,
 
     # Do not advance the cursor on Fuseki errors: incomplete RDF evidence must
     # never masquerade as a negative query result.
-    presence = _rdf_presence(fuseki, atoms)
+    presence = _rdf_snapshot(fuseki, atoms)
     recorded = 0
     for atom in atoms:
         atom_id = atom["atom_id"]
@@ -250,9 +272,10 @@ async def run_shadow_batch(db: Database, fuseki: FusekiClient, *,
         lineage = [_source_entry(row) for row in rows[:MAX_SOURCE_ROWS]]
         impact = await db.fetchrow(_IMPACT, atom_id)
         impact_data = dict(impact or {})
-        graphs = presence.get(str(atom_id), [])
+        rdf_rows = presence.get(str(atom_id), [])
+        graphs = sorted({str(row["graph"]) for row in rdf_rows})
         disposition, reasons = classify_candidate(
-            atom, lineage, impact_data, graphs, truncated=truncated,
+            atom, lineage, impact_data, rdf_rows, truncated=truncated,
         )
         claim_ids = sorted({
             str(row["claim_id"]) for row in lineage if row["claim_id"]
@@ -262,7 +285,7 @@ async def run_shadow_batch(db: Database, fuseki: FusekiClient, *,
         })
         source_signature = hashlib.sha256(_json(
             [atom["subject_norm"], atom["predicate_norm"], atom["object_norm"],
-             lineage, impact_data]
+             lineage, impact_data, rdf_rows]
         ).encode("utf-8")).hexdigest()
 
         result = await db.execute_returning_row(
@@ -280,7 +303,8 @@ async def run_shadow_batch(db: Database, fuseki: FusekiClient, *,
             _json({"atom": {
                 "subject": atom["subject_norm"], "predicate": atom["predicate_norm"],
                 "object": atom["object_norm"],
-            }, "sources": lineage, "truncated": truncated}),
+            }, "sources": lineage, "rdf_snapshot": rdf_rows,
+                   "truncated": truncated}),
         )
         recorded += int(result is not None)
 
