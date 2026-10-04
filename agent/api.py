@@ -145,15 +145,16 @@ def install_external_agency_routes(app, db) -> None:
         from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
         source=await db.fetchrow(
             """SELECT dn.message_text,dn.speaker_role::text AS role,
-                      dn.speaker_id,ci.character_id
+                      ie.viewpoint_id,ci.character_id
                FROM aios.character_runtime_state rs
                JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
                JOIN aios.dag_node dn ON dn.node_id=$2
                  AND dn.timeline_id=rs.source_timeline_id
                  AND dn.node_id=rs.source_head_node_id
+               JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
                WHERE rs.instance_id=$1""",instance_id,req.source_node_id)
         if not source or source["role"]!='character' or (
-            str(source["speaker_id"])!=str(source["character_id"])):
+            str(source["viewpoint_id"])!=str(source["character_id"])):
             raise HTTPException(409,"research request must be the current character-authored source node")
         try:
             question=extract_research_request(source["message_text"])
