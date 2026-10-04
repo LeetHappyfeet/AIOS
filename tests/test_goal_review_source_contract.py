@@ -2,13 +2,13 @@
 import inspect
 
 from aios_app.agent.cognitive_operations import CognitiveOperationEngine
-from aios_app.agent.opportunities import CharacterOpportunityGenerator
+from aios_app.agent.opportunities import CognitiveOpportunityService
 
 
 def test_goal_review_receives_source_window_before_inference():
     # The source window comes from the already branch-scoped attention source.
     # Keep this structural test alongside the lifecycle's fake-DB negative tests.
-    source = inspect.getsource(CharacterOpportunityGenerator.generate)
+    source = inspect.getsource(CognitiveOpportunityService.generate)
     queue = inspect.getsource(CognitiveOperationEngine._queue_decision)
     assert 'row.get("event_stream")=="source"' in source
     assert '][:4]' in source
@@ -18,7 +18,7 @@ def test_goal_review_receives_source_window_before_inference():
 
 
 def test_planning_review_is_strict_at_both_generation_and_acceptance():
-    generator = inspect.getsource(CharacterOpportunityGenerator.generate)
+    generator = inspect.getsource(CognitiveOpportunityService.generate)
     queue = inspect.getsource(CognitiveOperationEngine._queue_decision)
     accept = inspect.getsource(CognitiveOperationEngine.accept_choice)
     assert 'freshness="strict"' in generator
