@@ -32,7 +32,10 @@ from .admission import (
     fail_open_stalled_admissions_once,
     admission_backlog_snapshot,
 )
-from .eligibility import quarantine_ineligible_vectors_once, quarantine_adjudicated_vectors_once
+from .eligibility import (
+    quarantine_ineligible_vectors_once, quarantine_adjudicated_vectors_once,
+    QUARANTINE_PHASES,
+)
 from .query_server import start_query_server
 from .structure import analyze_neighbors_once
 from .neighbor_classifier import classify_neighbor_relations_once
@@ -286,6 +289,15 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
         batch_sizes = {name:getattr(cfg,name) for name in (
             "neighbor_batch_size","relation_batch_size","validation_batch_size",
             "reconciliation_batch_size","background_batch_size")}
+        # The general quarantine pass previously ran six unrelated global
+        # queries inside one ten-second budget, then retried every five seconds
+        # even at batch=1. Rotate one phase/cycle; throttle an expensive phase
+        # independently without starving the other semantic maintenance lanes.
+        quarantine_phases = ("vectors",) + tuple(
+            phase for phase in QUARANTINE_PHASES if phase != "vectors")
+        quarantine_cursor = 0
+        quarantine_retry_after: dict[str, float] = {}
+        quarantine_failures: dict[str, int] = {}
         stage_batches = {"neighbors":"neighbor_batch_size",
                          "neighbor-classification":"relation_batch_size",
                          "relation-validation":"validation_batch_size",
@@ -321,8 +333,31 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
             work["topics_projected"] = await run_stage(
                 "rdf-topics", project_topics_once, db, fuseki,
                 limit=1)  # One acknowledged graph replacement per topology cycle.
-            await run_stage("topology-quarantine", quarantine_ineligible_vectors_once,
-                            db, replace(effective_cfg, batch_size=effective_cfg.background_batch_size))
+            phase = quarantine_phases[quarantine_cursor]
+            quarantine_cursor = (quarantine_cursor + 1) % len(quarantine_phases)
+            stage = f"topology-quarantine/{phase}"
+            if time.monotonic() >= quarantine_retry_after.get(phase, 0.0):
+                phase_batch = (effective_cfg.background_batch_size if phase == "vectors"
+                               else min(4, effective_cfg.background_batch_size))
+                await run_stage(
+                    stage, quarantine_ineligible_vectors_once,
+                    db, replace(effective_cfg, batch_size=phase_batch),
+                    phase=phase,
+                )
+                if stage in failed:
+                    streak = quarantine_failures.get(phase, 0) + 1
+                    quarantine_failures[phase] = streak
+                    # Query budgets and independent HUD retrieval should not
+                    # be continually contended by a pathological global scan.
+                    cooldown = min(300.0, 30.0 * (2 ** min(streak, 4)))
+                    quarantine_retry_after[phase] = time.monotonic() + cooldown
+                    logger.warning(
+                        "Topology quarantine phase=%s cooldown=%.0fs after %d failures",
+                        phase, cooldown, streak,
+                    )
+                else:
+                    quarantine_failures[phase] = 0
+                    quarantine_retry_after.pop(phase, None)
             _emit_telemetry({"service": "semantic_topology",
                              "state": "DEGRADED" if failed else ("DRAINING" if any(work.values()) else "CAUGHT_UP"),
                              "stage": "retry" if failed else "idle", "stage_started_at": None})
