@@ -156,6 +156,7 @@ class ProgressiveResearchService:
                    LEFT JOIN aios.character_research_materialization sc
                      ON sc.dossier_id=s.dossier_id AND sc.section_id=s.section_id
                    WHERE s.dossier_id=$1
+                     AND md5(section.content)=s.source_text_digest
                      AND (
                        EXISTS (
                          SELECT 1 FROM aios.corpus_document_scope scope_link
@@ -205,7 +206,7 @@ class ProgressiveResearchService:
             "sources":[_serial(s) for s in sources],
             "source_count":int(count["total"] or 0),
             "submitted_count":int(count["submitted"] or 0),
-            "source_visibility":"current_corpus_acl",
+            "source_visibility":"current_corpus_acl_and_exposed_revision",
         }
 
     async def list_dossiers(self, *, instance_id: UUID, limit: int = 12) -> list[dict[str, Any]]:
