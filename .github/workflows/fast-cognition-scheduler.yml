@@ -94,6 +94,7 @@ jobs:
               tests/test_inference_source_coordinate.py \
               tests/test_semantic_integrity_experiment.py \
               tests/test_runtime_version_manifest.py \
+              tests/test_participation_shadow_worker_integration.py \
               tests/test_hud_semantic_regressions.py \
               tests/test_knowledge_admission.py \
               tests/test_runner_stage_scheduling.py
