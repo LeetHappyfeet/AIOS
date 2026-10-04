@@ -50,3 +50,9 @@ After an intentional topic-collection wipe, set its SQL vector_revision to 0 and
 Canonical cold-start CI applies the complete migration chain with production migrator, executes real PostgreSQL tests for domain hierarchy, heading/facet sourcing, revisions and deletion retirement, and runs topic identity and projection-ordering unit tests. No operational Fuseki or Qdrant servers are required by these tests; an end-to-end external-service smoke test remains to be performed against the AIOS1 development VM before enabling broad search.
 
 Topic Atlas V1 does not yet expose character-authorized topic search, auto-reconcile aliases across namespaces, or build research dossiers. RDF navigation is bounded to 96 relation groups per topic graph; PostgreSQL preserves the complete ledger. The current bounded source scans should later be replaced by a more efficient source-change outbox/cursor as the corpus grows.
+
+
+Stage 2 implementation: [Corpus Discovery V2](knowledge_corpus_discovery_v2.md)
+adds a dedicated corpus vector collection, advisory topic-source coverage and
+character-authorized hybrid source discovery. No new epistemic promotion path
+is introduced.
