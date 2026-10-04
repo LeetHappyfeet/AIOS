@@ -13,6 +13,10 @@ class EmptyExperimentDB:
         self.expired = expired
 
     async def fetchrow(self, sql, *args):
+        if "character_participation_worker_heartbeat" in sql:
+            return {"ready": not self.expired, "worker_id": "fixture",
+                    "last_seen_at": datetime.now(timezone.utc),
+                    "last_error": None}
         if "character_participation_experiment" in sql:
             return {
                 "experiment_id": self.experiment_id,
@@ -42,6 +46,9 @@ def test_empty_v4_comparison_is_marked_no_evaluation_not_success():
     assert coverage["evaluated"] == 0
     assert coverage["v3_compared"] == 0
     assert coverage["v4_compared"] == 0
+    assert coverage["state"] == "queued"
+    assert coverage["expected"] == 1
+    assert coverage["worker"]["ready"] is True
     assert coverage["worker_required"] is True
     assert coverage["participation_live_admission"] is False
     assert "not a V3/V4 result" in coverage["note"]
@@ -53,6 +60,7 @@ def test_expired_unevaluated_experiment_requires_new_run():
         ParticipationService(db).inspect(db.instance_id, db.experiment_id)
     )
     assert "expired" in result["evaluation_coverage"]["note"]
+    assert result["evaluation_coverage"]["state"] == "expired_incomplete"
 
 
 def test_launch_opt_in_does_not_make_shadow_policy_authoritative():
@@ -65,3 +73,20 @@ def test_launch_opt_in_does_not_make_shadow_policy_authoritative():
     assert "AIOS_READY service=participation_shadow" in worker
     assert 'result["signals"]["comparison_v4"] = v4' in worker
     assert '"participation-shadow-v1"' in worker
+
+
+def test_worker_registration_is_required_before_enrollment():
+    # Start enforces the shared-DB heartbeat, not the API process env flag.
+    import inspect
+    start = inspect.getsource(ParticipationService.start)
+    assert "await self._worker_status(con)" in start
+    assert "Participation shadow evaluator unavailable" in start
+
+
+def test_incomplete_comparisons_are_not_reported_as_complete():
+    db = EmptyExperimentDB(expired=False)
+    result = asyncio.run(
+        ParticipationService(db).inspect(db.instance_id, db.experiment_id)
+    )
+    assert result["evaluation_coverage"]["evaluated"] == 0
+    assert result["evaluation_coverage"]["state"] != "complete"
