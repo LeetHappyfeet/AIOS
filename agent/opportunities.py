@@ -167,11 +167,17 @@ class CognitiveOpportunityService:
                 instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge),
                 retrieval_unavailable=snapshot.topology_unavailable)
             goal_subject_demands[goal.goal_id]=(goal_subject,demand)
-            requirement=await self.goal_dependencies.reconcile(
-                instance_id=instance_id,goal_id=goal.goal_id,
-                question=goal_subject.question or f"What knowledge helps satisfy: {goal.text}?",
-                query_text=demand["query"],demand=demand,
-                source_node_id=source_node_id or context.source_head_node_id)
+            try:
+                requirement=await self.goal_dependencies.reconcile(
+                    instance_id=instance_id,goal_id=goal.goal_id,
+                    question=goal_subject.question or f"What knowledge helps satisfy: {goal.text}?",
+                    query_text=demand["query"],demand=demand,
+                    source_node_id=source_node_id or context.source_head_node_id)
+            except (PermissionError, ValueError):
+                # A goal can resolve during this snapshot or have a too-short
+                # legacy label. Do not let optional knowledge planning fail
+                # the remaining cognition opportunities or mutate the goal.
+                continue
             last_status,last_reason,inquiry_at=latest_goal_inquiry.get(
                 goal.goal_id,(None,"",None))
             access_changed=bool(last_reason=="no_access" and corpus_epoch
