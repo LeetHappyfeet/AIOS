@@ -87,7 +87,7 @@ async def index_topics_once(db, cfg, *, limit: int = 8) -> int:
     rows = await db.fetch(
         """SELECT t.* FROM aios.knowledge_topic t
            LEFT JOIN aios.knowledge_topic_projection p ON p.topic_id=t.topic_id
-           WHERE t.status <> 'retired' AND
+           WHERE
              (p.topic_id IS NULL OR p.vector_revision < t.vector_revision
               OR p.embedding_model IS DISTINCT FROM $2
               OR p.embedding_version IS DISTINCT FROM $3
@@ -133,7 +133,7 @@ async def index_topics_once(db, cfg, *, limit: int = 8) -> int:
                 embedding_version,vector_collection,vector_projected_at)
                SELECT t.topic_id,t.vector_revision,$3,$4,$5,$6,now()
                FROM aios.knowledge_topic t
-               WHERE t.topic_id=$1 AND t.vector_revision=$2 AND t.status <> 'retired'
+               WHERE t.topic_id=$1 AND t.vector_revision=$2
                ON CONFLICT(topic_id) DO UPDATE SET
                  vector_revision=EXCLUDED.vector_revision,
                  vector_hash=EXCLUDED.vector_hash,
