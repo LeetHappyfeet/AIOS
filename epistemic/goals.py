@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.epistemic.goal_source_admission import review_goal_source
+from aios_app.epistemic.goal_source_admission import review_goal_source, ADMISSION_VERSION
 
 
 def valid_goal_objective(value: str | None) -> bool:
@@ -421,6 +422,22 @@ class CharacterGoalService:
             )
             if not admission.managed:
                 return None
+            # This is a source-eligibility receipt, NOT a semantic integrity or
+            # goal-completion assertion. Replays reuse the original fingerprint.
+            fingerprint = hashlib.sha256(json.dumps([
+                str(instance_id), str(source_node_id), str(source_unit_id),
+                source_text, objective or clean, polarity, ADMISSION_VERSION,
+            ], ensure_ascii=False).encode("utf-8")).hexdigest()
+            await self.db.execute(
+                """INSERT INTO aios.character_goal_admission_receipt
+                    (instance_id,source_node_id,source_unit_id,fingerprint,
+                     objective,source_excerpt,decision,reason,policy_version)
+                   VALUES ($1,$2,$3,$4,$5,$6,'eligible',$7,$8)
+                   ON CONFLICT (instance_id,fingerprint) DO NOTHING""",
+                instance_id, source_node_id, source_unit_id, fingerprint,
+                objective or clean, str(source_text)[:1800],
+                admission.reason, ADMISSION_VERSION,
+            )
         rows = await self.db.fetch(
             """SELECT goal_id,goal_text,status,priority,meta
                FROM aios.character_agent_goal

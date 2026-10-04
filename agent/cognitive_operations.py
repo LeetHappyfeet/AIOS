@@ -192,6 +192,7 @@ class CognitiveOperationEngine:
                 return
             from aios_app.inference.broker import InferenceBroker, InferenceRequest
             from aios_app.epistemic.goals import CharacterGoalService
+            from aios_app.epistemic.goal_formation_admission import verify_formed_goal
             source_text=str(source["message_text"])[:1800]
             existing=await CharacterGoalService(self.db).resolve_active(op["instance_id"])
             prompt=(
@@ -221,31 +222,54 @@ class CognitiveOperationEngine:
             if not isinstance(goal,str) or len(goal.strip())<12 or len(goal)>140:
                 await self._finish(op,{"kind":"rejected_goal","reason":"invalid text"})
                 return
-            # The inference can formulate an objective, but cannot introduce
-            # unrelated people, places, or activities into the character state.
-            tokens=set(re.findall(r"[a-z]{4,}",goal.lower()))
-            evidence=set(re.findall(r"[a-z]{4,}",source_text.lower()))
-            if len(tokens & evidence)<2 or any(g.text.casefold()==goal.strip().casefold()
-                                                for g in existing.active):
-                await self._finish(op,{"kind":"rejected_goal","reason":"ungrounded or duplicate"})
+            # The planning model is a selector, NOT an intention author.
+            # Derive the admitted objective and topic exclusively from original
+            # character-owned, positive V11 source units. Lexical overlap alone
+            # used to allow hypothetical or foreign speech to form executive goals.
+            reviewed=verify_formed_goal(
+                source_text=source_text, proposal=goal,
+                character_id=context.character_id,
+                speaker_id=source["speaker_id"], speaker_role=source["speaker_role"],
+            )
+            if not reviewed.eligible:
+                await self._finish(op,{"kind":"rejected_goal","reason":reviewed.reason})
+                return
+            unit=reviewed.unit
+            if any(g.text.casefold()==unit.text.casefold() for g in existing.active):
+                await self._finish(op,{"kind":"rejected_goal","reason":"duplicate"})
                 return
             horizon=str(raw.get("horizon") or "session")
+            # Persistent formation requires the source's explicit future horizon.
             if horizon not in {"scene","session","persistent"}:
                 horizon="session"
+            if horizon == "persistent" and not re.search(
+                    r"\b(?:next|every|each|until|tomorrow|in\s+\d+\s+(?:days?|weeks?|months?|years?))\b",
+                    str(unit.meta.get("source_text") or ""),re.I):
+                horizon="session"
             if source["speaker_role"] not in {"character","assistant"}:
-                horizon="session" if horizon=="persistent" else horizon
+                await self._finish(op,{"kind":"rejected_goal","reason":"foreign_speaker"})
+                return
             # Recheck after inference. A new turn may have arrived meanwhile.
             current=await HUDContextResolver(self.db).resolve(op["instance_id"])
             if (current.source_head_node_id != op["source_node_id"] or
                 current.state_version != op["source_state_version"]):
                 await self._stale(op,"goal formation context advanced")
                 return
-            created=await CharacterGoalService(self.db).create(
-                instance_id=op["instance_id"],text=goal.strip(),
-                source_node_id=op["source_node_id"],
-                meta={"created_by":"planning_formation","horizon":horizon,
-                      "source_operation_id":str(operation_id)})
-            await self._finish(op,{"kind":"formed_goal","goal_id":str(created.goal_id)})
+            created=await CharacterGoalService(self.db).reconcile_evidence(
+                instance_id=op["instance_id"],text=unit.text,
+                topic_key=unit.topic_key,polarity=unit.polarity,
+                source_node_id=op["source_node_id"],confidence=unit.confidence,
+                salience=unit.salience,intent_type=unit.meta.get("intent_type"),
+                horizon=horizon,objective=unit.meta.get("objective"),
+                source_text=unit.meta.get("source_text"),
+                parse_reason=unit.meta.get("parse_reason"),
+                source_span=unit.meta.get("source_span"))
+            if created is None:
+                await self._finish(op,{"kind":"rejected_goal","reason":"goal_lifecycle_not_admitted"})
+                return
+            await self._finish(op,{"kind":"formed_goal","goal_id":str(created.goal_id),
+                "admission":"source_grounded","proposal":goal,
+                "source_objective":unit.meta.get("objective")})
         except Exception as exc:
             await self._fail(op,exc)
             raise

@@ -29,6 +29,10 @@ _AFTER_EMBEDDED_SPEECH = re.compile(
     r"(?:imagined|thought\s+about|considered|pretended)\s+"
     r"(?:saying|telling|announcing)\b", re.I,
 )
+_HYPOTHETICAL_LEAD = re.compile(
+    r"\b(?:perhaps|maybe|possibly|hypothetically|if\s+only)\b.{0,90}$",
+    re.I | re.S,
+)
 _BARE_REFERENCE = re.compile(
     r"\b(?:it|them|this|that|these|those|one|ones)\b"
     r"(?=\s*(?:$|[,.!?;:]|\b(?:in|on|over|under|down|up|away|out|back)\b))",
@@ -84,6 +88,8 @@ def review_goal_source(
             or _AFTER_EMBEDDED_SPEECH.search(source)):
         return GoalAdmission("nonliteral_statement",
                              "narrator_implied_or_imagined_first_person", "narration")
+    if _HYPOTHETICAL_LEAD.search(prefix):
+        return GoalAdmission("insufficient_commitment", "hypothetical_intention", "source")
     if not action.strip():
         return GoalAdmission("insufficient_commitment", "empty_objective", "unknown")
     if _BARE_REFERENCE.search(action):
