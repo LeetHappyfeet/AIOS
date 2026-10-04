@@ -145,8 +145,11 @@ async def link_corpus_topics_once(db, cfg, *, limit: int = 2,
     changes. No vector association is labelled verified or used as corpus ACL.
     """
     epoch = await db.fetchval(
-        """SELECT max(vector_projected_at) FROM aios.knowledge_topic_projection
-           WHERE vector_collection=$1 AND embedding_version=$2""",
+        """SELECT max(p.vector_projected_at)
+           FROM aios.knowledge_topic_projection p
+           JOIN aios.knowledge_topic t ON t.topic_id=p.topic_id
+           WHERE p.vector_collection=$1 AND p.embedding_version=$2
+             AND t.visibility='catalog' AND t.status IN ('candidate','registered','organized')""",
         cfg.topic_collection,cfg.embedding_version)
     if epoch is None:
         return 0
@@ -211,23 +214,34 @@ async def link_corpus_topics_once(db, cfg, *, limit: int = 2,
                        WHERE section_id=$1 AND vector_collection=$2""",
                     row["section_id"],cfg.corpus_collection)
                 current_epoch = await con.fetchval(
-                    """SELECT max(vector_projected_at)
-                       FROM aios.knowledge_topic_projection
-                       WHERE vector_collection=$1 AND embedding_version=$2""",
+                    """SELECT max(p.vector_projected_at)
+                       FROM aios.knowledge_topic_projection p
+                       JOIN aios.knowledge_topic t ON t.topic_id=p.topic_id
+                       WHERE p.vector_collection=$1 AND p.embedding_version=$2
+                         AND t.visibility='catalog'
+                         AND t.status IN ('candidate','registered','organized')""",
                     cfg.topic_collection,cfg.embedding_version)
                 if (not current or current["source_fingerprint"]!=row["source_fingerprint"]
                         or current_epoch!=epoch):
                     continue
+                # Preserve unchanged links so updating one topic vector does
+                # not force every source graph to reproject unnecessarily.
                 await con.execute(
                     """DELETE FROM aios.knowledge_topic_source
-                       WHERE section_id=$1 AND link_kind='vector_candidate'""",
-                    row["section_id"])
+                       WHERE section_id=$1 AND link_kind='vector_candidate'
+                         AND (NOT(topic_id=ANY($2::uuid[]))
+                              OR source_revision IS DISTINCT FROM $3)""",
+                    row["section_id"],[tid for tid,_ in chosen],
+                    row["source_fingerprint"])
                 for topic_id,score in chosen:
                     await con.execute(
                         """INSERT INTO aios.knowledge_topic_source
                            (topic_id,document_id,section_id,link_kind,
                             source_key,source_revision,similarity,status)
-                           VALUES($1,$2,$3,'vector_candidate',$4,$5,$6,'candidate')""",
+                           VALUES($1,$2,$3,'vector_candidate',$4,$5,$6,'candidate')
+                           ON CONFLICT(topic_id,link_kind,source_key)
+                           DO UPDATE SET similarity=EXCLUDED.similarity,
+                             source_revision=EXCLUDED.source_revision""",
                         topic_id,row["document_id"],row["section_id"],
                         str(row["section_id"]),row["source_fingerprint"],score)
                     linked += 1
