@@ -168,7 +168,8 @@ async def _run_vector_stages(db, cfg, run_stage, *, run_corpus: bool = True) -> 
                              limit=cfg.background_batch_size)
     if run_corpus:
         coverage = await run_stage("vector-topic-coverage", link_corpus_topics_once,
-                                   db, cfg, limit=min(2,cfg.background_batch_size))
+                                   db, cfg, limit=min(2,cfg.background_batch_size),
+                                   min_score=cfg.corpus_topic_min_score)
     return {"propositions_indexed": propositions, "frames_indexed": frames,
             "epistemic_indexed": epistemic, "source_indexed": source,
             "corpus_indexed": corpus, "corpus_pruned": retired_corpus,
