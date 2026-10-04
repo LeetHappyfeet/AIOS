@@ -20,6 +20,8 @@ jobs:
         run: |
           python -m py_compile \
             epistemic/topology_projection.py \
+            epistemic/semantic_integrity.py \
+            tests/test_semantic_integrity_receipt_contract.py \
             epistemic/belief_reconciliation.py \
             epistemic/reconciliation_stage.py \
             epistemic/retention.py \
@@ -47,7 +49,8 @@ jobs:
               tests/test_memory_reconciliation_stage.py \
               tests/test_semantic_retention.py \
               tests/test_topology_retrieval.py \
-              tests/test_context_resolver.py
+              tests/test_context_resolver.py \
+              tests/test_semantic_integrity_receipt_contract.py
 
   fresh-baseline-policy-contract:
     runs-on: ubuntu-latest
