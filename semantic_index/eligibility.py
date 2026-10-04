@@ -141,3 +141,125 @@ async def quarantine_ineligible_vectors_once(db: Database, cfg: SemanticIndexCon
     logger.info("Quarantined %d ineligible propositions in %.2fs",
                 len(rows), time.monotonic() - started)
     return len(rows)
+
+
+async def quarantine_adjudicated_vectors_once(
+    db: Database, cfg: SemanticIndexConfig, *, limit: int = 8
+) -> int:
+    """Targeted, bounded inverse cleanup for explicitly applied hygiene cases.
+
+    The general topology-quarantine stage can yield under global SQL budgets.
+    This index-backed lane makes an adjudicated occurrence converge without
+    waiting for a global scan, but only after the last eligible source support
+    is gone. Active character beliefs block deletion of historical/derived
+    proposition topology until the serialized belief reconciler has run.
+    """
+    collections = [cfg.proposition_collection, cfg.epistemic_collection]
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT a.proposition_id
+        FROM aios.semantic_hygiene_adjudication a
+        WHERE a.status='applied'
+          AND NOT aios.semantic_proposition_topology_eligible(a.proposition_id)
+          AND (
+            EXISTS (
+                SELECT 1 FROM aios.semantic_vector_index_state s
+                WHERE s.qdrant_collection=ANY($1::text[])
+                  AND (
+                    (s.object_type='proposition'
+                        AND s.object_key=a.proposition_id::text)
+                    OR (s.object_type='character_knowledge'
+                        AND split_part(s.object_key,':',2)=a.proposition_id::text)
+                    OR (s.object_type='world_assertion' AND EXISTS (
+                        SELECT 1 FROM aios.world_proposition_assertion wa
+                        WHERE wa.proposition_id=a.proposition_id
+                          AND s.object_key='world:'||wa.assertion_id::text))
+                  )
+            )
+            OR EXISTS (
+                SELECT 1 FROM aios.semantic_topology_node n
+                WHERE n.proposition_id=a.proposition_id
+                  AND n.node_type NOT IN ('ROOT','INSTANCE')
+            )
+          )
+        ORDER BY a.proposition_id
+        LIMIT $2
+        """,
+        collections, max(1, min(int(limit), 8)),
+    )
+    if not rows:
+        return 0
+
+    async with db.connection() as con:
+        async with con.transaction():
+            if not await con.fetchval(
+                "SELECT pg_try_advisory_xact_lock($1)", VECTOR_MUTATION_LOCK
+            ):
+                return 0
+            # Serialize Qdrant mutations with normal vector indexing and
+            # recheck support under the lock; independent valid support wins.
+            selected = await con.fetch(
+                """SELECT proposition_id FROM aios.proposition
+                   WHERE proposition_id=ANY($1::uuid[])
+                     AND NOT aios.semantic_proposition_topology_eligible(proposition_id)""",
+                [row["proposition_id"] for row in rows],
+            )
+            ids = [row["proposition_id"] for row in selected]
+            if not ids:
+                return 0
+            keys = [str(value) for value in ids]
+            selector = qm.FilterSelector(filter=qm.Filter(must=[
+                qm.FieldCondition(
+                    key="proposition_id", match=qm.MatchAny(any=keys)
+                )
+            ]))
+            # Deletes are idempotent. Never acknowledge SQL receipts before
+            # both Qdrant collections confirm the removal.
+            for collection in collections:
+                store = _get_store(cfg, collection)
+                store.client.delete(
+                    collection_name=collection,
+                    points_selector=selector,
+                    wait=True,
+                )
+
+            await con.execute(
+                """DELETE FROM aios.semantic_vector_index_state s
+                   WHERE s.qdrant_collection=ANY($2::text[]) AND (
+                     (s.object_type='proposition' AND s.object_key=ANY($1::text[]))
+                     OR (s.object_type='character_knowledge'
+                         AND split_part(s.object_key,':',2)=ANY($1::text[]))
+                     OR (s.object_type='world_assertion' AND EXISTS (
+                         SELECT 1 FROM aios.world_proposition_assertion wa
+                         WHERE wa.proposition_id=ANY($3::uuid[])
+                           AND s.object_key='world:'||wa.assertion_id::text))
+                   )""",
+                keys, collections, ids,
+            )
+            await con.execute(
+                "DELETE FROM aios.semantic_structure_state WHERE proposition_id=ANY($1::uuid[])",
+                ids,
+            )
+            # Belief topology is deleted by serialized reconciliation when
+            # active support reaches zero. Clean up the remaining derived
+            # proposition/transition/source-branch nodes only when there are
+            # no surviving current beliefs selecting that proposition.
+            removed = await con.fetch(
+                """DELETE FROM aios.semantic_topology_node n
+                   WHERE n.proposition_id=ANY($1::uuid[])
+                     AND n.node_type NOT IN ('ROOT','INSTANCE','BELIEF_STATE')
+                     AND NOT aios.semantic_proposition_topology_eligible(n.proposition_id)
+                     AND NOT EXISTS (
+                         SELECT 1 FROM aios.character_belief_state bs
+                         WHERE bs.preferred_proposition_id=n.proposition_id
+                     )
+                   RETURNING n.scope_key""",
+                ids,
+            )
+            # The migration's targeted topology mutation trigger ensures any
+            # removed affected node also dirties its RDF projection scope.
+    logger.info(
+        "Targeted hygiene retirement propositions=%d topology_nodes=%d",
+        len(ids), len(removed),
+    )
+    return len(ids)
