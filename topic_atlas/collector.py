@@ -291,6 +291,13 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
                    UNION SELECT target_topic_id FROM aios.knowledge_topic_relation
                    WHERE source_kind=$1 AND source_key=$2""",
                 source_kind, row["source_key"])
+            old_mentions = {r["topic_id"] for r in await con.fetch(
+                """SELECT topic_id FROM aios.knowledge_topic_mention
+                   WHERE source_kind=$1 AND source_key=$2""", source_kind,row["source_key"])}
+            old_edges = {(r["source_topic_id"],r["target_topic_id"]) for r in await con.fetch(
+                """SELECT source_topic_id,target_topic_id
+                   FROM aios.knowledge_topic_relation
+                   WHERE source_kind=$1 AND source_key=$2""",source_kind,row["source_key"])}
             await con.execute(
                 "DELETE FROM aios.knowledge_topic_mention WHERE source_kind=$1 AND source_key=$2",
                 source_kind, row["source_key"])
@@ -301,11 +308,6 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
                 "DELETE FROM aios.knowledge_topic_source WHERE link_kind=$1 AND source_key=$2",
                 source_kind, row["source_key"])
             old_ids = [r["topic_id"] for r in old]
-            if old_ids:
-                await con.execute(
-                    """UPDATE aios.knowledge_topic SET graph_revision=graph_revision+1,
-                       updated_at=now() WHERE topic_id=ANY($1::uuid[])""", old_ids)
-
             topic_ids = []
             for kind, label, identity in candidates:
                 topic_id = await _upsert_topic(
@@ -332,7 +334,8 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
                            DO UPDATE SET source_revision=EXCLUDED.source_revision""",
                         topic_id,row["document_id"],row.get("section_id"),
                         source_kind,row["source_key"],row["source_revision"])
-            for a, b in combinations(sorted(topic_ids, key=str), 2):
+            new_edges=set(combinations(sorted(topic_ids, key=str),2))
+            for a, b in new_edges:
                 await con.execute(
                     """INSERT INTO aios.knowledge_topic_relation
                        (source_topic_id,target_topic_id,relation_kind,status,
@@ -340,10 +343,16 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
                        VALUES ($1,$2,'associated','candidate',$3,$4,$5)
                        ON CONFLICT DO NOTHING""",
                     a,b,source_kind,row["source_key"],row["source_revision"])
-            if topic_ids:
+            # Graph contains aggregate navigation and public source counts,
+            # not raw mention/source revision. A refresh with unchanged
+            # effective topic/edge membership must not invalidate Fuseki.
+            changed=set(old_mentions)^set(topic_ids)
+            for a,b in old_edges^new_edges:
+                changed.update((a,b))
+            if changed:
                 await con.execute(
                     """UPDATE aios.knowledge_topic SET graph_revision=graph_revision+1,
-                       updated_at=now() WHERE topic_id=ANY($1::uuid[])""",topic_ids)
+                       updated_at=now() WHERE topic_id=ANY($1::uuid[])""",list(changed))
             affected = set(old_ids) | set(topic_ids)
             for topic_id in affected:
                 # Source/claim dedup: frame and observation for one claim count once.
