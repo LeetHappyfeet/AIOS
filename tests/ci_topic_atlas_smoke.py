@@ -96,6 +96,19 @@ async def main():
             "SELECT status FROM aios.knowledge_topic WHERE topic_id=$1",
             original["topic_id"]) == "retired"
         assert await db.fetchval("SELECT count(*) FROM aios.world_proposition_assertion") == before_world
+        # The deleted-heading path must retract source linkage, not keep ghost topics.
+        await db.execute("UPDATE aios.corpus_section SET heading=NULL WHERE section_id=$1",
+                         section["section_id"])
+        for _ in range(4):
+            await collect_topics_once(db,limit=64)
+            if await db.fetchval(
+                    """SELECT source_revision FROM aios.knowledge_topic_discovery_receipt
+                       WHERE source_kind='corpus_heading' AND source_key=$1""",
+                    str(section["section_id"])) == "deleted":
+                break
+        assert await db.fetchval(
+            "SELECT status FROM aios.knowledge_topic WHERE topic_id=$1",
+            current["topic_id"]) == "retired"
         print("Topic Atlas PostgreSQL smoke PASS: source collection, domain hierarchy, scoped corpus coverage, source revision retirement, no world assertion promotion")
     finally:
         await db.close()
