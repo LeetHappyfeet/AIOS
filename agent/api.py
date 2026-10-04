@@ -169,7 +169,9 @@ def install_external_agency_routes(app, db) -> None:
                     "SELECT pg_advisory_xact_lock(hashtext($1))",
                     f"research-tool:{instance_id}:{req.source_node_id}")
                 old=await con.fetchrow(
-                    """SELECT request_hash,status,result FROM aios.character_research_tool_request
+                    """SELECT request_hash,status,result,
+                              updated_at > now()-interval '2 minutes' AS lease_fresh
+                       FROM aios.character_research_tool_request
                        WHERE instance_id=$1 AND source_node_id=$2 FOR UPDATE""",
                     instance_id,req.source_node_id)
                 if old and old["request_hash"]!=digest:
@@ -177,6 +179,15 @@ def install_external_agency_routes(app, db) -> None:
                 if old and old["status"]=="completed":
                     saved=old["result"]
                     return dict(saved) if isinstance(saved,dict) else json.loads(saved)
+                if old and old["status"]=="claimed" and old["lease_fresh"]:
+                    return {"operation":"research","source_node_id":str(req.source_node_id),
+                            "status":"pending","durable_knowledge":False}
+                if old:
+                    await con.execute(
+                        """UPDATE aios.character_research_tool_request
+                           SET status='claimed',updated_at=now()
+                           WHERE instance_id=$1 AND source_node_id=$2""",
+                        instance_id,req.source_node_id)
                 if not old:
                     await con.execute(
                         """INSERT INTO aios.character_research_tool_request
@@ -188,6 +199,13 @@ def install_external_agency_routes(app, db) -> None:
             result=await service.advance(
                 instance_id=instance_id,dossier_id=UUID(dossier["dossier_id"]),
                 request_id=req.source_node_id,include_fanwork=False)
+            if result.get("step"):
+                step=result["step"]
+                result={**result,
+                        "status":step.get("status"),
+                        "research_id":step.get("research_id"),
+                        "source_count":step.get("source_count",0),
+                        "new_sources":step.get("newly_discovered",0)}
             output={"operation":"research","dossier_id":dossier["dossier_id"],
                     "source_node_id":str(req.source_node_id),
                     "status":result.get("status"),
