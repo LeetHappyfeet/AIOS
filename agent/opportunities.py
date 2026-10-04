@@ -186,6 +186,40 @@ class CognitiveOpportunityService:
                         evidence=[{"kind":"corpus_demand","reason":kd.get("reason")}],
                         key=f"research:{subject.lower()[:100]}"))
 
+        # A reference found in an earlier, open research dossier can be offered
+        # for deliberate study. A vector hit ALONE does not consume the source.
+        # The study executor independently rechecks current corpus authorization.
+        proposed_study=await self.db.fetchrow(
+            """SELECT d.dossier_id,s.section_id,s.last_research_id
+               FROM aios.character_research_dossier d
+               JOIN aios.character_research_source s ON s.dossier_id=d.dossier_id
+               JOIN aios.character_corpus_exposure exposure
+                 ON exposure.research_id=s.last_research_id
+                AND exposure.section_id=s.section_id
+               LEFT JOIN aios.character_research_materialization material
+                 ON material.dossier_id=s.dossier_id AND material.section_id=s.section_id
+               WHERE d.instance_id=$1 AND d.status='open' AND s.status='discovered'
+                 AND material.section_id IS NULL AND
+                 d.max_materializations > (
+                    SELECT count(*) FROM aios.character_research_materialization reserved
+                    WHERE reserved.dossier_id=d.dossier_id
+                      AND reserved.status IN ('pending','submitted'))
+               ORDER BY d.updated_at DESC,s.best_score DESC,s.last_seen_at DESC LIMIT 1""",
+            instance_id)
+        if proposed_study:
+            proposals.append(self._p(
+                "knowledge_gap","Consider studying one discovered source from my open research.",
+                "research.study",
+                {"dossier_id":str(proposed_study["dossier_id"]),
+                 "section_id":str(proposed_study["section_id"])},
+                source_node_id or context.source_head_node_id,context,
+                relevance=.57,knowledge_gap=.6,novelty=.45,recency=.65,
+                evidence=[{"kind":"authorized_research_exposure",
+                           "research_id":str(proposed_study["last_research_id"]),
+                           "section_id":str(proposed_study["section_id"])}],
+                key=f"research-study:{proposed_study['dossier_id']}:{proposed_study['section_id']}",
+                subject_id=primary_subject.subject_id if primary_subject else None))
+
         goal_words=set(re.findall(r"[a-z0-9']+",focus.lower()))
         # Review is budgeted, not eligibility-limited. Rank every active goal
         # by current affinity plus review starvation, then spend at most three
