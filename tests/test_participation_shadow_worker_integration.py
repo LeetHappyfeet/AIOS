@@ -91,3 +91,42 @@ def test_incomplete_comparisons_are_not_reported_as_complete():
     )
     assert result["evaluation_coverage"]["evaluated"] == 0
     assert result["evaluation_coverage"]["state"] != "complete"
+
+
+def test_enrollment_fails_without_persisted_worker_heartbeat():
+    from contextlib import asynccontextmanager
+    import pytest
+
+    class UnservedDB:
+        def __init__(self):
+            self.inserted = False
+
+        @asynccontextmanager
+        async def connection(self):
+            yield self
+
+        @asynccontextmanager
+        async def transaction(self):
+            yield self
+
+        async def execute(self, sql, *args):
+            if "INSERT INTO aios.character_participation_experiment" in sql:
+                self.inserted = True
+
+        async def fetchval(self, sql, *args):
+            if "character_instance" in sql:
+                return 1
+            raise AssertionError(sql)
+
+        async def fetchrow(self, sql, *args):
+            if "character_participation_worker_heartbeat" in sql:
+                return None
+            self.inserted = True
+            raise AssertionError("Experiment inserted despite absent worker: " + sql)
+
+    db = UnservedDB()
+    async def attempt():
+        with pytest.raises(RuntimeError, match="worker_never_registered"):
+            await ParticipationService(db).start(uuid4(), max_claims=1)
+    asyncio.run(attempt())
+    assert db.inserted is False
