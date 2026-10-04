@@ -10,6 +10,7 @@ from qdrant_client.http import models as qm
 PAYLOAD_INDEXES = {
     "object_type": qm.PayloadSchemaType.KEYWORD,
     "section_id": qm.PayloadSchemaType.KEYWORD,
+    "document_id": qm.PayloadSchemaType.KEYWORD,
     "proposition_id": qm.PayloadSchemaType.KEYWORD,
     "claim_kind": qm.PayloadSchemaType.KEYWORD,
     "predicate_family": qm.PayloadSchemaType.KEYWORD,
