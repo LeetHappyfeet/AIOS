@@ -215,8 +215,8 @@ async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
     revision = revision_key(row["raw_text"], snapshot, context_digest=section_digest)
     await db.execute(
         """INSERT INTO aios.claim_semantic_integrity
-             (claim_id, revision_key, validator_version, status, reason_codes, source_text, frame_snapshot)
-           VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb)
+             (claim_id, revision_key, validator_version, status, reason_codes, source_text, frame_snapshot, source_section_digest)
+           VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8)
            ON CONFLICT (claim_id) DO UPDATE SET
              revision_key=EXCLUDED.revision_key,
              validator_version=EXCLUDED.validator_version,
@@ -224,9 +224,10 @@ async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
              reason_codes=EXCLUDED.reason_codes,
              source_text=EXCLUDED.source_text,
              frame_snapshot=EXCLUDED.frame_snapshot,
+             source_section_digest=EXCLUDED.source_section_digest,
              checked_at=now()
            WHERE aios.claim_semantic_integrity.revision_key IS DISTINCT FROM EXCLUDED.revision_key
               OR aios.claim_semantic_integrity.validator_version IS DISTINCT FROM EXCLUDED.validator_version""",
         claim_id, revision, INTEGRITY_VERSION, result.status,
-        json.dumps(result.reasons), row["raw_text"], json.dumps(snapshot))
+        json.dumps(result.reasons), row["raw_text"], json.dumps(snapshot), section_digest)
     return result
