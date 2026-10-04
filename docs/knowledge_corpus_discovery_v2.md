@@ -61,9 +61,13 @@ This is advisory: a vector match does not prove a topic is truly covered by
 the document, nor grant the character access to the document. Link receipts in
 aios.corpus_topic_link_state are tied to the corpus revision and latest catalog
 topic-vector epoch. Changes bump only the affected /topics projection revision.
-The existing Fuseki Topic Atlas named graphs gain a candidate source-document
-COUNT. Restricted section IDs and source content are deliberately not placed
-in a public catalog graph. Authoritative /world and /char triples remain untouched.
+The existing Fuseki Topic Atlas named graphs gain a public-corpus candidate
+document count. Restricted document IDs, private coverage counts and source
+content are deliberately not placed in the catalog graph. The bounded online
+research path traverses the authoritative PostgreSQL mirror of those topic
+relations instead of adding a blocking Fuseki network call to HUD preparation;
+the Fuseki topic graphs remain available for graph inspection and Stage 3
+multi-hop research. Authoritative /world and /char triples remain untouched.
 
 ## Character research: hybrid search
 
