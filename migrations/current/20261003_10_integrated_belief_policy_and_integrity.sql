@@ -275,15 +275,8 @@ BEGIN
         FROM aios.semantic_atom a
         WHERE a.atom_id=p_atom_id;
 
-        WITH RECURSIVE lineage AS (
-            SELECT ci.instance_id, ci.parent_instance_id
-            FROM aios.character_instance ci
-            WHERE ci.instance_id=p_instance_id
-            UNION ALL
-            SELECT parent.instance_id, parent.parent_instance_id
-            FROM lineage
-            JOIN aios.character_instance parent
-              ON parent.instance_id=lineage.parent_instance_id
+        WITH lineage AS (
+            SELECT instance_id,depth FROM aios.cognitive_evidence_instances(p_instance_id)
         )
         SELECT p.atom_id
         INTO v_winner_atom_id
