@@ -102,6 +102,23 @@ class ProgressiveResearchService:
                     row["dossier_id"],question,topic_id)
         return _serial(row)
 
+    async def available(self, *, instance_id: UUID, question: str) -> bool:
+        """Keep exhausted/closed dossier demand from requeuing on every turn."""
+        identity=focus_key(question)
+        row=await self.db.fetchrow(
+            """SELECT d.status,d.max_cycles,d.max_sections,
+                    (SELECT count(*) FROM aios.character_research_step st
+                     WHERE st.dossier_id=d.dossier_id) AS attempts,
+                    (SELECT count(*) FROM aios.character_research_source src
+                     WHERE src.dossier_id=d.dossier_id) AS sources,
+                    (SELECT count(*) FROM aios.character_research_question q
+                     WHERE q.dossier_id=d.dossier_id AND q.status='queued') AS queued
+               FROM aios.character_research_dossier d
+               WHERE d.instance_id=$1 AND d.focus_key=$2""",instance_id,identity)
+        return (not row or
+                (row["status"]=="open" and row["attempts"]<row["max_cycles"]
+                 and row["sources"]<row["max_sections"] and row["queued"]>0))
+
     async def _owned(self, con, instance_id: UUID, dossier_id: UUID, *, lock: bool = False):
         suffix = " FOR UPDATE" if lock else ""
         row = await con.fetchrow(
@@ -334,17 +351,17 @@ class ProgressiveResearchService:
                     new_count = 0
                     accepted_sections = []
                     for hit in result.hits:
-                        if hit.section_id not in known:
-                            if len(known)>=locked["max_sections"]:
-                                continue
-                            known.add(hit.section_id)
-                            new_count+=1
+                        if hit.section_id not in known and len(known)>=locked["max_sections"]:
+                            continue
                         source_digest=await con.fetchval(
                             """SELECT md5(cs.content) FROM aios.corpus_section cs
                                WHERE cs.section_id=$1 AND cs.document_id=$2""",
                             hit.section_id,hit.document_id)
                         if not source_digest:
                             continue  # Deleted/modified source is not eligible for study.
+                        if hit.section_id not in known:
+                            known.add(hit.section_id)
+                            new_count+=1
                         accepted_sections.append(hit.section_id)
                         await con.execute(
                             """INSERT INTO aios.character_research_source
