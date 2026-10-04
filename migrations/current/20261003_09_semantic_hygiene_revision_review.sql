@@ -4,6 +4,25 @@
 -- source re-adjudication until an operator explicitly supersedes the decision.
 BEGIN;
 
+-- Supersession releases a genuinely revised source, not the *old* rejected
+-- revision. If ingest replay restores the historical bad interpretation,
+-- its exact previously rejected fingerprint remains suppressed forever.
+CREATE OR REPLACE FUNCTION aios.semantic_hygiene_occurrence_suppressed(
+    p_claim uuid,p_frame uuid,p_proposition uuid
+) RETURNS boolean LANGUAGE sql STABLE AS $
+    SELECT EXISTS (
+        SELECT 1 FROM aios.semantic_hygiene_adjudication a
+        JOIN aios.claim_semantic_integrity si ON si.claim_id=a.claim_id
+        JOIN aios.claim_candidate cc ON cc.claim_id=a.claim_id
+        WHERE a.claim_id=p_claim AND a.frame_id=p_frame
+          AND a.proposition_id=p_proposition
+          AND a.status IN ('applied','superseded')
+          AND a.source_revision_key=si.revision_key
+          AND a.validator_version=si.validator_version
+          AND a.source_text=cc.raw_text AND si.source_text=cc.raw_text
+    )
+$;
+
 CREATE OR REPLACE FUNCTION aios.semantic_hygiene_occurrence_pending_review(
     p_claim uuid,p_frame uuid,p_proposition uuid
 ) RETURNS boolean LANGUAGE sql STABLE AS $$
