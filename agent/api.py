@@ -92,6 +92,10 @@ class OutcomeCorrectionIn(BaseModel):
 
 
 
+class ResearchToolRequestIn(BaseModel):
+    source_node_id: UUID
+
+
 class ResearchOpenIn(BaseModel):
     question: str = Field(min_length=3,max_length=600)
     topic_id: UUID | None = None
@@ -131,6 +135,84 @@ def install_external_agency_routes(app, db) -> None:
 
     # Research operations are instance-scoped and never write directly into /char.
     # Every source-study submission is reauthorized by CharacterResearchService.
+    @app.post("/agent/instance/{instance_id}/research/tool-request")
+    async def dispatch_source_research(instance_id: UUID, req: ResearchToolRequestIn):
+        """Validate actual character source text and dedupe transcript replay."""
+        import hashlib
+        import json
+        from fastapi import HTTPException
+        from aios_app.agent.research_action import extract_research_request
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        source=await db.fetchrow(
+            """SELECT dn.message_text,dn.speaker_role::text AS role,
+                      dn.speaker_id,ci.character_id
+               FROM aios.character_runtime_state rs
+               JOIN aios.character_instance ci ON ci.instance_id=rs.instance_id
+               JOIN aios.dag_node dn ON dn.node_id=$2
+                 AND dn.timeline_id=rs.source_timeline_id
+                 AND dn.node_id=rs.source_head_node_id
+               WHERE rs.instance_id=$1""",instance_id,req.source_node_id)
+        if not source or source["role"]!='character' or (
+            str(source["speaker_id"])!=str(source["character_id"])):
+            raise HTTPException(409,"research request must be the current character-authored source node")
+        try:
+            question=extract_research_request(source["message_text"])
+        except ValueError as exc:
+            raise HTTPException(422,str(exc)) from exc
+        if question is None:
+            raise HTTPException(422,"source does not contain a research operation")
+        digest=hashlib.sha256(question.encode("utf-8")).hexdigest()
+        async with db.connection() as con:
+            async with con.transaction():
+                # Serialize duplicate calls from render, reconciliation and swipe sync.
+                await con.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))",
+                    f"research-tool:{instance_id}:{req.source_node_id}")
+                old=await con.fetchrow(
+                    """SELECT request_hash,status,result FROM aios.character_research_tool_request
+                       WHERE instance_id=$1 AND source_node_id=$2 FOR UPDATE""",
+                    instance_id,req.source_node_id)
+                if old and old["request_hash"]!=digest:
+                    raise HTTPException(409,"source action changed; use a new DAG source coordinate")
+                if old and old["status"]=="completed":
+                    saved=old["result"]
+                    return dict(saved) if isinstance(saved,dict) else json.loads(saved)
+                if not old:
+                    await con.execute(
+                        """INSERT INTO aios.character_research_tool_request
+                           (instance_id,source_node_id,request_hash,question)
+                           VALUES($1,$2,$3,$4)""",instance_id,req.source_node_id,digest,question)
+        service=ProgressiveResearchService(db)
+        try:
+            dossier=await service.start(instance_id=instance_id,question=question,origin="cognition")
+            result=await service.advance(
+                instance_id=instance_id,dossier_id=UUID(dossier["dossier_id"]),
+                request_id=req.source_node_id,include_fanwork=False)
+            output={"operation":"research","dossier_id":dossier["dossier_id"],
+                    "source_node_id":str(req.source_node_id),
+                    "status":result.get("status"),
+                    "research_id":result.get("research_id"),
+                    "source_count":result.get("source_count",0),
+                    "new_sources":result.get("new_sources",0),
+                    "follow_up_questions":result.get("follow_up_questions",[]),
+                    "durable_knowledge":False}
+            await db.execute(
+                """UPDATE aios.character_research_tool_request
+                   SET dossier_id=$3,research_id=$4,status='completed',
+                       result=$5::jsonb,error=NULL,updated_at=now()
+                   WHERE instance_id=$1 AND source_node_id=$2""",
+                instance_id,req.source_node_id,UUID(dossier["dossier_id"]),
+                UUID(str(result["research_id"])) if result.get("research_id") else None,
+                json.dumps(output))
+            return output
+        except Exception as exc:
+            await db.execute(
+                """UPDATE aios.character_research_tool_request
+                   SET status='failed',error=$3,updated_at=now()
+                   WHERE instance_id=$1 AND source_node_id=$2""",
+                instance_id,req.source_node_id,str(exc)[:900])
+            raise
+
     @app.post("/agent/instance/{instance_id}/research")
     async def open_research_dossier(instance_id: UUID, req: ResearchOpenIn):
         from fastapi import HTTPException
