@@ -116,12 +116,16 @@ class ProgressiveResearchService:
                     (SELECT count(*) FROM aios.character_research_source src
                      WHERE src.dossier_id=d.dossier_id) AS sources,
                     (SELECT count(*) FROM aios.character_research_question q
-                     WHERE q.dossier_id=d.dossier_id AND q.status='queued') AS queued
+                     WHERE q.dossier_id=d.dossier_id AND q.status='queued') AS queued,
+                    (SELECT count(*) FROM aios.character_research_step st
+                     WHERE st.dossier_id=d.dossier_id AND st.status='running'
+                       AND st.lease_expires_at<now()) AS expired
                FROM aios.character_research_dossier d
                WHERE d.instance_id=$1 AND d.focus_key=$2""",instance_id,identity)
         return (not row or
                 (row["status"]=="open" and row["attempts"]<row["max_cycles"]
-                 and row["sources"]<row["max_sections"] and row["queued"]>0))
+                 and row["sources"]<row["max_sections"]
+                 and (row["queued"]>0 or row["expired"]>0)))
 
     async def _owned(self, con, instance_id: UUID, dossier_id: UUID, *, lock: bool = False):
         suffix = " FOR UPDATE" if lock else ""
