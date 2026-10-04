@@ -164,6 +164,25 @@ _SOURCE_QUERIES = (
              AND r.source_revision=s.source_revision)
         ORDER BY source_key LIMIT $1
     """),
+    ("claim_candidate", """
+      WITH s AS (
+        SELECT cc.claim_id::text source_key,cc.claim_id::text origin_key,
+               md5(concat_ws('|',cc.subject,cc.object,
+                   c.character_instance_id::text,c.origin_character_id,c.world_id::text)) source_revision,
+               cc.subject subject_label,cc.object object_label,
+               cc.claim_id,c.character_instance_id instance_id,
+               c.origin_character_id character_id,c.world_id,
+               NULL::text domain_key,NULL::uuid document_id,NULL::uuid section_id
+        FROM aios.claim_candidate cc
+        JOIN aios.claim_context_resolution c ON c.claim_id=cc.claim_id
+        WHERE NULLIF(btrim(cc.subject),'') IS NOT NULL
+           OR NULLIF(btrim(cc.object),'') IS NOT NULL
+      ) SELECT s.* FROM s WHERE NOT EXISTS
+          (SELECT 1 FROM aios.knowledge_topic_discovery_receipt r
+           WHERE r.source_kind='claim_candidate' AND r.source_key=s.source_key
+             AND r.source_revision=s.source_revision)
+        ORDER BY source_key LIMIT $1
+    """),
     ("semantic_frame", """
       WITH s AS (
         SELECT f.frame_id::text source_key, f.claim_id::text origin_key,
@@ -221,7 +240,12 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
         )
     )
     candidates: list[tuple[str, str, str | None]] = []
-    if source_kind == "semantic_frame":
+    if source_kind == "claim_candidate":
+        # Permissive, low-trust surface inventory. These are NEVER factual claims.
+        for label in (row["subject_label"], row["object_label"]):
+            if normalize_label(label) and len(str(label).split()) <= 4:
+                candidates.append(("concept", label, None))
+    elif source_kind == "semantic_frame":
         for identity, label in (
             (row["subject_key"], row["subject_label"]),
             (row["object_key"], row["object_label"]),
