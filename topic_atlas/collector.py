@@ -72,7 +72,11 @@ async def _upsert_topic(con, *, namespace: str, visibility: str, owner: str | No
              graph_revision=CASE WHEN EXCLUDED.status='registered'
                        AND aios.knowledge_topic.status='candidate'
                        THEN aios.knowledge_topic.graph_revision+1
-                       ELSE aios.knowledge_topic.graph_revision END
+                       ELSE aios.knowledge_topic.graph_revision END,
+             vector_revision=CASE WHEN EXCLUDED.status='registered'
+                       AND aios.knowledge_topic.status='candidate'
+                       THEN aios.knowledge_topic.vector_revision+1
+                       ELSE aios.knowledge_topic.vector_revision END
            RETURNING topic_id""",
         key, namespace, kind, canonical, display,
         "registered" if registered else "candidate", visibility, owner,
