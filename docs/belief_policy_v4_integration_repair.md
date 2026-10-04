@@ -41,7 +41,13 @@ policy stage. Source eligibility was not uniformly enforced for topology.
   semantic-frame fields; integrity receipt changes also trigger refresh.
 - Existing dirty-set triggers then queue descendants for reconciliation.
 
-The migrator applies both files lexically after 08 and 09. db_check.py
+20261003_12_occurrence_completion_invalidation.sql:
+
+- Revisit earlier unresolved admission decisions if observation/frame bindings
+  or standalone interpretation rows arrive AFTER acquisition. This closes the
+  conservative source-gate ordering hole without guessing missing evidence.
+
+The migrator applies all three files lexically after 08 and 09. db_check.py
 checks the default and family policy rows, actual integrated SQL wrapper,
 and three source-integrity gates during startup.
 
