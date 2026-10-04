@@ -126,7 +126,13 @@ def _json(value: Any) -> str:
 
 def _source_entry(row: Any) -> dict[str, Any]:
     """Freeze only lineage and fields needed to reproduce the diagnosis."""
-    meta = row["frame_meta"] if isinstance(row["frame_meta"], dict) else {}
+    raw_meta = row["frame_meta"]
+    if isinstance(raw_meta, str):
+        try:
+            raw_meta = json.loads(raw_meta)
+        except (ValueError, TypeError):
+            raw_meta = {}
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
     return {
         key: row[key] for key in (
             "proposition_id", "canonical_text", "evidence_id", "evidence_role",
@@ -250,7 +256,7 @@ def _rdf_snapshot(fuseki: FusekiClient, atoms: list[Any]) -> dict[str, list[dict
                 key: binding.get(key, {}).get("value")
                 for key in ("graph", "subject", "predicate", "object")
             })
-    return found
+    return {key: sorted(rows, key=_json) for key, rows in found.items()}
 
 
 async def run_shadow_batch(db: Database, fuseki: FusekiClient, *,
@@ -292,6 +298,10 @@ async def run_shadow_batch(db: Database, fuseki: FusekiClient, *,
         lineage = [_source_entry(row) for row in rows[:MAX_SOURCE_ROWS]]
         impact = await db.fetchrow(_IMPACT, atom_id)
         impact_data = dict(impact or {})
+        # asyncpg returns JSONB as a string unless a custom codec is installed.
+        scopes = impact_data.get("potentially_affected_scopes")
+        if isinstance(scopes, str):
+            impact_data["potentially_affected_scopes"] = json.loads(scopes)
         rdf_rows = presence.get(str(atom_id), [])
         graphs = sorted({str(row["graph"]) for row in rdf_rows})
         disposition, reasons = classify_candidate(
