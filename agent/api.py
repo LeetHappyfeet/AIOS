@@ -92,6 +92,17 @@ class OutcomeCorrectionIn(BaseModel):
 
 
 def install_external_agency_routes(app, db) -> None:
+    @app.get("/agent/runtime/versions")
+    async def inspect_effective_runtime_versions():
+        """Installed code, effective SQL policy and receipt provenance are separate."""
+        from aios_app.epistemic.runtime_versions import capture_runtime_manifest
+        if db is None:
+            # Tests may install routes without an attached DB. Do not
+            # fabricate active authority in that case.
+            from fastapi import HTTPException
+            raise HTTPException(503, "Runtime database not connected")
+        return await capture_runtime_manifest(db)
+
     @app.get("/agent/instance/{instance_id}/participation/context")
     async def audit_participation_context(instance_id: UUID):
         from fastapi import HTTPException
