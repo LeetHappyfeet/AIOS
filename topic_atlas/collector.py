@@ -433,6 +433,7 @@ async def collect_topics_once(db, *, limit: int = 16) -> dict[str, int]:
             count += await _collect_row(db, source_kind, row)
         counts[source_kind] = count
     counts["domain_hierarchy"] = await reconcile_domain_hierarchy_once(db, limit=budget)
+    counts["catalog_links"] = await reconcile_catalog_domain_links_once(db, limit=budget)
     counts["retired_sources"] = await retire_missing_sources_once(db, limit=budget)
     return counts
 
@@ -470,6 +471,56 @@ async def reconcile_domain_hierarchy_once(db, *, limit: int = 16) -> int:
                        VALUES ($1,$2,'broader','verified','domain_hierarchy',$3,$3)
                        ON CONFLICT DO NOTHING RETURNING source_topic_id""",
                     row["child"],row["parent"],row["source_key"])
+                if inserted:
+                    await con.execute(
+                        """UPDATE aios.knowledge_topic
+                           SET graph_revision=graph_revision+1,updated_at=now()
+                           WHERE topic_id=ANY($1::uuid[])""",
+                        [row["child"],row["parent"]])
+                    count += 1
+    return count
+
+
+async def reconcile_catalog_domain_links_once(db, *, limit: int = 16) -> int:
+    """Connect catalog subjects to an *explicitly registered* document domain.
+
+    This is advisory navigation from topic to its source collection, not an
+    ontological is-a relation and never a character corpus-access grant.
+    The source kind/key match topic_source so source revisions retract this link.
+    """
+    rows = await db.fetch(
+        """SELECT s.topic_id AS child, parent_topic.topic_id AS parent,
+                  s.link_kind source_kind,s.source_key,s.source_revision
+           FROM aios.knowledge_topic_source s
+           JOIN aios.knowledge_topic t ON t.topic_id=s.topic_id
+           JOIN aios.corpus_document_domain cdd ON cdd.document_id=s.document_id
+             AND t.namespace='catalog:'||cdd.knowledge_domain
+           JOIN aios.knowledge_domain d ON d.domain_key=cdd.knowledge_domain
+             AND d.enabled
+           JOIN aios.knowledge_topic_mention dm ON dm.source_kind='knowledge_domain'
+             AND dm.source_key=d.domain_id::text
+           JOIN aios.knowledge_topic parent_topic ON parent_topic.topic_id=dm.topic_id
+           WHERE t.status<>'retired' AND NOT EXISTS (
+              SELECT 1 FROM aios.knowledge_topic_relation r
+              WHERE r.source_topic_id=s.topic_id AND r.target_topic_id=parent_topic.topic_id
+                AND r.relation_kind='associated'
+                AND r.source_kind=s.link_kind AND r.source_key=s.source_key)
+           ORDER BY s.created_at,s.topic_id LIMIT $1""",
+        max(1,min(int(limit),64)))
+    count = 0
+    for row in rows:
+        if row["child"] == row["parent"]:
+            continue
+        async with db.connection() as con:
+            async with con.transaction():
+                inserted = await con.fetchrow(
+                    """INSERT INTO aios.knowledge_topic_relation
+                       (source_topic_id,target_topic_id,relation_kind,status,
+                        source_kind,source_key,source_revision)
+                       VALUES ($1,$2,'associated','candidate',$3,$4,$5)
+                       ON CONFLICT DO NOTHING RETURNING source_topic_id""",
+                    row["child"],row["parent"],row["source_kind"],
+                    row["source_key"],row["source_revision"])
                 if inserted:
                     await con.execute(
                         """UPDATE aios.knowledge_topic
