@@ -279,7 +279,13 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
                 stream = event.get("event_stream") or "runtime"
                 role = event.get("speaker_role") or "other"
                 speaker = event.get("speaker_id") or "unknown"
-                lines.append(f"- [{stream}|{role}:{speaker}] {rendered_text}")
+                if role=="character":
+                    # Preserve the complete source in SQL; show the tool
+                    # request separately under RESEARCH ACTIVITY in the HUD.
+                    from aios_app.agent.research_action import strip_tool_markup
+                    rendered_text=strip_tool_markup(rendered_text)
+                if rendered_text:
+                    lines.append(f"- [{stream}|{role}:{speaker}] {rendered_text}")
             else:
                 lines.append(f"- {rendered_text}")
     actions = frame.get("actions") or []
