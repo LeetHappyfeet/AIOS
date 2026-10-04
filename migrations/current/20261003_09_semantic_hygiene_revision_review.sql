@@ -9,7 +9,7 @@ BEGIN;
 -- its exact previously rejected fingerprint remains suppressed forever.
 CREATE OR REPLACE FUNCTION aios.semantic_hygiene_occurrence_suppressed(
     p_claim uuid,p_frame uuid,p_proposition uuid
-) RETURNS boolean LANGUAGE sql STABLE AS $
+) RETURNS boolean LANGUAGE sql STABLE AS $$
     SELECT EXISTS (
         SELECT 1 FROM aios.semantic_hygiene_adjudication a
         JOIN aios.claim_semantic_integrity si ON si.claim_id=a.claim_id
@@ -21,7 +21,7 @@ CREATE OR REPLACE FUNCTION aios.semantic_hygiene_occurrence_suppressed(
           AND a.validator_version=si.validator_version
           AND a.source_text=cc.raw_text AND si.source_text=cc.raw_text
     )
-$;
+$$;
 
 CREATE OR REPLACE FUNCTION aios.semantic_hygiene_occurrence_pending_review(
     p_claim uuid,p_frame uuid,p_proposition uuid
@@ -96,7 +96,7 @@ $$;
 -- Continued dirty outbox coverage if a superseded source is later replayed
 -- with its original rejected revision.
 CREATE OR REPLACE FUNCTION aios.dirty_adjudicated_topology_mutation()
-RETURNS trigger LANGUAGE plpgsql AS $
+RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF OLD.proposition_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM aios.semantic_hygiene_adjudication a
@@ -106,7 +106,7 @@ BEGIN
         PERFORM aios.mark_semantic_hygiene_scope_dirty(OLD.scope_key);
     END IF;
     RETURN COALESCE(NEW,OLD);
-END $;
+END $$;
 
 -- Explicit operator release after actual source/frame revalidation. No direct
 -- changes to original evidence. Restores the ordinary admission resolver,
