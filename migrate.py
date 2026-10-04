@@ -27,7 +27,9 @@ REQUIRED_ACTIVE_MIGRATIONS = frozenset({
 })
 _MIGRATION_LOCK_KEY = "aios.canonical.migrator"
 _OUTER_BEGIN = re.compile(r"\A(?:\s|--[^\n]*(?:\n|$)|/\*.*?\*/)*BEGIN\s*;", re.I | re.S)
-_OUTER_COMMIT = re.compile(r"\bCOMMIT\s*;\s*\Z", re.I)
+_OUTER_COMMIT = re.compile(
+    r"\bCOMMIT\s*;\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/\s*)*\Z", re.I | re.S
+)
 
 
 def _migration_body(sql: str, filename: str) -> str:
