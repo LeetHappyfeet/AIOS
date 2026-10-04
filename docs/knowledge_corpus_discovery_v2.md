@@ -119,6 +119,10 @@ fallback. These mock the warm Qdrant server; run the end-to-end indexing and
 Fuseki graph catch-up once on a disposable AIOS1 dataset before relying on
 the new production-like pipeline.
 
+Stage 3 implementation: [Progressive Research V1](knowledge_progressive_research_v1.md).
+A bounded character dossier now uses this discovery path and selects actual source
+passages for intentional rematerialization while preserving acquisition policy.
+
 Not included in Stage 2: automatic publication of candidate topic links,
 multi-episode research dossiers, source section consumption decisions, and
 broad automatic learning. Those are Stage 3 responsibilities.
