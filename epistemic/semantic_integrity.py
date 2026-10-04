@@ -109,6 +109,28 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
         reasons.append("subject_gender_contradicts_source")
     original_subject = _norm(source_subject)
     original_object = _norm(source_object)
+    # Fidelity of participant ownership is source-local. A grammatical I/me
+    # belongs to the message speaker, not the observer/target character.
+    # Abstain rather than invent an alias when the source identity differs.
+    speaker = _norm(speaker_id)
+    first_person = {"i", "me", "my", "mine", "myself", "we", "us", "our", "ours"}
+    original_first_person = original_subject in first_person
+    source_first_person = bool(re.search(
+        r"\b(?:i|i'm|i've|i'd|i'll|me|my|mine|myself|we|us|our|ours)\b",
+        source.casefold().replace("’", "'"),
+    ))
+    if original_first_person and speaker and subject not in {speaker, original_subject}:
+        return IntegrityResult("incomplete", ("speaker_owned_subject_not_grounded",))
+    # Residual first-person objects in a third-person paraphrase are neither
+    # an unambiguous Alex/observer reference nor a legitimate speaker switch.
+    # A quoted passage is not sufficient evidence to repair this downstream.
+    if source_first_person and speaker and subject != speaker and (
+        re.search(r"\b(?:i|me|my|mine|myself|we|us|our|ours)\b", obj)
+        or (original_object in first_person and obj in first_person)
+    ):
+        return IntegrityResult("incomplete", ("mixed_perspective_source_reference",))
+    if original_object in first_person and speaker and obj not in {speaker, original_object}:
+        return IntegrityResult("incomplete", ("speaker_owned_object_not_grounded",))
     feminine = {"she", "her", "hers"}
     masculine = {"he", "him", "his"}
     if original_subject in feminine and subject in masculine:
