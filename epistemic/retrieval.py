@@ -22,7 +22,8 @@ from aios_app.semantic_index.query import SemanticQueryService
 logger = logging.getLogger("aios.hud.retrieval")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
 SEMANTIC_SEED_WAIT_SECONDS = 0.25
-TOPOLOGY_SQL_TIMEOUT_SECONDS = 2.0
+# Pre-generation topology search budget; measured separately from semantic seeds.
+TOPOLOGY_SQL_TIMEOUT_SECONDS = 5.0
 MAX_FOCUS_TERMS = 12
 MAX_TOPOLOGY_SEEDS = 64
 _TOPOLOGY_DEGRADED: ContextVar[bool] = ContextVar(
