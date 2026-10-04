@@ -180,3 +180,35 @@ class LocalSemanticQueryService:
                 break
 
         return merged[:candidate_k]
+
+
+    def search_corpus_discovery(
+        self, query_text: str, *, corpus_k: int = 96, topic_k: int = 12
+    ) -> list[tuple[str, float, dict[str, Any]]]:
+        """Internal candidate-only query using ONE embedding for both collections.
+
+        Deliberately return IDs and scores ONLY. A client must authorize every
+        source and topic in PostgreSQL before showing any content or metadata.
+        """
+        if not query_text.strip():
+            return []
+        vector = self.embedder.embed([query_text])[0]
+        corpus = _get_store(self.cfg,self.cfg.corpus_collection).search(
+            vector,top_k=max(1,min(int(corpus_k),128)),
+            qdrant_filter=self._filter(must={"object_type":"corpus_section"}))
+        topics = _get_store(self.cfg,self.cfg.topic_collection).search(
+            vector,top_k=max(1,min(int(topic_k),24)),
+            qdrant_filter=qm.Filter(must=[
+                qm.FieldCondition(key="object_type",match=qm.MatchValue(value="knowledge_topic")),
+                qm.FieldCondition(key="visibility",match=qm.MatchValue(value="catalog")),
+                qm.FieldCondition(key="topic_status",
+                    match=qm.MatchAny(any=["candidate","registered","organized"])),
+            ]))
+        result = []
+        for _,score,payload in corpus:
+            if payload.get("section_id"):
+                result.append(("corpus",float(score),{"section_id":str(payload["section_id"])}))
+        for _,score,payload in topics:
+            if payload.get("topic_id"):
+                result.append(("topic",float(score),{"topic_id":str(payload["topic_id"])}))
+        return result
