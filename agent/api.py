@@ -119,6 +119,15 @@ class ResearchStatusIn(BaseModel):
 
 
 def install_external_agency_routes(app, db) -> None:
+    @app.get("/agent/knowledge-atlas/health")
+    async def knowledge_atlas_health():
+        from fastapi import HTTPException
+        from aios_app.topic_atlas.diagnostics import atlas_health
+        if db is None:
+            raise HTTPException(503,"Runtime database not connected")
+        return await atlas_health(db)
+
+
 
     # Research operations are instance-scoped and never write directly into /char.
     # Every source-study submission is reauthorized by CharacterResearchService.
