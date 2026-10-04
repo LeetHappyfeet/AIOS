@@ -48,7 +48,7 @@ def topic_rdf_update(row, aliases, relations, *, candidate_source_count: int = 0
         f"<{subject}> <urn:aios:topic#namespace> {_literal(row['namespace'])} .",
         f"<{subject}> <urn:aios:topic#status> {_literal(row['status'])} .",
         f"<{subject}> <urn:aios:topic#projectionVersion> {_literal(RDF_VERSION)} .",
-        f"<{subject}> <urn:aios:topic#candidateSourceCount> \"{max(0,int(candidate_source_count))}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
+        f"<{subject}> <urn:aios:topic#publicCandidateSourceCount> \"{max(0,int(candidate_source_count))}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
     ]
     if row["description"]:
         triples.append(f"<{subject}> <urn:aios:topic#description> {_literal(row['description'])} .")
@@ -174,8 +174,14 @@ async def project_topics_once(db, fuseki, *, limit: int = 4) -> int:
         # Only an advisory aggregate enters RDF. Never expose IDs of
         # restricted corpus documents through an unrestricted catalog graph.
         candidate_source_count = await db.fetchval(
-            """SELECT count(DISTINCT document_id) FROM aios.knowledge_topic_source
-               WHERE topic_id=$1 AND status='candidate'""",row["topic_id"])
+            """SELECT count(DISTINCT s.document_id)
+               FROM aios.knowledge_topic_source s
+               WHERE s.topic_id=$1 AND s.status='candidate'
+                 AND EXISTS (
+                   SELECT 1 FROM aios.corpus_document_scope cds
+                   JOIN aios.corpus_scope scope_def ON scope_def.scope_key=cds.scope_key
+                     AND scope_def.access_class='public'
+                   WHERE cds.document_id=s.document_id)""",row["topic_id"])
         dataset,graph,sparql,digest = topic_rdf_update(
             row,aliases,relations,candidate_source_count=candidate_source_count or 0)
         # Keep the synchronized Fuseki call inside the dedicated topology worker:
