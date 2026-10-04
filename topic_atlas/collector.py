@@ -12,6 +12,8 @@ from typing import Any
 
 POLICY_VERSION = "topic-atlas-discovery-v1"
 _WS = re.compile(r"\s+")
+_OPAQUE = re.compile(r"(?i)(?:[a-f0-9]{32,64}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|topic-v\d+:[a-f0-9]+)")
+_TRAILING = re.compile(r"(?i)\b(?:and|or|of|the|with|for|to|in|at|a|an)$")
 _BAD = frozenset({
     "i", "me", "my", "we", "us", "our", "you", "your", "he", "his", "she",
     "her", "they", "them", "it", "its", "someone", "something", "unknown",
@@ -27,7 +29,9 @@ def normalize_label(value: Any) -> str | None:
     if (len(label) < 2 or len(label) > 112 or len(label.split()) > 10
             or folded in _BAD or "://" in label or "@" in label
             or not any(ch.isalpha() for ch in label)
-            or any(ord(ch) < 32 for ch in label)):
+            or any(ord(ch) < 32 for ch in label)
+            or _OPAQUE.fullmatch(label.strip()) is not None
+            or _TRAILING.search(folded) is not None):
         return None
     return folded
 
