@@ -168,3 +168,13 @@ def test_demand_anchor_roundtrip():
     original = demand(anchor_text="start collecting them", source_span=(60, 81))
     assert InquiryDemand.from_dict(original.as_dict()) == original
     assert original.fingerprint != demand().fingerprint
+
+
+def test_goal_inquiry_fingerprint_is_separate_and_cannot_leak_into_source_repair():
+    from uuid import uuid4
+    goal = uuid4()
+    linked = demand(goal_id=goal)
+    assert InquiryDemand.from_dict(linked.as_dict()) == linked
+    assert linked.fingerprint != demand().fingerprint
+    with pytest.raises(ValueError, match="cannot be a goal inquiry"):
+        demand(goal_id=goal, evidence_scope="source_local")

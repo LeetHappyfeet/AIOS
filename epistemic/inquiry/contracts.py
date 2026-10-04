@@ -26,6 +26,7 @@ class InquiryDemand:
     anchor_text: str = ""
     evidence_scope: str = "character_accessible"
     priority: int = 100
+    goal_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.evidence_scope not in _SCOPES:
@@ -38,6 +39,8 @@ class InquiryDemand:
             raise ValueError("inquiry needs a source/evidence revision")
         if self.evidence_scope == "source_local" and not self.source_node_id:
             raise ValueError("source-local inquiry requires an anchored source node")
+        if self.evidence_scope == "source_local" and self.goal_id is not None:
+            raise ValueError("source-local repair cannot be a goal inquiry")
         if self.source_span is not None and (self.source_span[0] < 0 or
                                             self.source_span[1] <= self.source_span[0]):
             raise ValueError("invalid source span")
@@ -47,7 +50,7 @@ class InquiryDemand:
         data = (str(self.instance_id), str(self.source_node_id or ""),
                 self.source_span, self.anchor_text, self.origin, self.uncertainty_kind,
                 " ".join(self.question.casefold().split()), self.evidence_scope,
-                self.evidence_revision, self.policy_version)
+                self.evidence_revision, self.policy_version, str(self.goal_id or ""))
         return hashlib.sha256(json.dumps(data).encode()).hexdigest()
 
     def as_dict(self) -> dict[str, Any]:
@@ -56,7 +59,8 @@ class InquiryDemand:
                 "anchor_text": self.anchor_text, "origin": self.origin, "uncertainty_kind": self.uncertainty_kind,
                 "question": self.question, "evidence_scope": self.evidence_scope,
                 "evidence_revision": self.evidence_revision, "policy_version": self.policy_version,
-                "priority": self.priority}
+                "priority": self.priority,
+                "goal_id": str(self.goal_id) if self.goal_id else None}
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "InquiryDemand":
@@ -71,7 +75,8 @@ class InquiryDemand:
                        value.get("evidence_scope") or "character_accessible"),
                    evidence_revision=str(value["evidence_revision"]),
                    policy_version=str(value.get("policy_version") or "character-inquiry-v1"),
-                   priority=int(value.get("priority") or 100))
+                   priority=int(value.get("priority") or 100),
+                   goal_id=UUID(str(value["goal_id"])) if value.get("goal_id") else None)
 
 
 @dataclass(frozen=True)

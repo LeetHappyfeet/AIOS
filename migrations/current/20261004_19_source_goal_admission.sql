@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS aios.character_goal_admission_receipt (
 );
 CREATE INDEX IF NOT EXISTS idx_goal_admission_source
     ON aios.character_goal_admission_receipt(instance_id,source_node_id,created_at DESC);
+ALTER TABLE aios.character_inquiry
+    ADD COLUMN IF NOT EXISTS goal_id uuid
+    REFERENCES aios.character_agent_goal(goal_id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_character_inquiry_goal
+    ON aios.character_inquiry(instance_id,goal_id,updated_at DESC)
+    WHERE goal_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS aios.character_goal_research_link (
     instance_id uuid NOT NULL REFERENCES aios.character_instance(instance_id) ON DELETE CASCADE,
     goal_id uuid NOT NULL REFERENCES aios.character_agent_goal(goal_id) ON DELETE CASCADE,

@@ -31,19 +31,28 @@ class CharacterInquiryService:
     async def resolve(self, demand: InquiryDemand, *,
                       allow_model: bool = False) -> dict:
         """Persist one evidence-relative inquiry. No LLM in this worker/lane."""
+        if demand.goal_id is not None:
+            active = await self.db.fetchrow(
+                """SELECT goal_id FROM aios.character_agent_goal
+                   WHERE goal_id=$1 AND instance_id=$2 AND status='active'""",
+                demand.goal_id, demand.instance_id)
+            if not active:
+                return {"inquiry_id": None, "status": "unresolved",
+                        "result": {"reason": "goal_not_active", "admission_effect": "none"},
+                        "cached": False, "plan_eligible": False}
         row = await self.db.fetchrow(
             """INSERT INTO aios.character_inquiry (
                  instance_id,source_node_id,demand_fingerprint,origin,
                  uncertainty_kind,evidence_scope,evidence_revision,policy_version,
-                 demand,status)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,'queued')
+                 demand,status,goal_id)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,'queued',$10)
                ON CONFLICT (instance_id,demand_fingerprint)
                DO UPDATE SET updated_at=now()
                RETURNING inquiry_id,status,result,model_calls""",
             demand.instance_id, demand.source_node_id, demand.fingerprint,
             demand.origin, demand.uncertainty_kind, demand.evidence_scope,
             demand.evidence_revision, demand.policy_version,
-            json.dumps(demand.as_dict()))
+            json.dumps(demand.as_dict()), demand.goal_id)
         inquiry_id = row["inquiry_id"]
         if row["status"] != "queued":
             eligible = bool(allow_model and demand.evidence_scope != "source_local" and
@@ -86,6 +95,11 @@ class CharacterInquiryService:
                       updated_at=now()
                 WHERE inquiry_id=$1 AND evidence_scope='character_accessible'
                   AND status IN ('partial','unresolved') AND model_calls=0
+                   AND (goal_id IS NULL OR EXISTS (
+                      SELECT 1 FROM aios.character_agent_goal g
+                      WHERE g.goal_id=character_inquiry.goal_id
+                        AND g.instance_id=character_inquiry.instance_id
+                        AND g.status='active'))
                 RETURNING inquiry_id""", inquiry_id)
         return bool(row)
 

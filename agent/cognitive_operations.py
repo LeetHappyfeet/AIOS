@@ -104,7 +104,9 @@ class CognitiveOperationEngine:
                         instance_id=op["instance_id"], source_node_id=op.get("source_node_id"),
                         origin="character_cognition", uncertainty_kind="explicit_question",
                         question=question, evidence_scope="character_accessible",
-                        evidence_revision=f"{op.get('source_state_version')}:{op.get('source_node_id')}")
+                        evidence_revision=f"{op.get('source_state_version')}:{op.get('source_node_id')}",
+                        goal_id=UUID(str(payload["goal_id"]))
+                        if payload.get("goal_id") else None)
                 service=CharacterInquiryService(self.db)
                 receipt=await service.resolve(
                     demand,allow_model=bool(payload.get("allow_model",False)))
