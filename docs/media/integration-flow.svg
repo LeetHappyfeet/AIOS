@@ -1,18 +1,33 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 288" role="img" aria-labelledby="title desc">
-<title id="title">Integrating AIOS with an application and a language model</title>
-<desc id="desc">Your application records interactions through the HTTP API. AIOS persists experience and supplies a prepared HUD. Your selected language model generates a response, which the app sends back to AIOS.</desc>
-<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#111a31"/><stop offset="1" stop-color="#122e43"/></linearGradient></defs>
-<rect width="1120" height="288" rx="22" fill="url(#bg)"/>
-<g font-family="Arial,Helvetica,sans-serif" text-anchor="middle">
-<rect x="45" y="60" width="268" height="158" rx="18" fill="#253451" stroke="#8299c4" stroke-width="2"/>
-<rect x="426" y="60" width="268" height="158" rx="18" fill="#1c4b62" stroke="#79d6e1" stroke-width="2.5"/>
-<rect x="807" y="60" width="268" height="158" rx="18" fill="#3c2d57" stroke="#c9a3f2" stroke-width="2"/>
-<g font-size="15" letter-spacing="3" fill="#ffffff" opacity=".65"><text x="179" y="93">01 / INPUT</text><text x="560" y="93">02 / CONTINUITY</text><text x="941" y="93">03 / GENERATION</text></g>
-<g font-size="29" font-weight="bold" fill="#ffffff"><text x="179" y="137">Your application</text><text x="560" y="137">AIOS</text><text x="941" y="137">Your LLM</text></g>
-<g font-size="16" fill="#deebf3"><text x="179" y="170">Game, chat or simulation</text><text x="560" y="170">Persistent state + HUD</text><text x="941" y="170">Any compatible model</text></g>
-<g stroke="#b0e5ed" stroke-width="3" fill="none"><path d="M321 127H416"/><path d="M702 127H797"/><path d="M416 127L406 120M416 127L406 134M797 127L787 120M797 127L787 134"/></g>
-<g font-size="14" fill="#b4d5e6"><text x="369" y="109">HTTP</text><text x="749" y="109">HUD</text></g>
-<path d="M941 229V253H179V229" stroke="#bfa9db" stroke-width="2" fill="none" stroke-dasharray="6 6"/>
-<g fill="#bfa9db"><path d="M172 236L179 226 186 236Z"/></g>
-<text x="560" y="245" fill="#e1d5f2" font-size="14">Record the generated reply as the next interaction</text>
-</g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 458" role="img" aria-labelledby="title desc">
+<title id="title">AIOS is a third-prong memory pipeline, not an LLM proxy</title>
+<desc id="desc">The application independently communicates with the customer-provided language model for generation and with AIOS for persistent memory and HUD retrieval. Small-model inference within AIOS is only for internal cognition and processing. There is no connection from AIOS to the customer's LLM.</desc>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#111a31"/><stop offset="1" stop-color="#122e43"/></linearGradient>
+<marker id="model-arrow" markerWidth="12" markerHeight="12" refX="7" refY="6" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M1 1L8 6L1 11" fill="none" stroke="#d4b9fc" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="memory-arrow" markerWidth="12" markerHeight="12" refX="7" refY="6" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M1 1L8 6L1 11" fill="none" stroke="#92e1e9" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></marker>
+</defs>
+<rect width="1120" height="458" rx="22" fill="url(#bg)"/>
+<g font-family="Arial,Helvetica,sans-serif">
+<text x="45" y="44" fill="#cadbe9" font-size="16" letter-spacing="3">INTEGRATION / THREE INDEPENDENT PRONGS</text>
+<!-- No AIOS-to-customer-LLM link: both branches terminate at the application. -->
+<path d="M358 178L753 109" fill="none" stroke="#d4b9fc" stroke-width="3.5" marker-start="url(#model-arrow)" marker-end="url(#model-arrow)"/>
+<path d="M358 266L753 322" fill="none" stroke="#92e1e9" stroke-width="3.5" marker-start="url(#memory-arrow)" marker-end="url(#memory-arrow)"/>
+<text x="475" y="108" fill="#e7d5ff" font-size="18" font-weight="bold">DIRECT MODEL I/O</text>
+<text x="479" y="322" fill="#baf1f2" font-size="18" font-weight="bold">EVENTS / MEMORY HUD</text>
+<rect x="42" y="137" width="310" height="181" rx="18" fill="#253451" stroke="#8299c4" stroke-width="2.5"/>
+<text x="65" y="173" fill="#b9c8e4" font-size="17" font-weight="bold" letter-spacing="2">01 / CUSTOMER APP</text>
+<text x="65" y="219" fill="#ffffff" font-size="31" font-weight="bold">Your application</text>
+<text x="65" y="252" fill="#deebf3" font-size="19">Game, chat, simulation</text>
+<text x="65" y="284" fill="#b9c8e4" font-size="17">Owns prompts and turn order</text>
+<rect x="759" y="57" width="318" height="143" rx="18" fill="#3c2d57" stroke="#c9a3f2" stroke-width="2.5"/>
+<text x="782" y="91" fill="#e0c8fa" font-size="16" font-weight="bold" letter-spacing="2">02 / CUSTOMER-PROVIDED</text>
+<text x="782" y="132" fill="#ffffff" font-size="32" font-weight="bold">Your LLM</text>
+<text x="782" y="164" fill="#eadcfb" font-size="19">Primary response generation</text>
+<rect x="759" y="248" width="318" height="153" rx="18" fill="#1c4b62" stroke="#79d6e1" stroke-width="2.5"/>
+<text x="782" y="282" fill="#b8edf2" font-size="16" font-weight="bold" letter-spacing="2">03 / INDEPENDENT SERVICE</text>
+<text x="782" y="321" fill="#ffffff" font-size="32" font-weight="bold">AIOS</text>
+<text x="782" y="349" fill="#c4f1f4" font-size="19">Persistent memory pipeline</text>
+<text x="782" y="377" fill="#a7dbe7" font-size="17">Optional small LLM: internal work</text>
+<text x="560" y="435" text-anchor="middle" fill="#cbdce8" font-size="16">The app calls its LLM directly. AIOS maintains memory; it does not proxy generation.</text>
+</g>
+</svg>

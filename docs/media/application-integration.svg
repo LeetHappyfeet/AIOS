@@ -1,22 +1,38 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 720 350" role="img" aria-labelledby="title desc">
-<title id="title">Application integration</title><desc id="desc">A game screen, AIOS core, and language model linked through API connections.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 350" role="img" aria-labelledby="title desc">
+<title id="title">Three-prong application integration</title>
+<desc id="desc">Your application calls its own LLM directly and independently exchanges events and the memory HUD with AIOS. AIOS optionally uses a small LLM only for internal work. There is no proxy connection from AIOS to the customer's LLM.</desc>
 <defs>
- <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0c2745"/><stop offset="1" stop-color="#183b57"/></linearGradient>
- <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="#ffffff" stroke-opacity=".07"/></pattern>
- <radialGradient id="halo"><stop stop-color="#ffffff" stop-opacity=".18"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
- <filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="10"/></filter>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0c2745"/><stop offset="1" stop-color="#183b57"/></linearGradient>
+<pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="#ffffff" stroke-opacity=".07"/></pattern>
+<marker id="llm-arrow" markerWidth="9" markerHeight="9" refX="5" refY="4.5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M1 1L6 4.5L1 8" fill="none" stroke="#d3b9fb" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="memory-arrow" markerWidth="9" markerHeight="9" refX="5" refY="4.5" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M1 1L6 4.5L1 8" fill="none" stroke="#93e1e9" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
 </defs>
 <rect width="720" height="350" rx="24" fill="url(#bg)"/><rect width="720" height="350" rx="24" fill="url(#grid)"/>
-<circle cx="560" cy="150" r="200" fill="url(#halo)" opacity=".45"/>
-<text x="38" y="48" fill="#ffffff" fill-opacity=".55" font-family="Arial,Helvetica,sans-serif" font-size="17" letter-spacing="4">04 / AIOS</text>
-
-<g stroke="#93dbef" stroke-width="2.5"><rect x="62" y="99" width="208" height="144" rx="12" fill="#092236"/><rect x="81" y="118" width="170" height="106" rx="5" fill="#16435d"/><path d="M152 244V261M126 262H176" stroke-linecap="round"/></g>
-<path d="M90 211L135 161 168 183 192 143 242 208Z" fill="#2b8294"/><circle cx="211" cy="144" r="10" fill="#98e4e8"/>
-<path d="M271 170H318M459 170H511" stroke="#b1e8f6" stroke-width="3" stroke-dasharray="5 6" fill="none"/>
-<g fill="#94e3ed"><path d="M311 161L325 170 311 179ZM504 161L518 170 504 179Z"/></g>
-<circle cx="391" cy="170" r="75" fill="#154d6a" stroke="#75d3e5" stroke-width="3"/>
-<circle cx="391" cy="170" r="52" fill="none" stroke="#75d3e5" stroke-opacity=".55" stroke-width="2" stroke-dasharray="6 6"/>
-<g stroke="#a6f4ed" stroke-width="2" fill="#61bace"><circle cx="391" cy="142" r="11"/><circle cx="363" cy="184" r="9"/><circle cx="419" cy="184" r="9"/><path d="M391 154L365 175M391 154L417 175M372 184H410" fill="none"/></g>
-<g stroke="#88dbe7" stroke-width="2.5"><rect x="520" y="112" width="144" height="119" rx="13" fill="#10364c"/><circle cx="570" cy="156" r="9" fill="#91e4ef"/><circle cx="611" cy="156" r="9" fill="#91e4ef"/><path d="M556 188Q592 215 628 188" fill="none" stroke-linecap="round"/><path d="M543 112V99H568M640 112V99H616" fill="none"/></g>
-<g font-family="Arial,Helvetica,sans-serif" font-size="13" fill="#d8f5fa" text-anchor="middle"><text x="166" y="292" letter-spacing="2">YOUR APP</text><text x="391" y="275" letter-spacing="2">AIOS</text><text x="592" y="292" letter-spacing="2">YOUR LLM</text></g>
+<g font-family="Arial,Helvetica,sans-serif">
+<text x="35" y="41" fill="#ffffff" fill-opacity=".58" font-size="16" letter-spacing="3">04 / THREE-PRONG INTEGRATION</text>
+<!-- The customer app independently calls the customer model and AIOS. -->
+<path d="M286 146L449 104" fill="none" stroke="#d3b9fb" stroke-width="3" marker-start="url(#llm-arrow)" marker-end="url(#llm-arrow)"/>
+<path d="M286 222L449 263" fill="none" stroke="#93e1e9" stroke-width="3" marker-start="url(#memory-arrow)" marker-end="url(#memory-arrow)"/>
+<text x="328" y="100" fill="#e6d4ff" font-size="15" font-weight="bold">MODEL I/O</text>
+<text x="319" y="259" fill="#b8f6f8" font-size="15" font-weight="bold">EVENTS / HUD</text>
+<rect x="35" y="111" width="247" height="148" rx="18" fill="#102e47" stroke="#91d4ec" stroke-width="2.5"/>
+<rect x="53" y="128" width="60" height="47" rx="6" fill="#28627b" stroke="#99dfed" stroke-width="1.5"/>
+<path d="M63 164L76 145L88 155L101 138" fill="none" stroke="#b2eced" stroke-width="2.5" stroke-linecap="round"/>
+<text x="126" y="151" fill="#e1f6fc" font-size="15" font-weight="bold">CUSTOMER</text>
+<text x="126" y="171" fill="#e1f6fc" font-size="15" font-weight="bold">APPLICATION</text>
+<path d="M54 189H263" stroke="#ffffff" stroke-opacity=".17"/>
+<text x="54" y="218" fill="#ffffff" font-size="22" font-weight="bold">Your app</text>
+<text x="54" y="240" fill="#b8dce9" font-size="14">Owns the interaction</text>
+<rect x="453" y="53" width="233" height="105" rx="17" fill="#322b57" stroke="#c6a5f1" stroke-width="2.5"/>
+<circle cx="481" cy="81" r="8" fill="#caa8f5"/>
+<text x="498" y="87" fill="#e7d7ff" font-size="13" font-weight="bold">CUSTOMER-PROVIDED</text>
+<text x="472" y="121" fill="#ffffff" font-size="25" font-weight="bold">Your LLM</text>
+<text x="472" y="142" fill="#ddc9fa" font-size="14">Primary generation</text>
+<rect x="453" y="203" width="233" height="124" rx="17" fill="#154e64" stroke="#7fd9e3" stroke-width="2.5"/>
+<circle cx="481" cy="231" r="8" fill="#87e1e8"/>
+<text x="498" y="237" fill="#c7f6f7" font-size="13" font-weight="bold">SEPARATE SERVICE</text>
+<text x="472" y="270" fill="#ffffff" font-size="25" font-weight="bold">AIOS</text>
+<text x="472" y="290" fill="#c7f6f7" font-size="16">Memory pipeline</text>
+<text x="472" y="311" fill="#c7f6f7" font-size="13">Small LLM: internal work</text>
+</g>
 </svg>

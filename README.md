@@ -48,9 +48,9 @@ or agent project. You keep control of the interface and model; AIOS tracks conti
       <p>Import documents into a searchable corpus and intentionally acquire selected material into an actor's knowledge path, with source information retained. Importing a document is not the same as making every agent know it.</p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/media/application-integration.svg" alt="An application linked to the AIOS state engine and an external language model" width="100%" />
+      <img src="docs/media/application-integration.svg" alt="Three-prong integration: your app talks directly to your chosen LLM for generation, and separately to AIOS for events and its memory HUD. Internal small-model processing in AIOS is not a proxy for the customer model." width="100%" />
       <h3>Stateful application integrations</h3>
-      <p>Connect a game, local LLM frontend, simulation, or custom program over HTTP. AIOS supplies persistent state and a prepared context view; your application controls the model call and interaction order.</p>
+      <p>Your application calls its chosen LLM directly and connects independently to AIOS for persistent memory and a prepared HUD. AIOS can use smaller inference workers for its own internal cognitive processing; it is not a proxy for your primary model.</p>
     </td>
   </tr>
 </table>
@@ -133,11 +133,14 @@ is an alternative experimental introduction.
 ## Connect your application
 
 <p align="center">
-  <img src="docs/media/integration-flow.svg" alt="Your application submits observations to AIOS, which persists state and prepares a HUD for your preferred LLM; the generated reply returns through the application to AIOS" width="100%" />
+  <img src="docs/media/integration-flow.svg" alt="Three-prong architecture: the app communicates directly with its customer-provided LLM and independently exchanges events and a memory HUD with AIOS. AIOS may use small-model inference internally but never serves as the main model proxy." width="100%" />
 </p>
 
-AIOS is an HTTP JSON service. Your application owns its UI, model invocation, and turn ordering.
-An inference provider registered inside AIOS is optional for this external-client loop.
+AIOS is an independent HTTP JSON **memory pipeline**, not an LLM proxy. Your application owns its
+UI, turn ordering, and direct calls to the customer-provided model. Separately, it sends observations
+and generated replies to AIOS and retrieves the memory HUD to include in its own model prompt.
+Optional small-model inference workers inside AIOS support its internal cognitive/semantic work;
+they do not replace or sit in front of the application’s primary LLM.
 
 The normal live-agent sequence is:
 
@@ -145,7 +148,7 @@ The normal live-agent sequence is:
 2. Bootstrap both participant identities, then `POST /character/{character_id}/activate` for each actor in the intended shared world.
 3. `POST /ingest` — record the incoming message with explicit speaker/recipient IDs and a unique logical-message `dedupe_key`.
 4. `POST /instance/{instance_id}/hud?through_node_id={node_id}` — use the `node_id` from ingestion, and check `generation_ready` before invoking your model.
-5. Give the prepared HUD `text` to your LLM alongside your application instructions. Record the actual model reply through `POST /ingest`.
+5. **Your application** sends the prepared HUD `text` alongside its own instructions directly to **your LLM**. The application then records the generated reply separately through AIOS `POST /ingest`.
 
 For example, once the [tutorial's participant setup](docs/integration.md) has supplied
 `SESSION` and `INSTANCE`, a typical user-message body looks like this:
