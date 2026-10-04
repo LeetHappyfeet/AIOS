@@ -262,14 +262,19 @@ belief_owned AS (
                eaa.authority_rank,eaa.lineage_key,eaa.authorized_uses
         FROM aios.knowledge_acquisition_event kae_auth
         JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae_auth.acquisition_id
+        JOIN aios.semantic_evidence_admission sea_auth
+          ON sea_auth.acquisition_id=kae_auth.acquisition_id AND sea_auth.status='active'
         WHERE kae_auth.instance_id=ck.evidence_instance_id
           AND kae_auth.proposition_id=ck.proposition_id
+          AND aios.semantic_acquisition_source_eligible(kae_auth.acquisition_id)
         ORDER BY kae_auth.created_at DESC,kae_auth.acquisition_id DESC LIMIT 1
     ) auth ON true
     WHERE ck.instance_id = ANY($2::uuid[])
       AND EXISTS (
           SELECT 1
           FROM aios.knowledge_acquisition_event kae
+          JOIN aios.semantic_evidence_admission sea
+            ON sea.acquisition_id=kae.acquisition_id AND sea.status='active'
           LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
           LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
           LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
@@ -277,6 +282,7 @@ belief_owned AS (
           LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
           WHERE kae.instance_id=ck.evidence_instance_id
             AND kae.proposition_id=ck.proposition_id
+            AND aios.semantic_acquisition_source_eligible(kae.acquisition_id)
             AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
       )
     ORDER BY ck.proposition_id,
@@ -316,7 +322,11 @@ episodic_owned AS (
       ON kae.instance_id=cpk.instance_id
      AND kae.proposition_id=cpk.proposition_id
     JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae.acquisition_id
-    JOIN aios.observation obs ON obs.proposition_id=cpk.proposition_id
+    JOIN aios.semantic_evidence_admission sea
+      ON sea.acquisition_id=kae.acquisition_id AND sea.status='active'
+    -- Match the observation to THIS acquisition, not merely its proposition.
+    JOIN aios.observation obs
+      ON obs.claim_id=kae.claim_id AND obs.proposition_id=cpk.proposition_id
     JOIN aios.claim_context_resolution ccr ON ccr.claim_id=obs.claim_id
     LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
     LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
@@ -325,6 +335,7 @@ episodic_owned AS (
     LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
     WHERE cpk.instance_id = ANY($2::uuid[])
       AND ccr.claim_kind IN ('EVENT','MEMORY')
+      AND aios.semantic_acquisition_source_eligible(kae.acquisition_id)
       AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL)
     ORDER BY cpk.proposition_id,
              array_position($2::uuid[], cpk.instance_id),
