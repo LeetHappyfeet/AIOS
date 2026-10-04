@@ -144,6 +144,27 @@ class ProgressiveResearchService:
             result["linked_requirement_id"] = str(requirement_id)
         return result
 
+    async def corpus_change_epoch(self, instance_id: UUID):
+        """Bounded retry signal only; it grants no access and admits no facts."""
+        return await self.db.fetchval(
+            """SELECT greatest(
+                 coalesce((SELECT max(indexed_at)
+                           FROM aios.corpus_discovery_projection),
+                          '-infinity'::timestamptz),
+                 coalesce((SELECT max(acl.updated_at)
+                           FROM aios.character_corpus_access acl
+                           JOIN aios.character_instance ci
+                             ON ci.character_id=acl.character_id
+                           WHERE ci.instance_id=$1),
+                          '-infinity'::timestamptz),
+                 coalesce((SELECT max(ckd.updated_at)
+                           FROM aios.character_knowledge_domain ckd
+                           JOIN aios.character_instance ci
+                             ON ci.character_id=ckd.character_id
+                           WHERE ci.instance_id=$1),
+                          '-infinity'::timestamptz)
+               )""",instance_id)
+
     async def available(self, *, instance_id: UUID, question: str) -> bool:
         """Do not hot-loop exhausted dossiers; renew once for newly indexed corpus.
 
@@ -182,24 +203,7 @@ class ProgressiveResearchService:
         # Also notice explicit access grants for an already-indexed corpus.
         # A global index change or scoped ACL change may justify ONE bounded
         # new search; the actual section query must still enforce current ACL.
-        epoch=await self.db.fetchval(
-            """SELECT greatest(
-                 coalesce((SELECT max(indexed_at)
-                           FROM aios.corpus_discovery_projection),
-                          '-infinity'::timestamptz),
-                 coalesce((SELECT max(acl.updated_at)
-                           FROM aios.character_corpus_access acl
-                           JOIN aios.character_instance ci
-                             ON ci.character_id=acl.character_id
-                           WHERE ci.instance_id=$1),
-                          '-infinity'::timestamptz),
-                 coalesce((SELECT max(ckd.updated_at)
-                           FROM aios.character_knowledge_domain ckd
-                           JOIN aios.character_instance ci
-                             ON ci.character_id=ckd.character_id
-                           WHERE ci.instance_id=$1),
-                          '-infinity'::timestamptz)
-               )""",instance_id)
+        epoch=await self.corpus_change_epoch(instance_id)
         if epoch is None or epoch<=last_completed:
             return False
         inserted=await self.db.fetchrow(
