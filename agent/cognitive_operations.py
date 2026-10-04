@@ -244,7 +244,8 @@ class CognitiveOperationEngine:
                 "I should preserve this concern but not act yet.",
                 "This no longer needs action."],
         }[str(op["operation_type"])]
-        choice_freshness="strict" if str(op["operation_type"])=="executive.review" else str(op.get("freshness_policy") or "contextual")
+        choice_freshness=("strict" if str(op["operation_type"]) in {"executive.review","planning.review"}
+                          else str(op.get("freshness_policy") or "contextual"))
         candidates=[{"key":k,"label":label,"operation":"operation_choice",
                      "operation_id":str(op["operation_id"]),"option_index":i,
                      "freshness_policy":choice_freshness}
@@ -283,7 +284,7 @@ class CognitiveOperationEngine:
             await self._stale(op,"source timeline changed while inference was running")
             return False
         policy=str(op.get("freshness_policy") or "contextual")
-        if str(op["operation_type"])=="executive.review":
+        if str(op["operation_type"]) in {"executive.review","planning.review"}:
             policy="strict"
         if policy=="strict" and (
             current.state_version != op.get("source_state_version")
