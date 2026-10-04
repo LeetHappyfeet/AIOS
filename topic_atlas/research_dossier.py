@@ -6,7 +6,9 @@ Neither 'discovered' nor 'submitted' asserts truth or Integrity V4 approval.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import json
 import re
 from typing import Any, Sequence
@@ -14,6 +16,8 @@ from uuid import UUID
 
 from aios_app.db import Database
 from aios_app.epistemic.research import CharacterResearchService, research_terms
+
+log=logging.getLogger("aios.topic_atlas.progressive_research")
 
 MAX_SEARCH_RESULTS = 8
 MAX_SELECTED_PER_STEP = 2
@@ -316,6 +320,44 @@ class ProgressiveResearchService:
                         "dossier":dict(dossier),"question":dict(question),
                         "remaining_sections":dossier["max_sections"]-n_sources}
 
+    async def _rdf_neighbors(self, dossier, allowed_sections: Sequence[UUID]) -> tuple[UUID,...]:
+        """Use Fuseki as advisory navigation, never as corpus authorization."""
+        if not allowed_sections:
+            return ()
+        anchor=None
+        if dossier["topic_id"] is not None:
+            anchor=await self.db.fetchrow(
+                """SELECT t.* FROM aios.knowledge_topic t
+                   WHERE t.topic_id=$1 AND t.status<>'retired'
+                     AND (t.visibility='catalog' OR
+                         (t.visibility='private' AND t.owner_character_id=$2))""",
+                dossier["topic_id"],dossier["character_id"])
+        if not anchor:
+            # Only bootstrap a navigation node linked to an already-authorized
+            # passage from this cycle; do not traverse arbitrary private graphs.
+            anchor=await self.db.fetchrow(
+                """SELECT t.* FROM aios.knowledge_topic_source src
+                   JOIN aios.knowledge_topic t ON t.topic_id=src.topic_id
+                   WHERE src.section_id=ANY($1::uuid[])
+                     AND src.status<>'rejected' AND t.visibility='catalog'
+                     AND t.status IN ('candidate','registered','organized')
+                   ORDER BY CASE WHEN t.status='registered' THEN 0 ELSE 1 END,
+                            src.created_at,t.topic_id LIMIT 1""",
+                list(allowed_sections))
+        if not anchor:
+            return ()
+        from aios_app.config import settings
+        from aios_app.rdf.fuseki import FusekiClient
+        from .fuseki_navigation import query_neighbors
+        try:
+            client=FusekiClient(settings.fuseki_base_url,timeout=2,retries=0)
+            return await asyncio.wait_for(
+                asyncio.to_thread(query_neighbors,client,anchor,limit=12),
+                timeout=3.0)
+        except Exception as exc:
+            log.debug("Fuseki topic neighbor read unavailable: %s",exc)
+            return ()
+
     async def advance(self, *, instance_id: UUID, dossier_id: UUID,
                       request_id: UUID, include_fanwork: bool = False) -> dict[str, Any]:
         claim = await self._claim_advance(
@@ -337,6 +379,8 @@ class ProgressiveResearchService:
                 result.research_id,instance_id)
             if not evidence:
                 raise PermissionError("research event not owned by dossier instance")
+            rdf_neighbors=await self._rdf_neighbors(
+                claim["dossier"],[hit.section_id for hit in result.hits])
             async with self.db.connection() as con:
                 async with con.transaction():
                     locked = await self._owned(con,instance_id,dossier_id,lock=True)
@@ -392,7 +436,8 @@ class ProgressiveResearchService:
                            cycles_completed=cycles_completed+1,updated_at=now()
                            WHERE dossier_id=$1""",dossier_id)
                     followups = await self._seed_followups(
-                        con,dossier=locked,allowed_sections=accepted_sections)
+                        con,dossier=locked,allowed_sections=accepted_sections,
+                        preferred_neighbors=rdf_neighbors)
             return {
                 "dossier_id":str(dossier_id),"step_id":step["step_id"],
                 "status":result.status,"research_id":str(result.research_id),
@@ -418,7 +463,8 @@ class ProgressiveResearchService:
                             changed["question_id"])
             raise
 
-    async def _seed_followups(self, con, *, dossier, allowed_sections: Sequence[UUID]) -> list[str]:
+    async def _seed_followups(self, con, *, dossier, allowed_sections: Sequence[UUID],
+                              preferred_neighbors: Sequence[UUID] = ()) -> list[str]:
         """One-hop topic expansion only from sections this character just saw."""
         if not allowed_sections:
             return []
@@ -436,7 +482,7 @@ class ProgressiveResearchService:
                WHERE s.section_id=ANY($1::uuid[]) AND s.status<>'rejected'
                  AND t.visibility='catalog' AND t.status IN ('candidate','registered','organized')
                  AND t.topic_id IS DISTINCT FROM $2::uuid
-                 AND ($2::uuid IS NULL OR EXISTS (
+                 AND ($2::uuid IS NULL OR t.topic_id=ANY($5::uuid[]) OR EXISTS (
                    SELECT 1 FROM aios.knowledge_topic_relation r
                    WHERE r.status IN ('candidate','verified') AND
                      ((r.source_topic_id=$2 AND r.target_topic_id=t.topic_id) OR
@@ -446,9 +492,14 @@ class ProgressiveResearchService:
                    WHERE q.dossier_id=$3 AND q.source_topic_id=t.topic_id)
                ORDER BY t.topic_id,s.section_id LIMIT $4""",
             list(allowed_sections),dossier["topic_id"],dossier["dossier_id"],
-            min(3,remaining))
+            min(16,remaining+8),list(preferred_neighbors))
+        preferred=set(preferred_neighbors)
+        rows=sorted(rows,key=lambda row: (0 if row["topic_id"] in preferred else 1,
+                                          str(row["topic_id"])))
         questions = []
         for row in rows:
+            if len(questions)>=remaining:
+                break
             label=" ".join(str(row["display_label"]).split())[:112]
             if not research_terms(label):
                 continue
