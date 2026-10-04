@@ -139,7 +139,8 @@ jobs:
             topic_atlas/research_dossier.py topic_atlas/fuseki_navigation.py \
             topic_atlas/collector.py topic_atlas/projection.py topic_atlas/hygiene.py \
             topic_atlas/diagnostics.py epistemic/scene_resolver.py hud/frame.py \
-            agent/research_action.py \
+            agent/research_action.py agent/goal_dependencies.py agent/cognitive_subjects.py \
+            tests/test_goal_knowledge_dependencies.py \
             tests/test_topic_atlas.py tests/ci_topic_atlas_smoke.py \
             tests/test_corpus_discovery_v2.py tests/ci_corpus_discovery_v2.py \
             tests/test_progressive_research.py tests/ci_progressive_research.py \
@@ -181,6 +182,7 @@ jobs:
             tests/test_runtime_version_manifest.py tests/test_migration_transaction_contract.py \
             tests/test_topic_atlas.py tests/test_corpus_discovery_v2.py \
             tests/test_progressive_research.py tests/test_atlas_stabilization.py \
+            tests/test_goal_knowledge_dependencies.py \
             tests/test_corpus_research.py
 
   context-uuid-binding-smoke:
