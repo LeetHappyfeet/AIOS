@@ -103,7 +103,16 @@ jobs:
       - name: Test context resolver UUID fixture separately
         env:
           AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
-        run: python tests/ci_context_resolver_uuid_binding_smoke.py
+        run: |
+          python - <<'PY'
+          import asyncio,os,asyncpg
+          async def setup():
+              con=await asyncpg.connect(os.environ["AIOS_DB_DSN"])
+              try: await con.execute("CREATE SCHEMA IF NOT EXISTS aios")
+              finally: await con.close()
+          asyncio.run(setup())
+          PY
+          python tests/ci_context_resolver_uuid_binding_smoke.py
 
   hygiene-shadow:
     runs-on: ubuntu-latest
