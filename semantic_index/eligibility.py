@@ -159,7 +159,7 @@ async def quarantine_adjudicated_vectors_once(
         """
         SELECT DISTINCT a.proposition_id
         FROM aios.semantic_hygiene_adjudication a
-        WHERE a.status='applied'
+        WHERE a.status IN ('applied','superseded')
           AND NOT aios.semantic_proposition_topology_eligible(a.proposition_id)
           AND (
             EXISTS (
