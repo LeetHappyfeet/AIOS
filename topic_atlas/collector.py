@@ -302,6 +302,11 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
                 """SELECT source_topic_id,target_topic_id
                    FROM aios.knowledge_topic_relation
                    WHERE source_kind=$1 AND source_key=$2""",source_kind,row["source_key"])}
+            old_links = {(r["topic_id"],r["document_id"],r["section_id"])
+                         for r in await con.fetch(
+                """SELECT topic_id,document_id,section_id
+                   FROM aios.knowledge_topic_source
+                   WHERE link_kind=$1 AND source_key=$2""",source_kind,row["source_key"])}
             await con.execute(
                 "DELETE FROM aios.knowledge_topic_mention WHERE source_kind=$1 AND source_key=$2",
                 source_kind, row["source_key"])
@@ -353,6 +358,10 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
             changed=set(old_mentions)^set(topic_ids)
             for a,b in old_edges^new_edges:
                 changed.update((a,b))
+            new_links={(topic_id,row["document_id"],row.get("section_id"))
+                       for topic_id in topic_ids} if row.get("document_id") else set()
+            if old_links != new_links:
+                changed.update(link[0] for link in old_links^new_links)
             if changed:
                 await con.execute(
                     """UPDATE aios.knowledge_topic SET graph_revision=graph_revision+1,
