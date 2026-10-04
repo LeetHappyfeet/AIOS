@@ -62,6 +62,24 @@ class CognitiveOperationEngine:
                     instance_id=op["instance_id"],query=str(payload.get("query") or ""),limit=8)
                 await self._finish(op,{"kind":"inquiry","research_id":str(found.research_id),
                                        "status":found.status,"hits":found.reference_context()})
+            elif kind=="research.advance":
+                from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+                payload=self._mapping(op["input"])
+                query=str(payload.get("query") or "").strip()[:600]
+                if not query:
+                    raise ValueError("progressive research requires a topic query")
+                service=ProgressiveResearchService(self.db)
+                dossier=await service.start(
+                    instance_id=op["instance_id"],question=query,
+                    origin="goal" if payload.get("goal_id") else "cognition")
+                result=await service.advance(
+                    instance_id=op["instance_id"],dossier_id=UUID(dossier["dossier_id"]),
+                    request_id=op["operation_id"],include_fanwork=False)
+                # Preserve bounded receipts in operation JSON. Original text
+                # belongs to source/exposure and is available only via authorized
+                # corpus research, not copied into long-running goal state.
+                result.pop("references",None)
+                await self._finish(op,{"kind":"research_dossier",**result})
             elif kind=="inquiry.resolve":
                 from aios_app.epistemic.inquiry.contracts import InquiryDemand
                 from aios_app.epistemic.inquiry.service import CharacterInquiryService
@@ -392,7 +410,7 @@ class CognitiveOperationEngine:
         await self._finish_side_effects(op,result)
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
-        if op.get("operation_type")=="inquiry.resolve":
+        if op.get("operation_type") in {"inquiry.resolve","research.advance"}:
             # Searching is not goal progress or source admission. Still close
             # the opportunity and record the thread receipt so it cannot stick
             # in 'selected' or 'working' indefinitely.
