@@ -343,8 +343,13 @@ class ParticipationService:
                         "Participation shadow evaluator unavailable: " + worker["reason"]
                         + ". Enable AIOS_PARTICIPATION_SHADOW_ENABLED=1 and wait for its READY heartbeat."
                     )
-                from aios_app.epistemic.runtime_versions import component_versions
-                manifest = component_versions()
+                from aios_app.epistemic.runtime_versions import capture_runtime_manifest
+                manifest = await capture_runtime_manifest(con, receipt_versions={
+                    "participation_experiment": POLICY_VERSION,
+                    "participation_comparators": [COMPARISON_VERSION, V3_VERSION, V4_VERSION],
+                })
+                if manifest["effective_authority"]["belief_executor"] == "unverified":
+                    raise RuntimeError("Database belief authority not verified; run aios_app.db_check before enrollment")
                 exp = await con.fetchrow("""INSERT INTO aios.character_participation_experiment
                     (instance_id,policy_version,since_at,until_at,max_claims,runtime_versions)
                     VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING *""", instance_id, POLICY_VERSION,
@@ -504,8 +509,17 @@ class ParticipationService:
                         result["signals"]["comparison_v4"] = v4
                         result["signals"]["comparison"] = comparison
                         result["signals"]["comparison_v3"] = v3
-                        from aios_app.epistemic.runtime_versions import component_versions
-                        result["signals"]["runtime_versions"] = component_versions()
+                        from aios_app.epistemic.runtime_versions import capture_runtime_manifest
+                        result["signals"]["runtime_versions"] = await capture_runtime_manifest(
+                            con, receipt_versions={
+                                "participation_baseline": POLICY_VERSION,
+                                "comparison_v2": COMPARISON_VERSION,
+                                "comparison_v3": V3_VERSION,
+                                "comparison_v4": V4_VERSION,
+                                "source_integrity": item["integrity_validator_version"],
+                                "evaluation_mode_v4": v4["evaluation_mode"],
+                            },
+                        )
                         snapshot = json.dumps(context,default=str,sort_keys=True)
                         await con.execute("""INSERT INTO aios.character_participation_evaluation
                             (experiment_id,claim_id,instance_id,proposition_id,policy_version,population,
