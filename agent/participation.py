@@ -584,7 +584,39 @@ class ParticipationService:
              GROUP BY 1,2,3""",experiment_id)
         total = sum(int(r['count']) for r in populations)
         foreground = sum(int(r['count']) for r in populations if r['population']=='foreground')
+        coverage = await self.db.fetchrow("""
+            SELECT COUNT(*) AS evaluated,
+                   COUNT(*) FILTER (WHERE signals ? 'comparison_v3') AS v3_compared,
+                   COUNT(*) FILTER (WHERE signals ? 'comparison_v4') AS v4_compared
+            FROM aios.character_participation_evaluation
+            WHERE experiment_id=$1
+        """, experiment_id)
+        queue_totals = {str(r["status"]): int(r["count"]) for r in counts}
+        now = datetime.now(timezone.utc)
+        if int(coverage["evaluated"]) == 0:
+            coverage_note = (
+                "No evaluation receipts; this is not a V3/V4 result. "
+                "Confirm that a separate participation shadow worker is running."
+            )
+            if exp["until_at"] <= now:
+                coverage_note += " Experiment expired; create a fresh controlled experiment."
+        elif int(coverage["v4_compared"]) < int(coverage["evaluated"]):
+            coverage_note = (
+                "Some baseline receipts have no V4 paired comparison; "
+                "frozen replay may fill these but cannot recreate historical live context."
+            )
+        else:
+            coverage_note = "All evaluation receipts include the V4 comparator."
         return {'shadow':True,'experiment':dict(exp),'queue':[dict(r) for r in counts],
+                'evaluation_coverage': {
+                    'evaluated': int(coverage["evaluated"]),
+                    'v3_compared': int(coverage["v3_compared"]),
+                    'v4_compared': int(coverage["v4_compared"]),
+                    'pending': queue_totals.get("pending", 0),
+                    'worker_required': True,
+                    'participation_live_admission': False,
+                    'note': coverage_note,
+                },
                 'populations':[dict(r) for r in populations],
                 'comparison_version':COMPARISON_VERSION,'comparisons':[dict(r) for r in comparisons],
                  'comparison_v3_version':V3_VERSION,'comparisons_v3':[dict(r) for r in v3comparisons],
@@ -603,6 +635,8 @@ async def run_worker(*, once=False):
     try:
         from aios_app.epistemic.runtime_versions import component_versions
         logger.info("Participation worker runtime versions: %s", component_versions())
+        print("AIOS_READY service=participation_shadow comparator=v4 live_admission=false",
+              flush=True)
         while True:
             try:
                 count = await ParticipationService(db).process_pending()
