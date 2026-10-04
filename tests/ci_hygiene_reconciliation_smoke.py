@@ -83,12 +83,12 @@ CREATE TABLE aios.semantic_topology_node (
  node_type text NOT NULL,node_key text NOT NULL
 );
 CREATE FUNCTION aios.recompute_semantic_evidence_admission(p_acquisition uuid)
-RETURNS void LANGUAGE plpgsql AS $
+RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
  UPDATE aios.semantic_evidence_admission
  SET status='active',reason='recomputed',confidence=0.6,updated_at=now()
  WHERE acquisition_id=p_acquisition;
-END $;
+END $$;
 CREATE TABLE aios.semantic_scope_projection_state (
  scope_key text PRIMARY KEY,dirty_version bigint NOT NULL DEFAULT 0,
  projected_version bigint NOT NULL DEFAULT 0,status text NOT NULL DEFAULT 'ready',
