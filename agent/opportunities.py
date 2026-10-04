@@ -159,7 +159,7 @@ class CognitiveOpportunityService:
             query=structured_demand["query"]
             gap=max(0.0,1.0-float(structured_demand["internal_coverage"]))
             proposals.append(self._p(
-                "knowledge_gap",f"Find out more about {subject}.","inquiry.resolve",
+                "knowledge_gap",f"Investigate {subject} progressively.","research.advance",
                 {"query":query,"allow_model":gap >= .75,
                  "focus":primary_subject.retrieval_text,
                  "subject_id":str(primary_subject.subject_id)},
@@ -180,8 +180,8 @@ class CognitiveOpportunityService:
                 if subject:
                     gap=max(0,min(1,1-float(kd.get("coverage") or 0)))
                     proposals.append(self._p(
-                        "knowledge_gap",f"Find out more about {subject}.","inquiry.resolve",
-                        {"query":subject,"focus":focus,"allow_model":gap >= .75},source_node_id or context.source_head_node_id,
+                        "knowledge_gap",f"Investigate {subject} progressively.","research.advance",
+                        {"query":subject,"focus":focus,"allow_model":False,source_node_id or context.source_head_node_id,
                         context,relevance=.65,knowledge_gap=gap,novelty=.7,recency=1,
                         evidence=[{"kind":"corpus_demand","reason":kd.get("reason")}],
                         key=f"research:{subject.lower()[:100]}"))
