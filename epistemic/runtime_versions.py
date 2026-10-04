@@ -18,4 +18,14 @@ def component_versions() -> dict[str, str]:
         "participation_v2": participation.COMPARISON_VERSION,
         "participation_v3": participation.V3_VERSION,
         "participation_v4": participation.V4_VERSION,
+        # Installed comparison modules are not automatically authoritative.
+        "participation_primary_execution": "shadow-v1-ledger-only",
+        "participation_v2_execution": "shadow-comparison-only",
+        "participation_v3_execution": "shadow-comparison-only",
+        "participation_v4_execution": "shadow-comparison-only",
+        "participation_live_admission": "none",
+        "belief_materializer": "character-belief-v4-authority-family",
+        "belief_authority_base": "character-belief-v3-authority-lineage",
+        "belief_family_policy": "semantic-policy-v1",
+        "source_integrity_contract": "integrity-contract-v1",
     }
