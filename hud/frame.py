@@ -335,7 +335,29 @@ class HUDAssembler:
         working_scene["immediate_goal"] = (
             attention.goals[0].hud_item() if attention.goals else None
         )
+        if isinstance(working_scene.get("last_significant_change"), Mapping) and (
+            working_scene["last_significant_change"].get("source")=="dag_node"
+        ):
+            # Legacy snapshots may carry an entire character message here.
+            working_scene["last_significant_change"]=None
         scene["working_state"] = working_scene
+        research_activity = None
+        if context.source_head_node_id:
+            receipt = await self.db.fetchrow(
+                """SELECT question,status,result,dossier_id,updated_at
+                   FROM aios.character_research_tool_request
+                   WHERE instance_id=$1 AND source_node_id=$2""",
+                context.instance_id,context.source_head_node_id)
+            if receipt:
+                result=_json_value(receipt["result"],{})
+                research_activity={
+                    "question":str(receipt["question"])[:200],
+                    "status":str(receipt["status"]),
+                    "dossier_id":str(receipt["dossier_id"]) if receipt["dossier_id"] else None,
+                    "source_count":int(result.get("source_count") or 0),
+                    "outcome":str(result.get("status") or "")[:40],
+                    "durable_knowledge":False,
+                }
 
         suppressed = cognitive_snapshot.firewall_suppressed
         return {
@@ -354,6 +376,7 @@ class HUDAssembler:
                 "location_entity_id": context.location_entity_id,
             },
             "scene": scene,
+            "research_activity": research_activity,
             "retrieval_evidence": cognitive_snapshot.retrieval_evidence,
             "state": {
                 "health": raw_state.get("health"),
