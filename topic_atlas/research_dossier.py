@@ -60,6 +60,7 @@ class ProgressiveResearchService:
         self, *, instance_id: UUID, question: str, topic_id: UUID | None = None,
         origin: str = "manual", max_cycles: int = 8, max_sections: int = 24,
         max_materializations: int = 4, goal_id: UUID | None = None,
+        requirement_id: UUID | None = None,
     ) -> dict[str, Any]:
         question = " ".join(str(question).split())
         identity = focus_key(question, topic_id)
@@ -67,6 +68,8 @@ class ProgressiveResearchService:
             raise ValueError("unsupported research dossier origin")
         if (goal_id is None) != (origin != "goal"):
             raise ValueError("goal research requires a goal_id and goal origin")
+        if requirement_id is not None and goal_id is None:
+            raise ValueError("requirement-scoped research requires an owned goal")
         max_cycles = max(1, min(int(max_cycles), 16))
         max_sections = max(1, min(int(max_sections), 48))
         max_materializations = max(0, min(int(max_materializations), 8))
@@ -85,6 +88,13 @@ class ProgressiveResearchService:
                            FOR SHARE""", goal_id, instance_id)
                     if not owned_goal:
                         raise PermissionError("research requires an active owned goal")
+                    if requirement_id is not None:
+                        owned_requirement = await con.fetchval(
+                            """SELECT 1 FROM aios.character_goal_knowledge_requirement
+                               WHERE requirement_id=$1 AND goal_id=$2 AND instance_id=$3""",
+                            requirement_id, goal_id, instance_id)
+                        if not owned_requirement:
+                            raise PermissionError("research requirement does not belong to this goal")
                 if topic_id is not None:
                     admitted = await con.fetchval(
                         """SELECT EXISTS (
@@ -120,9 +130,18 @@ class ProgressiveResearchService:
                            VALUES($1,$2,$3)
                            ON CONFLICT(goal_id,dossier_id) DO NOTHING""",
                         instance_id, goal_id, row["dossier_id"])
+                    if requirement_id is not None:
+                        await con.execute(
+                            """INSERT INTO aios.character_goal_research_requirement_link
+                                 (instance_id,goal_id,requirement_id,dossier_id)
+                               VALUES($1,$2,$3,$4)
+                               ON CONFLICT(requirement_id,dossier_id) DO NOTHING""",
+                            instance_id,goal_id,requirement_id,row["dossier_id"])
         result = _serial(row)
         if goal_id is not None:
             result["linked_goal_id"] = str(goal_id)
+        if requirement_id is not None:
+            result["linked_requirement_id"] = str(requirement_id)
         return result
 
     async def available(self, *, instance_id: UUID, question: str) -> bool:
