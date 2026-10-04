@@ -615,7 +615,10 @@ class ParticipationService:
         coverage = await self.db.fetchrow("""
             SELECT COUNT(*) AS evaluated,
                    COUNT(*) FILTER (WHERE signals ? 'comparison_v3') AS v3_compared,
-                   COUNT(*) FILTER (WHERE signals ? 'comparison_v4') AS v4_compared
+                   COUNT(*) FILTER (WHERE signals ? 'comparison_v4') AS v4_compared,
+                   COUNT(*) FILTER (
+                     WHERE signals->'comparison_v4'->>'evaluation_mode'='paired_live'
+                   ) AS v4_paired_live
             FROM aios.character_participation_evaluation
             WHERE experiment_id=$1
         """, experiment_id)
@@ -626,6 +629,7 @@ class ParticipationService:
         evaluated = int(coverage["evaluated"] or 0)
         v3_count = int(coverage["v3_compared"] or 0)
         v4_count = int(coverage["v4_compared"] or 0)
+        v4_live = int(coverage["v4_paired_live"] or 0)
         pending = queue_totals.get("pending", 0)
         failed = queue_totals.get("failed", 0)
         skipped = queue_totals.get("skipped", 0)
@@ -643,7 +647,9 @@ class ParticipationService:
         elif pending:
             evaluation_state = "evaluating" if worker["ready"] else "stalled"
         else:
-            evaluation_state = "complete" if evaluated >= expected else "partial"
+            evaluation_state = ("complete" if evaluated >= expected and v4_live == evaluated
+                                else "complete_retrospective" if evaluated >= expected
+                                else "partial")
         if evaluated == 0:
             coverage_note = (
                 "No evaluation receipts; this is not a V3/V4 result. "
@@ -666,7 +672,11 @@ class ParticipationService:
                 'evaluation_coverage': {
                     'evaluated': int(coverage["evaluated"]),
                     'v3_compared': int(coverage["v3_compared"]),
-                    'v4_compared': int(coverage["v4_compared"]),
+                    'v4_compared': v4_count,
+                    'v4_paired_live': v4_live,
+                    'comparison_mode': ("not_evaluated" if not evaluated else
+                                        "paired_live" if v4_live == evaluated else
+                                        "mixed_or_retrospective"),
                     'pending': pending,
                     'failed': failed,
                     'skipped': skipped,
