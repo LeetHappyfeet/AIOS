@@ -113,8 +113,8 @@ async def main():
                                question="s3renamon",max_cycles=2,
                                max_sections=4,max_materializations=1)
         dossier_id=UUID(opened["dossier_id"])
-        assert (await svc.start(instance_id=instance["instance_id"],
-                                question=" S3RENAMON ",max_cycles=2))["dossier_id"]==dossier_id
+        assert UUID((await svc.start(instance_id=instance["instance_id"],
+                                question=" S3RENAMON ",max_cycles=2))["dossier_id"])==dossier_id
         try:
             await svc.inspect(instance_id=other["instance_id"],dossier_id=dossier_id)
             raise AssertionError("foreign instance must be denied")
