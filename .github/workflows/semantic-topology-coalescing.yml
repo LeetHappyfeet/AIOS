@@ -20,6 +20,8 @@ jobs:
         run: |
           python -m py_compile \
             epistemic/topology_projection.py \
+            epistemic/semantic_hygiene.py \
+            tests/test_semantic_hygiene_shadow.py \
             epistemic/belief_reconciliation.py \
             epistemic/reconciliation_stage.py \
             epistemic/retention.py \
@@ -43,6 +45,7 @@ jobs:
             python -m pytest -q \
               tests/test_hud_readiness.py \
               tests/test_topology_projection_coalescing.py \
+              tests/test_semantic_hygiene_shadow.py \
               tests/test_belief_reconciliation.py \
               tests/test_memory_reconciliation_stage.py \
               tests/test_semantic_retention.py \
@@ -102,6 +105,16 @@ jobs:
                   )
                   assert await conn.fetchval(
                       "SELECT to_regclass('aios.semantic_scope_projection_state') IS NOT NULL"
+                  )
+                  await conn.execute(
+                      Path('migrations/current/20261003_07_semantic_hygiene_shadow.sql')
+                      .read_text(encoding='utf-8')
+                  )
+                  assert await conn.fetchval(
+                      "SELECT COUNT(*) FROM aios.semantic_hygiene_shadow_cursor"
+                  ) == 2
+                  assert await conn.fetchval(
+                      "SELECT to_regclass('aios.semantic_hygiene_shadow_audit') IS NOT NULL"
                   )
                   await conn.execute(
                       """
