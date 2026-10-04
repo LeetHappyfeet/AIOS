@@ -79,6 +79,7 @@ class CognitiveKnowledgeSnapshot:
     anchored_knowledge_count: int
     visible_world_context_count: int
     invisible_anchor_count: int
+    topology_unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class PreparedRetrievalSnapshot:
     legacy_knowledge: list[dict[str, Any]]
     missing_modes: dict[str, bool]
     prepared_at: float
+    topology_unavailable: bool = False
 
 
 def _json_value(value: Any, default: Any) -> Any:
@@ -537,6 +539,7 @@ class CognitiveContextService:
             legacy_knowledge=legacy_knowledge,
             missing_modes=missing_modes,
             prepared_at=time.monotonic(),
+            topology_unavailable=bool(getattr(self.retriever, "topology_degraded", False)),
         )
         self._prepared_retrieval[key] = snapshot
         while len(self._prepared_retrieval) > PREPARED_RETRIEVAL_CACHE_SIZE:
@@ -853,6 +856,7 @@ class CognitiveContextService:
             anchored_knowledge_count=anchored_knowledge_count,
             visible_world_context_count=visible_world_context_count,
             invisible_anchor_count=invisible_anchor_count,
+            topology_unavailable=prepared.topology_unavailable,
         )
 
     async def lookup_character_knowledge(
