@@ -12,6 +12,8 @@ import asyncpg
 
 SELECTED_MIGRATIONS = [
     "20260913_baseline_reference_data.sql",
+    "20260917_character_memory_continuity.sql",
+    "20260919_replay_correlated_evidence.sql",
     "20260919_serialized_belief_reconciliation.sql",
     "20260927_coalesced_character_belief_reconciliation.sql",
     "20260927_epistemic_authority_membrane.sql",
