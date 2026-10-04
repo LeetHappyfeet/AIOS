@@ -93,6 +93,9 @@ def test_goal_progression_inquiry_then_dossier_only_for_verified_gap():
     assert goal_research_operation("memory","unresolved")=="research.advance"
     assert goal_research_operation("memory","partial")=="research.advance"
     assert goal_research_operation("memory","resolved",coverage_status="partial")=="research.advance"
+    assert goal_research_operation("corpus","unresolved","no_access") is None
+    assert goal_research_operation("corpus","unresolved","no_access",
+                                   access_changed=True)=="research.advance"
     assert goal_research_operation("memory","planning") is None
     assert goal_research_operation("memory","unresolved",coverage_status="sufficient") is None
     assert goal_research_operation("defer","unresolved",coverage_status="unavailable",
