@@ -1,4 +1,5 @@
 """Source-grounded semantic hygiene stays an auditable, read-only shadow pass."""
+import asyncio
 from pathlib import Path
 from uuid import UUID
 
@@ -19,7 +20,7 @@ def _atom(subject="mia and", predicate="keep", obj=None):
 def _lineage(*, relation=None, standalone=True, source="Mia and Renamon packed up."):
     return [{"frame_meta": {"clause_relation": relation,
                             "standalone_semantic": standalone},
-             "raw_text": source}]
+             "raw_text": source, "integrity_status": "valid"}]
 
 
 def test_malformed_coordination_is_a_repair_proposal_not_a_deletion():
@@ -148,19 +149,17 @@ def test_single_bounded_rdf_snapshot():
     assert not fuseki.updates
 
 
-@pytest.mark.asyncio
-async def test_fuseki_error_never_advances_cursor_or_writes_partial_audit():
+def test_fuseki_error_never_advances_cursor_or_writes_partial_audit():
     db, fuseki = FakeDb(), FakeFuseki(fail=True)
     with pytest.raises(RuntimeError, match="Fuseki unavailable"):
-        await run_shadow_batch(db, fuseki)
+        asyncio.run(run_shadow_batch(db, fuseki))
     assert db.audit_inserts == []
     assert db.cursor_updates == []
 
 
-@pytest.mark.asyncio
-async def test_shadow_batch_only_writes_audit_and_cursor():
+def test_shadow_batch_only_writes_audit_and_cursor():
     db, fuseki = FakeDb(), FakeFuseki()
-    outcome = await run_shadow_batch(db, fuseki, population="v3_only", limit=16)
+    outcome = asyncio.run(run_shadow_batch(db, fuseki, population="v3_only", limit=16))
     assert outcome["scanned"] == 1
     assert outcome["new_audits"] == 1
     assert len(db.audit_inserts) == len(db.cursor_updates) == 1
