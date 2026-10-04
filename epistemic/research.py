@@ -411,7 +411,9 @@ class CorpusSearchService:
         suggested_topics: list[UUID] = []
         try:
             candidates = await asyncio.to_thread(
-                self.semantic.search_corpus_discovery, query, corpus_k=96, topic_k=12)
+                self.semantic.search_corpus_discovery,
+                re.sub(r"\\s+OR\\s+", " ", query, flags=re.IGNORECASE),
+                corpus_k=96, topic_k=12)
             for kind, _score, payload in candidates:
                 try:
                     if kind == "corpus" and len(vector_sections) < 96:
