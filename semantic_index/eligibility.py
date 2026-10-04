@@ -247,11 +247,19 @@ async def quarantine_adjudicated_vectors_once(
             removed = await con.fetch(
                 """DELETE FROM aios.semantic_topology_node n
                    WHERE n.proposition_id=ANY($1::uuid[])
-                     AND n.node_type NOT IN ('ROOT','INSTANCE','BELIEF_STATE')
+                     AND n.node_type NOT IN ('ROOT','INSTANCE')
                      AND NOT aios.semantic_proposition_topology_eligible(n.proposition_id)
-                     AND NOT EXISTS (
-                         SELECT 1 FROM aios.character_belief_state bs
-                         WHERE bs.preferred_proposition_id=n.proposition_id
+                     AND (
+                       (n.node_type='BELIEF_STATE' AND NOT EXISTS (
+                           SELECT 1 FROM aios.character_belief_state bs
+                           JOIN aios.proposition p ON p.atom_id=bs.atom_id
+                           WHERE p.proposition_id=n.proposition_id
+                             AND bs.instance_id=n.character_instance_id
+                       ))
+                       OR (n.node_type<>'BELIEF_STATE' AND NOT EXISTS (
+                           SELECT 1 FROM aios.character_belief_state bs
+                           WHERE bs.preferred_proposition_id=n.proposition_id
+                       ))
                      )
                    RETURNING n.scope_key""",
                 ids,
