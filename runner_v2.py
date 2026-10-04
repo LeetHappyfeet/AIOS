@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict
 
 from aios_app import runner as base
@@ -38,6 +39,17 @@ async def handle_compact_character_world_epistemic(db: Database, job: Dict[str, 
 
 
 base.JOB_HANDLERS["compact_character_world_epistemic"] = handle_compact_character_world_epistemic
+
+async def handle_semantic_hygiene_shadow(db: Database, job: Dict[str, Any]) -> None:
+    """Read-only /char inspection; writes ONLY semantic_hygiene_shadow_audit/cursor."""
+    from aios_app.epistemic.semantic_hygiene import run_shadow_batch
+    population = str((job.get("payload") or {}).get("population") or "v3_only")
+    fuseki = base.FusekiClient(settings.fuseki_base_url, timeout=12.0, retries=0)
+    await run_shadow_batch(db, fuseki, population=population, limit=16)
+
+
+base.JOB_HANDLERS["semantic_hygiene_shadow"] = handle_semantic_hygiene_shadow
+
 
 async def handle_agent_wake(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
@@ -770,6 +782,36 @@ async def _projection_scheduler_loop() -> None:
                         payload={},
                         priority=250,
                     )
+
+                # Explicit opt-in; at most one small shadow batch per minute.
+                # This must never compete continuously with live RDF projection.
+                if os.getenv("AIOS_SEMANTIC_HYGIENE_SHADOW_ENABLED", "0").lower() in {
+                    "1", "true", "yes", "on",
+                }:
+                    from aios_app.epistemic.semantic_hygiene import POLICY_VERSION
+                    hygiene_state = await db.fetchrow(
+                        """
+                        SELECT population
+                        FROM aios.semantic_hygiene_shadow_cursor
+                        WHERE policy_version=$1 AND completed_at IS NULL
+                          AND NOT EXISTS (
+                            SELECT 1 FROM aios.pipeline_job pj
+                            WHERE pj.job_type='semantic_hygiene_shadow'
+                              AND (pj.status IN ('queued','running')
+                                OR pj.created_at > now() - interval '60 seconds')
+                          )
+                        ORDER BY CASE WHEN population='v3_only' THEN 0 ELSE 1 END
+                        LIMIT 1
+                        """,
+                        POLICY_VERSION,
+                    )
+                    if hygiene_state:
+                        await enqueue_job(
+                            db,
+                            job_type="semantic_hygiene_shadow",
+                            payload={"population": str(hygiene_state["population"])},
+                            priority=290,
+                        )
             except Exception:
                 logger.exception("Failed to schedule dirty semantic topology scopes")
             await asyncio.sleep(RDF_PROJECTION_SCHEDULER_SECONDS)
