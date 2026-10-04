@@ -285,7 +285,7 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
             work = await _run_topology_stages(db, fuseki, effective_cfg, run_stage)
             work["topics_projected"] = await run_stage(
                 "rdf-topics", project_topics_once, db, fuseki,
-                limit=effective_cfg.background_batch_size)
+                limit=1)  # One acknowledged graph replacement per topology cycle.
             await run_stage("topology-quarantine", quarantine_ineligible_vectors_once,
                             db, replace(effective_cfg, batch_size=effective_cfg.background_batch_size))
             _emit_telemetry({"service": "semantic_topology",
