@@ -185,6 +185,8 @@ def test_goal_research_progression_does_not_spin_on_partial_or_access_denied():
     assert goal_research_operation("memory", None) == "inquiry.resolve"
     assert goal_research_operation("memory", "unresolved") == "research.advance"
     assert goal_research_operation("corpus", "unresolved", "no_access") is None
-    assert goal_research_operation("memory", "partial") is None
+    assert goal_research_operation("memory", "partial") == "research.advance"
+    assert goal_research_operation("corpus", "unresolved", "no_access",
+                                   access_changed=True) == "research.advance"
     assert goal_research_operation("memory", "planning") is None
     assert goal_research_operation("none", "unresolved") is None
