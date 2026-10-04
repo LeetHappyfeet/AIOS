@@ -5,6 +5,11 @@ separate Fuseki topic-navigation graphs) is documented in
 [Knowledge Topic Atlas V1](../docs/knowledge_topic_atlas_v1.md). It is a
 discovery catalogue, not semantic admission or an asserted RDF ontology.
 
+[Corpus Discovery V2](../docs/knowledge_corpus_discovery_v2.md) is Stage 2:
+dedicated revision-aware cold corpus vectors, topic-linked source candidates,
+and ACL-checked hybrid research. Qdrant does not authorize source exposure.
+
+
 
 This subsystem replaces the former monolithic RAG sidecar.
 
