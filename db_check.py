@@ -159,7 +159,11 @@ async def check_database() -> int:
             "SELECT EXISTS (SELECT 1 FROM aios.schema_migration WHERE migration_name=$1)",
             "20261003_11_integrity_context_invalidation.sql",
         )
-        if not integrated_receipt or not context_receipt:
+        completion_receipt = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM aios.schema_migration WHERE migration_name=$1)",
+            "20261003_12_occurrence_completion_invalidation.sql",
+        )
+        if not integrated_receipt or not context_receipt or not completion_receipt:
             print("FAIL: integrated belief/source integrity migrations missing.")
             print("Run: python -m aios_app.migrate")
             return 10
