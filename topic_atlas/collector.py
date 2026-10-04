@@ -355,7 +355,8 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
                     """UPDATE aios.knowledge_topic t
                        SET status='retired',vector_revision=vector_revision+1,
                            graph_revision=graph_revision+1,updated_at=now()
-                       WHERE t.topic_id=ANY($1::uuid[]) AND t.status='candidate'
+                       WHERE t.topic_id=ANY($1::uuid[])
+                         AND t.status IN ('candidate','registered')
                          AND NOT EXISTS (SELECT 1 FROM aios.knowledge_topic_mention m
                                          WHERE m.topic_id=t.topic_id)""",
                     list(affected))
@@ -371,6 +372,56 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
     return len(topic_ids)
 
 
+async def retire_missing_sources_once(db, *, limit: int = 8) -> int:
+    """Tombstone changed/removed source coordinates, not the original source data."""
+    rows = await db.fetch(
+        """SELECT r.source_kind,r.source_key
+           FROM aios.knowledge_topic_discovery_receipt r
+           WHERE r.source_revision<>'deleted' AND (
+             (r.source_kind='knowledge_domain' AND NOT EXISTS (
+                SELECT 1 FROM aios.knowledge_domain d
+                WHERE d.domain_id::text=r.source_key AND d.enabled))
+             OR (r.source_kind='corpus_heading' AND NOT EXISTS (
+                SELECT 1 FROM aios.corpus_section cs
+                WHERE cs.section_id::text=r.source_key
+                  AND NULLIF(btrim(cs.heading),'') IS NOT NULL))
+             OR (r.source_kind='corpus_facet' AND NOT EXISTS (
+                SELECT 1 FROM aios.corpus_document_facet f
+                WHERE f.document_id::text||':'||f.facet_type||':'||f.facet_value=r.source_key))
+             OR (r.source_kind='claim_candidate' AND NOT EXISTS (
+                SELECT 1 FROM aios.claim_candidate cc
+                JOIN aios.claim_context_resolution c ON c.claim_id=cc.claim_id
+                WHERE cc.claim_id::text=r.source_key
+                  AND (NULLIF(btrim(cc.subject),'') IS NOT NULL
+                    OR NULLIF(btrim(cc.object),'') IS NOT NULL)))
+             OR (r.source_kind='semantic_frame' AND NOT EXISTS (
+                SELECT 1 FROM aios.claim_semantic_frame f
+                WHERE f.frame_id::text=r.source_key
+                  AND f.decomposer_version='semantic-frame-v2'
+                  AND (NULLIF(f.subject_entity_key,'') IS NOT NULL
+                    OR NULLIF(f.object_entity_key,'') IS NOT NULL)))
+             OR (r.source_kind='proposition_occurrence' AND NOT EXISTS (
+                SELECT 1 FROM aios.observation o JOIN aios.proposition p
+                  ON p.proposition_id=o.proposition_id
+                WHERE o.observation_id::text=r.source_key
+                  AND NULLIF(btrim(p.topic_key),'') IS NOT NULL))
+           ) ORDER BY r.processed_at,r.source_kind,r.source_key LIMIT $1""",
+        max(1,min(int(limit),32)))
+    for row in rows:
+        # The normal transactional revision path retracts links, updates graph
+        # revisions and retires orphaned topics. A tombstone stops repeat scans.
+        await _collect_row(db,row["source_kind"],{
+            "source_key":row["source_key"],"source_revision":"deleted",
+            "origin_key":row["source_key"],"label":None,"identifier":None,
+            "domain_key":None,"document_id":None,"section_id":None,
+            "character_id":None,"world_id":None,"instance_id":None,
+            "topic_kind":"concept",
+            "subject_key":None,"object_key":None,
+            "subject_label":None,"object_label":None,
+        })
+    return len(rows)
+
+
 async def collect_topics_once(db, *, limit: int = 16) -> dict[str, int]:
     """Bounded, idempotent discovery. Every lane advances independently."""
     budget = max(1, min(int(limit), 64))
@@ -382,6 +433,7 @@ async def collect_topics_once(db, *, limit: int = 16) -> dict[str, int]:
             count += await _collect_row(db, source_kind, row)
         counts[source_kind] = count
     counts["domain_hierarchy"] = await reconcile_domain_hierarchy_once(db, limit=budget)
+    counts["retired_sources"] = await retire_missing_sources_once(db, limit=budget)
     return counts
 
 
