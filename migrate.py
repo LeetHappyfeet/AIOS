@@ -26,6 +26,7 @@ REQUIRED_ACTIVE_MIGRATIONS = frozenset({
     "20261003_14_participation_worker_heartbeat.sql",
     "20261004_15_knowledge_topic_atlas.sql",
     "20261004_16_corpus_discovery_v2.sql",
+    "20261004_17_progressive_research.sql",
 })
 _MIGRATION_LOCK_KEY = "aios.canonical.migrator"
 _OUTER_BEGIN = re.compile(r"\A(?:\s|--[^\n]*(?:\n|$)|/\*.*?\*/)*BEGIN\s*;", re.I | re.S)
