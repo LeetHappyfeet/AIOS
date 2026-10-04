@@ -72,7 +72,7 @@ async def _upsert_topic(con, *, namespace: str, visibility: str, owner: str | No
              topic_key,namespace,topic_kind,normalized_label,display_label,
              status,visibility,owner_character_id)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-           ON CONFLICT(topic_key) DO UPDATE SET
+           ON CONFLICT(namespace,topic_kind,normalized_label) DO UPDATE SET
              display_label=CASE WHEN EXCLUDED.status='registered'
                                   THEN EXCLUDED.display_label
                                   ELSE aios.knowledge_topic.display_label END,
