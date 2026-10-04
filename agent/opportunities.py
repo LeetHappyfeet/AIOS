@@ -153,8 +153,8 @@ class CognitiveOpportunityService:
             for row in goal_inquiry_rows}
         # A prior no_access remains terminal until new reference-index work
         # appears. One epoch lookup is shared by all active goal demands.
-        corpus_epoch=(await self.db.fetchval(
-            "SELECT max(indexed_at) FROM aios.corpus_discovery_projection")
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        corpus_epoch=(await ProgressiveResearchService(self.db).corpus_change_epoch(instance_id)
             if any(value[1]=="no_access" for value in latest_goal_inquiry.values())
             else None)
         for goal in goals:
