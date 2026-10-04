@@ -67,41 +67,97 @@ async def _upsert_topic(con, *, namespace: str, visibility: str, owner: str | No
     if canonical is None or normalize_label(display) is None:
         return None
     key = topic_identity(namespace, kind, canonical)
-    row = await con.fetchrow(
+    # This catalogue has TWO independent unique constraints. Historical
+    # collectors sometimes used an opaque entity identifier as the normalized
+    # label; newer source labels can therefore match a different existing row
+    # by natural identity or collide with a legacy topic_key. A one-target
+    # UPSERT merely shifts UniqueViolation between those constraints.
+    inserted = await con.fetchrow(
         """INSERT INTO aios.knowledge_topic (
              topic_key,namespace,topic_kind,normalized_label,display_label,
              status,visibility,owner_character_id)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-           ON CONFLICT(namespace,topic_kind,normalized_label) DO UPDATE SET
-             display_label=CASE WHEN EXCLUDED.status='registered'
-                                  THEN EXCLUDED.display_label
-                                  ELSE aios.knowledge_topic.display_label END,
-             updated_at=CASE WHEN EXCLUDED.status='registered'
-                               AND EXCLUDED.display_label IS DISTINCT FROM aios.knowledge_topic.display_label
-                               THEN now() ELSE aios.knowledge_topic.updated_at END,
-             status=CASE WHEN aios.knowledge_topic.status='retired'
-                            THEN EXCLUDED.status
-                         WHEN EXCLUDED.status='registered'
-                           AND aios.knowledge_topic.status='candidate'
-                            THEN 'registered'
-                         ELSE aios.knowledge_topic.status END,
-             graph_revision=CASE WHEN aios.knowledge_topic.status='retired'
-                            OR (EXCLUDED.status='registered'
-                                AND (aios.knowledge_topic.status='candidate'
-                                     OR EXCLUDED.display_label IS DISTINCT FROM aios.knowledge_topic.display_label))
-                       THEN aios.knowledge_topic.graph_revision+1
-                       ELSE aios.knowledge_topic.graph_revision END,
-             vector_revision=CASE WHEN aios.knowledge_topic.status='retired'
-                            OR (EXCLUDED.status='registered'
-                                AND (aios.knowledge_topic.status='candidate'
-                                     OR EXCLUDED.display_label IS DISTINCT FROM aios.knowledge_topic.display_label))
-                       THEN aios.knowledge_topic.vector_revision+1
-                       ELSE aios.knowledge_topic.vector_revision END
-           RETURNING topic_id""",
+           ON CONFLICT DO NOTHING RETURNING topic_id""",
         key, namespace, kind, canonical, display,
         "registered" if registered else "candidate", visibility, owner,
     )
-    topic_id = row["topic_id"]
+    if inserted:
+        topic_id = inserted["topic_id"]
+    else:
+        # _collect_row holds the global topic-discovery advisory transaction
+        # lock. Lock the existing identities and select the NATURAL topic when
+        # a legacy key and normalized label resolve to different topic IDs.
+        matches = await con.fetch(
+            """SELECT topic_id,topic_key,namespace,topic_kind,
+                      normalized_label,display_label,status
+               FROM aios.knowledge_topic
+               WHERE topic_key=$1 OR (
+                   namespace=$2 AND topic_kind=$3 AND normalized_label=$4)
+               FOR UPDATE""",
+            key, namespace, kind, canonical,
+        )
+        by_natural = next(
+            (r for r in matches if r["namespace"] == namespace
+             and r["topic_kind"] == kind
+             and r["normalized_label"] == canonical), None)
+        by_key = next((r for r in matches if r["topic_key"] == key), None)
+        existing = by_natural or by_key
+        if existing is None:
+            # A non-cooperating writer changed the row between the initial
+            # insert and our locked lookup. Retry the source transaction later.
+            raise RuntimeError("topic identity changed concurrently during collection")
+        if by_natural is not None and by_key is not None and (
+                by_natural["topic_id"] != by_key["topic_id"]):
+            # Never merge independent historical source/mention foreign keys.
+            # Select the already canonical natural row; preserve the legacy
+            # key-holder for the bounded source-reconciliation lifecycle.
+            import logging
+            logging.getLogger(__name__).warning(
+                "Atlas split legacy identities namespace=%s kind=%s label=%s "
+                "canonical_topic_id=%s legacy_key_topic_id=%s",
+                namespace, kind, canonical,
+                by_natural["topic_id"], by_key["topic_id"],
+            )
+        topic_id = existing["topic_id"]
+        repair_label = (by_natural is None and by_key is not None
+                        and existing["namespace"] == namespace
+                        and existing["topic_kind"] == kind
+                        and existing["normalized_label"] != canonical)
+        if by_natural is None and by_key is not None and not repair_label and (
+                existing["namespace"] != namespace or existing["topic_kind"] != kind):
+            # A corrupted key pointing outside its hashed scope cannot
+            # authorize cross-character topic identity.
+            raise ValueError("topic key conflicts with a different scope or topic kind")
+        if existing["status"] == "retired":
+            next_status = "registered" if registered else "candidate"
+        elif registered and existing["status"] == "candidate":
+            next_status = "registered"
+        else:
+            next_status = existing["status"]
+        # Explicit registrations may refresh a display label. Candidate
+        # replays otherwise leave existing human-readable presentation alone,
+        # except when repairing the same hashed key's stale natural label.
+        next_display = (
+            display if registered or repair_label else existing["display_label"]
+        )
+        revision_changed = (
+            repair_label
+            or existing["status"] == "retired"
+            or (registered and (
+                existing["status"] == "candidate"
+                or existing["display_label"] != next_display))
+        )
+        await con.execute(
+            """UPDATE aios.knowledge_topic
+               SET normalized_label=CASE WHEN $2 THEN $3 ELSE normalized_label END,
+                   display_label=$4,status=$5,
+                   vector_revision=vector_revision+CASE WHEN $6 THEN 1 ELSE 0 END,
+                   graph_revision=graph_revision+CASE WHEN $6 THEN 1 ELSE 0 END,
+                   updated_at=CASE WHEN $6 THEN now() ELSE updated_at END
+               WHERE topic_id=$1""",
+            topic_id, repair_label, canonical, next_display,
+            next_status, revision_changed,
+        )
     # The identifier is a lookup aid, not a claim that two external entities are identical.
     alias = normalize_label(display)
     if alias != canonical:
