@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 from aios_app.config import settings
@@ -140,6 +141,27 @@ class ServiceRuntime:
 
 
 def _run_preflight() -> None:
+    # Both optional semantic workers import topic_atlas at module startup. An
+    # invalid newly added module must fail before migration or daemon launch,
+    # instead of reporting READY—DEGRADED for the entire subsequent session.
+    root = Path(__file__).resolve().parent
+    semantic_sources = sorted((root / "topic_atlas").glob("*.py"))
+    semantic_sources += [
+        root / relative
+        for relative in (
+            "semantic_index/cli.py",
+            "epistemic/scene_resolver.py",
+            "agent/api.py",
+            "agent/opportunities.py",
+            "hud/frame.py",
+            "hud/render_text.py",
+        )
+    ]
+    print("🔎 Compiling semantic, Topic Atlas, agency and HUD startup modules...", flush=True)
+    subprocess.run(
+        [PYTHON, "-m", "py_compile", *(str(path) for path in semantic_sources)],
+        check=True,
+    )
     print("🗄️  Updating AIOS PostgreSQL schema...", flush=True)
     subprocess.run([PYTHON, "-m", "aios_app.migrate"], check=True)
     print("🔎 Checking AIOS PostgreSQL readiness...", flush=True)
