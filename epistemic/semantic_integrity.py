@@ -124,7 +124,7 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
     # Residual first-person objects in a third-person paraphrase are neither
     # an unambiguous Alex/observer reference nor a legitimate speaker switch.
     # A quoted passage is not sufficient evidence to repair this downstream.
-    if source_first_person and speaker and subject != speaker and (
+    if source_first_person and speaker and subject not in first_person and (
         re.search(r"\b(?:i|me|my|mine|myself|we|us|our|ours)\b", obj)
         or (original_object in first_person and obj in first_person)
     ):
