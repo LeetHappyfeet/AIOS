@@ -68,6 +68,19 @@ class SemanticQueryService:
             },
         })
 
+    def search_corpus_discovery(
+        self, query_text: str, *, corpus_k: int = 96, topic_k: int = 12
+    ) -> list[tuple[str, float, dict[str, Any]]]:
+        """Internal IDs only; research SQL must check source ACL before returning text."""
+        if not query_text.strip():
+            return []
+        return self._request({
+            "op":"search_corpus_discovery",
+            "query_text":query_text,
+            "corpus_k":max(1,min(int(corpus_k),128)),
+            "topic_k":max(1,min(int(topic_k),24)),
+        })
+
     def search_epistemic(
         self,
         query_text: str,
