@@ -205,6 +205,16 @@ class CognitiveOpportunityService:
                GROUP BY g.goal_id""",
             instance_id)
         last_reviewed={row["goal_id"]:row["last_reviewed_at"] for row in review_rows}
+        # A bounded, already scoped source-turn window lets planning.review
+        # inspect the character's preceding answer and the participant's
+        # acknowledgment, not just the current focus string.
+        recent_source_events=[
+            {"node_id":str(row.get("node_id") or ""),
+             "speaker_id":str(row.get("speaker_id") or ""),
+             "message_text":_clip(row.get("message_text") or "",300)}
+            for row in attention.recent_newest
+            if row.get("event_stream")=="source" and row.get("message_text")
+        ][:4]
         review_candidates=[]
         for index,goal in enumerate(goals):
             g=_clip(goal.text,160)
@@ -229,6 +239,7 @@ class CognitiveOpportunityService:
                 "goal_review",f"Consider whether what just happened changes my goal: {g}",
                 "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
                 "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
+                "recent_source_events":recent_source_events,
                 "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),
                 "current_scene":{
                     "location":current_scene.get("location"),
