@@ -265,6 +265,7 @@ async def consume_corpus_sections(
     section_ids: Iterable[UUID],
     mode: str = "read",
     dedupe_key_prefix: str | None = None,
+    expected_content_digests: dict[UUID,str] | None = None,
 ) -> dict:
     """Cross selected cold sections into normal ingestion for one character only."""
     if dedupe_key_prefix is not None and (mode != "research" or
@@ -296,6 +297,10 @@ async def consume_corpus_sections(
         )
         if not row:
             raise ValueError(f"unknown corpus section {section_id}")
+        if expected_content_digests is not None:
+            expected=expected_content_digests.get(section_id)
+            if not expected or hashlib.md5(row["content"].encode("utf-8")).hexdigest()!=expected:
+                raise ValueError("selected corpus section text changed since research exposure")
 
         receipt = await db.execute_returning_row(
             """
