@@ -87,6 +87,27 @@ async def main() -> None:
                 trigger,
             ) == 1, trigger
 
+        # The previous occurrence/interpretation UPDATE handlers checked only
+        # the destination. Verify both old and new source coordinates are
+        # present in the effective functions, and that repeat admission writes
+        # have an explicit no-op suppression boundary.
+        binding = await con.fetchval(
+            "SELECT pg_get_functiondef('aios.revisit_admission_after_occurrence_binding()'::regprocedure)"
+        )
+        interpretation = await con.fetchval(
+            "SELECT pg_get_functiondef('aios.revisit_admission_after_interpretation()'::regprocedure)"
+        )
+        frame_mutation = await con.fetchval(
+            "SELECT pg_get_functiondef('aios.refresh_admission_from_integrity_frame_mutation()'::regprocedure)"
+        )
+        noop = await con.fetchval(
+            "SELECT pg_get_functiondef('aios.skip_unchanged_semantic_admission()'::regprocedure)"
+        )
+        assert "OLD.observation_id" in binding and "NEW.observation_id" in binding
+        assert "OLD.claim_id" in interpretation and "NEW.claim_id" in interpretation
+        assert "OLD.claim_id" in frame_mutation and "NEW.claim_id" in frame_mutation
+        assert "IS NOT DISTINCT FROM" in noop and "RETURN NULL" in noop
+
         # Runtime cannot silently delete critical reference data. Separately,
         # simulate a damaged ledger to assert that a missing default fails closed.
         try:
