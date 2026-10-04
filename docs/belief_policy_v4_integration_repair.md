@@ -47,7 +47,25 @@ policy stage. Source eligibility was not uniformly enforced for topology.
   or standalone interpretation rows arrive AFTER acquisition. This closes the
   conservative source-gate ordering hole without guessing missing evidence.
 
-The migrator applies all three files lexically after 08 and 09. db_check.py
+20261003_13_source_receipt_and_belief_hardening.sql (first-round pre-reset pass):
+
+- Protects the required default belief-policy row from accidental runtime edits.
+- Makes V4 read eligibility require exact section identity, paragraph digest,
+  extracted-sentence digest and source DAG origin. V3's NULL-context exception
+  stays historical only; existing V4 rows missing new fields need revalidation.
+- Removes stale preferred evidence IDs from displaced exclusive-slot beliefs,
+  synchronizes their topology nodes/edges, and applies family-specific
+  accumulate thresholds rather than only stamping family metadata.
+- Gives both effective materializers the same current acquisition source gate.
+- Revisits old and new claim coordinates after occurrence, interpretation or
+  frame reassignment; tracks claim sentence moves, extracted-sentence edits and
+  section source-node changes.
+- Skips admission no-op updates after the integrity/hygiene triggers to avoid
+  unnecessary dirty generations during repeat evaluation.
+- Updates the Python Integrity V4 writer, startup checks, fresh-baseline smoke
+  and receipt writer regression. No source deletion or mass backfill.
+
+The migrator applies files 10 through 13 lexically after 08 and 09. db_check.py
 checks the default and family policy rows, actual integrated SQL wrapper,
 and three source-integrity gates during startup.
 
@@ -127,3 +145,12 @@ V3+family composition, source paragraph digest and integrity invalidation.
 Old CI jobs pointing to removed prototype migrations have been replaced
 with fresh-baseline smoke tests; the causal baseline smoke is separate.
 The optional shadow worker has an explicit zero-evaluation/expiry test.
+
+## First-round deployment warning
+
+This commit group has not been run against AIOS1. Its new V4 source-coordinate
+columns intentionally make older V4 receipts without matching coordinates
+ineligible until `semantic_integrity.validate_claim()` revalidates them. On
+the planned database reset all newly generated receipts use the stricter writer.
+Do not operate a mixed older writer with the new migration. Full PostgreSQL
+integration remains a release gate before the destructive reset.
