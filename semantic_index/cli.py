@@ -12,6 +12,8 @@ from typing import Any
 from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
+from aios_app.topic_atlas.collector import collect_topics_once
+from aios_app.topic_atlas.projection import index_topics_once, project_topics_once
 from .config import SemanticIndexConfig
 from .service import (
     index_source_sections_once, index_corpus_sections_once, index_semantic_frames_once,
@@ -64,6 +66,8 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
         "cluster_classified_per_s": round(totals["classified"] / elapsed, 2),
         "reconciled_per_s": round(totals["reconciled"] / elapsed, 2),
         "validated_per_s": round(totals.get("validated", 0) / elapsed, 2),
+        "topics_collected_per_s": round(totals.get("topics_collected", 0) / elapsed, 2),
+        "topics_indexed_per_s": round(totals.get("topics_indexed", 0) / elapsed, 2),
     }
 
 
@@ -146,9 +150,11 @@ async def _run_vector_stages(db, cfg, run_stage) -> dict[str, int]:
     corpus = 0
     if max(propositions, frames, epistemic) < cfg.batch_size:
         corpus = await run_stage("vector-corpus", index_corpus_sections_once, db, background_cfg)
+    topics = await run_stage("vector-topics", index_topics_once, db, cfg,
+                             limit=cfg.background_batch_size)
     return {"propositions_indexed": propositions, "frames_indexed": frames,
             "epistemic_indexed": epistemic, "source_indexed": source + corpus,
-            "admitted": admitted, "admission_bypassed": bypassed}
+            "topics_indexed": topics, "admitted": admitted, "admission_bypassed": bypassed}
 
 
 async def run_forever(poll_seconds: float = 1.0) -> None:
@@ -164,12 +170,14 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         window_started = time.monotonic()
         totals = {key: 0 for key in (
             "source_indexed", "frames_indexed", "propositions_indexed", "epistemic_indexed",
-            "admitted", "admission_bypassed", "structured", "neighbor_classified",
+            "admitted", "admission_bypassed", "topics_collected", "topics_indexed",
+            "structured", "neighbor_classified",
             "clustered", "classified", "reconciled", "validated")}
         last_batches = {}
         backlog = {}
         failed = []
         last_backlog_snapshot = 0.0
+        last_topic_scan = 0.0
 
         async def run_stage(stage, func, *args, **kwargs):
             _emit_telemetry(_semantic_snapshot(
@@ -194,6 +202,13 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
 
         while True:
             failed.clear()
+            if time.monotonic() - last_topic_scan >= 10.0:
+                # Topic mentions are advisory and run behind the critical vector
+                # stages on a bounded cadence, not on HUD's hot path.
+                found = await run_stage("topic-discovery", collect_topics_once, db,
+                                        limit=cfg.background_batch_size)
+                totals["topics_collected"] = sum(found.values()) if isinstance(found,dict) else 0
+                last_topic_scan = time.monotonic()
             totals.update(await _run_vector_stages(db, cfg, run_stage))
             last_batches = dict(totals)
             if time.monotonic() - last_backlog_snapshot >= 10:
@@ -268,6 +283,9 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
             # verified decisions and RDF deltas from progressing.
             effective_cfg = replace(cfg,**batch_sizes)
             work = await _run_topology_stages(db, fuseki, effective_cfg, run_stage)
+            work["topics_projected"] = await run_stage(
+                "rdf-topics", project_topics_once, db, fuseki,
+                limit=effective_cfg.background_batch_size)
             await run_stage("topology-quarantine", quarantine_ineligible_vectors_once,
                             db, replace(effective_cfg, batch_size=effective_cfg.background_batch_size))
             _emit_telemetry({"service": "semantic_topology",
