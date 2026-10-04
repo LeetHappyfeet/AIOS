@@ -72,7 +72,9 @@ class CognitiveOperationEngine:
                 dossier=await service.start(
                     instance_id=op["instance_id"],question=query,
                     origin="goal" if payload.get("goal_id") else "cognition",
-                    goal_id=UUID(str(payload["goal_id"])) if payload.get("goal_id") else None)
+                    goal_id=UUID(str(payload["goal_id"])) if payload.get("goal_id") else None,
+                    requirement_id=UUID(str(payload["requirement_id"]))
+                    if payload.get("requirement_id") else None)
                 result=await service.advance(
                     instance_id=op["instance_id"],dossier_id=UUID(dossier["dossier_id"]),
                     request_id=op["operation_id"],include_fanwork=False)
@@ -80,7 +82,9 @@ class CognitiveOperationEngine:
                 # belongs to source/exposure and is available only via authorized
                 # corpus research, not copied into long-running goal state.
                 result.pop("references",None)
-                await self._finish(op,{"kind":"research_dossier",**result})
+                await self._finish(op,{"kind":"research_dossier",
+                                       "requirement_id":payload.get("requirement_id"),
+                                       "goal_id":payload.get("goal_id"),**result})
             elif kind=="research.study":
                 from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
                 payload=self._mapping(op["input"])
