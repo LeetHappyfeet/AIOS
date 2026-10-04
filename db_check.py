@@ -148,6 +148,51 @@ async def check_database() -> int:
             return 7
         print("OK: reconciliation policies 16/16")
 
+        # A schema can have all its tables while executing the wrong resolver.
+        # Verify the integration migration, mandatory default policy, and the
+        # actual SQL wrapper selected by serialized reconciliation at startup.
+        integrated_receipt = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM aios.schema_migration WHERE migration_name=$1)",
+            "20261003_10_integrated_belief_policy_and_integrity.sql",
+        )
+        context_receipt = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM aios.schema_migration WHERE migration_name=$1)",
+            "20261003_11_integrity_context_invalidation.sql",
+        )
+        if not integrated_receipt or not context_receipt:
+            print("FAIL: integrated belief/source integrity migrations missing.")
+            print("Run: python -m aios_app.migrate")
+            return 10
+        try:
+            await conn.execute("SELECT aios.assert_belief_policy_configuration()")
+        except Exception as exc:
+            print(f"FAIL: belief policy runtime contract: {exc}")
+            return 11
+        resolver_body = await conn.fetchval(
+            """SELECT pg_get_functiondef(
+                to_regprocedure('aios.reconcile_character_belief_atom(uuid,uuid)'))"""
+        )
+        if not resolver_body or (
+            "reconcile_character_belief_atom_authority_v3" not in resolver_body
+            or "apply_character_belief_policy" not in resolver_body
+        ):
+            print("FAIL: serialized belief resolver is not authority+family integrated.")
+            return 12
+        gates = await conn.fetchval(
+            """SELECT count(*) FROM pg_proc p
+               JOIN pg_namespace n ON n.oid=p.pronamespace
+               WHERE n.nspname='aios' AND p.proname IN (
+                 'semantic_integrity_claim_current',
+                 'semantic_occurrence_topology_eligible',
+                 'semantic_acquisition_source_eligible'
+               )"""
+        )
+        if gates != 3:
+            print(f"FAIL: missing authoritative integrity/source gates ({gates}/3).")
+            return 13
+        print("OK: default belief policy and effective authority+family resolver")
+        print("OK: shared source-integrity eligibility contract")
+
         hud_receipt = await conn.fetchval(
             """
             SELECT EXISTS (
