@@ -19,6 +19,12 @@ PAYLOAD_INDEXES = {
     "timeline_id": qm.PayloadSchemaType.KEYWORD,
     "source_type": qm.PayloadSchemaType.KEYWORD,
     "source_domain": qm.PayloadSchemaType.KEYWORD,
+    "topic_id": qm.PayloadSchemaType.KEYWORD,
+    "topic_kind": qm.PayloadSchemaType.KEYWORD,
+    "namespace": qm.PayloadSchemaType.KEYWORD,
+    "visibility": qm.PayloadSchemaType.KEYWORD,
+    "owner_character_id": qm.PayloadSchemaType.KEYWORD,
+    "topic_status": qm.PayloadSchemaType.KEYWORD,
     "epistemic_status": qm.PayloadSchemaType.KEYWORD,
     "created_at": qm.PayloadSchemaType.DATETIME,
 }
