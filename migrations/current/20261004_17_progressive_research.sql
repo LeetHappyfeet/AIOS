@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS aios.character_research_source (
     dossier_id uuid NOT NULL REFERENCES aios.character_research_dossier(dossier_id) ON DELETE CASCADE,
     section_id uuid NOT NULL REFERENCES aios.corpus_section(section_id) ON DELETE CASCADE,
     document_id uuid NOT NULL REFERENCES aios.corpus_document(document_id) ON DELETE CASCADE,
+    source_text_digest text NOT NULL,
     first_research_id uuid REFERENCES aios.character_research_event(research_id) ON DELETE SET NULL,
     last_research_id uuid REFERENCES aios.character_research_event(research_id) ON DELETE SET NULL,
     best_score double precision NOT NULL DEFAULT 0,
