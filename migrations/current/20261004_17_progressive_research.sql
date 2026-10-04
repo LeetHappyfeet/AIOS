@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS aios.character_research_selection (
     request_id uuid NOT NULL,
     status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','submitted','failed')),
     requested_at timestamptz NOT NULL DEFAULT now(),
+    lease_expires_at timestamptz NOT NULL DEFAULT (now()+interval '2 minutes'),
     completed_at timestamptz,
     result jsonb NOT NULL DEFAULT '{}'::jsonb,
     UNIQUE(dossier_id,request_id)
@@ -98,6 +99,13 @@ CREATE TABLE IF NOT EXISTS aios.character_research_materialization (
 );
 CREATE INDEX IF NOT EXISTS idx_research_materialization_selection
     ON aios.character_research_materialization(selection_id);
+
+-- Stable dedupe key ensures recovery cannot emit the same corpus section twice
+-- when observation persisted but dossier receipt update was interrupted.
+ALTER TABLE aios.source_consumption ADD COLUMN IF NOT EXISTS research_dedupe_key text;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_consumption_research_dedupe
+    ON aios.source_consumption(instance_id,research_dedupe_key)
+    WHERE research_dedupe_key IS NOT NULL;
 
 COMMENT ON TABLE aios.character_research_dossier IS
 'Character-specific bounded research state. Not a shared world fact, belief or ontology.';
