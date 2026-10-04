@@ -179,6 +179,12 @@ async def check_database() -> int:
             print("FAIL: participation shadow readiness migration missing.")
             print("Run: python -m aios_app.migrate")
             return 16
+        heartbeat_relation = await conn.fetchval(
+            "SELECT to_regclass('aios.character_participation_worker_heartbeat') IS NOT NULL"
+        )
+        if not heartbeat_relation:
+            print("FAIL: participation shadow evaluator heartbeat relation is absent.")
+            return 17
         try:
             await conn.execute("SELECT aios.assert_belief_policy_configuration()")
         except Exception as exc:
