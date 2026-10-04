@@ -1,5 +1,7 @@
 # AIOS Knowledge Atlas — Stage 3: Progressive Research V1
 
+See [Knowledge Atlas Stabilization V1](knowledge_atlas_stabilization_v1.md) for the source-node research-tool bridge, topic candidate hygiene and updated HUD boundary.
+
 Stage 3 adds *persistent, character-scoped inquiry*, bounded continuation, and
 deliberate source rematerialization on top of the Stage 1 Topic Atlas and
 Stage 2 ACL-checked hybrid corpus discovery.
