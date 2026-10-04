@@ -241,9 +241,11 @@ class ParsedCandidate:
     match_span: tuple[int, int] | None = None
 
 
-def _runtime_versions() -> dict[str, str]:
-    from aios_app.epistemic.runtime_versions import component_versions
-    return component_versions()
+async def _effective_runtime_versions(db) -> dict:
+    from aios_app.epistemic.runtime_versions import capture_runtime_manifest
+    return await capture_runtime_manifest(
+        db, receipt_versions={"message_cognition": INTERPRETER_VERSION},
+    )
 
 
 def _sentences(text: str) -> list[str]:
@@ -805,7 +807,7 @@ async def _commit_message_cognition_locked(
         "candidate_rejections": candidate_diagnostics,
         "candidate_rejection_count": len(candidate_diagnostics),
         "candidate_audit_complete": len(candidate_diagnostics) < 32,
-        "runtime_versions": _runtime_versions(),
+        "runtime_versions": await _effective_runtime_versions(con),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
         "historical_catchup": not bool(live_head),
