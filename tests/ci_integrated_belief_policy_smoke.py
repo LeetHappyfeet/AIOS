@@ -24,6 +24,7 @@ SELECTED_MIGRATIONS = [
     "20261003_08_semantic_hygiene_reconciliation.sql",
     "20261003_09_semantic_hygiene_revision_review.sql",
     "20261003_10_integrated_belief_policy_and_integrity.sql",
+    "20261003_11_integrity_context_invalidation.sql",
 ]
 
 
@@ -66,6 +67,18 @@ async def main() -> None:
             "SELECT aios.semantic_occurrence_topology_eligible($1,$2)",
             UUID(int=901), UUID(int=902),
         ) is False
+
+        # Paragraph and non-resolved frame mutations are active invalidations.
+        for trigger in (
+            "trg_refresh_admission_from_integrity_receipt",
+            "trg_refresh_admission_integrity_section_edit",
+            "trg_refresh_admission_integrity_frame_mutation",
+            "trg_zzz_current_integrity_admission",
+        ):
+            assert await con.fetchval(
+                "SELECT count(*) FROM pg_trigger WHERE tgname=$1 AND NOT tgisinternal",
+                trigger,
+            ) == 1, trigger
 
         # Misconfigured defaults are now an error, never 100%-unresolved output.
         await con.execute("DELETE FROM aios.belief_reconciliation_policy WHERE policy_key='default'")
