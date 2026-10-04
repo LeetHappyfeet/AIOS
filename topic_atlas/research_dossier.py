@@ -26,6 +26,18 @@ def focus_key(question: str, topic_id: UUID | None = None) -> str:
     return hashlib.sha256(f"{topic_id or ''}\x1f{normal}".encode("utf-8")).hexdigest()
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value,dict):
+        return dict(value)
+    if isinstance(value,str):
+        try:
+            result=json.loads(value)
+            return result if isinstance(result,dict) else {}
+        except ValueError:
+            return {}
+    return {}
+
+
 def _serial(row: Any) -> dict[str, Any]:
     if not row:
         return {}
@@ -327,20 +339,27 @@ class ProgressiveResearchService:
                                 continue
                             known.add(hit.section_id)
                             new_count+=1
+                        source_digest=await con.fetchval(
+                            """SELECT md5(cs.content) FROM aios.corpus_section cs
+                               WHERE cs.section_id=$1 AND cs.document_id=$2""",
+                            hit.section_id,hit.document_id)
+                        if not source_digest:
+                            continue  # Deleted/modified source is not eligible for study.
                         accepted_sections.append(hit.section_id)
                         await con.execute(
                             """INSERT INTO aios.character_research_source
-                               (dossier_id,section_id,document_id,first_research_id,
-                                last_research_id,best_score,retrieval_methods)
-                               VALUES($1,$2,$3,$4,$4,$5,$6::text[])
+                               (dossier_id,section_id,document_id,source_text_digest,
+                                first_research_id,last_research_id,best_score,retrieval_methods)
+                               VALUES($1,$2,$3,$4,$5,$5,$6,$7::text[])
                                ON CONFLICT(dossier_id,section_id) DO UPDATE
                                SET last_research_id=EXCLUDED.last_research_id,
+                                   source_text_digest=EXCLUDED.source_text_digest,
                                    best_score=GREATEST(aios.character_research_source.best_score,
                                                        EXCLUDED.best_score),
                                    retrieval_methods=EXCLUDED.retrieval_methods,
                                    last_seen_at=now()""",
-                            dossier_id,hit.section_id,hit.document_id,result.research_id,
-                            hit.score,list(hit.retrieval_methods))
+                            dossier_id,hit.section_id,hit.document_id,source_digest,
+                            result.research_id,hit.score,list(hit.retrieval_methods))
                     await con.execute(
                         """UPDATE aios.character_research_step
                            SET status='completed',research_id=$2,source_count=$3,
@@ -445,14 +464,17 @@ class ProgressiveResearchService:
                     dossier_id,request_id)
                 if previous and previous["status"]!="pending":
                     return {"status":previous["status"],"selection_id":str(previous["selection_id"]),
-                            "result":dict(previous["result"])}
+                            "result":_json_object(previous["result"])}
                 if previous and previous["lease_expires_at"] > await con.fetchval("SELECT now()"):
                     return {"status":"pending","selection_id":str(previous["selection_id"])}
                 if dossier["status"]!="open":
                     raise ValueError("study requires an open dossier")
                 source_rows=await con.fetch(
-                    """SELECT s.section_id,s.status,s.last_research_id
+                    """SELECT s.section_id,s.status,s.last_research_id,s.source_text_digest
                        FROM aios.character_research_source s
+                       JOIN aios.corpus_section current_section
+                         ON current_section.section_id=s.section_id
+                        AND md5(current_section.content)=s.source_text_digest
                        JOIN aios.character_corpus_exposure e
                          ON e.research_id=s.last_research_id AND e.section_id=s.section_id
                        JOIN aios.character_research_event r
@@ -500,7 +522,9 @@ class ProgressiveResearchService:
             # normal source observations with stable IDs on recovery/retry.
             consumed=await self.researcher.acquire(
                 instance_id=instance_id,section_ids=sections,mode="research",
-                dedupe_key_prefix=f"research-dossier:{dossier_id}")
+                dedupe_key_prefix=f"research-dossier:{dossier_id}",
+                expected_content_digests={
+                    row["section_id"]:row["source_text_digest"] for row in source_rows})
             ids=list(consumed["consumption_ids"])
             if len(ids)!=len(sections):
                 raise RuntimeError("missing source-consumption receipt")
