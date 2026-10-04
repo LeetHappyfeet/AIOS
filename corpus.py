@@ -264,8 +264,13 @@ async def consume_corpus_sections(
     instance_id: UUID,
     section_ids: Iterable[UUID],
     mode: str = "read",
+    dedupe_key_prefix: str | None = None,
 ) -> dict:
     """Cross selected cold sections into normal ingestion for one character only."""
+    if dedupe_key_prefix is not None and (mode != "research" or
+            not dedupe_key_prefix.startswith("research-dossier:") or
+            len(dedupe_key_prefix) > 150):
+        raise ValueError("dossier deduplication is reserved for bounded research")
     if mode not in {"read", "research", "taught", "import"}:
         raise ValueError(f"unsupported consumption mode {mode!r}")
 
@@ -295,10 +300,14 @@ async def consume_corpus_sections(
         receipt = await db.execute_returning_row(
             """
             INSERT INTO aios.source_consumption (
-                instance_id, document_id, section_id, mode, status, meta
+                instance_id, document_id, section_id, mode, status, meta,
+                research_dedupe_key
             )
-            VALUES ($1,$2,$3,$4,'pending',$5::jsonb)
-            RETURNING consumption_id, ingest_event_id, status
+            VALUES ($1,$2,$3,$4,'pending',$5::jsonb,$6)
+            ON CONFLICT (instance_id,research_dedupe_key)
+                WHERE research_dedupe_key IS NOT NULL
+            DO UPDATE SET requested_at=aios.source_consumption.requested_at
+            RETURNING consumption_id, ingest_event_id, status, section_id, document_id, mode
             """,
             instance_id, row["document_id"], section_id, mode,
             json.dumps({
@@ -307,11 +316,23 @@ async def consume_corpus_sections(
                 "epistemic_namespace": row["epistemic_namespace"],
                 "identity_binding": row["identity_binding"],
             }),
+            f"{dedupe_key_prefix}:{section_id}" if dedupe_key_prefix else None,
         )
+        if (receipt["section_id"] != section_id or
+                receipt["document_id"] != row["document_id"] or
+                receipt["mode"] != mode):
+            raise RuntimeError("research consumption dedupe key collision")
         if receipt["ingest_event_id"] is not None and receipt["status"] == "ingested":
             consumed.append(receipt["consumption_id"])
             continue
 
+        # Retrying an acknowledged failure reuses the same deterministic
+        # observation event key, never creates another source-consumption row.
+        if receipt["status"] == "failed":
+            await db.execute(
+                """UPDATE aios.source_consumption SET status='pending',error=NULL
+                   WHERE consumption_id=$1 AND status='failed'""",
+                receipt["consumption_id"])
         try:
             result = await persist_external_observation(
                 db,
