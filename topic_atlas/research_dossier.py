@@ -416,7 +416,10 @@ class ProgressiveResearchService:
                                VALUES($1,$2,$3,$4,$5,$5,$6,$7::text[])
                                ON CONFLICT(dossier_id,section_id) DO UPDATE
                                SET last_research_id=EXCLUDED.last_research_id,
-                                   source_text_digest=EXCLUDED.source_text_digest,
+                                   source_text_digest=CASE
+                                     WHEN aios.character_research_source.status='submitted'
+                                     THEN aios.character_research_source.source_text_digest
+                                     ELSE EXCLUDED.source_text_digest END,
                                    best_score=GREATEST(aios.character_research_source.best_score,
                                                        EXCLUDED.best_score),
                                    retrieval_methods=EXCLUDED.retrieval_methods,
