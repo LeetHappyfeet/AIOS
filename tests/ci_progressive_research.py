@@ -104,6 +104,11 @@ async def main():
         base=CharacterResearchService(db)
         base.searcher.semantic=Candidates([private_section,public_section])
         svc=ProgressiveResearchService(db,researcher=base)
+        # Real RDF traversal is separately contract-tested; leave external
+        # Fuseki service out of this disposable PostgreSQL smoke.
+        async def no_rdf_neighbors(*args,**kwargs):
+            return ()
+        svc._rdf_neighbors=no_rdf_neighbors
         opened=await svc.start(instance_id=instance["instance_id"],
                                question="s3renamon",max_cycles=2,
                                max_sections=4,max_materializations=1)
