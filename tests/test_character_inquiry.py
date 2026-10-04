@@ -178,3 +178,13 @@ def test_goal_inquiry_fingerprint_is_separate_and_cannot_leak_into_source_repair
     assert linked.fingerprint != demand().fingerprint
     with pytest.raises(ValueError, match="cannot be a goal inquiry"):
         demand(goal_id=goal, evidence_scope="source_local")
+
+
+def test_goal_research_progression_does_not_spin_on_partial_or_access_denied():
+    from aios_app.agent.opportunities import goal_research_operation
+    assert goal_research_operation("memory", None) == "inquiry.resolve"
+    assert goal_research_operation("memory", "unresolved") == "research.advance"
+    assert goal_research_operation("corpus", "unresolved", "no_access") is None
+    assert goal_research_operation("memory", "partial") is None
+    assert goal_research_operation("memory", "planning") is None
+    assert goal_research_operation("none", "unresolved") is None

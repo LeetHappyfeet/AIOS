@@ -113,6 +113,33 @@ async def main():
                                question="s3renamon",max_cycles=2,
                                max_sections=4,max_materializations=1)
         dossier_id=UUID(opened["dossier_id"])
+        goal=await db.fetchrow(
+            """INSERT INTO aios.character_agent_goal(instance_id,goal_text)
+               VALUES($1,'Investigate digital ecology') RETURNING goal_id""",
+            instance["instance_id"])
+        linked=await svc.start(instance_id=instance["instance_id"],
+                               question="s3renamon goal inquiry",origin="goal",
+                               goal_id=goal["goal_id"],max_cycles=2)
+        linked_id=UUID(linked["dossier_id"])
+        assert linked["linked_goal_id"]==str(goal["goal_id"])
+        assert await db.fetchval(
+            """SELECT count(*) FROM aios.character_goal_research_link
+               WHERE instance_id=$1 AND goal_id=$2 AND dossier_id=$3""",
+            instance["instance_id"],goal["goal_id"],linked_id)==1
+        repeated=await svc.start(instance_id=instance["instance_id"],
+                                 question="S3RENAMON GOAL INQUIRY",origin="goal",
+                                 goal_id=goal["goal_id"],max_cycles=2)
+        assert UUID(repeated["dossier_id"])==linked_id
+        try:
+            await svc.start(instance_id=other["instance_id"],
+                            question="foreign goal inquiry",origin="goal",
+                            goal_id=goal["goal_id"])
+            raise AssertionError("foreign instance goal research must be denied")
+        except PermissionError:
+            pass
+        linked_inspection=await svc.inspect(instance_id=instance["instance_id"],
+                                            dossier_id=linked_id)
+        assert linked_inspection["linked_goal_ids"]==[str(goal["goal_id"])]
         assert UUID((await svc.start(instance_id=instance["instance_id"],
                                 question=" S3RENAMON ",max_cycles=2))["dossier_id"])==dossier_id
         try:

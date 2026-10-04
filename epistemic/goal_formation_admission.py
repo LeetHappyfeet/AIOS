@@ -13,7 +13,7 @@ from typing import Any
 
 
 _NOISE = frozenset({
-    "renamon", "character", "intends", "intend", "wants", "want", "needs",
+    "character", "intends", "intend", "wants", "want", "needs",
     "need", "plans", "plan", "will", "going", "goal", "objective", "that",
     "this", "them", "their", "they", "with", "have", "from", "into",
     "about", "some", "would", "should", "could", "might", "the", "and",

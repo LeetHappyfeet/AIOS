@@ -17,6 +17,18 @@ from aios_app.agent.cognitive_subjects import (
     GoalSubjectProjector, GoalKnowledgeDemandResolver,
 )
 
+def goal_research_operation(next_source: str, last_status: str | None,
+                            last_reason: str = "") -> str | None:
+    """Budgeted one-step progression, never a goal-completion decision."""
+    if next_source not in {"memory", "corpus"}:
+        return None
+    if last_status in {"queued", "planning", "partial", "resolved", "conflicting"}:
+        return None
+    if last_reason == "no_access":
+        return None  # Access can be re-evaluated when source/ACL state changes.
+    return "research.advance" if last_status == "unresolved" else "inquiry.resolve"
+
+
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
 
@@ -113,14 +125,16 @@ class CognitiveOpportunityService:
         goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
         active_goal_ids=[g.goal_id for g in goals if g.goal_id]
         goal_inquiry_rows = (await self.db.fetch(
-            """SELECT DISTINCT ON (goal_id) goal_id,status
+            """SELECT DISTINCT ON (goal_id) goal_id,status,result->>'reason' AS reason
                FROM aios.character_inquiry
                WHERE instance_id=$1 AND goal_id=ANY($2::uuid[])
                  AND evidence_scope='character_accessible'
                ORDER BY goal_id,updated_at DESC,inquiry_id DESC""",
             instance_id,active_goal_ids,
         )) if active_goal_ids else []
-        latest_goal_inquiry={row["goal_id"]:str(row["status"]) for row in goal_inquiry_rows}
+        latest_goal_inquiry={
+            row["goal_id"]:(str(row["status"]),str(row["reason"] or ""))
+            for row in goal_inquiry_rows}
         for goal in goals:
             if not goal.goal_id:
                 continue
@@ -130,14 +144,15 @@ class CognitiveOpportunityService:
             demand=await self.goal_demand.resolve(
                 instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge))
             goal_subject_demands[goal.goal_id]=(goal_subject,demand)
-            if demand["next_source"] in {"corpus","memory"}:
+            last_status,last_reason=latest_goal_inquiry.get(goal.goal_id,(None,""))
+            research_op=goal_research_operation(
+                demand["next_source"],last_status,last_reason)
+            if research_op:
                 gap=max(0.0,1.0-float(demand["internal_coverage"]))
-                # A previously unsuccessful local inquiry can progress to one
-                # bounded dossier cycle. Never equate a graph hit to knowledge.
-                needs_dossier=latest_goal_inquiry.get(goal.goal_id)=="unresolved"
+                needs_dossier=research_op=="research.advance"
                 proposals.append(self._p(
                     "knowledge_gap",f"Find knowledge needed for my goal: {goal.text}",
-                    "research.advance" if needs_dossier else "inquiry.resolve",
+                    research_op,
                     {"query":demand["query"],"allow_model":False if needs_dossier else gap >= .75,
                      "focus":goal_subject.retrieval_text,
                      "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id)},
@@ -146,7 +161,7 @@ class CognitiveOpportunityService:
                     evidence=[{"kind":"goal_knowledge_demand","goal_id":str(goal.goal_id),
                                "internal_coverage":demand["internal_coverage"],
                                "coverage_source":demand["coverage_source"],
-                               "prior_inquiry_status":latest_goal_inquiry.get(goal.goal_id)}],
+                               "prior_inquiry_status":last_status}],
                     key=f"goal-research:{goal.goal_id}",
                     subject_id=goal_subject.subject_id))
 

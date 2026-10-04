@@ -74,6 +74,19 @@ class CharacterInquiryService:
                     evidence = alternative
                     break
         data = evidence.as_dict()
+        if demand.evidence_scope == "source_local":
+            # A bounded ancestry excerpt may clarify the source, but does not
+            # establish an unambiguous referent or license goal promotion.
+            anchored = bool(evidence.hits and
+                            evidence.hits[0].provenance.get("anchor_verified") and
+                            evidence.hits[0].source == "source_dag" and
+                            evidence.hits[0].evidence_id == str(demand.source_node_id))
+            data["goal_admission_review"] = {
+                "decision": "deferred",
+                "reason": ("source_anchor_available_requires_referent_verification"
+                           if anchored else "source_anchor_unverified"),
+                "admission_effect": "none",
+            }
         updated = await self.db.fetchrow(
             """UPDATE aios.character_inquiry
                   SET status=$2,result=$3::jsonb,updated_at=now()

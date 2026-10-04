@@ -63,3 +63,13 @@ FROM aios.character_goal_research_link l
 JOIN aios.character_research_dossier d ON d.dossier_id=l.dossier_id
 WHERE l.instance_id='<INSTANCE_UUID>'::uuid;
 ```
+
+
+## Source-repair authority and bounded retries
+
+Character Inquiry annotates source-local evidence with
+`goal_admission_review.decision=deferred`. Even a verified source anchor
+is not a unique referent binding. No shadow inquiry may write a managed goal.
+Goal research moves from inquiry.resolve to research.advance only after an
+unresolved goal-scoped inquiry; planning/partial/resolved/conflicting receipts
+and no_access do not cause an automatic research loop.
