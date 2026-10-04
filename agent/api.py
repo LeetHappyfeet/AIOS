@@ -111,6 +111,10 @@ def install_external_agency_routes(app, db) -> None:
             raise HTTPException(422, str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            # No shadow evaluator: fail enrollment visibly rather than
+            # accepting an experiment that can never produce comparisons.
+            raise HTTPException(503, str(exc)) from exc
 
     @app.get("/agent/instance/{instance_id}/participation/experiments/{experiment_id}")
     async def inspect_participation(instance_id: UUID, experiment_id: UUID, limit: int = 50):
