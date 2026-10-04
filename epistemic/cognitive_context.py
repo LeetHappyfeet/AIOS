@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -788,7 +789,14 @@ class CognitiveContextService:
                     knowledge=structured_knowledge,
                     current_research_id=current_research_id,
                 )
-                if corpus_result is not None and corpus_result.hits:
+                # Stage 3 keeps automatic lookup and reinforcement, but
+                # a search hit must no longer silently become a source-consumption
+                # event. Deliberate research.study is the default acquisition path.
+                # Operators can opt back into the earlier heuristic policy.
+                legacy_auto_acquire = os.getenv(
+                    "AIOS_LEGACY_AUTO_CORPUS_ACQUIRE", "0").strip().lower() in {
+                        "1","true","yes","on"}
+                if legacy_auto_acquire and corpus_result is not None and corpus_result.hits:
                     await self.corpus_learning.evaluate_and_acquire(
                         instance_id=context.instance_id,
                         research_id=corpus_result.research_id,
