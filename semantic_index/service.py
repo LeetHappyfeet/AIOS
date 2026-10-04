@@ -42,6 +42,7 @@ def initialize_backend(cfg: SemanticIndexConfig, *, warmup: bool = True) -> None
         cfg.frame_collection,
         cfg.proposition_collection,
         cfg.epistemic_collection,
+        cfg.topic_collection,
     ):
         _get_store(cfg, collection)
 
