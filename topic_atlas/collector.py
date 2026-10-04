@@ -59,7 +59,10 @@ def topic_scope(*, character_id: str | None = None,
 async def _upsert_topic(con, *, namespace: str, visibility: str, owner: str | None,
                         kind: str, label: str, identifier: str | None = None,
                         registered: bool = False):
-    canonical = normalize_label(identifier or label)
+    # Internal entity keys can be opaque while a frame's resolved name is
+    # readable. Preserve key provenance on the mention, but use a linguistic
+    # topic identity rather than embedding/deduplicating an internal hash.
+    canonical = normalize_label(identifier) or normalize_label(label)
     display = _WS.sub(" ", str(label).strip())
     if canonical is None or normalize_label(display) is None:
         return None
@@ -268,8 +271,9 @@ async def _collect_row(db, source_kind: str, row: Any) -> int:
             (row["subject_key"], row["subject_label"]),
             (row["object_key"], row["object_label"]),
         ):
-            if normalize_label(identity):
-                candidates.append(("entity", label if normalize_label(label) else identity, identity))
+            if normalize_label(label) or normalize_label(identity):
+                candidates.append(("entity", label if normalize_label(label) else identity,
+                                   identity if normalize_label(identity) else None))
     else:
         if normalize_label(row.get("label")):
             candidates.append((row["topic_kind"], row["label"], row["identifier"]))
