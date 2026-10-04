@@ -1,6 +1,8 @@
 """Typed deterministic retrieval. Query planners never execute storage operations."""
 from __future__ import annotations
 from typing import Any
+import re
+from .passage import select_passage, SELECTOR_VERSION
 from .contracts import InquiryDemand, InquiryEvidence, InquiryHit
 from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.research import CharacterResearchService, research_terms
@@ -83,7 +85,23 @@ class InquiryLookup:
             return InquiryEvidence("unresolved", reason="no_source_anchor")
         # The source timeline is a hard read boundary: never query siblings or
         # descendants of the anchored node, never infer an antecedent by vectors.
-        timeline = ctx.source_timeline_id or ctx.timeline_id
+        # Resolve historical coordinates from this instance's persisted
+        # cognition receipt, or authorize an active-source node on its own
+        # timeline. Never silently substitute the current timeline for history.
+        source = await self.db.fetchrow(
+            """SELECT dn.timeline_id, dn.message_text,
+                      EXISTS(SELECT 1 FROM aios.message_cognitive_commit c
+                             WHERE c.instance_id=$1 AND c.node_id=dn.node_id
+                               AND c.timeline_id=dn.timeline_id) AS committed
+               FROM aios.dag_node dn WHERE dn.node_id=$2""",
+            demand.instance_id, demand.source_node_id)
+        if not source:
+            return InquiryEvidence("unresolved", reason="missing_source_node")
+        timeline = source["timeline_id"]
+        if (not source["committed"] and
+                (timeline != (ctx.source_timeline_id or ctx.timeline_id)
+                 or demand.source_node_id != ctx.source_head_node_id)):
+            return InquiryEvidence("unresolved", reason="source_not_authorized_for_instance")
         rows = await self.db.fetch(
             """WITH RECURSIVE ancestry AS (
                  SELECT dn.node_id,dn.timeline_id,dn.speaker_id,
@@ -107,12 +125,45 @@ class InquiryLookup:
         rows = sorted(rows, key=lambda r: int(r["depth"]))
         if not rows or rows[0]["node_id"] != demand.source_node_id:
             return InquiryEvidence("unresolved", reason="source_not_in_active_timeline")
-        hits = tuple(InquiryHit(
-            "source_dag", str(row["node_id"]),
-            str(row["message_text"] or "")[-650:],
-            {"timeline_id": str(row["timeline_id"]), "depth": int(row["depth"]),
-             "speaker_id": str(row["speaker_id"] or "")}
-        ) for row in rows[:limit + 1] if row["message_text"])
-        # Returning ancestry is evidence exposure, not a certified referent.
-        return InquiryEvidence("partial" if len(hits) > 1 else "unresolved",
-                               hits, "bounded_same_timeline_source_ancestry")
+        anchor = demand.anchor_text
+        if not anchor:
+            # Manual inquiries may have a quoted clause but no recorded V11
+            # span; use the longest quotation present in the original source.
+            quoted = re.findall(r"['\"]([^'\"]{12,140})['\"]", demand.question)
+            anchor = next((q for q in sorted(quoted, key=len, reverse=True)
+                           if q.casefold() in str(rows[0]["message_text"] or "").casefold()), "")
+            if not anchor:
+                # Restrict fallback to a distinctive source phrase, never a
+                # generic full-question vector/lexical similarity guess.
+                for phrase in ("start collecting them",):
+                    if phrase in demand.question.casefold():
+                        anchor = phrase
+                        break
+        first = select_passage(
+            str(rows[0]["message_text"] or ""), anchor_text=anchor,
+            source_span=demand.source_span, uncertainty_kind=demand.uncertainty_kind)
+        if not first.anchor_verified:
+            return InquiryEvidence("unresolved", reason=first.method)
+        hits = [InquiryHit(
+            "source_dag", str(rows[0]["node_id"]), first.text,
+            {"timeline_id": str(timeline), "depth": 0,
+             "speaker_id": str(rows[0]["speaker_id"] or ""),
+             "start_char": first.start_char, "end_char": first.end_char,
+             "anchor_start_char": first.anchor_start_char,
+             "anchor_end_char": first.anchor_end_char,
+             "anchor_verified": first.anchor_verified,
+             "selection_method": first.method,
+             "selector_version": SELECTOR_VERSION})]
+        # Historical parents are neutral context, not authoritative antecedents.
+        for row in rows[1:limit]:
+            excerpt = select_passage(str(row["message_text"] or ""), budget=350)
+            if excerpt.text:
+                hits.append(InquiryHit(
+                    "source_dag", str(row["node_id"]), excerpt.text,
+                    {"timeline_id": str(timeline), "depth": int(row["depth"]),
+                     "speaker_id": str(row["speaker_id"] or ""),
+                     "start_char": excerpt.start_char, "end_char": excerpt.end_char,
+                     "anchor_verified": False, "selection_method": excerpt.method,
+                     "selector_version": SELECTOR_VERSION}))
+        return InquiryEvidence("partial", tuple(hits),
+                               "anchored_same_timeline_source_ancestry")

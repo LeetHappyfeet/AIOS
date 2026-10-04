@@ -8,6 +8,7 @@ from aios_app.epistemic.inquiry.trigger import demand_from_v11_rejection, should
 from aios_app.epistemic.inquiry.planner import (
     build_query_hud, validate_query_payload)
 from aios_app.epistemic.inquiry.lookup import InquiryLookup
+from aios_app.epistemic.inquiry.passage import select_passage
 
 INSTANCE = UUID("00000000-0000-0000-0000-000000000001")
 NODE = UUID("00000000-0000-0000-0000-000000000002")
@@ -86,7 +87,7 @@ def test_query_hud_is_micro_and_read_only():
 async def test_source_lookup_refuses_non_source_backend(monkeypatch):
     from aios_app.epistemic.inquiry import lookup as module
     async def context(self, instance_id):
-        return SimpleNamespace(timeline_id=TIMELINE,source_timeline_id=TIMELINE)
+        return SimpleNamespace(timeline_id=TIMELINE,source_timeline_id=TIMELINE,source_head_node_id=NODE)
     monkeypatch.setattr(module.HUDContextResolver, "resolve", context)
     class DB:
         async def fetch(self, *a):
@@ -101,9 +102,12 @@ async def test_source_lookup_refuses_non_source_backend(monkeypatch):
 async def test_source_ancestry_keeps_timeline_and_no_admission(monkeypatch):
     from aios_app.epistemic.inquiry import lookup as module
     async def context(self, instance_id):
-        return SimpleNamespace(timeline_id=TIMELINE,source_timeline_id=TIMELINE)
+        return SimpleNamespace(timeline_id=TIMELINE,source_timeline_id=TIMELINE,source_head_node_id=NODE)
     monkeypatch.setattr(module.HUDContextResolver, "resolve", context)
     class DB:
+        async def fetchrow(self, sql, instance_id, node_id):
+            assert instance_id == INSTANCE and node_id == NODE
+            return dict(timeline_id=TIMELINE, message_text="I'll collect them.", committed=True)
         async def fetch(self, sql, source_node, timeline):
             assert source_node == NODE and timeline == TIMELINE
             assert "parent_node_id" in sql and "a.depth < 3" in sql
@@ -113,8 +117,54 @@ async def test_source_ancestry_keeps_timeline_and_no_admission(monkeypatch):
                 dict(node_id=INSTANCE,timeline_id=TIMELINE,speaker_id="User",
                      speaker_role="user",message_text="Those old postcards.",depth=1)]
     result = await InquiryLookup(DB()).search(
-        demand(evidence_scope="source_local", uncertainty_kind="unresolved_reference"))
+        demand(evidence_scope="source_local", uncertainty_kind="unresolved_reference",
+               anchor_text="I\'ll collect them."))
     assert result.status == "partial"
     assert len(result.hits) == 2
     assert not any(hit.durable_knowledge for hit in result.hits)
     assert result.hits[1].provenance["depth"] == 1
+
+
+def test_middle_source_anchor_retained_with_antecedent():
+    source = ("Earlier unrelated scene. " * 60 +
+              'You told your father I am a business associate. '
+              "That's the second name you have given me tonight. "
+              "I'm going to start collecting them." +
+              " Subsequent unrelated content." * 60)
+    selected = select_passage(source, anchor_text="start collecting them")
+    assert selected.anchor_verified
+    assert "second name" in selected.text
+    assert "start collecting them" in selected.text
+    assert selected.text == source[selected.start_char:selected.end_char]
+    assert len(selected.text) <= 650
+
+
+def test_start_end_and_duplicate_anchor_cases():
+    assert select_passage("Collect them. " + "x" * 1800,
+                          anchor_text="Collect them").anchor_verified
+    assert select_passage("x" * 1800 + " Collect them.",
+                          anchor_text="Collect them").anchor_verified
+    ambiguous = select_passage("collect them and collect them",
+                               anchor_text="collect them")
+    assert ambiguous.ambiguous and not ambiguous.anchor_verified
+    assert ambiguous.text == ""
+
+
+def test_verified_span_and_serialization_keep_anchor():
+    from aios_app.epistemic.inquiry.contracts import InquiryHit
+    source = "intro " * 200 + "second name: collect them" + " outro" * 200
+    lo = source.index("collect them")
+    result = select_passage(source, anchor_text="collect them",
+                            source_span=(lo, lo + len("collect them")))
+    hit = InquiryHit("source_dag", str(NODE), result.text,
+                     {"anchor_verified": True,
+                      "anchor_start_char": result.anchor_start_char,
+                      "start_char": result.start_char})
+    assert "collect them" in hit.as_dict()["text"]
+    assert result.method == "verified_span"
+
+
+def test_demand_anchor_roundtrip():
+    original = demand(anchor_text="start collecting them", source_span=(60, 81))
+    assert InquiryDemand.from_dict(original.as_dict()) == original
+    assert original.fingerprint != demand().fingerprint

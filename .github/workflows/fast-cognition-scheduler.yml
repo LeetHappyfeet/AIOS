@@ -23,6 +23,7 @@ jobs:
             epistemic/inquiry/contracts.py \
             epistemic/inquiry/trigger.py \
             epistemic/inquiry/lookup.py \
+            epistemic/inquiry/passage.py \
             epistemic/inquiry/planner.py \
             epistemic/inquiry/service.py \
             epistemic/inquiry/shadow.py \

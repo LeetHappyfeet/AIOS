@@ -23,6 +23,7 @@ class InquiryDemand:
     policy_version: str = "character-inquiry-v1"
     source_node_id: UUID | None = None
     source_span: tuple[int, int] | None = None
+    anchor_text: str = ""
     evidence_scope: str = "character_accessible"
     priority: int = 100
 
@@ -44,7 +45,7 @@ class InquiryDemand:
     @property
     def fingerprint(self) -> str:
         data = (str(self.instance_id), str(self.source_node_id or ""),
-                self.source_span, self.origin, self.uncertainty_kind,
+                self.source_span, self.anchor_text, self.origin, self.uncertainty_kind,
                 " ".join(self.question.casefold().split()), self.evidence_scope,
                 self.evidence_revision, self.policy_version)
         return hashlib.sha256(json.dumps(data).encode()).hexdigest()
@@ -52,7 +53,7 @@ class InquiryDemand:
     def as_dict(self) -> dict[str, Any]:
         return {"instance_id": str(self.instance_id), "source_node_id": str(self.source_node_id)
                 if self.source_node_id else None, "source_span": self.source_span,
-                "origin": self.origin, "uncertainty_kind": self.uncertainty_kind,
+                "anchor_text": self.anchor_text, "origin": self.origin, "uncertainty_kind": self.uncertainty_kind,
                 "question": self.question, "evidence_scope": self.evidence_scope,
                 "evidence_revision": self.evidence_revision, "policy_version": self.policy_version,
                 "priority": self.priority}
@@ -64,6 +65,7 @@ class InquiryDemand:
                    source_node_id=UUID(str(value["source_node_id"]))
                    if value.get("source_node_id") else None,
                    source_span=tuple(span) if span is not None else None,
+                   anchor_text=str(value.get("anchor_text") or ""),
                    origin=str(value["origin"]), uncertainty_kind=str(value["uncertainty_kind"]),
                    question=str(value["question"]), evidence_scope=str(
                        value.get("evidence_scope") or "character_accessible"),
@@ -82,7 +84,7 @@ class InquiryHit:
 
     def as_dict(self) -> dict[str, Any]:
         return {"source": self.source, "evidence_id": self.evidence_id,
-                "text": self.text[:650], "provenance": self.provenance,
+                "text": self.text, "provenance": self.provenance,
                 "durable_knowledge": self.durable_knowledge}
 
 

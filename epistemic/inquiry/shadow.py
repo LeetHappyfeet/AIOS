@@ -45,6 +45,7 @@ async def scan_v11_rejections(db: Any, *, instance_id: UUID,
         demand = demand_from_v11_rejection(
             instance_id=instance_id, source_node_id=node_id, source_text=source,
             rejection_reason=str(rejected.get("reason") or ""), source_index=index,
+            source_span=(tuple(rejected["source_span"]) if rejected.get("source_span") else None),
             admission_version=str(summary.get("interpreter_version") or
                                   "goal-source-admission-v1"))
         if demand:

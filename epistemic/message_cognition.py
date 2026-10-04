@@ -781,6 +781,15 @@ async def _commit_message_cognition_locked(
         speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
         diagnostics=candidate_diagnostics,
     )
+    # Diagnostic-only original DAG offsets for source-local Inquiry. Do not
+    # change interpretation, source admission, or emitted cognition units.
+    for diagnostic in candidate_diagnostics:
+        excerpt = str(diagnostic.get("source_excerpt") or "")
+        if not excerpt:
+            continue
+        pos = text.find(excerpt)
+        if pos >= 0 and text.find(excerpt, pos + 1) < 0:
+            diagnostic["source_span"] = [pos, pos + len(excerpt)]
     ambiguous = ambiguous_cognition_sentences(
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
         speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],

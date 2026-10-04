@@ -17,6 +17,7 @@ _V11_REASONS = {
 def demand_from_v11_rejection(
     *, instance_id: UUID, source_node_id: UUID, source_text: str,
     rejection_reason: str, source_index: int, admission_version: str,
+    source_span: tuple[int, int] | None = None,
 ) -> InquiryDemand | None:
     """Only actionable, source-bound V11 diagnostics are eligible.
     
@@ -34,6 +35,7 @@ def demand_from_v11_rejection(
                 "Check original speaker and ownership for this source: ") + source[:420]
     return InquiryDemand(
         instance_id=instance_id, source_node_id=source_node_id, origin="message_cognition",
+        source_span=source_span, anchor_text=source,
         uncertainty_kind=kind, question=question[:600], evidence_scope="source_local",
         evidence_revision=revision, policy_version=admission_version or "goal-source-admission-v1",
     )

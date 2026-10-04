@@ -64,12 +64,18 @@ def build_query_hud(demand: InquiryDemand, evidence: InquiryEvidence, *,
         "CHARACTER: " + character_id[:60],
         "MODE: " + demand.evidence_scope,
         "UNCERTAINTY: " + demand.uncertainty_kind,
-        "QUESTION: " + demand.question[:420],
-        "PREVIOUS LOOKUP: " + evidence.status + " / " + evidence.reason[:100],
+        "PREVIOUS LOOKUP: " + evidence.status + " / " + evidence.reason[:70],
     ]
     for item in evidence.hits[:2]:
+        excerpt = item.text
+        provenance = item.provenance
+        if provenance.get("anchor_verified") and isinstance(provenance.get("anchor_start_char"), int):
+            local = max(0, provenance["anchor_start_char"] -
+                        int(provenance.get("start_char") or 0))
+            excerpt = excerpt[max(0, local - 120):local + 180]
         context.append(item.source.upper() + " [" + item.evidence_id[:36] +
-                       "]: " + item.text[:300])
+                       "]: " + excerpt[:300])
+    context.append("QUESTION: " + demand.question[:200])
     variable = "\n".join(context)
     # Byte-pair vocabularies cannot consume more token units than input bytes.
     # Keep the complete output contract and bound even pathological passages.
