@@ -40,6 +40,8 @@ Environment:
 - AIOS_SEMANTIC_CORPUS_QUERY_TIMEOUT_SECONDS=2.0 (the corpus lookup has a
   separate, bounded, longer deadline than the latency-sensitive HUD query)
 - AIOS_SEMANTIC_BACKGROUND_BATCH_SIZE=8 (shared per-lane background budget)
+- AIOS_CORPUS_DISCOVERY_INTERVAL_SECONDS=5.0 (bounded SQL/vector sweep cadence)
+- AIOS_CORPUS_TOPIC_MIN_SCORE=0.55 (advisory, domain-checked coverage floor)
 
 If the V2 collection is deliberately deleted and rebuilt externally, clear
 only aios.corpus_discovery_projection to replay the corpus index. Do not delete
