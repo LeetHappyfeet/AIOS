@@ -341,88 +341,133 @@ class GoalSubjectProjector:
 
 
 class GoalKnowledgeDemandResolver:
-    """Use topology as navigation candidates; unavailable or stale topology is
-    not proof that a goal's knowledge demand has been fulfilled.
+    """Evidence coverage is independent of advisory RDF/topology node counts.
+
+    One proposition indexed in three graph roles is still one evidence unit.
+    A missed retrieval deadline is UNAVAILABLE, never an inferred knowledge gap.
     """
+
+    _FILLER = frozenset({
+        "renamon", "intend", "intends", "intended", "want", "wants",
+        "wanted", "goal", "know", "needs", "need", "help", "information",
+        "which", "someone", "something", "character",
+    })
 
     def __init__(self, db: Database):
         self.db = db
-        self.fallback = SubjectKnowledgeDemandResolver()
+
+    @classmethod
+    def established_support(
+        cls, subject: CognitiveSubject, known: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        focus = set(research_terms(subject.display_label, limit=20)) - cls._FILLER
+        independent: dict[str, Mapping[str, Any]] = {}
+        covered: set[str] = set()
+        source_ids: set[str] = set()
+        for item in known:
+            if str(item.get("claim_kind") or "").upper() in {"GOAL", "RULE"}:
+                continue
+            if item.get("cognitive_provisional") or item.get("cognitive_commit"):
+                continue
+            if str(item.get("authority_state") or "").lower() in {
+                "candidate", "rejected", "quarantined",
+            }:
+                continue
+            proposition = _uuid_or_none(item.get("proposition_id"))
+            if proposition is None:
+                # Raw text, a synthetic message-cognition ID or an advisory
+                # graph node is not a durable independent evidentiary receipt.
+                continue
+            text = " ".join(str(item.get(key) or "") for key in (
+                "subject_norm", "predicate_norm", "object_norm", "text",
+            ))
+            matched = focus & set(research_terms(text, limit=48))
+            if len(matched) < min(2, max(1, len(focus))):
+                continue
+            identity = str(proposition)
+            if identity in independent:
+                continue
+            independent[identity] = item
+            covered.update(matched)
+            source = item.get("source_node_id") or item.get("lineage_key")
+            if source:
+                source_ids.add(str(source))
+        count = len(independent)
+        term_coverage = len(covered) / len(focus) if focus else 0.0
+        # This is a routing heuristic, NOT proof that a goal was satisfied.
+        # Multiple representations of one fact never inflate the count.
+        sufficient = count >= 3 and term_coverage >= .75 and len(source_ids) >= 2
+        status = "sufficient" if sufficient else "partial" if count else "missing"
+        return {
+            "coverage_status": status,
+            "internal_coverage": min(1.0, count / 3.0) * term_coverage,
+            "independent_support_count": count,
+            "evidence_ids": list(independent)[:8],
+            "source_ids": sorted(source_ids)[:8],
+            "term_coverage": round(term_coverage, 3),
+            "matching": list(independent.values())[:6],
+            "query": " ".join(subject.display_label.split())[:600],
+            "question": subject.question,
+            "coverage_source": "established_character_propositions",
+        }
 
     async def resolve(
         self, *, instance_id: UUID, subject: CognitiveSubject,
-        known: Sequence[Mapping[str, Any]],
+        known: Sequence[Mapping[str, Any]], retrieval_unavailable: bool = False,
     ) -> dict[str, Any]:
-        terms = research_terms(subject.retrieval_text, limit=24)
+        local = self.established_support(subject, known)
+        if retrieval_unavailable:
+            return {
+                **local, "coverage_status": "unavailable",
+                "retrieval_state": "unavailable", "next_source": "defer",
+                "coverage_source": "established_fallback_only",
+                "topology_status": "unavailable", "topology": [],
+            }
+        import asyncio
+        terms = research_terms(subject.display_label, limit=12)
         try:
-            rows = await self.db.fetch(
-            """SELECT DISTINCT n.topology_node_id,n.node_type,n.node_key,n.label,
+            rows = await asyncio.wait_for(
+                self.db.fetch(
+                    """SELECT DISTINCT n.topology_node_id,n.node_type,n.label,
                               n.proposition_id,n.significance
-               FROM aios.semantic_topology_node n
-               WHERE n.scope_kind='character'
-                 AND n.character_instance_id=$1
-                 AND n.node_type IN
-                     ('PROPOSITION','TOPIC','CONCEPT','SEMANTIC_PIVOT','BELIEF_STATE',
-                      'EPISTEMIC_TRANSITION')
-                 AND (
-                     cardinality($2::text[])=0
-                     OR EXISTS (
-                         SELECT 1 FROM unnest($2::text[]) term
-                         WHERE lower(COALESCE(n.label,'') || ' ' || COALESCE(n.node_key,''))
-                               LIKE '%' || lower(term) || '%'
-                     )
-                 )
-               ORDER BY n.significance DESC
-               LIMIT 12""",
-            instance_id, list(terms),
-            )
+                       FROM aios.semantic_topology_node n
+                       WHERE n.scope_kind='character'
+                         AND n.character_instance_id=$1
+                         AND n.node_type IN
+                             ('PROPOSITION','TOPIC','CONCEPT','SEMANTIC_PIVOT',
+                              'BELIEF_STATE','EPISTEMIC_TRANSITION')
+                         AND EXISTS (
+                             SELECT 1 FROM unnest($2::text[]) term
+                             WHERE lower(COALESCE(n.label,'') || ' ' || COALESCE(n.node_key,''))
+                                   LIKE '%' || lower(term) || '%'
+                         )
+                       ORDER BY n.significance DESC LIMIT 12""",
+                    instance_id, list(terms),
+                ),
+                timeout=1.0,
+            ) if terms else []
         except Exception as exc:
-            logger.warning("Goal topology retrieval unavailable: %s", type(exc).__name__)
-            result = self.fallback.resolve(subject, known)
-            return {**result, "coverage_source": "retrieval_fallback",
-                    "topology_status": "unavailable", "knowledge_status": "unverified",
-                    "topology": []}
-        if not rows:
-            result = self.fallback.resolve(subject, known)
-            return {**result, "coverage_source": "lexical_fallback",
-                    "topology_status": "empty", "knowledge_status": "unverified",
-                    "topology": []}
-
-        propositions = {str(row["proposition_id"]) for row in rows if row["proposition_id"]}
-        structural = {
-            str(row["topology_node_id"]) for row in rows
-            if str(row["node_type"]) not in {"EPISTEMIC_TRANSITION"}
-        }
-        # Three distinct proposition/structural receipts are enough to stop
-        # automatic research. This is a routing threshold, not proof that the
-        # managed goal itself is complete.
-        evidence_units = len(propositions) + max(0, len(structural) - len(propositions))
-        topology_candidate_coverage = min(1.0, evidence_units / 3.0)
-        local = self.fallback.resolve(subject, known)
-        # Candidate graph nodes do not constitute current, eligible memory.
-        # The operative gap is based only on actually retrieved support.
-        coverage = local["internal_coverage"]
-        # A topology count is not an admissible memory receipt. Even several
-        # related topic nodes must not suppress retrieval when evidence is absent.
-        next_source = local["next_source"] if local["matching"] else "memory"
-        query = " ".join(dict.fromkeys(terms[:12])).strip() or subject.display_label
+            logger.warning("Goal topology candidate lookup unavailable: %s", type(exc).__name__)
+            return {
+                **local, "coverage_status": "unavailable",
+                "retrieval_state": "unavailable", "next_source": "defer",
+                "coverage_source": "established_fallback_only",
+                "topology_status": "unavailable", "topology": [],
+            }
         return {
-            "internal_coverage": coverage,
-            "matching": [],
-            "next_source": next_source,
-            "query": query,
-            "question": subject.question,
-            "coverage_source": "character_topology",
-            "topology_candidate_coverage": topology_candidate_coverage,
-            "topology_status": "candidate_only",
-            "knowledge_status": "retrieved_support" if local["matching"] else "unverified",
-            "topology": [
-                {"topology_node_id": str(row["topology_node_id"]),
-                 "node_type": str(row["node_type"]),
-                 "proposition_id": str(row["proposition_id"]) if row["proposition_id"] else None,
-                 "label": row["label"], "significance": float(row["significance"] or 0)}
-                for row in rows[:6]
-            ],
+            **local,
+            "retrieval_state": "available",
+            "next_source": "none" if local["coverage_status"] == "sufficient" else "memory",
+            "topology_status": "candidate_only" if rows else "empty",
+            # Navigation is advisory. Even 12 related nodes contribute ZERO
+            # to established support until independent evidence is returned.
+            "topology": [{
+                "topology_node_id": str(row["topology_node_id"]),
+                "node_type": str(row["node_type"]),
+                "proposition_id": str(row["proposition_id"]) if row["proposition_id"] else None,
+                "label": row["label"],
+                "significance": float(row["significance"] or 0),
+            } for row in rows[:6]],
         }
 
 
