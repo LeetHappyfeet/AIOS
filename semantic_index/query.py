@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 from typing import Any, Iterable
 
@@ -18,13 +19,14 @@ class SemanticQueryService:
     def __init__(self, cfg: SemanticIndexConfig | None = None):
         self.cfg = cfg or SemanticIndexConfig()
 
-    def _request(self, payload: dict[str, Any]) -> list[tuple[str, float, dict[str, Any]]]:
+    def _request(self, payload: dict[str, Any], *, timeout_seconds: float | None = None) -> list[tuple[str, float, dict[str, Any]]]:
+        timeout = float(timeout_seconds or self.cfg.query_timeout_seconds)
         data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
         with socket.create_connection(
             (self.cfg.query_host, self.cfg.query_port),
-            timeout=self.cfg.query_timeout_seconds,
+            timeout=timeout,
         ) as sock:
-            sock.settimeout(self.cfg.query_timeout_seconds)
+            sock.settimeout(timeout)
             sock.sendall(data)
             response = b""
             while not response.endswith(b"\n"):
@@ -79,7 +81,8 @@ class SemanticQueryService:
             "query_text":query_text,
             "corpus_k":max(1,min(int(corpus_k),128)),
             "topic_k":max(1,min(int(topic_k),24)),
-        })
+        }, timeout_seconds=max(self.cfg.query_timeout_seconds,
+            float(os.getenv("AIOS_SEMANTIC_CORPUS_QUERY_TIMEOUT_SECONDS","2.0"))))
 
     def search_epistemic(
         self,
