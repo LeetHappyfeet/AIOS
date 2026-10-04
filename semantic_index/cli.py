@@ -23,7 +23,7 @@ from .admission import (
     fail_open_stalled_admissions_once,
     admission_backlog_snapshot,
 )
-from .eligibility import quarantine_ineligible_vectors_once
+from .eligibility import quarantine_ineligible_vectors_once, quarantine_adjudicated_vectors_once
 from .query_server import start_query_server
 from .structure import analyze_neighbors_once
 from .neighbor_classifier import classify_neighbor_relations_once
@@ -128,6 +128,10 @@ async def analyze_regions_once() -> None:
 async def _run_vector_stages(db, cfg, run_stage) -> dict[str, int]:
     # Admission requires a canonical proposition vector. No topology or cleanup
     # operation may be inserted into this dependency chain.
+    # Explicitly adjudicated retractions must not wait behind the larger
+    # topology-quarantine maintenance pass (which may yield on SQL budgets).
+    await run_stage("hygiene-retirement", quarantine_adjudicated_vectors_once,
+                    db, cfg, limit=8)
     propositions = await run_stage("vector-propositions", index_propositions_once, db, cfg)
     admission_cfg = replace(cfg, batch_size=cfg.admission_batch_size)
     admitted = await run_stage(
