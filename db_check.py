@@ -258,6 +258,7 @@ async def check_database() -> int:
         print("OK: effective belief authority:", effective["belief_executor"])
         print("OK: current integrity contract:", effective["source_integrity_contract"])
         print("Effective SQL fingerprints:", effective["sql_fingerprints"])
+        print("Complete migration chain SHA-256:", manifest["migration_chain_sha256"])
         print("Migration receipt hashes:", manifest["migration_receipts"])
 
         hud_receipt = await conn.fetchval(
