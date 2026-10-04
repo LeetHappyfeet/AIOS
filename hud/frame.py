@@ -260,11 +260,18 @@ class HUDAssembler:
         goal_states = await self.cognition.goals.cognitive_states(
             context.instance_id, attention.goals
         )
+        # Read-only dependency summary; a research receipt cannot assert goal progress.
+        from aios_app.agent.goal_dependencies import GoalKnowledgeDependencyService
+        dependency_by_goal = await GoalKnowledgeDependencyService(self.db).for_goals(
+            instance_id=context.instance_id,
+            goal_ids=[g.goal_id for g in attention.goals if g.goal_id is not None],
+        )
         goal_items = []
         for goal in attention.goals:
             item = goal.hud_item()
             if goal.goal_id is not None:
                 item["lifecycle"] = goal_states.get(goal.goal_id, {})
+                item["knowledge_requirements"] = dependency_by_goal.get(goal.goal_id, [])
             goal_items.append(item)
         scheduled_goal_items = await self.cognition.goals.list_scheduled(
             context.instance_id, limit=8
@@ -333,7 +340,8 @@ class HUDAssembler:
         # Goal lifecycle can change without DAG movement (including migration
         # repairs), so the current intention must come from managed goals.
         working_scene["immediate_goal"] = (
-            attention.goals[0].hud_item() if attention.goals else None
+            goal_items[0] if goal_items else (
+                attention.goals[0].hud_item() if attention.goals else None)
         )
         if isinstance(working_scene.get("last_significant_change"), Mapping) and (
             working_scene["last_significant_change"].get("source")=="dag_node"
