@@ -134,9 +134,13 @@ jobs:
             epistemic/cognitive_context.py corpus.py agent/api.py \
             agent/cognitive_operations.py agent/cognitive_operation_registry.py agent/opportunities.py \
             topic_atlas/research_dossier.py topic_atlas/fuseki_navigation.py \
+            topic_atlas/collector.py topic_atlas/projection.py topic_atlas/hygiene.py \
+            topic_atlas/diagnostics.py epistemic/scene_resolver.py hud/frame.py \
+            agent/research_action.py \
             tests/test_topic_atlas.py tests/ci_topic_atlas_smoke.py \
             tests/test_corpus_discovery_v2.py tests/ci_corpus_discovery_v2.py \
-            tests/test_progressive_research.py tests/ci_progressive_research.py
+            tests/test_progressive_research.py tests/ci_progressive_research.py \
+            tests/test_atlas_stabilization.py tests/ci_atlas_stabilization.py
       - name: Exercise the complete production migrator twice and prove atomic rollback
         env:
           AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
@@ -159,6 +163,11 @@ jobs:
           AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
         run: |
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python tests/ci_progressive_research.py
+      - name: Verify Atlas topic reconciliation and stable projection receipts
+        env:
+          AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
+        run: |
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python tests/ci_atlas_stabilization.py
       - name: Verify installed versus effective version manifest and transaction parser
         run: |
           mkdir -p "$RUNNER_TEMP/aios-pythonpath"
@@ -168,7 +177,8 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python -m pytest -q \
             tests/test_runtime_version_manifest.py tests/test_migration_transaction_contract.py \
             tests/test_topic_atlas.py tests/test_corpus_discovery_v2.py \
-            tests/test_progressive_research.py tests/test_corpus_research.py
+            tests/test_progressive_research.py tests/test_atlas_stabilization.py \
+            tests/test_corpus_research.py
 
   context-uuid-binding-smoke:
     runs-on: ubuntu-latest
