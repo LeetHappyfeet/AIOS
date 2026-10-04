@@ -73,3 +73,7 @@ is not a unique referent binding. No shadow inquiry may write a managed goal.
 Goal research moves from inquiry.resolve to research.advance only after an
 unresolved goal-scoped inquiry; planning/partial/resolved/conflicting receipts
 and no_access do not cause an automatic research loop.
+
+A goal-origin dossier refuses new automatic research cycles once all linked
+owned goals are non-active. Idempotent replays of prior steps remain inspectable;
+independent manual dossiers are not implicitly closed by goal lifecycle.

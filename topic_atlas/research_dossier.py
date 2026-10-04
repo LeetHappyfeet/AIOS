@@ -319,6 +319,16 @@ class ProgressiveResearchService:
                     return {"claimed":False,"step":_serial(previous)}
                 if dossier["status"] != "open":
                     return {"claimed":False,"status":dossier["status"]}
+                if dossier["origin"] == "goal":
+                    active = await con.fetchval(
+                        """SELECT EXISTS (
+                           SELECT 1 FROM aios.character_goal_research_link l
+                           JOIN aios.character_agent_goal g
+                             ON g.goal_id=l.goal_id AND g.instance_id=l.instance_id
+                           WHERE l.instance_id=$1 AND l.dossier_id=$2
+                             AND g.status='active')""", instance_id,dossier_id)
+                    if not active:
+                        return {"claimed":False,"status":"goal_inactive"}
                 if await con.fetchval(
                     """SELECT EXISTS(SELECT 1 FROM aios.character_research_step
                        WHERE dossier_id=$1 AND status='running')""",dossier_id):

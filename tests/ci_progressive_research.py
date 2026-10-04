@@ -140,6 +140,12 @@ async def main():
         linked_inspection=await svc.inspect(instance_id=instance["instance_id"],
                                             dossier_id=linked_id)
         assert linked_inspection["linked_goal_ids"]==[str(goal["goal_id"])]
+        await db.execute(
+            "UPDATE aios.character_agent_goal SET status='completed' WHERE goal_id=$1",
+            goal["goal_id"])
+        inactive=await svc.advance(instance_id=instance["instance_id"],
+                                   dossier_id=linked_id,request_id=uuid4())
+        assert inactive["status"]=="goal_inactive",inactive
         assert UUID((await svc.start(instance_id=instance["instance_id"],
                                 question=" S3RENAMON ",max_cycles=2))["dossier_id"])==dossier_id
         try:
