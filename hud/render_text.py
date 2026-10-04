@@ -137,14 +137,28 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     pending_work = working_scene.get("pending_work") or working_scene.get("pending_action")
     last_change = working_scene.get("last_significant_change")
     if _scene_text(immediate_goal):
-        scene_lines.append(f"Immediate goal: {_scene_text(immediate_goal)}")
+        scene_lines.append(f"Immediate managed goal: {_scene_text(immediate_goal)[:180]}")
     if _scene_text(pending_work):
         scene_lines.append(f"Pending work: {_scene_text(pending_work)}")
-    if _scene_text(last_change):
-        scene_lines.append(f"Last change: {_scene_text(last_change)}")
+    # A pre-patch scene can still contain a copied DAG turn. Suppress it.
+    if (not isinstance(last_change, Mapping) or
+            last_change.get("source") != "dag_node"):
+        if _scene_text(last_change):
+            scene_lines.append(f"Last scene change: {_scene_text(last_change)[:220]}")
     if scene_lines:
         lines.append("\nCURRENT SCENE:")
         lines.extend(f"- {value}" for value in scene_lines)
+    research = frame.get("research_activity") or {}
+    if research:
+        status=str(research.get("status") or "requested")
+        outcome=str(research.get("outcome") or "").strip()
+        detail=f" ({outcome})" if outcome and outcome != status else ""
+        lines.append("\nRESEARCH ACTIVITY:")
+        lines.append(f"- {status}{detail}: {str(research.get('question') or '')[:180]}")
+        if status=="completed":
+            lines.append(
+                f"- Authorized references found: {int(research.get('source_count') or 0)}"
+                " (not acquired knowledge)")
     relationships = frame.get("relationships") or []
     if relationships:
         lines.append("\nRELATIONSHIPS:")
@@ -228,7 +242,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             continue
         rendered_goals.append((goal, text))
     if rendered_goals:
-        lines.append("\nGOALS:")
+        lines.append("\nOTHER ACTIVE GOALS:")
         for goal, text in rendered_goals:
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
             lines.append(f"-{annotation} {text}")
