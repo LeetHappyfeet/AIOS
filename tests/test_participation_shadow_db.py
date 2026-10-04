@@ -53,6 +53,17 @@ def test_disposable_postgres_queue_and_worker():
             migration = (root / "migrations/current/20260930_02_shadow_participation.sql").read_text()
             await db.execute(migration)
             await db.execute(migration)  # migration can be safely reapplied
+            heartbeat_migration = (
+                root / "migrations/current/20261003_14_participation_worker_heartbeat.sql"
+            ).read_text()
+            await db.execute(heartbeat_migration)
+            # The actual worker populates this on startup; an explicit fixture
+            # heartbeat is required for this scoped disposable integration run.
+            await db.execute(
+                """INSERT INTO aios.character_participation_worker_heartbeat
+                   (worker_name,worker_id,policy_version)
+                   VALUES('participation_shadow','fixture','participation-shadow-v1')"""
+            )
             instance, other = uuid4(), uuid4()
             world = uuid4()
             await db.execute("INSERT INTO aios.character_identity(character_id,display_name) VALUES('renamon','Renamon')")
