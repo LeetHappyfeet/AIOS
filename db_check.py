@@ -163,7 +163,11 @@ async def check_database() -> int:
             "SELECT EXISTS (SELECT 1 FROM aios.schema_migration WHERE migration_name=$1)",
             "20261003_12_occurrence_completion_invalidation.sql",
         )
-        if not integrated_receipt or not context_receipt or not completion_receipt:
+        hardening_receipt = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM aios.schema_migration WHERE migration_name=$1)",
+            "20261003_13_source_receipt_and_belief_hardening.sql",
+        )
+        if not integrated_receipt or not context_receipt or not completion_receipt or not hardening_receipt:
             print("FAIL: integrated belief/source integrity migrations missing.")
             print("Run: python -m aios_app.migrate")
             return 10
@@ -194,8 +198,40 @@ async def check_database() -> int:
         if gates != 3:
             print(f"FAIL: missing authoritative integrity/source gates ({gates}/3).")
             return 13
+        # Migration presence alone is insufficient: verify that the effective
+        # read gate is strict about V4 source identity and both active belief
+        # materializers invoke the shared acquisition source contract.
+        gate_body = await conn.fetchval(
+            """SELECT pg_get_functiondef(
+               to_regprocedure('aios.semantic_integrity_claim_current(uuid)'))"""
+        )
+        authority_body = await conn.fetchval(
+            """SELECT pg_get_functiondef(
+               to_regprocedure('aios.reconcile_character_belief_atom_authority_v3(uuid,uuid)'))"""
+        )
+        family_body = await conn.fetchval(
+            """SELECT pg_get_functiondef(
+               to_regprocedure('aios.apply_character_belief_policy(uuid,uuid)'))"""
+        )
+        if (not gate_body
+            or "source_section_id" not in gate_body
+            or "source_sentence_digest" not in gate_body
+            or "source_node_id" not in gate_body
+            or not authority_body or not family_body
+            or "semantic_acquisition_source_eligible" not in authority_body
+            or "semantic_acquisition_source_eligible" not in family_body):
+            print("FAIL: strict V4 source identity or effective belief source gate missing.")
+            return 14
+        guard_count = await conn.fetchval(
+            """SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname = ANY($1::text[])""",
+            ["trg_guard_default_belief_policy", "trg_zzzz_skip_unchanged_semantic_admission",
+             "trg_refresh_admission_integrity_sentence_edit"],
+        )
+        if guard_count != 3:
+            print(f"FAIL: protected policy/source invalidation triggers incomplete ({guard_count}/3).")
+            return 15
         print("OK: default belief policy and effective authority+family resolver")
-        print("OK: shared source-integrity eligibility contract")
+        print("OK: strict V4 source identity, admission and invalidation contracts")
 
         hud_receipt = await conn.fetchval(
             """
