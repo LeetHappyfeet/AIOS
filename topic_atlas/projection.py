@@ -87,7 +87,7 @@ async def index_topics_once(db, cfg, *, limit: int = 8) -> int:
     rows = await db.fetch(
         """SELECT t.* FROM aios.knowledge_topic t
            LEFT JOIN aios.knowledge_topic_projection p ON p.topic_id=t.topic_id
-           WHERE
+           WHERE t.status<>'retired' AND
              (p.topic_id IS NULL OR p.vector_revision < t.vector_revision
               OR p.embedding_model IS DISTINCT FROM $2
               OR p.embedding_version IS DISTINCT FROM $3
@@ -148,17 +148,62 @@ async def index_topics_once(db, cfg, *, limit: int = 8) -> int:
     return acknowledged
 
 
+async def prune_retired_topic_vectors_once(db, cfg, *, limit: int = 16) -> int:
+    """Acknowledge deletion before clearing index receipts; never resurrect retired points."""
+    rows=await db.fetch(
+        """SELECT t.topic_id,t.vector_revision,p.vector_collection
+           FROM aios.knowledge_topic t JOIN aios.knowledge_topic_projection p
+             ON p.topic_id=t.topic_id
+           WHERE t.status='retired' AND p.vector_collection IS NOT NULL
+           ORDER BY t.updated_at,t.topic_id LIMIT $1""",max(1,min(int(limit),64)))
+    if not rows:
+        return 0
+    count=0
+    for row in rows:
+        collection=row["vector_collection"]
+        store=_get_store(cfg,collection)
+        store.client.delete(collection_name=collection,
+            points_selector=qm.PointIdsList(points=[str(row["topic_id"])]),wait=True)
+        # A concurrent revival must not be acknowledged by an old tombstone.
+        receipt=await db.fetchrow(
+            """UPDATE aios.knowledge_topic_projection p
+               SET vector_collection=NULL,vector_revision=$2,vector_projected_at=now()
+               FROM aios.knowledge_topic t
+               WHERE p.topic_id=$1 AND t.topic_id=p.topic_id
+                 AND t.status='retired' AND t.vector_revision=$2
+                 AND p.vector_collection=$3
+               RETURNING p.topic_id""",row["topic_id"],row["vector_revision"],collection)
+        count+=bool(receipt)
+    return count
+
+
 async def project_topics_once(db, fuseki, *, limit: int = 4) -> int:
     """RDF named-graph projection. Never replaces /world or /char authoritative graphs."""
     rows = await db.fetch(
         """SELECT t.* FROM aios.knowledge_topic t
            LEFT JOIN aios.knowledge_topic_projection p ON p.topic_id=t.topic_id
-           WHERE p.topic_id IS NULL OR p.graph_revision < t.graph_revision
-                OR p.graph_dataset IS NULL OR p.graph_iri IS NULL
+           WHERE (t.status<>'retired' AND
+                 (p.topic_id IS NULL OR p.graph_revision < t.graph_revision
+                  OR p.graph_dataset IS NULL OR p.graph_iri IS NULL))
+              OR (t.status='retired' AND p.graph_iri IS NOT NULL
+                  AND p.graph_revision<t.graph_revision)
            ORDER BY t.updated_at,t.topic_id LIMIT $1""",
         max(1,min(int(limit),16)))
     projected = 0
     for row in rows:
+        if row["status"]=="retired":
+            dataset,graph=topic_graph_location(row)
+            fuseki.update(dataset,f"CLEAR SILENT GRAPH <{graph}>")
+            acknowledged=await db.fetchrow(
+                """UPDATE aios.knowledge_topic_projection p
+                   SET graph_revision=$2,graph_hash='retired-empty',
+                       graph_projected_at=now(),last_error=NULL
+                   FROM aios.knowledge_topic t
+                   WHERE p.topic_id=$1 AND t.topic_id=p.topic_id
+                     AND t.status='retired' AND t.graph_revision=$2
+                   RETURNING p.topic_id""",row["topic_id"],row["graph_revision"])
+            projected+=bool(acknowledged)
+            continue
         aliases = await db.fetch(
             """SELECT normalized_alias,display_alias FROM aios.knowledge_topic_alias
                WHERE topic_id=$1 ORDER BY normalized_alias""",row["topic_id"])
