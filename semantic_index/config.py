@@ -57,6 +57,8 @@ class SemanticIndexConfig:
     reconciliation_batch_size: int = max(1, int(os.getenv(
         "AIOS_SEMANTIC_RECONCILIATION_BATCH_SIZE", str(batch_size))))
     background_batch_size: int = max(1, int(os.getenv("AIOS_SEMANTIC_BACKGROUND_BATCH_SIZE", "8")))
+    corpus_refresh_seconds: float = max(1.0, float(os.getenv(
+        "AIOS_CORPUS_DISCOVERY_INTERVAL_SECONDS", "5.0")))
     admission_batch_size: int = max(1, int(os.getenv("AIOS_SEMANTIC_ADMISSION_BATCH_SIZE", "8")))
     vector_sql_seconds: float = max(0.1, float(os.getenv("AIOS_SEMANTIC_VECTOR_SQL_SECONDS", "10")))
     admission_stage_seconds: float = max(1.0, float(os.getenv("AIOS_SEMANTIC_ADMISSION_STAGE_SECONDS", "10")))
