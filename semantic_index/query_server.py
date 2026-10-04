@@ -33,7 +33,13 @@ class _Handler(socketserver.StreamRequestHandler):
             op = request.get("op")
             service: LocalSemanticQueryService = self.server.service  # type: ignore[attr-defined]
 
-            if op == "search_epistemic":
+            if op == "search_corpus_discovery":
+                hits = service.search_corpus_discovery(
+                    str(request.get("query_text") or ""),
+                    corpus_k=max(1,min(int(request.get("corpus_k") or 96),128)),
+                    topic_k=max(1,min(int(request.get("topic_k") or 12),24)),
+                )
+            elif op == "search_epistemic":
                 hits = service.search_epistemic(
                     str(request.get("query_text") or ""),
                     character_id=str(request.get("character_id") or ""),
