@@ -25,6 +25,7 @@ SELECTED_MIGRATIONS = [
     "20261003_09_semantic_hygiene_revision_review.sql",
     "20261003_10_integrated_belief_policy_and_integrity.sql",
     "20261003_11_integrity_context_invalidation.sql",
+    "20261003_12_occurrence_completion_invalidation.sql",
 ]
 
 
@@ -74,6 +75,8 @@ async def main() -> None:
             "trg_refresh_admission_integrity_section_edit",
             "trg_refresh_admission_integrity_frame_mutation",
             "trg_zzz_current_integrity_admission",
+            "trg_revisit_admission_after_occurrence_binding",
+            "trg_revisit_admission_after_interpretation",
         ):
             assert await con.fetchval(
                 "SELECT count(*) FROM pg_trigger WHERE tgname=$1 AND NOT tgisinternal",
