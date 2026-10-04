@@ -118,3 +118,63 @@ def test_goal_hud_displays_requirement_not_false_progress():
     hud=render_hud_text(frame)
     assert "Goal knowledge: missing; linked research dossiers: 1" in hud
     assert "completed" not in hud.lower()
+
+
+
+def test_idle_dossier_reopens_only_on_new_index_or_scoped_acl_epoch():
+    from datetime import datetime, timedelta, timezone
+    from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+
+    finished=datetime.now(timezone.utc)-timedelta(minutes=10)
+    class EpochDB:
+        def __init__(self,epoch):
+            self.epoch=epoch
+            self.queued=0
+            self.inserts=0
+            self.queries=[]
+        async def fetchrow(self,sql,*args):
+            self.queries.append(sql)
+            if "FROM aios.character_research_dossier d" in sql:
+                return {
+                    "dossier_id":uuid4(), "question":"Women's sports media coverage",
+                    "status":"open", "max_cycles":3, "max_sections":8,
+                    "attempts":1, "last_completed_at":finished,
+                    "sources":0, "queued":self.queued, "expired":0,
+                }
+            if "INSERT INTO aios.character_research_question" in sql:
+                self.inserts+=1
+                self.queued=1
+                return {"question_id":uuid4()}
+            raise AssertionError(sql)
+        async def fetchval(self,sql,*args):
+            self.queries.append(sql)
+            assert "character_corpus_access" in sql
+            assert "character_knowledge_domain" in sql
+            assert "corpus_discovery_projection" in sql
+            return self.epoch
+
+    before=EpochDB(finished-timedelta(minutes=1))
+    assert asyncio.run(ProgressiveResearchService(before).available(
+        instance_id=uuid4(),question="Women's sports media coverage")) is False
+    assert before.inserts==0
+
+    new_reference=EpochDB(finished+timedelta(minutes=1))
+    svc=ProgressiveResearchService(new_reference)
+    instance=uuid4()
+    assert asyncio.run(svc.available(
+        instance_id=instance,question="Women's sports media coverage")) is True
+    assert new_reference.inserts==1
+    assert asyncio.run(svc.available(
+        instance_id=instance,question="Women's sports media coverage")) is True
+    assert new_reference.inserts==1  # Queued once, no repeated insert per cycle.
+
+
+def test_requirement_schema_never_equates_research_with_goal_completion():
+    from pathlib import Path
+    sql=(Path(__file__).parents[1]/"migrations"/"current"/
+         "20261004_20_goal_knowledge_dependencies.sql").read_text()
+    assert "UNIQUE (instance_id,goal_id,requirement_key)" in sql
+    assert "FOREIGN KEY (requirement_id,goal_id,instance_id)" in sql
+    assert "FOREIGN KEY (goal_id,dossier_id)" in sql
+    assert "character_goal_evidence" not in sql
+    assert "semantic_integrity" not in sql
