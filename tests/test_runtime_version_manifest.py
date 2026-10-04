@@ -83,3 +83,12 @@ def test_runtime_snapshots_are_persisted_at_the_write_connection():
     assert "await _effective_runtime_versions(con)" in inspect.getsource(
         message_cognition._commit_message_cognition_locked
     )
+
+
+def test_effective_runtime_endpoint_is_read_only_and_never_invents_authority():
+    import inspect
+    from aios_app.agent.api import install_external_agency_routes
+    source = inspect.getsource(install_external_agency_routes)
+    assert '/agent/runtime/versions' in source
+    assert 'return await capture_runtime_manifest(db)' in source
+    assert 'HTTPException(503' in source
