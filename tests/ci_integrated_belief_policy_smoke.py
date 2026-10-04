@@ -27,6 +27,7 @@ SELECTED_MIGRATIONS = [
     "20261003_11_integrity_context_invalidation.sql",
     "20261003_12_occurrence_completion_invalidation.sql",
     "20261003_13_source_receipt_and_belief_hardening.sql",
+    "20261003_14_participation_worker_heartbeat.sql",
 ]
 
 
@@ -38,6 +39,9 @@ async def main() -> None:
             await con.execute((Path("migrations/current") / name).read_text(encoding="utf-8"))
             print("APPLIED:", name, flush=True)
 
+        assert await con.fetchval(
+            "SELECT to_regclass('aios.character_participation_worker_heartbeat') IS NOT NULL"
+        )
         assert await con.fetchval("SELECT count(*) FROM aios.reconciliation_family_policy") == 16
         default = await con.fetchrow(
             """SELECT accept_support,decision_margin
