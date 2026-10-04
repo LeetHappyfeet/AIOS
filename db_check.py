@@ -167,10 +167,18 @@ async def check_database() -> int:
             "SELECT EXISTS (SELECT 1 FROM aios.schema_migration WHERE migration_name=$1)",
             "20261003_13_source_receipt_and_belief_hardening.sql",
         )
+        participation_receipt = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM aios.schema_migration WHERE migration_name=$1)",
+            "20261003_14_participation_worker_heartbeat.sql",
+        )
         if not integrated_receipt or not context_receipt or not completion_receipt or not hardening_receipt:
             print("FAIL: integrated belief/source integrity migrations missing.")
             print("Run: python -m aios_app.migrate")
             return 10
+        if not participation_receipt:
+            print("FAIL: participation shadow readiness migration missing.")
+            print("Run: python -m aios_app.migrate")
+            return 16
         try:
             await conn.execute("SELECT aios.assert_belief_policy_configuration()")
         except Exception as exc:
