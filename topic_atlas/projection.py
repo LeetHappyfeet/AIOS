@@ -211,9 +211,13 @@ async def project_topics_once(db, fuseki, *, limit: int = 4) -> int:
             """SELECT source_topic_id,target_topic_id,relation_kind,
                       CASE WHEN bool_or(status='verified') THEN 'verified'
                            ELSE 'candidate' END AS status
-               FROM aios.knowledge_topic_relation
-               WHERE (source_topic_id=$1 OR target_topic_id=$1) AND status<>'rejected'
-               GROUP BY source_topic_id,target_topic_id,relation_kind
+               FROM aios.knowledge_topic_relation r
+               JOIN aios.knowledge_topic left_topic ON left_topic.topic_id=r.source_topic_id
+               JOIN aios.knowledge_topic right_topic ON right_topic.topic_id=r.target_topic_id
+               WHERE (r.source_topic_id=$1 OR r.target_topic_id=$1)
+                 AND r.status<>'rejected'
+                 AND left_topic.status<>'retired' AND right_topic.status<>'retired'
+               GROUP BY r.source_topic_id,r.target_topic_id,r.relation_kind
                ORDER BY source_topic_id,target_topic_id,relation_kind LIMIT $2""",
             row["topic_id"],MAX_GRAPH_RELATIONS)
         # Only an advisory aggregate enters RDF. Never expose IDs of
