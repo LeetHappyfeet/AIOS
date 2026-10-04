@@ -97,6 +97,35 @@ async def main():
         assert ids == {public_section},f"vector-only authorized recall should return only public source: {ids}"
         assert no_lexical.hits[0].retrieval_methods == ("semantic",)
 
+        # Stage 2 topic atlas expansion: a topic may discover a relevant
+        # accessible passage even without a direct vector/lexical source hit.
+        domain_topic = await db.fetchval(
+            """SELECT t.topic_id FROM aios.knowledge_topic t
+               JOIN aios.knowledge_topic_mention m ON m.topic_id=t.topic_id
+               WHERE m.source_kind='corpus_facet'
+                 AND m.source_key LIKE '%:subject:Renamon'
+                 AND t.namespace='catalog:fiction.topic-atlas-ci'
+               LIMIT 1""")
+        assert domain_topic is not None
+        await db.execute(
+            """INSERT INTO aios.corpus_document_domain(document_id,knowledge_domain)
+               VALUES($1,'fiction.topic-atlas-ci')""",public)
+        await db.execute(
+            """INSERT INTO aios.knowledge_topic_source
+               (topic_id,document_id,section_id,link_kind,source_key,
+                source_revision,similarity,status)
+               VALUES ($1,$2,$3,'vector_candidate',$4,'test-vector-v1',0.81,'candidate')""",
+            domain_topic,public,public_section,str(public_section))
+        class TopicOnlyStub:
+            def search_corpus_discovery(self,query,*,corpus_k=96,topic_k=12):
+                return [("topic",0.82,{"topic_id":str(domain_topic)})]
+        service.semantic = TopicOnlyStub()
+        topic_result = await service.search(
+            instance_id=instance["instance_id"],query="xylophonic",
+            include_fanwork=False,limit=8)
+        assert {h.section_id for h in topic_result.hits}=={public_section}
+        assert "topic" in topic_result.hits[0].retrieval_methods
+
         service.semantic = CandidateStub([],unavailable=True)
         fallback = await service.search(
             instance_id=instance["instance_id"],query="woodland",
