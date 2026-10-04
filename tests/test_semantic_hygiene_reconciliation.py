@@ -90,3 +90,37 @@ def test_apply_is_explicitly_transaction_local():
     assert "--apply-id" in source
     assert "--actor" in source
     assert "semantic_hygiene_apply_enabled" in MIGRATION.read_text()
+
+
+def test_targeted_vector_retirement_precedes_general_quarantine():
+    eligibility = Path("semantic_index/eligibility.py").read_text()
+    cli = Path("semantic_index/cli.py").read_text()
+    block = eligibility.split("async def quarantine_adjudicated_vectors_once", 1)[1]
+    assert "a.status='applied'" in block
+    assert "NOT aios.semantic_proposition_topology_eligible(a.proposition_id)" in block
+    assert "pg_try_advisory_xact_lock($1)" in block
+    assert "points_selector=selector" in block
+    assert "wait=True" in block
+    assert "NOT EXISTS" in block
+    assert "character_belief_state" in block
+    assert "DELETE FROM aios.proposition_evidence" not in block
+    assert "DELETE FROM aios.claim_candidate" not in block
+    assert cli.index('"hygiene-retirement"') < cli.index('"vector-propositions"')
+
+
+def test_vector_retirement_noop_without_an_applied_candidate():
+    from aios_app.semantic_index.config import SemanticIndexConfig
+    from aios_app.semantic_index.eligibility import quarantine_adjudicated_vectors_once
+
+    class NoCandidateDb:
+        async def fetch(self, sql, *args):
+            assert "semantic_hygiene_adjudication" in sql
+            assert "NOT aios.semantic_proposition_topology_eligible" in sql
+            return []
+
+        def connection(self):
+            raise AssertionError("No Qdrant mutation or SQL transaction for an empty batch")
+
+    assert asyncio.run(
+        quarantine_adjudicated_vectors_once(NoCandidateDb(), SemanticIndexConfig())
+    ) == 0
