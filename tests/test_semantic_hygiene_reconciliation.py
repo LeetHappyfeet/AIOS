@@ -22,8 +22,8 @@ MIA_ATOM = UUID("16432edb-9565-468d-ba9d-75da96c572f0")
 def test_mia_source_is_exactly_scoped_by_claim_frame_proposition_and_revision():
     sql = MIGRATION.read_text()
     assert "p_claim uuid, p_frame uuid, p_proposition uuid" in sql
-    assert "source->>'raw_text'=cc.raw_text" in sql
-    assert "source->>'frame_id'=f.frame_id::text" in sql
+    assert "source.value->>'raw_text'=cc.raw_text" in sql
+    assert "source.value->>'frame_id'=f.frame_id::text" in sql
     assert "a.source_revision_key=si.revision_key" in sql
     assert "a.validator_version=si.validator_version" in sql
     assert "a.source_text=cc.raw_text" in sql
