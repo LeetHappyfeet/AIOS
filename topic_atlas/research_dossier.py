@@ -271,15 +271,9 @@ class ProgressiveResearchService:
         async with self.db.connection() as con:
             async with con.transaction():
                 dossier = await self._owned(con,instance_id,dossier_id,lock=True)
-                previous = await con.fetchrow(
-                    """SELECT * FROM aios.character_research_step
-                       WHERE dossier_id=$1 AND request_id=$2""",dossier_id,request_id)
-                if previous:
-                    return {"claimed":False,"step":_serial(previous)}
-                if dossier["status"] != "open":
-                    return {"claimed":False,"status":dossier["status"]}
-                # Failed/crashed work requeues its question, but retains the
-                # failed step and consumes one attempt in the hard cycle budget.
+                # Reap an expired step even when a caller retries the original
+                # request ID: idempotent replay should report FAILED, not an
+                # indefinitely RUNNING stale receipt.
                 expired = await con.fetch(
                     """UPDATE aios.character_research_step
                        SET status='failed',error='lease_expired',completed_at=now()
@@ -290,6 +284,13 @@ class ProgressiveResearchService:
                         """UPDATE aios.character_research_question SET status='queued'
                            WHERE question_id=ANY($1::uuid[]) AND status='running'""",
                         [r["question_id"] for r in expired])
+                previous = await con.fetchrow(
+                    """SELECT * FROM aios.character_research_step
+                       WHERE dossier_id=$1 AND request_id=$2""",dossier_id,request_id)
+                if previous:
+                    return {"claimed":False,"step":_serial(previous)}
+                if dossier["status"] != "open":
+                    return {"claimed":False,"status":dossier["status"]}
                 if await con.fetchval(
                     """SELECT EXISTS(SELECT 1 FROM aios.character_research_step
                        WHERE dossier_id=$1 AND status='running')""",dossier_id):
