@@ -54,6 +54,10 @@ variable. A stale/absent heartbeat means experiment enrollment fails visibly.
 
 - Goal reviews prioritize active goals with completion candidates or topic
   overlap, while still rotating older unreviewed goals through the budget.
+- `planning.review` receives at most four already-scoped recent source turns
+  (bounded per excerpt), including the character's prior response when available.
+  The review prompt puts this evidence before auxiliary context rather than
+  silently truncating it behind goal metadata.
 - `planning.review` choices require strict source freshness at both creation
   and acceptance. Advancing the head invalidates an obsolete inference choice.
 - Review option 2 only closes a goal if the operation is bound to the currently
