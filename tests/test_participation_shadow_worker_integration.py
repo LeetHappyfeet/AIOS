@@ -28,7 +28,8 @@ class EmptyExperimentDB:
                 "enqueued_count": 1,
             }
         if "COUNT(*) AS evaluated" in sql:
-            return {"evaluated": 0, "v3_compared": 0, "v4_compared": 0}
+            return {"evaluated": 0, "v3_compared": 0, "v4_compared": 0,
+                    "v4_paired_live": 0}
         raise AssertionError(sql)
 
     async def fetch(self, sql, *args):
