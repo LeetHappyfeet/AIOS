@@ -26,6 +26,7 @@ SELECTED_MIGRATIONS = [
     "20261003_10_integrated_belief_policy_and_integrity.sql",
     "20261003_11_integrity_context_invalidation.sql",
     "20261003_12_occurrence_completion_invalidation.sql",
+    "20261003_13_source_receipt_and_belief_hardening.sql",
 ]
 
 
@@ -55,9 +56,9 @@ async def main() -> None:
             "SELECT pg_get_functiondef('aios.reconcile_character_belief_atom(uuid,uuid)'::regprocedure)"
         )
         assert "epistemic_authority_admission" in authority
-        assert "semantic_integrity_claim_current" in authority
+        assert "semantic_acquisition_source_eligible" in authority
         assert "epistemic_authority_admission" in family
-        assert "semantic_integrity_claim_current" in family
+        assert "semantic_acquisition_source_eligible" in family
         assert "cognitive_evidence_instances" in family
         assert "reconcile_character_belief_atom_authority_v3" in wrapper
         assert "apply_character_belief_policy" in wrapper
@@ -77,13 +78,26 @@ async def main() -> None:
             "trg_zzz_current_integrity_admission",
             "trg_revisit_admission_after_occurrence_binding",
             "trg_revisit_admission_after_interpretation",
+            "trg_refresh_admission_integrity_sentence_edit",
+            "trg_guard_default_belief_policy",
+            "trg_zzzz_skip_unchanged_semantic_admission",
         ):
             assert await con.fetchval(
                 "SELECT count(*) FROM pg_trigger WHERE tgname=$1 AND NOT tgisinternal",
                 trigger,
             ) == 1, trigger
 
-        # Misconfigured defaults are now an error, never 100%-unresolved output.
+        # Runtime cannot silently delete critical reference data. Separately,
+        # simulate a damaged ledger to assert that a missing default fails closed.
+        try:
+            await con.execute("DELETE FROM aios.belief_reconciliation_policy WHERE policy_key='default'")
+        except asyncpg.RaiseError as e:
+            assert "Protected belief reconciliation default" in str(e)
+        else:
+            raise AssertionError("Default row was not protected")
+        await con.execute(
+            "ALTER TABLE aios.belief_reconciliation_policy DISABLE TRIGGER trg_guard_default_belief_policy"
+        )
         await con.execute("DELETE FROM aios.belief_reconciliation_policy WHERE policy_key='default'")
         try:
             await con.execute("SELECT aios.assert_belief_policy_configuration()")
@@ -91,6 +105,14 @@ async def main() -> None:
             assert "missing belief_reconciliation_policy.default" in str(e)
         else:
             raise AssertionError("Missing default policy silently accepted")
+        await con.execute(
+            """INSERT INTO aios.belief_reconciliation_policy
+               (policy_key,accept_support,decision_margin,resolver_version)
+               VALUES ('default',0.6,0.15,'character-belief-v4-authority-family')"""
+        )
+        await con.execute(
+            "ALTER TABLE aios.belief_reconciliation_policy ENABLE TRIGGER trg_guard_default_belief_policy"
+        )
         # A real frame+receipt check: mismatched source invalidates current
         # eligibility; a new V4 receipt must contain the section digest.
         await con.execute(
@@ -121,17 +143,71 @@ async def main() -> None:
         digest = hashlib.sha256(b"Alex saw Renamon.").hexdigest()
         snapshot = [{"frame_id":str(UUID(int=114)),"subject":"Alex","predicate":"see",
                      "object":"Renamon","polarity":1,"modality":"asserted"}]
+        # A V4 receipt without every source coordinate must NOT pass, even
+        # when text and frame snapshot match (the former NULL-digest loophole).
         await con.execute(
             """INSERT INTO aios.claim_semantic_integrity
-              (claim_id,revision_key,validator_version,status,source_text,
-               frame_snapshot,source_section_digest)
+              (claim_id,revision_key,validator_version,status,source_text,frame_snapshot)
                VALUES($1,'r1','semantic-integrity-v4-source-coverage','valid',
-                      'Alex saw Renamon.',$2::jsonb,$3)""",
-            UUID(int=113), json.dumps(snapshot), digest,
+                      'Alex saw Renamon.',$2::jsonb)""",
+            UUID(int=113), json.dumps(snapshot),
+        )
+        assert await con.fetchval(
+            "SELECT aios.semantic_integrity_claim_current($1)", UUID(int=113)
+        ) is False
+
+        # Historical V3 stays inspectable/eligible ONLY through its explicit
+        # compatibility path, never by pretending it has a current V4 receipt.
+        await con.execute(
+            """UPDATE aios.claim_semantic_integrity
+               SET validator_version='semantic-integrity-v3-fidelity'
+               WHERE claim_id=$1""", UUID(int=113)
         )
         assert await con.fetchval(
             "SELECT aios.semantic_integrity_claim_current($1)", UUID(int=113)
         ) is True
+
+        sentence_digest = hashlib.sha256(b"Alex saw Renamon.").hexdigest()
+        await con.execute(
+            """UPDATE aios.claim_semantic_integrity
+               SET validator_version='semantic-integrity-v4-source-coverage',
+                   revision_key='r2', source_section_digest=$2,
+                   source_section_id=$3, source_sentence_digest=$4
+               WHERE claim_id=$1""",
+            UUID(int=113), digest, UUID(int=111), sentence_digest,
+        )
+        assert await con.fetchval(
+            "SELECT aios.semantic_integrity_claim_current($1)", UUID(int=113)
+        ) is True
+
+        # Extracted-sentence edits and section-reparenting invalidate receipts
+        # without changing claim_candidate.raw_text.
+        await con.execute(
+            "UPDATE aios.extracted_sentence SET sentence_text='Alex did not see Renamon.' WHERE sentence_id=$1",
+            UUID(int=112),
+        )
+        assert await con.fetchval(
+            "SELECT aios.semantic_integrity_claim_current($1)", UUID(int=113)
+        ) is False
+        await con.execute(
+            "UPDATE aios.extracted_sentence SET sentence_text='Alex saw Renamon.' WHERE sentence_id=$1",
+            UUID(int=112),
+        )
+        await con.execute(
+            """INSERT INTO aios.document_section(section_id,section_path,section_order,content)
+               VALUES($1,'1',1,'Alex saw Renamon.')""", UUID(int=115)
+        )
+        await con.execute(
+            "UPDATE aios.extracted_sentence SET section_id=$1 WHERE sentence_id=$2",
+            UUID(int=115), UUID(int=112),
+        )
+        assert await con.fetchval(
+            "SELECT aios.semantic_integrity_claim_current($1)", UUID(int=113)
+        ) is False
+        await con.execute(
+            "UPDATE aios.extracted_sentence SET section_id=$1 WHERE sentence_id=$2",
+            UUID(int=111), UUID(int=112),
+        )
         await con.execute(
             "UPDATE aios.document_section SET content='Alex did not see Renamon.' WHERE section_id=$1",
             UUID(int=111),
@@ -140,7 +216,7 @@ async def main() -> None:
             "SELECT aios.semantic_integrity_claim_current($1)", UUID(int=113)
         ) is False
         print("PASS: fresh baseline, seeded default, family authority composition, "
-              "fail-closed policy, frame/paragraph integrity",flush=True)
+              "fail-closed policy, V4 source identity, legacy V3 compatibility",flush=True)
     finally:
         await con.close()
 
