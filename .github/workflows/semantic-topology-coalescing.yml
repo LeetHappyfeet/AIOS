@@ -169,10 +169,10 @@ jobs:
         run: python -m pip install --disable-pip-version-check pytest asyncpg requests qdrant-client pydantic python-dotenv
       - name: Compile and unit-test non-mutating hygiene shadow
         run: |
-          python -m py_compile epistemic/semantic_hygiene.py tests/test_semantic_hygiene_shadow.py runner_v2.py pipeline/job_registry.py
+          python -m py_compile epistemic/semantic_hygiene.py rdf/fuseki.py tests/test_semantic_hygiene_shadow.py tests/test_fuseki_query_negotiation.py runner_v2.py pipeline/job_registry.py
           mkdir -p "$RUNNER_TEMP/aios-pythonpath"
           ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
-          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python -m pytest -q tests/test_semantic_hygiene_shadow.py
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python -m pytest -q tests/test_semantic_hygiene_shadow.py tests/test_fuseki_query_negotiation.py
 
   hygiene-migration-smoke:
     runs-on: ubuntu-latest
