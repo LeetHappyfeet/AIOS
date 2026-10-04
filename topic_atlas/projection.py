@@ -39,7 +39,7 @@ def _literal(value) -> str:
     return json.dumps(str(value), ensure_ascii=True)
 
 
-def topic_rdf_update(row, aliases, relations) -> tuple[str, str, str, str]:
+def topic_rdf_update(row, aliases, relations, *, candidate_source_count: int = 0) -> tuple[str, str, str, str]:
     dataset, graph = topic_graph_location(row)
     subject = f"urn:aios:knowledge-topic:{row['topic_id']}"
     triples = [
@@ -48,6 +48,7 @@ def topic_rdf_update(row, aliases, relations) -> tuple[str, str, str, str]:
         f"<{subject}> <urn:aios:topic#namespace> {_literal(row['namespace'])} .",
         f"<{subject}> <urn:aios:topic#status> {_literal(row['status'])} .",
         f"<{subject}> <urn:aios:topic#projectionVersion> {_literal(RDF_VERSION)} .",
+        f"<{subject}> <urn:aios:topic#candidateSourceCount> \"{max(0,int(candidate_source_count))}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
     ]
     if row["description"]:
         triples.append(f"<{subject}> <urn:aios:topic#description> {_literal(row['description'])} .")
@@ -170,7 +171,13 @@ async def project_topics_once(db, fuseki, *, limit: int = 4) -> int:
                GROUP BY source_topic_id,target_topic_id,relation_kind
                ORDER BY source_topic_id,target_topic_id,relation_kind LIMIT $2""",
             row["topic_id"],MAX_GRAPH_RELATIONS)
-        dataset,graph,sparql,digest = topic_rdf_update(row,aliases,relations)
+        # Only an advisory aggregate enters RDF. Never expose IDs of
+        # restricted corpus documents through an unrestricted catalog graph.
+        candidate_source_count = await db.fetchval(
+            """SELECT count(DISTINCT document_id) FROM aios.knowledge_topic_source
+               WHERE topic_id=$1 AND status='candidate'""",row["topic_id"])
+        dataset,graph,sparql,digest = topic_rdf_update(
+            row,aliases,relations,candidate_source_count=candidate_source_count or 0)
         # Keep the synchronized Fuseki call inside the dedicated topology worker:
         # cancelling a detached network thread could let a stale graph write
         # finish after a newer revision had already been acknowledged.
