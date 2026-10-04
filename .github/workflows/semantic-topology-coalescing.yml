@@ -28,6 +28,7 @@ jobs:
             agent/opportunities.py \
             tests/test_semantic_integrity_receipt_contract.py \
             tests/test_source_ownership_and_hud_provenance.py \
+            tests/test_retrieval_source_provenance_contract.py \
             tests/test_participation_shadow_worker_integration.py \
             tests/test_cognitive_lifecycle.py \
             epistemic/belief_reconciliation.py \
@@ -60,6 +61,7 @@ jobs:
               tests/test_context_resolver.py \
               tests/test_semantic_integrity_receipt_contract.py \
               tests/test_source_ownership_and_hud_provenance.py \
+              tests/test_retrieval_source_provenance_contract.py \
               tests/test_participation_shadow_worker_integration.py \
               tests/test_cognitive_lifecycle.py
 
