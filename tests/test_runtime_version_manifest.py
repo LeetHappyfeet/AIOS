@@ -1,36 +1,85 @@
-"""Runtime attribution is taken from loaded worker modules, not branch labels."""
-from aios_app.epistemic.runtime_versions import component_versions
+"""Loaded modules are not proof of live SQL authority or comparator execution."""
+import asyncio
+from aios_app.epistemic.runtime_versions import (
+    component_versions, capture_runtime_manifest, INTEGRATION_MIGRATIONS,
+    BELIEF_EXECUTOR_VERSION, SOURCE_CONTRACT_VERSION,
+)
 from aios_app.epistemic import message_cognition, semantic_integrity
 from aios_app.agent import participation
 
 
-def test_component_version_manifest_reflects_loaded_code():
-    versions = component_versions()
+class RuntimeDB:
+    def __init__(self, *, live=True):
+        self.live=live
+
+    async def fetchrow(self, sql, *args):
+        if not self.live:
+            return {
+                "belief_wrapper": "legacy isolated resolver",
+                "authority_base": "", "family_materializer": "",
+                "integrity_gate": "", "acquisition_gate": "",
+                "configured_belief_version": None, "family_count": 0,
+            }
+        return {
+            "belief_wrapper": (
+                "PERFORM aios.reconcile_character_belief_atom_authority_v3(); "
+                "PERFORM aios.apply_character_belief_policy();"
+            ),
+            "authority_base": "SELECT aios.semantic_acquisition_source_eligible(kae.acquisition_id);",
+            "family_materializer": "SELECT aios.semantic_acquisition_source_eligible(kae.acquisition_id);",
+            "integrity_gate": (
+                "semantic-integrity-v4-source-coverage source_section_id "
+                "source_section_digest source_sentence_digest source_node_id"
+            ),
+            "acquisition_gate": "semantic_integrity_claim_current",
+            "configured_belief_version": BELIEF_EXECUTOR_VERSION,
+            "family_count": 16,
+        }
+
+    async def fetch(self, sql, *args):
+        if not self.live:
+            return []
+        return [{"migration_name": name, "sha256": "test-" + name}
+                for name in ("0001_aios_baseline", *INTEGRATION_MIGRATIONS)]
+
+
+def test_component_manifest_is_installed_only():
+    versions=component_versions()
     assert versions["message_cognition"] == message_cognition.INTERPRETER_VERSION
     assert versions["semantic_integrity"] == semantic_integrity.INTEGRITY_VERSION
     assert versions["participation_v3"] == participation.V3_VERSION
     assert versions["participation_v4"] == participation.V4_VERSION
-    assert versions["message_cognition"] == "message-cognition-v11-source-goal-admission+epistemic-scope-v1"
-    assert message_cognition.BASE_INTERPRETER_VERSION == "message-cognition-v11-source-goal-admission"
-    assert message_cognition.SCOPE_POLICY_VERSION == "epistemic-scope-v1"
-    assert versions["semantic_integrity"] == "semantic-integrity-v4-source-coverage"
-
-
-def test_experiment_and_cognition_persist_runtime_provenance():
-    import inspect
-    participation_source = inspect.getsource(participation.ParticipationService)
-    cognition_source = inspect.getsource(message_cognition._commit_message_cognition_locked)
-    assert "runtime_versions" in participation_source
-    assert "comparison_v3" in participation_source
-    assert "runtime_versions" in cognition_source
-
-
-def test_manifest_separates_effective_execution_from_shadow_comparators():
-    versions = component_versions()
-    assert versions["belief_materializer"] == "character-belief-v4-authority-family"
-    assert versions["belief_authority_base"] == "character-belief-v3-authority-lineage"
-    assert versions["belief_family_policy"] == "semantic-policy-v1"
-    assert versions["source_integrity_contract"] == "integrity-contract-v1"
+    assert versions["manifest_scope"] == "installed_modules_not_effective_database"
+    assert "belief_materializer" not in versions  # never claim effective SQL from Python
+    assert versions["belief_materializer_installed"] == BELIEF_EXECUTOR_VERSION
     assert versions["participation_live_admission"] == "none"
-    assert versions["participation_v4_execution"] == "shadow-comparison-only"
-    assert versions["participation_primary_execution"] == "shadow-v1-ledger-only"
+
+
+def test_persisted_manifest_captures_effective_sql_and_receipt_versions():
+    manifest=asyncio.run(capture_runtime_manifest(
+        RuntimeDB(),receipt_versions={"source_integrity":"semantic-integrity-v4-source-coverage"},
+    ))
+    assert manifest["effective_authority"]["belief_executor"] == BELIEF_EXECUTOR_VERSION
+    assert manifest["effective_authority"]["source_integrity_contract"] == SOURCE_CONTRACT_VERSION
+    assert manifest["effective_authority"]["sql_fingerprints"]["belief_wrapper_sha256"]
+    assert manifest["receipt_versions"]["source_integrity"] == semantic_integrity.INTEGRITY_VERSION
+    assert manifest["shadow_comparators"]["participation_v4"] == "comparison-only"
+    assert all(k in manifest["migration_receipts"] for k in INTEGRATION_MIGRATIONS)
+
+
+def test_missing_sql_or_receipts_fails_closed_without_rewriting_installed_metadata():
+    manifest=asyncio.run(capture_runtime_manifest(RuntimeDB(live=False)))
+    assert manifest["installed_components"]["belief_materializer_installed"] == BELIEF_EXECUTOR_VERSION
+    assert manifest["effective_authority"]["belief_executor"] == "unverified"
+    assert manifest["effective_authority"]["source_integrity_contract"] == "unverified"
+    assert manifest["effective_authority"]["checks"]["required_migrations_applied"] is False
+
+
+def test_runtime_snapshots_are_persisted_at_the_write_connection():
+    import inspect
+    from aios_app.agent.participation import ParticipationService
+    assert "capture_runtime_manifest(con" in inspect.getsource(ParticipationService.start)
+    assert "capture_runtime_manifest(" in inspect.getsource(ParticipationService.process_pending)
+    assert "await _effective_runtime_versions(con)" in inspect.getsource(
+        message_cognition._commit_message_cognition_locked
+    )
