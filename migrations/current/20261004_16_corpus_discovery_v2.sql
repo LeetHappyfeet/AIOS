@@ -44,6 +44,27 @@ CREATE INDEX IF NOT EXISTS idx_topic_source_section_status
     ON aios.knowledge_topic_source(section_id,status,topic_id)
     WHERE section_id IS NOT NULL;
 
+CREATE OR REPLACE FUNCTION aios.bump_vector_topic_source_revision()
+RETURNS trigger LANGUAGE plpgsql AS $
+BEGIN
+    IF TG_OP='DELETE' THEN
+        IF OLD.link_kind='vector_candidate' THEN
+            UPDATE aios.knowledge_topic SET graph_revision=graph_revision+1,updated_at=now()
+            WHERE topic_id=OLD.topic_id;
+        END IF;
+    ELSE
+        IF NEW.link_kind='vector_candidate' THEN
+            UPDATE aios.knowledge_topic SET graph_revision=graph_revision+1,updated_at=now()
+            WHERE topic_id=NEW.topic_id;
+        END IF;
+    END IF;
+    RETURN NULL;
+END $;
+DROP TRIGGER IF EXISTS trg_vector_topic_source_revision ON aios.knowledge_topic_source;
+CREATE TRIGGER trg_vector_topic_source_revision
+AFTER INSERT OR DELETE ON aios.knowledge_topic_source
+FOR EACH ROW EXECUTE FUNCTION aios.bump_vector_topic_source_revision();
+
 CREATE TABLE IF NOT EXISTS aios.corpus_topic_link_state (
     section_id uuid PRIMARY KEY REFERENCES aios.corpus_section(section_id) ON DELETE CASCADE,
     source_fingerprint text NOT NULL,
