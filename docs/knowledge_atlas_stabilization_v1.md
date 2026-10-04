@@ -6,18 +6,18 @@ legitimately be empty; the patch does not create reference documents.
 
 ## Deployment order
 
-1. Pull AIOS AIOS-development and run \`python -m aios_app.migrate\`.
-   This installs \`20261004_18_knowledge_atlas_stabilization.sql\`, including
+1. Pull AIOS AIOS-development and run `python -m aios_app.migrate`.
+   This installs `20261004_18_knowledge_atlas_stabilization.sql`, including
    the source-node keyed research action ledger and one-time advisory source
    receipt replay. The replay leaves underlying claims/frames/observations
-   untouched and is consumed in bounded \`topic-discovery\` cycles.
+   untouched and is consumed in bounded `topic-discovery` cycles.
 2. Restart the AIOS services, including semantic index and topology workers.
-3. Pull \`LeetHappyfeet/extension-MemoryVaultIngest\` on its \`main\` branch
+3. Pull `LeetHappyfeet/extension-MemoryVaultIngest` on its `main` branch
    separately and refresh SillyTavern; the client-side adapter is NOT part of
    the AIOS repository. This version dispatches a single well-formed character
    research tool request after a live rendered message has been ingested.
    Historical transcript reconciliation never launches old requests.
-4. Watch \`GET /agent/knowledge-atlas/health\` and confirm active opaque topics
+4. Watch `GET /agent/knowledge-atlas/health` and confirm active opaque topics
    approach zero, pending retired vector deletions reach zero, and projection
    backlog converges once historical source discovery settles. Retired vectors
    are deleted only after Qdrant acknowledges; retired named graphs are cleared
@@ -26,7 +26,7 @@ legitimately be empty; the patch does not create reference documents.
 ## Correctness boundaries
 
 * An opaque proposition/topic key is source provenance, not a topic label.
-  \`normalize_label\` rejects pure 32–64-character hexadecimal strings,
+  `normalize_label` rejects pure 32–64-character hexadecimal strings,
   UUID-shaped labels and obvious dangling function words. Readable semantic
   frame labels remain usable even where frame entity keys are opaque.
 * Previously collected bad candidates are retired incrementally; their
@@ -38,10 +38,10 @@ legitimately be empty; the patch does not create reference documents.
   presentation time, and character tool tags are stripped from rendered recent
   dialogue only. Full raw source remains available as ingested DAG evidence.
 * A host-generated research call is routed by the client to
-  \`POST /agent/instance/{instance_id}/research/tool-request\` with
-  \`{"source_node_id":"<current-character-source-node-UUID>"}\`.
+  `POST /agent/instance/{instance_id}/research/tool-request` with
+  `{"source_node_id":"<current-character-source-node-UUID>"}`.
   The backend checks the current source timeline and the ingest event's
-  \`viewpoint_id\` against the instance character; the client cannot supply its
+  `viewpoint_id` against the instance character; the client cannot supply its
   own research question for authority. The server extracts one structured
   research request from canonical source text and persists a unique receipt
   keyed by (instance_id,source_node_id). Repeat or concurrent requests return
@@ -81,9 +81,9 @@ instance and source node UUID from your SillyTavern/AIOS log:
 
 ## Verification
 
-\`tests/test_atlas_stabilization.py\` checks candidate rejection, source tag
+`tests/test_atlas_stabilization.py` checks candidate rejection, source tag
 parsing, legacy HUD isolation, and Qdrant/Fuseki acknowledgement ordering.
-\`tests/ci_atlas_stabilization.py\` uses a disposable real PostgreSQL database
+`tests/ci_atlas_stabilization.py` uses a disposable real PostgreSQL database
 to ensure a changed source receipt with the same effective topic/edge identity
 does not advance projection revisions, historical opaque candidates retire
 exactly once, the tool ledger exists, and the health report returns coverage.
