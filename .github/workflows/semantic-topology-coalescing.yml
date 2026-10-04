@@ -127,7 +127,9 @@ jobs:
           python -m py_compile migrate.py db_check.py epistemic/runtime_versions.py \
             epistemic/message_cognition.py agent/participation.py \
             tests/ci_canonical_cold_start.py tests/test_runtime_version_manifest.py \
-            tests/test_migration_transaction_contract.py
+            tests/test_migration_transaction_contract.py \
+            topic_atlas/__init__.py topic_atlas/collector.py topic_atlas/projection.py \
+            tests/test_topic_atlas.py tests/ci_topic_atlas_smoke.py
       - name: Exercise the complete production migrator twice and prove atomic rollback
         env:
           AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
@@ -135,6 +137,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/aios-pythonpath"
           ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python tests/ci_canonical_cold_start.py
+      - name: Verify topic collection and revision behavior in real PostgreSQL
+        env:
+          AIOS_DB_DSN: postgresql://aios:aios@127.0.0.1:5432/aiosdb
+        run: |
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python tests/ci_topic_atlas_smoke.py
       - name: Verify installed versus effective version manifest and transaction parser
         run: |
           mkdir -p "$RUNNER_TEMP/aios-pythonpath"
@@ -142,7 +149,8 @@ jobs:
             ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
           fi
           PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python -m pytest -q \
-            tests/test_runtime_version_manifest.py tests/test_migration_transaction_contract.py
+            tests/test_runtime_version_manifest.py tests/test_migration_transaction_contract.py \
+            tests/test_topic_atlas.py
 
   context-uuid-binding-smoke:
     runs-on: ubuntu-latest
