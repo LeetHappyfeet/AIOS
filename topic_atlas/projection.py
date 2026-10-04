@@ -225,7 +225,7 @@ async def project_topics_once(db, fuseki, *, limit: int = 4) -> int:
         candidate_source_count = await db.fetchval(
             """SELECT count(DISTINCT s.document_id)
                FROM aios.knowledge_topic_source s
-               WHERE s.topic_id=$1 AND s.status='candidate'
+               WHERE s.topic_id=$1 AND s.link_kind='vector_candidate'
                  AND EXISTS (
                    SELECT 1 FROM aios.corpus_document_scope cds
                    JOIN aios.corpus_scope scope_def ON scope_def.scope_key=cds.scope_key
