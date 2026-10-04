@@ -441,10 +441,64 @@ async def collect_topics_once(db, *, limit: int = 16) -> dict[str, int]:
         for row in rows:
             count += await _collect_row(db, source_kind, row)
         counts[source_kind] = count
+    counts["retired_sources"] = await retire_missing_sources_once(db, limit=budget)
+    counts["retired_domain_links"] = await retire_stale_domain_links_once(db, limit=budget)
     counts["domain_hierarchy"] = await reconcile_domain_hierarchy_once(db, limit=budget)
     counts["catalog_links"] = await reconcile_catalog_domain_links_once(db, limit=budget)
-    counts["retired_sources"] = await retire_missing_sources_once(db, limit=budget)
     return counts
+
+
+async def retire_stale_domain_links_once(db, *, limit: int = 16) -> int:
+    """Withdraw catalogue navigation after domain removal/reparenting."""
+    rows = await db.fetch(
+        """SELECT r.source_topic_id,r.target_topic_id,r.relation_kind,
+                  r.source_kind,r.source_key
+           FROM aios.knowledge_topic_relation r
+           WHERE (r.source_kind='domain_hierarchy' AND NOT EXISTS (
+             SELECT 1 FROM aios.knowledge_domain d
+             JOIN aios.knowledge_domain parent ON parent.domain_id=d.parent_domain_id
+               AND parent.enabled
+             JOIN aios.knowledge_topic_mention dm
+               ON dm.source_kind='knowledge_domain' AND dm.source_key=d.domain_id::text
+               AND dm.topic_id=r.source_topic_id
+             JOIN aios.knowledge_topic_mention pm
+               ON pm.source_kind='knowledge_domain' AND pm.source_key=parent.domain_id::text
+               AND pm.topic_id=r.target_topic_id
+             WHERE d.enabled AND d.domain_id::text=r.source_key))
+           OR (r.source_kind IN ('corpus_heading','corpus_facet')
+               AND r.relation_kind='associated' AND NOT EXISTS (
+             SELECT 1 FROM aios.knowledge_topic_source s
+             JOIN aios.knowledge_topic t ON t.topic_id=s.topic_id
+             JOIN aios.corpus_document_domain cdd ON cdd.document_id=s.document_id
+               AND t.namespace='catalog:'||cdd.knowledge_domain
+             JOIN aios.knowledge_domain d ON d.domain_key=cdd.knowledge_domain
+               AND d.enabled
+             JOIN aios.knowledge_topic_mention pm
+               ON pm.source_kind='knowledge_domain' AND pm.source_key=d.domain_id::text
+               AND pm.topic_id=r.target_topic_id
+             WHERE s.topic_id=r.source_topic_id AND s.link_kind=r.source_kind
+               AND s.source_key=r.source_key))
+           ORDER BY r.created_at,r.source_topic_id LIMIT $1""",
+        max(1,min(int(limit),32)))
+    removed = 0
+    for row in rows:
+        async with db.connection() as con:
+            async with con.transaction():
+                changed = await con.fetchrow(
+                    """DELETE FROM aios.knowledge_topic_relation
+                       WHERE source_topic_id=$1 AND target_topic_id=$2
+                         AND relation_kind=$3 AND source_kind=$4 AND source_key=$5
+                       RETURNING source_topic_id""",
+                    row["source_topic_id"],row["target_topic_id"],
+                    row["relation_kind"],row["source_kind"],row["source_key"])
+                if changed:
+                    await con.execute(
+                        """UPDATE aios.knowledge_topic
+                           SET graph_revision=graph_revision+1,updated_at=now()
+                           WHERE topic_id=ANY($1::uuid[])""",
+                        [row["source_topic_id"],row["target_topic_id"]])
+                    removed += 1
+    return removed
 
 
 async def reconcile_domain_hierarchy_once(db, *, limit: int = 16) -> int:
