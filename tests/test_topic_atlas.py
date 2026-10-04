@@ -110,6 +110,8 @@ def test_fuseki_receipt_only_after_replacement(monkeypatch):
             if "knowledge_topic_alias" in sql: return []
             if "knowledge_topic_relation" in sql: return []
             raise AssertionError(sql)
+        async def fetchval(self,sql,*args):
+            return 0
         async def fetchrow(self,sql,*args):
             sequence.append("receipt")
             return {"topic_id":topic["topic_id"]}
@@ -128,6 +130,8 @@ def test_failed_fuseki_replacement_must_not_create_a_receipt():
         async def fetch(self,sql,*args):
             if "SELECT t.*" in sql: return [topic]
             return []
+        async def fetchval(self,sql,*args):
+            return 0
         async def fetchrow(self,sql,*args):
             raise AssertionError("receipt must not be written")
     class BrokenFuseki:
