@@ -4,7 +4,7 @@ Run after canonical migrator. Assesses dossier ownership, bounded cycles, topic
 follow-ups, source text revisions, current ACL, explicit study and idempotence.
 """
 import asyncio
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from aios_app.config import settings
 from aios_app.db import Database
@@ -107,33 +107,33 @@ async def main():
         opened=await svc.start(instance_id=instance["instance_id"],
                                question="s3renamon",max_cycles=2,
                                max_sections=4,max_materializations=1)
-        dossier_id=opened["dossier_id"]
+        dossier_id=UUID(opened["dossier_id"])
         assert (await svc.start(instance_id=instance["instance_id"],
                                 question=" S3RENAMON ",max_cycles=2))["dossier_id"]==dossier_id
         try:
-            await svc.inspect(instance_id=other["instance_id"],dossier_id=opened["dossier_id"])
+            await svc.inspect(instance_id=other["instance_id"],dossier_id=dossier_id)
             raise AssertionError("foreign instance must be denied")
         except LookupError:
             pass
         first_request=uuid4()
         step=await svc.advance(instance_id=instance["instance_id"],
-                               dossier_id=opened["dossier_id"],request_id=first_request)
+                               dossier_id=dossier_id,request_id=first_request)
         assert step["new_sources"]==1,step
         assert {ref["section_id"] for ref in step["references"]}=={str(public_section)}
         assert "Digital ecology" in step["follow_up_questions"],step
         retry=await svc.advance(instance_id=instance["instance_id"],
-                                dossier_id=opened["dossier_id"],request_id=first_request)
+                                dossier_id=dossier_id,request_id=first_request)
         assert retry["claimed"] is False
         inspection=await svc.inspect(instance_id=instance["instance_id"],
-                                     dossier_id=opened["dossier_id"])
+                                     dossier_id=dossier_id)
         assert inspection["source_count"]==1
         assert "s3renamon" in inspection["sources"][0]["excerpt"]
         assert len(inspection["questions"])==2
         second=await svc.advance(instance_id=instance["instance_id"],
-                                 dossier_id=opened["dossier_id"],request_id=uuid4())
+                                 dossier_id=dossier_id,request_id=uuid4())
         assert second["new_sources"]==0,second
         exhausted=await svc.advance(instance_id=instance["instance_id"],
-                                    dossier_id=opened["dossier_id"],request_id=uuid4())
+                                    dossier_id=dossier_id,request_id=uuid4())
         assert exhausted["status"]=="budget_exhausted",exhausted
 
         # An edited source must be discovered again before it is studied.
@@ -141,7 +141,7 @@ async def main():
             """UPDATE aios.corpus_section SET content=content || ' changed'
                WHERE section_id=$1""",public_section)
         try:
-            await svc.study(instance_id=instance["instance_id"],dossier_id=opened["dossier_id"],
+            await svc.study(instance_id=instance["instance_id"],dossier_id=dossier_id,
                             section_ids=[public_section],request_id=uuid4())
             raise AssertionError("changed source must be rejected")
         except PermissionError:
@@ -157,13 +157,13 @@ async def main():
                VALUES('stage3-researcher','stage3.open',false)
                ON CONFLICT(character_id,scope_key) DO UPDATE SET allowed=false""")
         try:
-            await svc.study(instance_id=instance["instance_id"],dossier_id=opened["dossier_id"],
+            await svc.study(instance_id=instance["instance_id"],dossier_id=dossier_id,
                             section_ids=[public_section],request_id=uuid4())
             raise AssertionError("revoked ACL must block study")
         except PermissionError:
             pass
         assert not (await svc.inspect(instance_id=instance["instance_id"],
-                                      dossier_id=opened["dossier_id"]))["sources"]
+                                      dossier_id=dossier_id))["sources"]
         await db.execute(
             """DELETE FROM aios.character_corpus_access
                WHERE character_id='stage3-researcher' AND scope_key='stage3.open'""")
@@ -171,12 +171,12 @@ async def main():
         study=ProgressiveResearchService(db,researcher=stub)
         selection_request=uuid4()
         receipt=await study.study(instance_id=instance["instance_id"],
-                                  dossier_id=opened["dossier_id"],
+                                  dossier_id=dossier_id,
                                   section_ids=[public_section],request_id=selection_request)
         assert receipt["status"]=="submitted_to_ingestion",receipt
         assert receipt["integrity_admission"]=="not_asserted"
         again=await study.study(instance_id=instance["instance_id"],
-                                dossier_id=opened["dossier_id"],
+                                dossier_id=dossier_id,
                                 section_ids=[public_section],request_id=selection_request)
         assert again["status"]=="submitted" and stub.calls==1,again
         assert await db.fetchval(
@@ -184,13 +184,13 @@ async def main():
                WHERE instance_id=$1 AND research_dedupe_key=$2""",
             instance["instance_id"],f"research-dossier:{dossier_id}:{public_section}")==1
         inspection=await study.inspect(instance_id=instance["instance_id"],
-                                       dossier_id=opened["dossier_id"])
+                                       dossier_id=dossier_id)
         assert inspection["submitted_count"]==1
         paused=await study.set_status(instance_id=instance["instance_id"],
-                                       dossier_id=opened["dossier_id"],status="paused")
+                                       dossier_id=dossier_id,status="paused")
         assert paused["status"]=="paused"
         closed=await study.set_status(instance_id=instance["instance_id"],
-                                       dossier_id=opened["dossier_id"],status="closed")
+                                       dossier_id=dossier_id,status="closed")
         assert closed["status"]=="closed"
         print("Stage 3 PostgreSQL smoke PASS: resumable scoped dossier, bounded topic follow-up, idempotent steps, stale-content rejection, ACL revocation, deliberate study, unique receipt")
     finally:
