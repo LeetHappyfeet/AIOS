@@ -226,7 +226,19 @@ class CognitiveOperationEngine:
     async def _queue_decision(self, op: Mapping[str,Any]) -> None:
         from aios_app.agent.transactions import InternalCognitionTransactions
         payload=self._mapping(op["input"])
-        subject=" ".join(str(v) for v in payload.values() if v)[:220]
+        if str(op["operation_type"])=="planning.review":
+            turns=payload.get("recent_source_events") or []
+            excerpts=[
+                f"{str(turn.get('speaker_id') or 'unknown')}: {str(turn.get('message_text') or '')[:260]}"
+                for turn in turns[:4] if isinstance(turn,Mapping)
+            ]
+            subject=(
+                f"Goal: {str(payload.get('goal') or '')[:180]}. "
+                f"Current focus: {str(payload.get('focus') or '')[:300]}. "
+                f"Recent source turns (newest first): {' | '.join(excerpts)}."
+            )[:1200]
+        else:
+            subject=" ".join(str(v) for v in payload.values() if v)[:220]
         labels={
             "reflection.review":[
                 f"This seems important; keep it in mind: {subject}.",
