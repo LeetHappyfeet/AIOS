@@ -472,9 +472,45 @@ class CorpusSearchService:
             JOIN aios.corpus_section cs ON
                (cs.section_id=ts.section_id OR
                 (ts.section_id IS NULL AND cs.document_id=ts.document_id))
+            WHERE ($5::boolean OR NOT EXISTS (
+                SELECT 1 FROM aios.corpus_document_scope fan_scope
+                WHERE fan_scope.document_id=cs.document_id
+                  AND fan_scope.scope_key ~ '(^|[.])fanwork([.]|$)'))
+              AND (
+                EXISTS (SELECT 1 FROM aios.corpus_document_scope scope_link
+                        JOIN aios.corpus_scope scope_def ON scope_def.scope_key=scope_link.scope_key
+                          AND scope_def.access_class='public'
+                        WHERE scope_link.document_id=cs.document_id)
+                OR EXISTS (SELECT 1 FROM aios.corpus_document_domain cdd
+                           JOIN aios.character_knowledge_domain ckd
+                             ON ckd.character_id=$4 AND ckd.enabled
+                            AND ckd.knowledge_domain=cdd.knowledge_domain
+                           WHERE cdd.document_id=cs.document_id)
+                OR EXISTS (SELECT 1 FROM aios.corpus_document_collection dc
+                           JOIN aios.corpus_source_profile profile ON profile.profile_id=dc.profile_id
+                             AND profile.enabled
+                           JOIN aios.corpus_scope sc ON sc.scope_key=profile.scope_key
+                             AND sc.access_class='domain'
+                           JOIN aios.character_knowledge_domain ckd
+                             ON ckd.character_id=$4 AND ckd.enabled
+                            AND ckd.knowledge_domain=profile.knowledge_domain
+                           WHERE dc.document_id=cs.document_id)
+                OR EXISTS (SELECT 1 FROM aios.corpus_document_scope scope_link
+                           JOIN aios.character_corpus_access acl
+                             ON acl.character_id=$4 AND acl.allowed
+                            AND (scope_link.scope_key=acl.scope_key OR
+                                 left(scope_link.scope_key,length(acl.scope_key)+1)=acl.scope_key||'.')
+                           WHERE scope_link.document_id=cs.document_id)
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM aios.corpus_document_scope denied
+                JOIN aios.character_corpus_access acl ON acl.character_id=$4 AND NOT acl.allowed
+                  AND (denied.scope_key=acl.scope_key OR
+                       left(denied.scope_key,length(acl.scope_key)+1)=acl.scope_key||'.')
+                WHERE denied.document_id=cs.document_id)
             ORDER BY cs.section_id LIMIT 96
             """,
-            suggested_topics,list(terms),query.lower())
+            suggested_topics,list(terms),query.lower(),character_id,include_fanwork)
         topic_sections = [row["section_id"] for row in related_sections]
 
         # Reciprocal rank fusion over the union of SQL FTS, vector candidates
