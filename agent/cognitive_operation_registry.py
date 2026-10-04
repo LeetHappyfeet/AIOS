@@ -19,6 +19,9 @@ SPECS = {
     "corpus.search": CognitiveOperationSpec(
         "corpus.search", frozenset({"research","planning","executive"})
     ),
+    "research.advance": CognitiveOperationSpec(
+        "research.advance", frozenset({"research","planning","executive"})
+    ),
     "inquiry.resolve": CognitiveOperationSpec(
         "inquiry.resolve", frozenset({"research","reflection","planning","executive"})
     ),
