@@ -731,6 +731,7 @@ class CharacterResearchService:
         instance_id: UUID,
         section_ids: Sequence[UUID],
         mode: str = "research",
+        dedupe_key_prefix: str | None = None,
     ) -> dict:
         instance = await self.db.fetchrow(
             "SELECT character_id FROM aios.character_instance WHERE instance_id=$1",
@@ -823,6 +824,7 @@ class CharacterResearchService:
             instance_id=instance_id,
             section_ids=section_ids,
             mode=mode,
+            dedupe_key_prefix=dedupe_key_prefix,
         )
 
 
