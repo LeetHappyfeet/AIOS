@@ -93,6 +93,21 @@ CREATE OR REPLACE FUNCTION aios.semantic_occurrence_topology_eligible(
     )
 $$;
 
+-- Continued dirty outbox coverage if a superseded source is later replayed
+-- with its original rejected revision.
+CREATE OR REPLACE FUNCTION aios.dirty_adjudicated_topology_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $
+BEGIN
+    IF OLD.proposition_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM aios.semantic_hygiene_adjudication a
+        WHERE a.proposition_id=OLD.proposition_id
+          AND a.status IN ('applied','superseded')
+    ) THEN
+        PERFORM aios.mark_semantic_hygiene_scope_dirty(OLD.scope_key);
+    END IF;
+    RETURN COALESCE(NEW,OLD);
+END $;
+
 -- Explicit operator release after actual source/frame revalidation. No direct
 -- changes to original evidence. Restores the ordinary admission resolver,
 -- which may itself choose active/unresolved/suppressed for the revised source.
