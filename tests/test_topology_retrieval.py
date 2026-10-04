@@ -1,5 +1,6 @@
 from aios_app.hud.retrieval import MAX_FOCUS_TERMS, POLICIES, _RETRIEVAL_SQL, _focus_terms
 from aios_app.epistemic.relevance import _continuity_distance
+from aios_app.epistemic.retrieval import TOPOLOGY_SQL_TIMEOUT_SECONDS
 
 
 def test_memory_retrieval_keeps_topic_history():
@@ -61,3 +62,7 @@ def test_character_continuity_rank_is_not_treated_as_graph_depth():
     assert _continuity_distance(1) == 1
     assert _continuity_distance(100001) == 2
     assert _continuity_distance(100031) == 32
+
+
+def test_pre_generation_topology_sql_budget_is_five_seconds():
+    assert TOPOLOGY_SQL_TIMEOUT_SECONDS == 5.0
