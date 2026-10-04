@@ -13,7 +13,10 @@ from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
 from aios_app.topic_atlas.collector import collect_topics_once
-from aios_app.topic_atlas.projection import index_topics_once, project_topics_once
+from aios_app.topic_atlas.projection import (
+    index_topics_once, project_topics_once, prune_retired_topic_vectors_once,
+)
+from aios_app.topic_atlas.hygiene import retire_invalid_candidates_once
 from .corpus_discovery import (
     index_corpus_discovery_once, prune_deleted_corpus_once,
     link_corpus_topics_once,
@@ -164,6 +167,8 @@ async def _run_vector_stages(db, cfg, run_stage, *, run_corpus: bool = True) -> 
                                          db, cfg, limit=cfg.background_batch_size)
         corpus = await run_stage("vector-corpus-v2", index_corpus_discovery_once,
                                  db, cfg, limit=cfg.background_batch_size)
+    await run_stage("vector-topic-retire", prune_retired_topic_vectors_once, db, cfg,
+                    limit=cfg.background_batch_size)
     topics = await run_stage("vector-topics", index_topics_once, db, cfg,
                              limit=cfg.background_batch_size)
     if run_corpus:
@@ -229,6 +234,10 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 # stages on a bounded cadence, not on HUD's hot path.
                 found = await run_stage("topic-discovery", collect_topics_once, db,
                                         limit=cfg.background_batch_size)
+                retired_bad = await run_stage(
+                    "topic-hygiene", retire_invalid_candidates_once, db,
+                    limit=cfg.background_batch_size)
+                totals["topic_hygiene_retired"] = retired_bad
                 totals["topics_collected"] = sum(found.values()) if isinstance(found,dict) else 0
                 last_topic_scan = time.monotonic()
             corpus_due = time.monotonic()-last_corpus_scan >= cfg.corpus_refresh_seconds
