@@ -150,11 +150,12 @@ async def apply_migrations() -> None:
     if missing:
         raise RuntimeError(f"Canonical migration chain incomplete: {sorted(missing)}")
     # Verify syntax and wrappers BEFORE modifying an empty database.
-    prepared = [
-        (path, _sha256_text(path.read_text(encoding="utf-8")),
-         _migration_body(path.read_text(encoding="utf-8"), path.name))
-        for path in files
-    ]
+    prepared = []
+    for path in files:
+        # Hash and execute exactly the same source snapshot. Never reread the
+        # file between the checksum and schema write.
+        sql = path.read_text(encoding="utf-8")
+        prepared.append((path, _sha256_text(sql), _migration_body(sql, path.name)))
 
     conn = await asyncpg.connect(settings.db_dsn)
     locked = False
