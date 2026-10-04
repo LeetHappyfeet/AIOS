@@ -203,13 +203,16 @@ class CognitiveOpportunityService:
                LEFT JOIN aios.character_research_materialization material
                  ON material.dossier_id=s.dossier_id AND material.section_id=s.section_id
                WHERE d.instance_id=$1 AND d.status='open' AND s.status='discovered'
+                 AND $2::boolean
                  AND material.section_id IS NULL AND
                  d.max_materializations > (
                     SELECT count(*) FROM aios.character_research_materialization reserved
                     WHERE reserved.dossier_id=d.dossier_id
                       AND reserved.status IN ('pending','submitted'))
                ORDER BY d.updated_at DESC,s.best_score DESC,s.last_seen_at DESC LIMIT 1""",
-            instance_id)
+            instance_id,
+            bool(re.search(r"\b(?:study|read (?:this|the|a) (?:article|passage|source|reference)|learn from (?:this|the|a))\b",
+                           focus,re.IGNORECASE)))
         if proposed_study:
             proposals.append(self._p(
                 "knowledge_gap","Consider studying one discovered source from my open research.",
