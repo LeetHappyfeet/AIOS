@@ -46,6 +46,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "derive_character_acquisition_topology": JobSpec(ResourceClass.SEMANTIC, "acquisition_scope", True, isolate_blocking=True),
     "derive_world_assertion_topology": JobSpec(ResourceClass.SEMANTIC, "assertion_scope", True, isolate_blocking=True),
     "project_semantic_scope": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
+    "semantic_hygiene_shadow": JobSpec(ResourceClass.RDF, "global", True, isolate_blocking=True, requires_rdf_slot=True),
     "reconcile_character_beliefs": JobSpec(ResourceClass.RECONCILIATION, "global", True),
     "resolve_generated_facts": JobSpec(ResourceClass.RECONCILIATION, "global", True),
     "rdf_epistemic_project": JobSpec(ResourceClass.RDF, "claim_scope", True, isolate_blocking=True, requires_rdf_slot=True),
@@ -105,6 +106,6 @@ def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) 
         "derive_world_assertion_topology",
     }:
         return SchedulingLane.STRUCTURAL
-    if job_type in {"project_semantic_scope", "compact_character_world_epistemic"}:
+    if job_type in {"project_semantic_scope", "compact_character_world_epistemic", "semantic_hygiene_shadow"}:
         return SchedulingLane.BACKGROUND
     return SchedulingLane.DEFAULT
