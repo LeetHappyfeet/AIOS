@@ -415,9 +415,21 @@ BEGIN
                 AND node_key='belief:' || p_instance_id::text || ':' || p_atom_id::text
           );
     ELSE
+        -- Accumulate preserves V3's authority/correlation aggregation but
+        -- recalculates the FINAL stance with this predicate family's own
+        -- thresholds. Metadata-only composition was not sufficient when a
+        -- family threshold differs from the generic default.
         UPDATE aios.character_belief_state
-        SET resolver_version='character-belief-v4-authority-family',
-            meta=COALESCE(meta,'{}'::jsonb) || jsonb_build_object(
+        SET stance=CASE
+              WHEN positive_support>=v_accept_support
+               AND positive_support-negative_support>=v_decision_margin THEN 'positive'
+              WHEN negative_support>=v_accept_support
+               AND negative_support-positive_support>=v_decision_margin THEN 'negative'
+              ELSE 'unresolved'
+            END,
+            resolver_version='character-belief-v4-authority-family',
+            meta=(COALESCE(meta,'{}'::jsonb) - 'state' - 'slot_winner_atom_id')
+               || jsonb_build_object(
                 'policy_engine_version','semantic-policy-v1',
                 'predicate_family',v_family,
                 'policy_name',v_policy_name,
@@ -427,7 +439,39 @@ BEGIN
                 'exclusive_slot',v_exclusive_slot
             ),
             updated_at=now()
-        WHERE instance_id=p_instance_id AND atom_id=p_atom_id;
+        WHERE instance_id=p_instance_id AND atom_id=p_atom_id
+        RETURNING stance INTO v_stance;
+
+        IF FOUND THEN
+          UPDATE aios.semantic_topology_node
+          SET meta=(COALESCE(meta,'{}'::jsonb) - 'state' - 'slot_winner_atom_id')
+             || jsonb_build_object(
+                 'stance',v_stance,
+                 'policy_engine_version','semantic-policy-v1',
+                 'predicate_family',v_family,
+                 'policy_name',v_policy_name,
+                 'policy_mode',v_policy_mode,
+                 'resolver_version','character-belief-v4-authority-family'),
+              updated_at=now()
+          WHERE scope_key=v_scope_key
+            AND node_type='BELIEF_STATE'
+            AND node_key='belief:' || p_instance_id::text || ':' || p_atom_id::text;
+
+          UPDATE aios.semantic_topology_edge
+          SET meta=(COALESCE(meta,'{}'::jsonb) - 'state' - 'slot_winner_atom_id')
+             || jsonb_build_object(
+                 'stance',v_stance,
+                 'policy_engine_version','semantic-policy-v1',
+                 'policy_name',v_policy_name,
+                 'resolver_version','character-belief-v4-authority-family')
+          WHERE scope_key=v_scope_key
+            AND edge_type='holds_belief_state'
+            AND child_node_id=(
+                SELECT topology_node_id FROM aios.semantic_topology_node
+                WHERE scope_key=v_scope_key AND node_type='BELIEF_STATE'
+                  AND node_key='belief:' || p_instance_id::text || ':' || p_atom_id::text
+            );
+        END IF;
     END IF;
 END;
 $$;
