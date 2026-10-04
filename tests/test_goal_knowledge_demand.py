@@ -40,20 +40,23 @@ async def test_goal_demand_uses_character_topology_before_lexical_fallback():
     ]
     result = await GoalKnowledgeDemandResolver(FakeDB(rows)).resolve(
         instance_id=uuid4(), subject=subject(), known=[])
-    assert result["coverage_source"] == "character_topology"
+    assert result["coverage_source"] == "established_character_propositions"
     assert result["internal_coverage"] == 0
-    assert result["topology_candidate_coverage"] >= 2 / 3
+    assert result["coverage_status"] == "missing"
+    assert len(result["topology"]) == 2  # Advisory navigation, zero admitted receipts.
     assert result["next_source"] == "memory"
     assert result["topology_status"] == "candidate_only"
-    assert result["knowledge_status"] == "unverified"
+    assert result["retrieval_state"] == "available"
 
 
 @pytest.mark.asyncio
 async def test_goal_demand_falls_back_to_existing_subject_coverage_without_topology():
     result = await GoalKnowledgeDemandResolver(FakeDB([])).resolve(
         instance_id=uuid4(), subject=subject(), known=[])
-    assert result["coverage_source"] == "lexical_fallback"
-    assert result["next_source"] == "corpus"
+    assert result["coverage_source"] == "established_character_propositions"
+    assert result["coverage_status"] == "missing"
+    assert result["topology_status"] == "empty"
+    assert result["next_source"] == "memory"  # Attempt scoped inquiry first.
 
 
 @pytest.mark.asyncio
@@ -64,5 +67,6 @@ async def test_topology_timeout_is_not_interpreted_as_known():
     result = await GoalKnowledgeDemandResolver(BrokenDB()).resolve(
         instance_id=uuid4(), subject=subject(), known=[])
     assert result["topology_status"] == "unavailable"
-    assert result["knowledge_status"] == "unverified"
-    assert result["next_source"] != "none"
+    assert result["coverage_status"] == "unavailable"
+    assert result["retrieval_state"] == "unavailable"
+    assert result["next_source"] == "defer"
