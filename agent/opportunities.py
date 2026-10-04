@@ -214,10 +214,13 @@ class CognitiveOpportunityService:
             # Never-reviewed goals outrank already-reviewed zero-affinity goals;
             # otherwise older reviews rotate forward deterministically.
             starvation=1.0 if reviewed is None else 0.0
-            review_candidates.append((starvation,affinity,reviewed,index,goal,g))
+            completion_due=bool(goal_states.get(goal.goal_id,{}).get("completion_candidate_count"))
+            relevant=overlap>0
+            review_candidates.append((completion_due,relevant,starvation,affinity,reviewed,index,goal,g))
         review_candidates.sort(
-            key=lambda x:(-x[0],-x[1],x[2] is not None,x[2],x[3]))
-        for starvation,affinity,reviewed,index,goal,g in review_candidates[:3]:
+            key=lambda x:(-int(x[0]),-int(x[1]),-x[2],-x[3],
+                          x[4] is not None,x[4],x[5]))
+        for completion_due,relevant,starvation,affinity,reviewed,index,goal,g in review_candidates[:3]:
             goal_id=str(goal.goal_id) if goal.goal_id else None
             goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
             goal_subject=goal_subject_entry[0] if goal_subject_entry else None
@@ -240,7 +243,7 @@ class CognitiveOpportunityService:
                 goal_affinity=max(.35,affinity)+(.15 if starvation else 0),recency=1,
                 evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g,
                            "last_reviewed_at":str(reviewed) if reviewed else None}],
-                key=f"goal:{goal_id or g.lower()[:100]}",
+                key=f"goal:{goal_id or g.lower()[:100]}",freshness="strict",
                 subject_id=goal_subject.subject_id if goal_subject else
                            (primary_subject.subject_id if primary_subject else None)))
 
