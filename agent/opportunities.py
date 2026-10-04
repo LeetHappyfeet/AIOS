@@ -318,6 +318,21 @@ class CognitiveOpportunityService:
                     key=f"scene:{slot}:{after.lower()[:80]}",
                     subject_id=primary_subject.subject_id if primary_subject else None))
 
+        # A completed/closed dossier should not generate the same source-gap
+        # operation indefinitely on every later conversation turn.
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        progressive=ProgressiveResearchService(self.db)
+        eligible_proposals=[]
+        for proposed in proposals:
+            if proposed["operation_type"]=="research.advance":
+                query=str(proposed["operation_payload"].get("query") or "")
+                try:
+                    if not await progressive.available(instance_id=instance_id,question=query):
+                        continue
+                except ValueError:
+                    continue
+            eligible_proposals.append(proposed)
+        proposals=eligible_proposals
         proposals.sort(key=lambda x:x["priority_score"],reverse=True)
         budget=max(1,min(limit,16))
         # Goal lifecycle has a reserved downstream slot, so preserve one review
