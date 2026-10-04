@@ -209,7 +209,7 @@ async def project_topics_once(db, fuseki, *, limit: int = 4) -> int:
                WHERE topic_id=$1 ORDER BY normalized_alias""",row["topic_id"])
         relations = await db.fetch(
             """SELECT source_topic_id,target_topic_id,relation_kind,
-                      CASE WHEN bool_or(status='verified') THEN 'verified'
+                      CASE WHEN bool_or(r.status='verified') THEN 'verified'
                            ELSE 'candidate' END AS status
                FROM aios.knowledge_topic_relation r
                JOIN aios.knowledge_topic left_topic ON left_topic.topic_id=r.source_topic_id
