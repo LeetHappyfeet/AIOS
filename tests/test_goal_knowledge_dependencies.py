@@ -1,0 +1,117 @@
+"""Goal Integration V1: authority boundaries, coverage and dispatch contracts."""
+import asyncio
+from uuid import uuid4
+
+from aios_app.agent.cognitive_subjects import (
+    CognitiveSubject, GoalKnowledgeDemandResolver,
+)
+from aios_app.agent.opportunities import goal_research_operation
+from aios_app.hud.render_text import render_hud_text
+
+
+def _subject():
+    return CognitiveSubject(
+        subject_id=uuid4(), canonical_key="goal:test", subject_type="goal_knowledge",
+        entity_keys=(), predicate_key=None, object_key=None, topic_key=None,
+        question_type="knowledge_demand",
+        question="Find evidence about gendered sports media coverage statistics",
+        display_label="Gendered sports media coverage statistics",
+        confidence=1.0, uncertainty=0.0, salience=0.9,
+    )
+
+
+def _evidence(*, proposition=None, source=None, **extra):
+    return {
+        "claim_kind": "BELIEF", "proposition_id": proposition or uuid4(),
+        "source_node_id": source or uuid4(),
+        "text": "Gendered sports media coverage statistics",
+        **extra,
+    }
+
+
+def test_goal_coverage_deduplicates_graph_representations_and_provisional_text():
+    subject=_subject()
+    original=_evidence()
+    duplicates=[
+        original,
+        {**original, "topology_node_id": uuid4(), "node_type": "TOPIC"},
+        {**original, "topology_node_id": uuid4(), "node_type": "SEMANTIC_PIVOT"},
+        _evidence(claim_kind="GOAL"),
+        _evidence(authority_state="candidate"),
+        _evidence(cognitive_provisional=True),
+        {"claim_kind":"BELIEF","proposition_id":"cognitive:synthetic",
+         "text":"Gendered sports media coverage statistics"},
+    ]
+    result=GoalKnowledgeDemandResolver.established_support(subject,duplicates)
+    assert result["independent_support_count"]==1
+    assert result["coverage_status"]=="partial"
+    assert len(result["evidence_ids"])==1
+
+
+def test_independent_established_source_receipts_can_make_coverage_sufficient():
+    subject=_subject()
+    rows=[_evidence() for _ in range(3)]
+    result=GoalKnowledgeDemandResolver.established_support(subject,rows)
+    assert result["independent_support_count"]==3
+    assert result["coverage_status"]=="sufficient"
+    assert result["term_coverage"]==1.0
+    assert GoalKnowledgeDemandResolver.established_support(subject,[])["coverage_status"]=="missing"
+
+
+def test_three_nodes_from_one_source_do_not_claim_independent_sufficiency():
+    origin=uuid4()
+    rows=[_evidence(source=origin) for _ in range(3)]
+    assert GoalKnowledgeDemandResolver.established_support(_subject(),rows)["coverage_status"]=="partial"
+
+
+def test_topology_timeout_is_unavailable_not_missing_and_not_research_permission():
+    class TimedOut:
+        async def fetch(self,*args,**kwargs):
+            raise TimeoutError("contended topology query")
+    resolver=GoalKnowledgeDemandResolver(TimedOut())
+    result=asyncio.run(resolver.resolve(
+        instance_id=uuid4(),subject=_subject(),known=[]))
+    assert result["coverage_status"]=="unavailable"
+    assert result["retrieval_state"]=="unavailable"
+    assert result["next_source"]=="defer"
+    assert result["evidence_ids"]==[]
+
+
+def test_declared_retrieval_budget_miss_skips_secondary_graph_query():
+    class MustNotCall:
+        async def fetch(self,*args,**kwargs):
+            raise AssertionError("HUD already proved topology unavailable")
+    result=asyncio.run(GoalKnowledgeDemandResolver(MustNotCall()).resolve(
+        instance_id=uuid4(),subject=_subject(),known=[],
+        retrieval_unavailable=True))
+    assert result["coverage_status"]=="unavailable"
+    assert result["next_source"]=="defer"
+
+
+def test_goal_progression_inquiry_then_dossier_only_for_verified_gap():
+    assert goal_research_operation("memory",None)=="inquiry.resolve"
+    assert goal_research_operation("memory","unresolved")=="research.advance"
+    assert goal_research_operation("memory","partial")=="research.advance"
+    assert goal_research_operation("memory","resolved",coverage_status="partial")=="research.advance"
+    assert goal_research_operation("memory","planning") is None
+    assert goal_research_operation("memory","unresolved",coverage_status="sufficient") is None
+    assert goal_research_operation("defer","unresolved",coverage_status="unavailable",
+                                   retrieval_state="unavailable") is None
+    assert goal_research_operation("memory",None,retrieval_state="unavailable") is None
+
+
+def test_goal_hud_displays_requirement_not_false_progress():
+    goal=uuid4()
+    frame={
+        "identity":{"name":"Renamon"},"presence":{"instance_id":str(uuid4())},
+        "scene":{"working_state":{"immediate_goal":{
+            "goal_id":str(goal),"text":"Research sports-media sources",
+            "knowledge_requirements":[{
+                "coverage_status":"missing", "dossier_ids":[str(uuid4())],
+            }],
+        }}},
+        "goals":[{"goal_id":str(goal),"text":"Research sports-media sources"}],
+    }
+    hud=render_hud_text(frame)
+    assert "Goal knowledge: missing; linked research dossiers: 1" in hud
+    assert "completed" not in hud.lower()
