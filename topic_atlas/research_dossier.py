@@ -59,12 +59,14 @@ class ProgressiveResearchService:
     async def start(
         self, *, instance_id: UUID, question: str, topic_id: UUID | None = None,
         origin: str = "manual", max_cycles: int = 8, max_sections: int = 24,
-        max_materializations: int = 4,
+        max_materializations: int = 4, goal_id: UUID | None = None,
     ) -> dict[str, Any]:
         question = " ".join(str(question).split())
         identity = focus_key(question, topic_id)
         if origin not in {"manual", "cognition", "goal"}:
             raise ValueError("unsupported research dossier origin")
+        if (goal_id is None) != (origin != "goal"):
+            raise ValueError("goal research requires a goal_id and goal origin")
         max_cycles = max(1, min(int(max_cycles), 16))
         max_sections = max(1, min(int(max_sections), 48))
         max_materializations = max(0, min(int(max_materializations), 8))
@@ -76,6 +78,13 @@ class ProgressiveResearchService:
                 if not instance:
                     raise LookupError("unknown character instance")
                 character = str(instance["character_id"])
+                if goal_id is not None:
+                    owned_goal = await con.fetchrow(
+                        """SELECT goal_id FROM aios.character_agent_goal
+                           WHERE goal_id=$1 AND instance_id=$2 AND status='active'
+                           FOR SHARE""", goal_id, instance_id)
+                    if not owned_goal:
+                        raise PermissionError("research requires an active owned goal")
                 if topic_id is not None:
                     admitted = await con.fetchval(
                         """SELECT EXISTS (
@@ -104,7 +113,17 @@ class ProgressiveResearchService:
                        VALUES($1,'initial',$2,'initial',$3,100)
                        ON CONFLICT(dossier_id,question_key) DO NOTHING""",
                     row["dossier_id"],question,topic_id)
-        return _serial(row)
+                if goal_id is not None:
+                    await con.execute(
+                        """INSERT INTO aios.character_goal_research_link
+                             (instance_id,goal_id,dossier_id)
+                           VALUES($1,$2,$3)
+                           ON CONFLICT(goal_id,dossier_id) DO NOTHING""",
+                        instance_id, goal_id, row["dossier_id"])
+        result = _serial(row)
+        if goal_id is not None:
+            result["linked_goal_id"] = str(goal_id)
+        return result
 
     async def available(self, *, instance_id: UUID, question: str) -> bool:
         """Keep exhausted/closed dossier demand from requeuing on every turn."""
@@ -199,6 +218,10 @@ class ProgressiveResearchService:
                        WHERE denied.document_id=s.document_id)
                    ORDER BY s.best_score DESC,s.last_seen_at DESC LIMIT 48""",
                 dossier_id,dossier["character_id"])
+            links = await con.fetch(
+                """SELECT goal_id FROM aios.character_goal_research_link
+                   WHERE instance_id=$1 AND dossier_id=$2
+                   ORDER BY linked_at,goal_id""", instance_id,dossier_id)
             count = await con.fetchrow(
                 """SELECT count(*) AS total,
                       count(*) FILTER(WHERE status='submitted') AS submitted
@@ -208,6 +231,7 @@ class ProgressiveResearchService:
             "dossier":_serial(dossier),
             "questions":[_serial(q) for q in questions],
             "sources":[_serial(s) for s in sources],
+            "linked_goal_ids":[str(link["goal_id"]) for link in links],
             "source_count":int(count["total"] or 0),
             "submitted_count":int(count["submitted"] or 0),
             "source_visibility":"current_corpus_acl_and_exposed_revision",

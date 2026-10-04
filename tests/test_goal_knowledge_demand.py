@@ -42,7 +42,9 @@ async def test_goal_demand_uses_character_topology_before_lexical_fallback():
         instance_id=uuid4(), subject=subject(), known=[])
     assert result["coverage_source"] == "character_topology"
     assert result["internal_coverage"] >= .67
-    assert result["next_source"] == "none"
+    assert result["next_source"] == "memory"
+    assert result["topology_status"] == "candidate_only"
+    assert result["knowledge_status"] == "unverified"
 
 
 @pytest.mark.asyncio
@@ -51,3 +53,15 @@ async def test_goal_demand_falls_back_to_existing_subject_coverage_without_topol
         instance_id=uuid4(), subject=subject(), known=[])
     assert result["coverage_source"] == "lexical_fallback"
     assert result["next_source"] == "corpus"
+
+
+@pytest.mark.asyncio
+async def test_topology_timeout_is_not_interpreted_as_known():
+    class BrokenDB:
+        async def fetch(self, *args):
+            raise TimeoutError("temporarily unavailable")
+    result = await GoalKnowledgeDemandResolver(BrokenDB()).resolve(
+        instance_id=uuid4(), subject=subject(), known=[])
+    assert result["topology_status"] == "unavailable"
+    assert result["knowledge_status"] == "unverified"
+    assert result["next_source"] != "none"

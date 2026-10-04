@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
+
+logger = logging.getLogger('aios.agent.cognitive_subjects')
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 from uuid import UUID
@@ -338,10 +341,8 @@ class GoalSubjectProjector:
 
 
 class GoalKnowledgeDemandResolver:
-    """Resolve a goal's knowledge demand from authoritative character topology.
-
-    SQL semantic topology is authoritative; Fuseki /char is its derived RDF view.
-    Lexical subject coverage is used only when no character topology is available.
+    """Use topology as navigation candidates; unavailable or stale topology is
+    not proof that a goal's knowledge demand has been fulfilled.
     """
 
     def __init__(self, db: Database):
@@ -353,7 +354,8 @@ class GoalKnowledgeDemandResolver:
         known: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
         terms = research_terms(subject.retrieval_text, limit=24)
-        rows = await self.db.fetch(
+        try:
+            rows = await self.db.fetch(
             """SELECT DISTINCT n.topology_node_id,n.node_type,n.node_key,n.label,
                               n.proposition_id,n.significance
                FROM aios.semantic_topology_node n
@@ -373,10 +375,18 @@ class GoalKnowledgeDemandResolver:
                ORDER BY n.significance DESC
                LIMIT 12""",
             instance_id, list(terms),
-        )
+            )
+        except Exception as exc:
+            logger.warning("Goal topology retrieval unavailable: %s", type(exc).__name__)
+            result = self.fallback.resolve(subject, known)
+            return {**result, "coverage_source": "retrieval_fallback",
+                    "topology_status": "unavailable", "knowledge_status": "unverified",
+                    "topology": []}
         if not rows:
             result = self.fallback.resolve(subject, known)
-            return {**result, "coverage_source": "lexical_fallback", "topology": []}
+            return {**result, "coverage_source": "lexical_fallback",
+                    "topology_status": "empty", "knowledge_status": "unverified",
+                    "topology": []}
 
         propositions = {str(row["proposition_id"]) for row in rows if row["proposition_id"]}
         structural = {
@@ -388,7 +398,10 @@ class GoalKnowledgeDemandResolver:
         # managed goal itself is complete.
         evidence_units = len(propositions) + max(0, len(structural) - len(propositions))
         coverage = min(1.0, evidence_units / 3.0)
-        next_source = "none" if coverage >= .67 else "memory"
+        local = self.fallback.resolve(subject, known)
+        # A topology count is not an admissible memory receipt. Even several
+        # related topic nodes must not suppress retrieval when evidence is absent.
+        next_source = local["next_source"] if local["matching"] else "memory"
         query = " ".join(dict.fromkeys(terms[:12])).strip() or subject.display_label
         return {
             "internal_coverage": coverage,
@@ -397,6 +410,8 @@ class GoalKnowledgeDemandResolver:
             "query": query,
             "question": subject.question,
             "coverage_source": "character_topology",
+            "topology_status": "candidate_only",
+            "knowledge_status": "retrieved_support" if local["matching"] else "unverified",
             "topology": [
                 {"topology_node_id": str(row["topology_node_id"]),
                  "node_type": str(row["node_type"]),

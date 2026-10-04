@@ -17,7 +17,7 @@ _NOISE = frozenset({
     "need", "plans", "plan", "will", "going", "goal", "objective", "that",
     "this", "them", "their", "they", "with", "have", "from", "into",
     "about", "some", "would", "should", "could", "might", "the", "and",
-    "for", "are", "one", "two", "three",
+    "for", "are",
 })
 
 

@@ -71,7 +71,8 @@ class CognitiveOperationEngine:
                 service=ProgressiveResearchService(self.db)
                 dossier=await service.start(
                     instance_id=op["instance_id"],question=query,
-                    origin="goal" if payload.get("goal_id") else "cognition")
+                    origin="goal" if payload.get("goal_id") else "cognition",
+                    goal_id=UUID(str(payload["goal_id"])) if payload.get("goal_id") else None)
                 result=await service.advance(
                     instance_id=op["instance_id"],dossier_id=UUID(dossier["dossier_id"]),
                     request_id=op["operation_id"],include_fanwork=False)
