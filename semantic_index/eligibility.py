@@ -13,77 +13,99 @@ from .service import _get_store, VECTOR_MUTATION_LOCK
 logger = logging.getLogger("aios.semantic_index.eligibility")
 
 
-async def quarantine_ineligible_vectors_once(db: Database, cfg: SemanticIndexConfig) -> int:
+QUARANTINE_PHASES = (
+    "cluster_candidates", "event_memberships", "events",
+    "episode_memberships", "topology_nodes", "vectors",
+)
+
+
+async def quarantine_ineligible_vectors_once(
+    db: Database, cfg: SemanticIndexConfig, *, phase: str | None = None,
+) -> int:
+    """One independently budgeted maintenance phase per worker cycle.
+
+    phase=None retains full-pass compatibility for callers outside the topology
+    scheduler. No phase discards evidence or bypasses vector mutation locks.
+    """
+    if phase is not None and phase not in QUARANTINE_PHASES:
+        raise ValueError(f"unsupported quarantine phase: {phase}")
     started = time.monotonic()
     # Historical snapshots and decisions remain available for audit. Current
     # clusters containing withdrawn support stop contributing derived pivots.
-    await db.execute("""
-        WITH batch AS (
-            SELECT c.cluster_id FROM aios.semantic_cluster_candidate c
-            WHERE c.status='candidate' AND EXISTS (
-                SELECT 1 FROM aios.semantic_cluster_membership m
-                WHERE m.cluster_id=c.cluster_id
-                  AND NOT aios.semantic_proposition_topology_admitted(m.proposition_id))
-            ORDER BY c.cluster_id LIMIT $1
-        )
-        UPDATE aios.semantic_cluster_candidate c SET status='stale',updated_at=now()
-        FROM batch WHERE c.cluster_id=batch.cluster_id
-    """, cfg.batch_size)
-    await db.execute("""
-        WITH batch AS (
-            SELECT m.ctid FROM aios.semantic_event_membership m
-            WHERE m.status='active' AND (
-                NOT aios.semantic_proposition_topology_admitted(m.proposition_id)
-                OR (m.claim_id IS NOT NULL AND NOT
-                    aios.semantic_claim_topology_admitted(m.claim_id)))
-            LIMIT $1
-        )
-        UPDATE aios.semantic_event_membership m SET status='superseded',updated_at=now(),
-            meta=meta || '{"withdrawal_reason":"non_standalone_topology"}'::jsonb
-        WHERE m.ctid IN (SELECT ctid FROM batch)
-    """, cfg.batch_size)
-    await db.execute("""
-        WITH batch AS (
-            SELECT e.semantic_event_id FROM aios.semantic_event e
-            WHERE e.status='active' AND EXISTS (
-            SELECT 1 FROM aios.semantic_event_membership w
-            WHERE w.semantic_event_id=e.semantic_event_id
-              AND w.meta->>'withdrawal_reason'='non_standalone_topology')
-              AND NOT EXISTS (
-            SELECT 1 FROM aios.semantic_event_membership m
-            WHERE m.semantic_event_id=e.semantic_event_id AND m.status='active')
-            ORDER BY e.semantic_event_id LIMIT $1
-        )
-        UPDATE aios.semantic_event e SET status='superseded',updated_at=now()
-        FROM batch WHERE e.semantic_event_id=batch.semantic_event_id
-    """, cfg.batch_size)
-    await db.execute("""
-        WITH batch AS (
-            SELECT m.ctid FROM aios.semantic_episode_membership m
-            WHERE m.status='active' AND EXISTS (SELECT 1 FROM aios.semantic_event e
-                WHERE e.semantic_event_id=m.semantic_event_id AND e.status='superseded')
-            LIMIT $1
-        )
-        UPDATE aios.semantic_episode_membership m SET status='superseded'
-        WHERE m.ctid IN (SELECT ctid FROM batch)
-    """, cfg.batch_size)
+    if phase is None or phase == "cluster_candidates":
+        await db.execute("""
+            WITH batch AS (
+                SELECT c.cluster_id FROM aios.semantic_cluster_candidate c
+                WHERE c.status='candidate' AND EXISTS (
+                    SELECT 1 FROM aios.semantic_cluster_membership m
+                    WHERE m.cluster_id=c.cluster_id
+                      AND NOT aios.semantic_proposition_topology_admitted(m.proposition_id))
+                ORDER BY c.cluster_id LIMIT $1
+            )
+            UPDATE aios.semantic_cluster_candidate c SET status='stale',updated_at=now()
+            FROM batch WHERE c.cluster_id=batch.cluster_id
+        """, cfg.batch_size)
+    if phase is None or phase == "event_memberships":
+        await db.execute("""
+            WITH batch AS (
+                SELECT m.ctid FROM aios.semantic_event_membership m
+                WHERE m.status='active' AND (
+                    NOT aios.semantic_proposition_topology_admitted(m.proposition_id)
+                    OR (m.claim_id IS NOT NULL AND NOT
+                        aios.semantic_claim_topology_admitted(m.claim_id)))
+                LIMIT $1
+            )
+            UPDATE aios.semantic_event_membership m SET status='superseded',updated_at=now(),
+                meta=meta || '{"withdrawal_reason":"non_standalone_topology"}'::jsonb
+            WHERE m.ctid IN (SELECT ctid FROM batch)
+        """, cfg.batch_size)
+    if phase is None or phase == "events":
+        await db.execute("""
+            WITH batch AS (
+                SELECT e.semantic_event_id FROM aios.semantic_event e
+                WHERE e.status='active' AND EXISTS (
+                SELECT 1 FROM aios.semantic_event_membership w
+                WHERE w.semantic_event_id=e.semantic_event_id
+                  AND w.meta->>'withdrawal_reason'='non_standalone_topology')
+                  AND NOT EXISTS (
+                SELECT 1 FROM aios.semantic_event_membership m
+                WHERE m.semantic_event_id=e.semantic_event_id AND m.status='active')
+                ORDER BY e.semantic_event_id LIMIT $1
+            )
+            UPDATE aios.semantic_event e SET status='superseded',updated_at=now()
+            FROM batch WHERE e.semantic_event_id=batch.semantic_event_id
+        """, cfg.batch_size)
+    if phase is None or phase == "episode_memberships":
+        await db.execute("""
+            WITH batch AS (
+                SELECT m.ctid FROM aios.semantic_episode_membership m
+                WHERE m.status='active' AND EXISTS (SELECT 1 FROM aios.semantic_event e
+                    WHERE e.semantic_event_id=m.semantic_event_id AND e.status='superseded')
+                LIMIT $1
+            )
+            UPDATE aios.semantic_episode_membership m SET status='superseded'
+            WHERE m.ctid IN (SELECT ctid FROM batch)
+        """, cfg.batch_size)
     # Node/edge deletion triggers write durable RDF deletion deltas. Only
     # derived topology is removed; its original evidence stays in SQL.
-    await db.execute("""
-        DELETE FROM aios.semantic_topology_node n WHERE n.topology_node_id IN (
-            SELECT x.topology_node_id FROM aios.semantic_topology_node x
-            WHERE (x.proposition_id IS NOT NULL AND NOT
-                aios.semantic_proposition_topology_admitted(x.proposition_id))
-               OR (x.claim_id IS NOT NULL AND NOT
-                aios.semantic_claim_topology_admitted(x.claim_id))
-               OR (x.node_key LIKE 'semantic_event:%' AND EXISTS (
-                   SELECT 1 FROM aios.semantic_event e
-                   WHERE e.semantic_event_id::text=x.meta->>'semantic_event_id'
-                     AND NOT EXISTS (SELECT 1 FROM aios.semantic_event_membership m
-                         WHERE m.semantic_event_id=e.semantic_event_id AND m.status='active')))
-            ORDER BY x.topology_node_id LIMIT $1
-        )
-    """, cfg.batch_size)
+    if phase is None or phase == "topology_nodes":
+        await db.execute("""
+            DELETE FROM aios.semantic_topology_node n WHERE n.topology_node_id IN (
+                SELECT x.topology_node_id FROM aios.semantic_topology_node x
+                WHERE (x.proposition_id IS NOT NULL AND NOT
+                    aios.semantic_proposition_topology_admitted(x.proposition_id))
+                   OR (x.claim_id IS NOT NULL AND NOT
+                    aios.semantic_claim_topology_admitted(x.claim_id))
+                   OR (x.node_key LIKE 'semantic_event:%' AND EXISTS (
+                       SELECT 1 FROM aios.semantic_event e
+                       WHERE e.semantic_event_id::text=x.meta->>'semantic_event_id'
+                         AND NOT EXISTS (SELECT 1 FROM aios.semantic_event_membership m
+                             WHERE m.semantic_event_id=e.semantic_event_id AND m.status='active')))
+                ORDER BY x.topology_node_id LIMIT $1
+            )
+        """, cfg.batch_size)
+    if phase is not None and phase != "vectors":
+        return 0
     # Index receipts identify vectors we own; a failed delete leaves receipts
     # intact so the next pass retries. Filter deletion also removes owner copies.
     rows = await db.fetch("""
