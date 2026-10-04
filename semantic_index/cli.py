@@ -296,6 +296,8 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
         quarantine_phases = ("vectors",) + tuple(
             phase for phase in QUARANTINE_PHASES if phase != "vectors")
         quarantine_cursor = 0
+        quarantine_next_at = 0.0
+        quarantine_min_interval = max(8.0, cfg.topology_sql_seconds * 2.0)
         quarantine_retry_after: dict[str, float] = {}
         quarantine_failures: dict[str, int] = {}
         stage_batches = {"neighbors":"neighbor_batch_size",
@@ -333,31 +335,35 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
             work["topics_projected"] = await run_stage(
                 "rdf-topics", project_topics_once, db, fuseki,
                 limit=1)  # One acknowledged graph replacement per topology cycle.
-            phase = quarantine_phases[quarantine_cursor]
-            quarantine_cursor = (quarantine_cursor + 1) % len(quarantine_phases)
-            stage = f"topology-quarantine/{phase}"
-            if time.monotonic() >= quarantine_retry_after.get(phase, 0.0):
-                phase_batch = (effective_cfg.background_batch_size if phase == "vectors"
-                               else min(4, effective_cfg.background_batch_size))
-                await run_stage(
-                    stage, quarantine_ineligible_vectors_once,
-                    db, replace(effective_cfg, batch_size=phase_batch),
-                    phase=phase,
-                )
-                if stage in failed:
-                    streak = quarantine_failures.get(phase, 0) + 1
-                    quarantine_failures[phase] = streak
-                    # Query budgets and independent HUD retrieval should not
-                    # be continually contended by a pathological global scan.
-                    cooldown = min(300.0, 30.0 * (2 ** min(streak, 4)))
-                    quarantine_retry_after[phase] = time.monotonic() + cooldown
-                    logger.warning(
-                        "Topology quarantine phase=%s cooldown=%.0fs after %d failures",
-                        phase, cooldown, streak,
+            # Prevent historical global maintenance from occupying the SQL
+            # pool on every ~2-second cycle while foreground HUD is active.
+            if time.monotonic() >= quarantine_next_at:
+                phase = quarantine_phases[quarantine_cursor]
+                quarantine_cursor = (quarantine_cursor + 1) % len(quarantine_phases)
+                stage = f"topology-quarantine/{phase}"
+                if time.monotonic() >= quarantine_retry_after.get(phase, 0.0):
+                    phase_batch = (effective_cfg.background_batch_size if phase == "vectors"
+                                   else min(4, effective_cfg.background_batch_size))
+                    await run_stage(
+                        stage, quarantine_ineligible_vectors_once,
+                        db, replace(effective_cfg, batch_size=phase_batch),
+                        phase=phase,
                     )
-                else:
-                    quarantine_failures[phase] = 0
-                    quarantine_retry_after.pop(phase, None)
+                    if stage in failed:
+                        streak = quarantine_failures.get(phase, 0) + 1
+                        quarantine_failures[phase] = streak
+                        # Query budgets and independent HUD retrieval should not
+                        # be continually contended by a pathological global scan.
+                        cooldown = min(300.0, 30.0 * (2 ** min(streak, 4)))
+                        quarantine_retry_after[phase] = time.monotonic() + cooldown
+                        logger.warning(
+                            "Topology quarantine phase=%s cooldown=%.0fs after %d failures",
+                            phase, cooldown, streak,
+                        )
+                    else:
+                        quarantine_failures[phase] = 0
+                        quarantine_retry_after.pop(phase, None)
+                quarantine_next_at = time.monotonic() + quarantine_min_interval
             _emit_telemetry({"service": "semantic_topology",
                              "state": "DEGRADED" if failed else ("DRAINING" if any(work.values()) else "CAUGHT_UP"),
                              "stage": "retry" if failed else "idle", "stage_started_at": None})
