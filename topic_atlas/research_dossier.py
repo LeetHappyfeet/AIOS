@@ -145,12 +145,18 @@ class ProgressiveResearchService:
         return result
 
     async def available(self, *, instance_id: UUID, question: str) -> bool:
-        """Keep exhausted/closed dossier demand from requeuing on every turn."""
+        """Do not hot-loop exhausted dossiers; renew once for newly indexed corpus.
+
+        The advisory index epoch is only a retry trigger. Discovery and
+        selection still apply the SQL per-character source ACL in search/study.
+        """
         identity=focus_key(question)
         row=await self.db.fetchrow(
-            """SELECT d.status,d.max_cycles,d.max_sections,
+            """SELECT d.dossier_id,d.question,d.status,d.max_cycles,d.max_sections,
                     (SELECT count(*) FROM aios.character_research_step st
                      WHERE st.dossier_id=d.dossier_id) AS attempts,
+                    (SELECT max(st.completed_at) FROM aios.character_research_step st
+                     WHERE st.dossier_id=d.dossier_id) AS last_completed_at,
                     (SELECT count(*) FROM aios.character_research_source src
                      WHERE src.dossier_id=d.dossier_id) AS sources,
                     (SELECT count(*) FROM aios.character_research_question q
@@ -160,10 +166,40 @@ class ProgressiveResearchService:
                        AND st.lease_expires_at<now()) AS expired
                FROM aios.character_research_dossier d
                WHERE d.instance_id=$1 AND d.focus_key=$2""",instance_id,identity)
-        return (not row or
-                (row["status"]=="open" and row["attempts"]<row["max_cycles"]
-                 and row["sources"]<row["max_sections"]
-                 and (row["queued"]>0 or row["expired"]>0)))
+        if not row:
+            return True
+        if (row["status"]!="open" or row["attempts"]>=row["max_cycles"]
+                or row["sources"]>=row["max_sections"]):
+            return False
+        if row["queued"] or row["expired"]:
+            return True
+        # Initial empty-corpus research is a legitimate zero-source outcome.
+        # It can be retried once when a *new* section is subsequently indexed,
+        # but never once per tick while the index remains unchanged.
+        last_completed=row["last_completed_at"]
+        if last_completed is None:
+            return False
+        epoch=await self.db.fetchval(
+            "SELECT max(indexed_at) FROM aios.corpus_discovery_projection")
+        if epoch is None or epoch<=last_completed:
+            return False
+        inserted=await self.db.fetchrow(
+            """INSERT INTO aios.character_research_question
+                 (dossier_id,question_key,query_text,origin,priority)
+               SELECT d.dossier_id,$3,$4,'manual',75
+               FROM aios.character_research_dossier d
+               WHERE d.dossier_id=$1 AND d.instance_id=$2 AND d.status='open'
+                 AND (SELECT count(*) FROM aios.character_research_step st
+                      WHERE st.dossier_id=d.dossier_id)<d.max_cycles
+                 AND NOT EXISTS (
+                     SELECT 1 FROM aios.character_research_question q
+                     WHERE q.dossier_id=d.dossier_id AND q.status='queued')
+               ON CONFLICT(dossier_id,question_key) DO NOTHING
+               RETURNING question_id""",
+            row["dossier_id"],instance_id,"indexed:"+epoch.isoformat(),
+            row["question"],
+        )
+        return bool(inserted)
 
     async def _owned(self, con, instance_id: UUID, dossier_id: UUID, *, lock: bool = False):
         suffix = " FOR UPDATE" if lock else ""
