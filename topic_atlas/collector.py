@@ -465,7 +465,7 @@ async def retire_stale_domain_links_once(db, *, limit: int = 16) -> int:
                ON pm.source_kind='knowledge_domain' AND pm.source_key=parent.domain_id::text
                AND pm.topic_id=r.target_topic_id
              WHERE d.enabled AND d.domain_id::text=r.source_key))
-           OR (r.source_kind IN ('corpus_heading','corpus_facet')
+           OR (r.source_kind IN ('corpus_heading','corpus_facet','vector_candidate')
                AND r.relation_kind='associated' AND NOT EXISTS (
              SELECT 1 FROM aios.knowledge_topic_source s
              JOIN aios.knowledge_topic t ON t.topic_id=s.topic_id
