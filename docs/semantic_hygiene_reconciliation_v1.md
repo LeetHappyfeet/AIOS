@@ -42,9 +42,19 @@ topology delta outbox records SQL node/edge deletion. The implicated RDF scope
 dirty version increments at apply and on later deletion/update of affected
 topology nodes, preventing a projection/reconciliation race.
 
-A new source/frame revision does not silently inherit an earlier adjudication.
-For a new revision, review source evidence and supersede the earlier decision
-under operator supervision; never create a blanket semantic-atom tombstone.
+If the current integrity revision changes while a decision remains applied,
+its acquisition is held unresolved as hygiene_revision_requires_review; new
+source revisions cannot silently reactivate the old belief. A supervised
+supersession requires a different current VALID integrity revision, then
+re-runs ordinary acquisition admission and dirties descendant beliefs. The
+exact previously rejected revision remains suppressed if historical ingestion
+replays it after supersession. Never create a blanket semantic-atom tombstone.
+
+The semantic index has a small hygiene-retirement pass ahead of the expensive
+general topology-quarantine scan: it removes now-ineligible proposition and
+epistemic Qdrant points using the shared mutation lock and retires topology
+only after no current belief requires the proposition. It survives incomplete
+or retried Qdrant writes by retaining index receipts until acknowledged.
 
 ## Deploy and propose (proposal does NOT change knowledge)
 
@@ -102,6 +112,22 @@ impacted RDF scopes dirty, and records one append-only event. It deliberately
 does not synchronously delete all ten belief states. Let the existing
 reconciliation stage drain, then topology quarantine and RDF catch up.
 Admission recomputation for the unchanged revision remains suppressed.
+
+## Supervised source revision release
+
+After the original source has genuinely been reparsed/revalidated (and its
+current claim_semantic_integrity status is valid, with a DIFFERENT revision),
+the operator may explicitly release the old decision:
+
+    export AIOS_SEMANTIC_HYGIENE_APPLY_ENABLED=1
+    python -m aios_app.epistemic.hygiene_reconciliation \
+      --supersede-id REVIEWED_ADJUDICATION_UUID --actor OPERATOR_NAME
+
+The extra migration 20261003_09_semantic_hygiene_revision_review.sql gates
+changed source revisions as unresolved until this step. Running normal
+migrations installs both 08 and 09 additively; never edit the old baseline.
+Supersession is not a way to reactivate the identical rejected source:
+the historical revision remains a suppression fingerprint after release.
 
 ## Verify Mia
 
