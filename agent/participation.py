@@ -5,10 +5,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
+import socket
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 POLICY_VERSION = "participation-shadow-v1"
 COMPARISON_VERSION = "participation-shadow-v2"
@@ -303,6 +306,25 @@ class ParticipationService:
     def __init__(self, db):
         self.db = db
 
+    @staticmethod
+    async def _worker_status(db):
+        row = await db.fetchrow(
+            """SELECT worker_id,policy_version,last_seen_at,last_error,
+                      (last_seen_at >= now()-interval '15 seconds'
+                       AND last_error IS NULL
+                       AND policy_version=$1) AS ready
+               FROM aios.character_participation_worker_heartbeat
+               WHERE worker_name='participation_shadow'""",
+            POLICY_VERSION,
+        )
+        if not row:
+            return {"ready": False, "reason": "worker_never_registered"}
+        return {"ready": bool(row["ready"]),
+                "reason": "ready" if row["ready"] else "worker_heartbeat_stale_or_failed",
+                "worker_id": row["worker_id"],
+                "last_seen_at": row["last_seen_at"],
+                "last_error": row["last_error"]}
+
     async def start(self, instance_id, *, since_at=None, duration_minutes=60, max_claims=100):
         if not 1 <= max_claims <= 1000 or not 1 <= duration_minutes <= 1440:
             raise ValueError("max_claims must be 1..1000 and duration_minutes 1..1440")
@@ -315,6 +337,12 @@ class ParticipationService:
                 await con.execute("SET LOCAL statement_timeout='2000ms'")
                 if not await con.fetchval("SELECT 1 FROM aios.character_instance WHERE instance_id=$1", instance_id):
                     raise LookupError("Unknown instance")
+                worker = await self._worker_status(con)
+                if not worker["ready"]:
+                    raise RuntimeError(
+                        "Participation shadow evaluator unavailable: " + worker["reason"]
+                        + ". Enable AIOS_PARTICIPATION_SHADOW_ENABLED=1 and wait for its READY heartbeat."
+                    )
                 from aios_app.epistemic.runtime_versions import component_versions
                 manifest = component_versions()
                 exp = await con.fetchrow("""INSERT INTO aios.character_participation_experiment
@@ -592,27 +620,59 @@ class ParticipationService:
             WHERE experiment_id=$1
         """, experiment_id)
         queue_totals = {str(r["status"]): int(r["count"]) for r in counts}
+        worker = await self._worker_status(self.db)
         now = datetime.now(timezone.utc)
-        if int(coverage["evaluated"]) == 0:
+        expected = int(exp["enqueued_count"] or 0)
+        evaluated = int(coverage["evaluated"] or 0)
+        v3_count = int(coverage["v3_compared"] or 0)
+        v4_count = int(coverage["v4_compared"] or 0)
+        pending = queue_totals.get("pending", 0)
+        failed = queue_totals.get("failed", 0)
+        skipped = queue_totals.get("skipped", 0)
+        expired = exp["until_at"] <= now
+        if expected == 0:
+            evaluation_state = "empty_population"
+        elif evaluated == 0:
+            evaluation_state = ("expired_incomplete" if expired
+                                else "queued" if worker["ready"] and pending
+                                else "awaiting_evaluator")
+        elif failed or skipped or evaluated < expected and expired:
+            evaluation_state = "expired_incomplete" if expired else "partial"
+        elif v3_count < evaluated or v4_count < evaluated:
+            evaluation_state = "partial"
+        elif pending:
+            evaluation_state = "evaluating" if worker["ready"] else "stalled"
+        else:
+            evaluation_state = "complete" if evaluated >= expected else "partial"
+        if evaluated == 0:
             coverage_note = (
                 "No evaluation receipts; this is not a V3/V4 result. "
                 "Confirm that a separate participation shadow worker is running."
             )
-            if exp["until_at"] <= now:
+            if expired:
                 coverage_note += " Experiment expired; create a fresh controlled experiment."
+            elif not worker["ready"]:
+                coverage_note += " Worker readiness: " + worker["reason"] + "."
         elif int(coverage["v4_compared"]) < int(coverage["evaluated"]):
             coverage_note = (
                 "Some baseline receipts have no V4 paired comparison; "
                 "frozen replay may fill these but cannot recreate historical live context."
             )
+        elif failed or skipped or pending or evaluated < expected:
+            coverage_note = "Evaluation population incomplete; inspect failed, skipped and pending claims."
         else:
-            coverage_note = "All evaluation receipts include the V4 comparator."
+            coverage_note = "All evaluation receipts include V4 and all enqueued claims are accounted for."
         return {'shadow':True,'experiment':dict(exp),'queue':[dict(r) for r in counts],
                 'evaluation_coverage': {
                     'evaluated': int(coverage["evaluated"]),
                     'v3_compared': int(coverage["v3_compared"]),
                     'v4_compared': int(coverage["v4_compared"]),
-                    'pending': queue_totals.get("pending", 0),
+                    'pending': pending,
+                    'failed': failed,
+                    'skipped': skipped,
+                    'expected': expected,
+                    'state': evaluation_state,
+                    'worker': worker,
                     'worker_required': True,
                     'participation_live_admission': False,
                     'note': coverage_note,
@@ -631,17 +691,37 @@ async def run_worker(*, once=False):
     from aios_app.config import settings
     from aios_app.db import Database
     db = Database(settings.db_dsn,min_size=1,max_size=2)
+    worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
     await db.connect()
+    async def heartbeat(error=None):
+        await db.execute(
+            """INSERT INTO aios.character_participation_worker_heartbeat
+                   (worker_name,worker_id,policy_version,started_at,last_seen_at,last_error)
+               VALUES ('participation_shadow',$1,$2,now(),now(),$3)
+               ON CONFLICT (worker_name) DO UPDATE
+                  SET started_at=CASE WHEN aios.character_participation_worker_heartbeat.worker_id
+                                           IS DISTINCT FROM EXCLUDED.worker_id
+                                      THEN now() ELSE aios.character_participation_worker_heartbeat.started_at END,
+                      worker_id=EXCLUDED.worker_id,
+                      policy_version=EXCLUDED.policy_version,
+                      last_seen_at=now(), last_error=EXCLUDED.last_error""",
+            worker_id, POLICY_VERSION, error,
+        )
     try:
         from aios_app.epistemic.runtime_versions import component_versions
         logger.info("Participation worker runtime versions: %s", component_versions())
+        # Emit READY only AFTER the heartbeat is persisted and start() can
+        # independently see a running evaluator through shared PostgreSQL.
+        await heartbeat()
         print("AIOS_READY service=participation_shadow comparator=v4 live_admission=false",
               flush=True)
         while True:
             try:
                 count = await ParticipationService(db).process_pending()
-            except Exception:
+                await heartbeat()
+            except Exception as exc:
                 logger.exception("Shadow participation worker batch failed")
+                await heartbeat(f"{type(exc).__name__}: {exc}"[:1000])
                 if once:
                     raise
                 await asyncio.sleep(2.0)
@@ -650,7 +730,16 @@ async def run_worker(*, once=False):
                 return
             await asyncio.sleep(0.25 if count else 2.0)
     finally:
-        await db.close()
+        try:
+            # A stopped --once worker must not look READY until its TTL expires.
+            await db.execute(
+                """UPDATE aios.character_participation_worker_heartbeat
+                   SET last_seen_at=now()-interval '1 day'
+                   WHERE worker_name='participation_shadow' AND worker_id=$1""",
+                worker_id,
+            )
+        finally:
+            await db.close()
 
 
 if __name__ == '__main__':
