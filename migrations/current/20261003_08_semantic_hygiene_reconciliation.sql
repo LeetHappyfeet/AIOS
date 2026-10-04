@@ -72,13 +72,13 @@ BEGIN
       AND EXISTS (
           SELECT 1 FROM jsonb_array_elements(
               COALESCE(h.evidence_snapshot->'sources','[]'::jsonb)
-          ) source
-          WHERE source->>'claim_id'=cc.claim_id::text
-            AND source->>'frame_id'=f.frame_id::text
-            AND source->>'proposition_id'=p.proposition_id::text
-            AND source->>'revision_key'=si.revision_key
-            AND source->>'validator_version'=si.validator_version
-            AND source->>'raw_text'=cc.raw_text
+          ) AS source(value)
+          WHERE source.value->>'claim_id'=cc.claim_id::text
+            AND source.value->>'frame_id'=f.frame_id::text
+            AND source.value->>'proposition_id'=p.proposition_id::text
+            AND source.value->>'revision_key'=si.revision_key
+            AND source.value->>'validator_version'=si.validator_version
+            AND source.value->>'raw_text'=cc.raw_text
       )
       AND EXISTS (
           SELECT 1 FROM aios.proposition_evidence pe
