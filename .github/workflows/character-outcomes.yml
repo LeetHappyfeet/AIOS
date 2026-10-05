@@ -41,4 +41,9 @@ jobs:
             tests/test_agent_temporal.py \
             tests/test_scene_state.py \
             tests/test_scene_convergence.py \
-            tests/test_cognitive_control_boundary.py
+            tests/test_cognitive_control_boundary.py \
+            tests/test_world_resolution.py \
+            tests/test_explicit_world_continuity.py \
+            tests/test_source_goal_formation_receipt.py \
+            tests/test_corpus_research.py \
+            tests/test_cognitive_recall_selection.py

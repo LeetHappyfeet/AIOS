@@ -47,6 +47,13 @@ _SCENE_ACTION = re.compile(
     r"pick|picking|move|moving|sit|sitting|stand|standing|"
     r"turn|turning|look|looking|reach|reaching)\b", re.I,
 )
+_SHORT_ERRAND_ACTION = re.compile(
+    r"^(?:to\s+)?(?:get|fetch|grab|pour|drink)\s+"
+    r"(?:(?:a|some|the|my|your)\s+)?(?:glass|cup|bottle|water|coffee|tea|drink|snack|pizza)\b", re.I,
+)
+_LOCATIVE_ACTION = re.compile(
+    r"^(?:to\s+)?be\s+(?:over\s+)?(?:here|there|nearby)\b", re.I,
+)
 _EXTENDED_TIME = re.compile(
     r"\b(?:tomorrow|next\s+(?:week|month|year)|"
     r"(?:two|three|four|five|six|seven|\d+)\s+"
@@ -97,7 +104,8 @@ def review_goal_source(
                              "objective_contains_unresolved_reference", "source")
     if str(horizon or "").lower() == "immediate":
         return GoalAdmission("scene_only", "immediate_intention", "source")
-    if (_SCENE_ACTION.search(action)
+    if ((_SCENE_ACTION.search(action) or _SHORT_ERRAND_ACTION.search(action)
+         or _LOCATIVE_ACTION.search(action))
             and (_NEAR_TIME.search(source) or not _EXTENDED_TIME.search(source))):
         return GoalAdmission("scene_only", "transient_scene_action", "source")
     return GoalAdmission("admit", "source_grounded_managed_intention", "source")

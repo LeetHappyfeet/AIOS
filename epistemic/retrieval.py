@@ -271,6 +271,7 @@ belief_owned AS (
         ORDER BY kae_auth.created_at DESC,kae_auth.acquisition_id DESC LIMIT 1
     ) auth ON true
     WHERE ck.instance_id = ANY($2::uuid[])
+      AND ck.evidence_instance_id = ANY($2::uuid[])
       AND EXISTS (
           SELECT 1
           FROM aios.knowledge_acquisition_event kae
@@ -362,6 +363,7 @@ classified AS (
         COALESCE(ctx.claim_kind, 'BELIEF') AS claim_kind,
         ctx.predicate_family,
         ctx.world_id AS source_world_id,
+        COALESCE(evidence_ci.current_world_id,evidence_ci.world_id) AS evidence_world_id,
         ctx.dag_node_id AS source_node_id,
         ctx.event_time AS occurrence_time,
         tp.topology_depth,
@@ -369,6 +371,7 @@ classified AS (
         tp.topology_significance
     FROM topology_props tp
     JOIN owned o ON o.proposition_id=tp.proposition_id
+    JOIN aios.character_instance evidence_ci ON evidence_ci.instance_id=o.instance_id
     JOIN aios.proposition p ON p.proposition_id=o.proposition_id
     LEFT JOIN LATERAL (
         SELECT ccr.claim_kind, ccr.predicate_family,
@@ -956,7 +959,7 @@ class TopologyRetriever:
             candidate_world_id = (
                 anchor.get("world_id")
                 if anchor and anchor.get("world_id") is not None
-                else item.get("source_world_id") or context.world_id
+                else item.get("evidence_world_id") or context.world_id
             )
             score = scorer.score(
                 item,

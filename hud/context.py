@@ -27,10 +27,13 @@ class HUDContext:
     lineage_instance_ids: tuple[UUID, ...]
     scene_entity_ids: frozenset[UUID]
     cognitive_instance_ids: tuple[UUID, ...] = ()
+    cognitive_world_ids: tuple[UUID, ...] = ()
 
     def world_visible(self, candidate_world_id: Optional[UUID]) -> bool:
         """Only the current branch and its ancestors are implicitly visible."""
-        return candidate_world_id is None or candidate_world_id in self.lineage_world_ids
+        return (candidate_world_id is None
+                or candidate_world_id in self.lineage_world_ids
+                or candidate_world_id in self.cognitive_world_ids)
 
     def instance_visible(self, candidate_instance_id: Optional[UUID]) -> bool:
         """Only the active experiential branch and its ancestors are implicit memory scope."""
@@ -144,6 +147,15 @@ class HUDContextResolver:
             tuple(row["instance_id"] for row in cognitive_scope) or lineage_instance_ids
         )
 
+        # The same canonical evidence scope also controls scorer world visibility.
+        # Explicitly continued worlds are eligible; unrelated siblings are not.
+        cognitive_world_rows = await self.db.fetch(
+            """SELECT DISTINCT COALESCE(current_world_id,world_id) AS world_id
+               FROM aios.character_instance WHERE instance_id=ANY($1::uuid[])""",
+            list(cognitive_instance_ids),
+        )
+        cognitive_world_ids = tuple(row["world_id"] for row in cognitive_world_rows)
+
         scene_ids = {state["entity_id"]}
         if state["location_entity_id"]:
             scene_ids.add(state["location_entity_id"])
@@ -177,5 +189,6 @@ class HUDContextResolver:
             lineage_world_ids=lineage_world_ids,
             lineage_instance_ids=lineage_instance_ids,
             cognitive_instance_ids=cognitive_instance_ids,
+            cognitive_world_ids=cognitive_world_ids,
             scene_entity_ids=frozenset(scene_ids),
         )

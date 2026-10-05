@@ -399,3 +399,27 @@ def test_web_structured_metadata_uses_jsonld_not_article_prose():
     assert result["schema_org"]["source_type"] == ["MedicalWebPage"]
     assert all("Star Wars" not in value for value in result["schema_org"]["subjects"])
     assert all("description" not in value.lower() for value in result["schema_org"]["subjects"])
+
+
+def test_library_search_narration_does_not_mine_corpus_for_random_words():
+    from aios_app.epistemic.cognitive_context import focused_corpus_research_query
+    roleplay = (
+        '"Loud names," I mutter back at the empty room. Okay. Three searches. '
+        "Big net first. I take a bite of the crust, type it one-handed. "
+        "Search two. I type women athletes framing inspirational media. "
+        "I open the WNBA one. I type search three anyway."
+    )
+    assert focused_corpus_research_query(roleplay) is None
+    attention = _corpus_attention(speaker_id="Alex_", speaker_role="user")
+    attention.recent_newest[0]["message_text"] = roleplay
+    assert not automatic_corpus_research_allowed(attention, character_id="Renamon")
+
+
+def test_explicit_source_question_uses_request_not_full_narrative():
+    from aios_app.epistemic.cognitive_context import focused_corpus_research_query
+    source = 'I close the book. "Can you research Digimon evolution?" I look up.'
+    assert focused_corpus_research_query(source) == "Digimon evolution"
+    assert focused_corpus_research_query("What was Renamon originally going to be named?") == (
+        "What was Renamon originally going to be named?"
+    )
+    assert focused_corpus_research_query("I type search three.") is None

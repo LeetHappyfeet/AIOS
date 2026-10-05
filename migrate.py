@@ -30,6 +30,8 @@ REQUIRED_ACTIVE_MIGRATIONS = frozenset({
     "20261004_18_knowledge_atlas_stabilization.sql",
     "20261004_19_source_goal_admission.sql",
     "20261004_20_goal_knowledge_dependencies.sql",
+    "20261004_21_explicit_world_cognitive_continuity.sql",
+    "20261004_22_transient_source_goal_repair.sql",
 })
 _MIGRATION_LOCK_KEY = "aios.canonical.migrator"
 _OUTER_BEGIN = re.compile(r"\A(?:\s|--[^\n]*(?:\n|$)|/\*.*?\*/)*BEGIN\s*;", re.I | re.S)

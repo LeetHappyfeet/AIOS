@@ -45,3 +45,29 @@ def test_negative_desire_is_not_formed_as_positive_goal():
 def test_nonliteral_first_person_cannot_form_goal():
     assert not check("Her gesture suggested I will visit the thrift store.",
                      "Renamon intends to visit the thrift store.").eligible
+
+
+def test_transient_self_authored_scene_commitments_do_not_become_managed_goals():
+    assert review_goal_source(
+        source_text="I will get a glass of water.",
+        objective="get a glass of water",
+    ).decision == "scene_only"
+    assert review_goal_source(
+        source_text="I will be over here.",
+        objective="be over here",
+    ).decision == "scene_only"
+    assert not check(
+        "I will get a glass of water.",
+        "Renamon intends to get a glass of water.",
+    ).eligible
+
+
+def test_durable_commitment_survives_scene_filter():
+    assert review_goal_source(
+        source_text="I will stay two nights.",
+        objective="stay two nights",
+    ).decision == "admit"
+    assert review_goal_source(
+        source_text="I will get a degree next year.",
+        objective="get a degree next year",
+    ).decision == "admit"

@@ -415,6 +415,10 @@ class CorpusSearchService:
                 re.sub(r"\s+OR\s+", " ", query, flags=re.IGNORECASE),
                 corpus_k=96, topic_k=12)
             for kind, _score, payload in candidates:
+                # A vector hit is a suggestion, not sufficient evidence of relevance.
+                # In particular, domain affinity must not promote very weak hits.
+                if _score < (0.58 if kind == "corpus" else 0.62):
+                    continue
                 try:
                     if kind == "corpus" and len(vector_sections) < 96:
                         section_id = UUID(str(payload["section_id"]))

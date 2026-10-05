@@ -8,7 +8,7 @@ from uuid import UUID
 from aios_app.db import Database
 
 
-RELATION_KINDS = frozenset({"inherits", "derived_from", "counterpart_of"})
+RELATION_KINDS = frozenset({"inherits", "derived_from", "counterpart_of", "continues"})
 INHERITANCE_MODES = frozenset({"inherit", "local_only"})
 # Deliberately broad, stable buckets. The database accepts additional domains,
 # but callers should prefer these rather than proliferating labels.

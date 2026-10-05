@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Optional
 from urllib.parse import quote
@@ -173,6 +174,8 @@ async def ensure_runtime_branch_world(
     character_id: str,
     session_id: Optional[UUID],
     root_world_id: UUID,
+    user_name: str,
+    scope_key: str,
 ) -> dict:
     """Ensure a concrete runtime world beneath the character root.
 
@@ -184,7 +187,10 @@ async def ensure_runtime_branch_world(
     historical world anchors as an authorized /char source binding.
     """
     suffix = str(session_id) if session_id else "default"
-    world_key = f"char:{character_id}:session:{suffix}"
+    # A client session is transport identity, not proof that two personas share reality.
+    # The discriminator is stable for reopen and avoids embedding names in world keys.
+    actor_scope = hashlib.sha256(f"{user_name}\x1f{scope_key}".encode("utf-8")).hexdigest()[:20]
+    world_key = f"char:{character_id}:session:{suffix}:actor:{actor_scope}"
 
     existing = await db.fetchrow(
         """
@@ -224,7 +230,10 @@ async def ensure_runtime_branch_world(
             jsonb_build_object(
                 'source','runtime_activation',
                 'topology_role','session_branch',
-                'source_session_id',$4::text
+                'source_session_id',$4::text,
+                'runtime_user_name',$5::text,
+                'source_scope_key',$6::text,
+                'continuity_mode','explicit'
             )
         )
         ON CONFLICT (world_key) DO NOTHING
@@ -235,6 +244,8 @@ async def ensure_runtime_branch_world(
         root_world_id,
         character_id,
         str(session_id) if session_id else None,
+        user_name,
+        scope_key,
     )
     if created:
         result = dict(created)

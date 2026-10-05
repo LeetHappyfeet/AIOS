@@ -207,6 +207,8 @@ class WorldRuntimeService:
                 character_id=character_id,
                 session_id=session_id,
                 root_world_id=root_world_id,
+                user_name=user_name,
+                scope_key=scope_key,
             )
         world_id = world["world_id"]
 
