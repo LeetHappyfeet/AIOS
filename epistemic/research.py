@@ -88,7 +88,7 @@ _SECOND_PERSON_RE = re.compile(r"\b(?:you|your|yours|yourself)\b", re.IGNORECASE
 _SELF_KNOWLEDGE_PATTERNS = (
     re.compile(r"\b(?:what|which)\s+(?:do|would|did)\s+you\s+(?:like|prefer|want|choose|pick|wear|use|keep|own)\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+would\s+you\b.{0,80}\b(?:wear|wearing|choose|choosing|pick|picking)\b", re.IGNORECASE),
-    re.compile(r"\b(?:do|did|have)\s+you\s+(?:ever\s+)?(?:actually\s+)?(?:like|prefer|want|care|cared|choose|pick|wear|use|keep|own|have|visit|meet|remember|experience|go|been|see|saw|read|buy|bought|try|tried)\b", re.IGNORECASE),
+    re.compile(r"\b(?:do|did|have)\s+you\s+(?:ever\s+)?(?:actually\s+)?(?:like|liked|prefer|preferred|want|wanted|care|cared|choose|chose|pick|picked|wear|wore|use|used|keep|kept|own|owned|have|had|visit|visited|meet|met|remember|remembered|experience|experienced|go|went|been|see|saw|read|buy|bought|try|tried)\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+(?:is|was|are|were)\s+your\s+(?:favorite|favourite|preference|opinion|memory|experience|relationship|history)\b", re.IGNORECASE),
     re.compile(r"\bhow\s+do\s+you\s+(?:feel|think)\s+about\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+do\s+you\s+remember\b", re.IGNORECASE),
