@@ -41,6 +41,11 @@ WORKER_HUD_PROFILES: dict[str, WorkerHUDProfile] = {
         name="inquiry", token_budget=380, memory_items=1, belief_items=2,
         goal_items=0, recent_event_items=1,
     ),
+    "inquiry_query": WorkerHUDProfile(
+        name="inquiry_query", token_budget=780,
+        memory_items=1, belief_items=1, goal_items=0,
+        recent_event_items=0, include_scene=False,
+    ),
     "planning": WorkerHUDProfile(
         name="planning", token_budget=460, memory_items=2, belief_items=1,
         goal_items=2, recent_event_items=1,

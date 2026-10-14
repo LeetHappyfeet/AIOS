@@ -128,9 +128,35 @@ class FusekiClient:
         resp = self._post(
             url,
             data={"query": sparql},
-            headers={"Accept": "application/sparql+json"},
+            # SELECT/ASK responses use the SPARQL Results JSON media type.
+            # application/sparql+json is not the results media type and can
+            # cause Fuseki to negotiate a non-JSON response.
+            headers={"Accept": "application/sparql-results+json"},
             operation="QUERY",
             payload_bytes=len(sparql.encode("utf-8")),
         )
 
-        return resp.json()
+        try:
+            result = resp.json()
+        except ValueError as exc:
+            content_type = resp.headers.get("Content-Type", "<missing>")
+            preview = (resp.text or "").strip()[:240]
+            raise FusekiError(
+                f"Fuseki QUERY expected SPARQL Results JSON url={url} "
+                f"status={resp.status_code} content_type={content_type!r} "
+                f"body_preview={preview!r}"
+            ) from exc
+
+        # Do not interpret an unexpected JSON response (or an HTTP proxy's
+        # JSON error page) as an empty SELECT. This matters for hygiene:
+        # an empty result is evidence about RDF presence and advances its cursor.
+        if not isinstance(result, dict) or not (
+            (isinstance(result.get("results"), dict)
+             and isinstance(result["results"].get("bindings"), list))
+            or isinstance(result.get("boolean"), bool)
+        ):
+            raise FusekiError(
+                f"Fuseki QUERY returned an unexpected JSON result shape "
+                f"url={url} status={resp.status_code}"
+            )
+        return result

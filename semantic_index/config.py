@@ -21,6 +21,12 @@ class SemanticIndexConfig:
     epistemic_collection: str = os.getenv(
         "AIOS_QDRANT_EPISTEMIC_COLLECTION", "epistemic_objects_v1"
     )
+    topic_collection: str = os.getenv(
+        "AIOS_QDRANT_TOPIC_COLLECTION", "knowledge_topics_v1"
+    )
+    corpus_collection: str = os.getenv(
+        "AIOS_QDRANT_CORPUS_COLLECTION", "corpus_sections_v2"
+    )
 
     embedding_model: str = os.getenv(
         "AIOS_SEMANTIC_EMBEDDING_MODEL",
@@ -51,6 +57,10 @@ class SemanticIndexConfig:
     reconciliation_batch_size: int = max(1, int(os.getenv(
         "AIOS_SEMANTIC_RECONCILIATION_BATCH_SIZE", str(batch_size))))
     background_batch_size: int = max(1, int(os.getenv("AIOS_SEMANTIC_BACKGROUND_BATCH_SIZE", "8")))
+    corpus_refresh_seconds: float = max(1.0, float(os.getenv(
+        "AIOS_CORPUS_DISCOVERY_INTERVAL_SECONDS", "5.0")))
+    corpus_topic_min_score: float = max(-1.0,min(1.0,float(os.getenv(
+        "AIOS_CORPUS_TOPIC_MIN_SCORE", "0.55"))))
     admission_batch_size: int = max(1, int(os.getenv("AIOS_SEMANTIC_ADMISSION_BATCH_SIZE", "8")))
     vector_sql_seconds: float = max(0.1, float(os.getenv("AIOS_SEMANTIC_VECTOR_SQL_SECONDS", "10")))
     admission_stage_seconds: float = max(1.0, float(os.getenv("AIOS_SEMANTIC_ADMISSION_STAGE_SECONDS", "10")))

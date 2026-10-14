@@ -241,9 +241,11 @@ class ParsedCandidate:
     match_span: tuple[int, int] | None = None
 
 
-def _runtime_versions() -> dict[str, str]:
-    from aios_app.epistemic.runtime_versions import component_versions
-    return component_versions()
+async def _effective_runtime_versions(db) -> dict:
+    from aios_app.epistemic.runtime_versions import capture_runtime_manifest
+    return await capture_runtime_manifest(
+        db, receipt_versions={"message_cognition": INTERPRETER_VERSION},
+    )
 
 
 def _sentences(text: str) -> list[str]:
@@ -781,6 +783,15 @@ async def _commit_message_cognition_locked(
         speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
         diagnostics=candidate_diagnostics,
     )
+    # Diagnostic-only original DAG offsets for source-local Inquiry. Do not
+    # change interpretation, source admission, or emitted cognition units.
+    for diagnostic in candidate_diagnostics:
+        excerpt = str(diagnostic.get("source_excerpt") or "")
+        if not excerpt:
+            continue
+        pos = text.find(excerpt)
+        if pos >= 0 and text.find(excerpt, pos + 1) < 0:
+            diagnostic["source_span"] = [pos, pos + len(excerpt)]
     ambiguous = ambiguous_cognition_sentences(
         text, character_id=str(row["character_id"]), speaker_id=row["speaker_id"],
         speaker_role=row["speaker_role"], viewpoint_id=row["viewpoint_id"],
@@ -796,7 +807,7 @@ async def _commit_message_cognition_locked(
         "candidate_rejections": candidate_diagnostics,
         "candidate_rejection_count": len(candidate_diagnostics),
         "candidate_audit_complete": len(candidate_diagnostics) < 32,
-        "runtime_versions": _runtime_versions(),
+        "runtime_versions": await _effective_runtime_versions(con),
         "participants": [value for value in (row["speaker_id"], row["character_id"]) if value],
         "bounded": True, "max_units": MAX_UNITS, "interpreter_version": INTERPRETER_VERSION,
         "historical_catchup": not bool(live_head),

@@ -260,11 +260,18 @@ class HUDAssembler:
         goal_states = await self.cognition.goals.cognitive_states(
             context.instance_id, attention.goals
         )
+        # Read-only dependency summary; a research receipt cannot assert goal progress.
+        from aios_app.agent.goal_dependencies import GoalKnowledgeDependencyService
+        dependency_by_goal = await GoalKnowledgeDependencyService(self.db).for_goals(
+            instance_id=context.instance_id,
+            goal_ids=[g.goal_id for g in attention.goals if g.goal_id is not None],
+        )
         goal_items = []
         for goal in attention.goals:
             item = goal.hud_item()
             if goal.goal_id is not None:
                 item["lifecycle"] = goal_states.get(goal.goal_id, {})
+                item["knowledge_requirements"] = dependency_by_goal.get(goal.goal_id, [])
             goal_items.append(item)
         scheduled_goal_items = await self.cognition.goals.list_scheduled(
             context.instance_id, limit=8
@@ -333,9 +340,32 @@ class HUDAssembler:
         # Goal lifecycle can change without DAG movement (including migration
         # repairs), so the current intention must come from managed goals.
         working_scene["immediate_goal"] = (
-            attention.goals[0].hud_item() if attention.goals else None
+            goal_items[0] if goal_items else (
+                attention.goals[0].hud_item() if attention.goals else None)
         )
+        if isinstance(working_scene.get("last_significant_change"), Mapping) and (
+            working_scene["last_significant_change"].get("source")=="dag_node"
+        ):
+            # Legacy snapshots may carry an entire character message here.
+            working_scene["last_significant_change"]=None
         scene["working_state"] = working_scene
+        research_activity = None
+        if context.source_head_node_id:
+            receipt = await self.db.fetchrow(
+                """SELECT question,status,result,dossier_id,updated_at
+                   FROM aios.character_research_tool_request
+                   WHERE instance_id=$1 AND source_node_id=$2""",
+                context.instance_id,context.source_head_node_id)
+            if receipt:
+                result=_json_value(receipt["result"],{})
+                research_activity={
+                    "question":str(receipt["question"])[:200],
+                    "status":str(receipt["status"]),
+                    "dossier_id":str(receipt["dossier_id"]) if receipt["dossier_id"] else None,
+                    "source_count":int(result.get("source_count") or 0),
+                    "outcome":str(result.get("status") or "")[:40],
+                    "durable_knowledge":False,
+                }
 
         suppressed = cognitive_snapshot.firewall_suppressed
         return {
@@ -354,6 +384,7 @@ class HUDAssembler:
                 "location_entity_id": context.location_entity_id,
             },
             "scene": scene,
+            "research_activity": research_activity,
             "retrieval_evidence": cognitive_snapshot.retrieval_evidence,
             "state": {
                 "health": raw_state.get("health"),

@@ -15,6 +15,8 @@ class TransactionScheduler:
         self.transactions=InternalCognitionTransactions(db)
 
     async def run_pending(self, limit:int=8) -> int:
+        from .cognition_recovery import CognitionRecovery
+        await CognitionRecovery(self.db).recover()
         rows=await self.db.fetch(
             """SELECT transaction_id FROM aios.internal_cognition_transaction
                WHERE status='pending' AND expires_at>now()
@@ -23,15 +25,11 @@ class TransactionScheduler:
         completed=0
         for row in rows:
             try:
-                await self.transactions.run(row["transaction_id"])
-                completed += 1
+                result=await self.transactions.run(row["transaction_id"])
+                if result.status == "consumed":
+                    completed += 1
             except Exception:
                 # Provider busy/unavailable leaves an auditable failed receipt;
                 # future admission creates a fresh transaction, never resurrects it.
                 continue
-        await self.db.execute(
-            """UPDATE aios.internal_cognition_transaction
-               SET status='stale',rejection_reason='expired before inference',updated_at=now()
-               WHERE status='pending' AND expires_at<=now()"""
-        )
         return completed

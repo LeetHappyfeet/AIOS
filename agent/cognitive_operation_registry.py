@@ -19,6 +19,15 @@ SPECS = {
     "corpus.search": CognitiveOperationSpec(
         "corpus.search", frozenset({"research","planning","executive"})
     ),
+    "research.advance": CognitiveOperationSpec(
+        "research.advance", frozenset({"research","planning","executive"})
+    ),
+    "research.study": CognitiveOperationSpec(
+        "research.study", frozenset({"research","planning","executive"})
+    ),
+    "inquiry.resolve": CognitiveOperationSpec(
+        "inquiry.resolve", frozenset({"research","reflection","planning","executive"})
+    ),
     "reflection.review": CognitiveOperationSpec(
         "reflection.review", frozenset({"reflection","executive"})
     ),

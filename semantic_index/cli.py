@@ -12,6 +12,15 @@ from typing import Any
 from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
+from aios_app.topic_atlas.collector import collect_topics_once
+from aios_app.topic_atlas.projection import (
+    index_topics_once, project_topics_once, prune_retired_topic_vectors_once,
+)
+from aios_app.topic_atlas.hygiene import retire_invalid_candidates_once
+from .corpus_discovery import (
+    index_corpus_discovery_once, prune_deleted_corpus_once,
+    link_corpus_topics_once,
+)
 from .config import SemanticIndexConfig
 from .service import (
     index_source_sections_once, index_corpus_sections_once, index_semantic_frames_once,
@@ -23,7 +32,10 @@ from .admission import (
     fail_open_stalled_admissions_once,
     admission_backlog_snapshot,
 )
-from .eligibility import quarantine_ineligible_vectors_once
+from .eligibility import (
+    quarantine_ineligible_vectors_once, quarantine_adjudicated_vectors_once,
+    QUARANTINE_PHASES,
+)
 from .query_server import start_query_server
 from .structure import analyze_neighbors_once
 from .neighbor_classifier import classify_neighbor_relations_once
@@ -45,7 +57,9 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
                        totals: dict[str, int], window_started: float,
                        admission_backlog: dict[str, int] | None = None) -> dict[str, Any]:
     elapsed = max(0.001, time.monotonic() - window_started)
-    total_indexed = totals["source_indexed"] + totals["frames_indexed"] + totals["propositions_indexed"] + totals["epistemic_indexed"]
+    total_indexed = sum(totals.get(name,0) for name in (
+        "source_indexed","frames_indexed","propositions_indexed","epistemic_indexed",
+        "corpus_indexed","topics_indexed"))
     saturated = [name for name, count in last_batches.items() if count >= cfg.batch_size]
     return {
         "service": "semantic_index", "state": state, "stage": stage,
@@ -64,6 +78,10 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
         "cluster_classified_per_s": round(totals["classified"] / elapsed, 2),
         "reconciled_per_s": round(totals["reconciled"] / elapsed, 2),
         "validated_per_s": round(totals.get("validated", 0) / elapsed, 2),
+        "corpus_indexed_per_s": round(totals.get("corpus_indexed", 0) / elapsed, 2),
+        "topic_coverage_per_s": round(totals.get("topic_coverage", 0) / elapsed, 2),
+        "topics_collected_per_s": round(totals.get("topics_collected", 0) / elapsed, 2),
+        "topics_indexed_per_s": round(totals.get("topics_indexed", 0) / elapsed, 2),
     }
 
 
@@ -125,9 +143,13 @@ async def analyze_regions_once() -> None:
         await db.close()
 
 
-async def _run_vector_stages(db, cfg, run_stage) -> dict[str, int]:
+async def _run_vector_stages(db, cfg, run_stage, *, run_corpus: bool = True) -> dict[str, int]:
     # Admission requires a canonical proposition vector. No topology or cleanup
     # operation may be inserted into this dependency chain.
+    # Explicitly adjudicated retractions must not wait behind the larger
+    # topology-quarantine maintenance pass (which may yield on SQL budgets).
+    await run_stage("hygiene-retirement", quarantine_adjudicated_vectors_once,
+                    db, cfg, limit=8)
     propositions = await run_stage("vector-propositions", index_propositions_once, db, cfg)
     admission_cfg = replace(cfg, batch_size=cfg.admission_batch_size)
     admitted = await run_stage(
@@ -138,13 +160,29 @@ async def _run_vector_stages(db, cfg, run_stage) -> dict[str, int]:
     epistemic = await run_stage("vector-epistemic", index_epistemic_objects_once, db, cfg)
     background_cfg = replace(cfg, batch_size=cfg.background_batch_size)
     source = await run_stage("vector-source", index_source_sections_once, db, background_cfg)
-    # Cold corpus embeddings only consume a small batch after the live streams.
+    # Cold corpus has its own collection and guaranteed background budget.
+    # The v1 shared-source corpus index is retained only for legacy/manual work.
+    retired_corpus = 0
     corpus = 0
-    if max(propositions, frames, epistemic) < cfg.batch_size:
-        corpus = await run_stage("vector-corpus", index_corpus_sections_once, db, background_cfg)
+    coverage = 0
+    if run_corpus:
+        retired_corpus = await run_stage("vector-corpus-prune", prune_deleted_corpus_once,
+                                         db, cfg, limit=cfg.background_batch_size)
+        corpus = await run_stage("vector-corpus-v2", index_corpus_discovery_once,
+                                 db, cfg, limit=cfg.background_batch_size)
+    await run_stage("vector-topic-retire", prune_retired_topic_vectors_once, db, cfg,
+                    limit=cfg.background_batch_size)
+    topics = await run_stage("vector-topics", index_topics_once, db, cfg,
+                             limit=cfg.background_batch_size)
+    if run_corpus:
+        coverage = await run_stage("vector-topic-coverage", link_corpus_topics_once,
+                                   db, cfg, limit=min(2,cfg.background_batch_size),
+                                   min_score=cfg.corpus_topic_min_score)
     return {"propositions_indexed": propositions, "frames_indexed": frames,
-            "epistemic_indexed": epistemic, "source_indexed": source + corpus,
-            "admitted": admitted, "admission_bypassed": bypassed}
+            "epistemic_indexed": epistemic, "source_indexed": source,
+            "corpus_indexed": corpus, "corpus_pruned": retired_corpus,
+            "topic_coverage": coverage,
+            "topics_indexed": topics, "admitted": admitted, "admission_bypassed": bypassed}
 
 
 async def run_forever(poll_seconds: float = 1.0) -> None:
@@ -160,12 +198,16 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         window_started = time.monotonic()
         totals = {key: 0 for key in (
             "source_indexed", "frames_indexed", "propositions_indexed", "epistemic_indexed",
-            "admitted", "admission_bypassed", "structured", "neighbor_classified",
+            "admitted", "admission_bypassed", "topics_collected", "topics_indexed", "corpus_indexed",
+            "corpus_pruned", "topic_coverage",
+            "structured", "neighbor_classified",
             "clustered", "classified", "reconciled", "validated")}
         last_batches = {}
         backlog = {}
         failed = []
         last_backlog_snapshot = 0.0
+        last_topic_scan = 0.0
+        last_corpus_scan = 0.0
 
         async def run_stage(stage, func, *args, **kwargs):
             _emit_telemetry(_semantic_snapshot(
@@ -190,7 +232,22 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
 
         while True:
             failed.clear()
-            totals.update(await _run_vector_stages(db, cfg, run_stage))
+            if time.monotonic() - last_topic_scan >= 10.0:
+                # Topic mentions are advisory and run behind the critical vector
+                # stages on a bounded cadence, not on HUD's hot path.
+                found = await run_stage("topic-discovery", collect_topics_once, db,
+                                        limit=cfg.background_batch_size)
+                retired_bad = await run_stage(
+                    "topic-hygiene", retire_invalid_candidates_once, db,
+                    limit=cfg.background_batch_size)
+                totals["topic_hygiene_retired"] = retired_bad
+                totals["topics_collected"] = sum(found.values()) if isinstance(found,dict) else 0
+                last_topic_scan = time.monotonic()
+            corpus_due = time.monotonic()-last_corpus_scan >= cfg.corpus_refresh_seconds
+            totals.update(await _run_vector_stages(
+                db, cfg, run_stage, run_corpus=corpus_due))
+            if corpus_due:
+                last_corpus_scan=time.monotonic()
             last_batches = dict(totals)
             if time.monotonic() - last_backlog_snapshot >= 10:
                 try:
@@ -232,6 +289,17 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
         batch_sizes = {name:getattr(cfg,name) for name in (
             "neighbor_batch_size","relation_batch_size","validation_batch_size",
             "reconciliation_batch_size","background_batch_size")}
+        # The general quarantine pass previously ran six unrelated global
+        # queries inside one ten-second budget, then retried every five seconds
+        # even at batch=1. Rotate one phase/cycle; throttle an expensive phase
+        # independently without starving the other semantic maintenance lanes.
+        quarantine_phases = ("vectors",) + tuple(
+            phase for phase in QUARANTINE_PHASES if phase != "vectors")
+        quarantine_cursor = 0
+        quarantine_next_at = 0.0
+        quarantine_min_interval = max(8.0, cfg.topology_sql_seconds * 2.0)
+        quarantine_retry_after: dict[str, float] = {}
+        quarantine_failures: dict[str, int] = {}
         stage_batches = {"neighbors":"neighbor_batch_size",
                          "neighbor-classification":"relation_batch_size",
                          "relation-validation":"validation_batch_size",
@@ -264,8 +332,38 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
             # verified decisions and RDF deltas from progressing.
             effective_cfg = replace(cfg,**batch_sizes)
             work = await _run_topology_stages(db, fuseki, effective_cfg, run_stage)
-            await run_stage("topology-quarantine", quarantine_ineligible_vectors_once,
-                            db, replace(effective_cfg, batch_size=effective_cfg.background_batch_size))
+            work["topics_projected"] = await run_stage(
+                "rdf-topics", project_topics_once, db, fuseki,
+                limit=1)  # One acknowledged graph replacement per topology cycle.
+            # Prevent historical global maintenance from occupying the SQL
+            # pool on every ~2-second cycle while foreground HUD is active.
+            if time.monotonic() >= quarantine_next_at:
+                phase = quarantine_phases[quarantine_cursor]
+                quarantine_cursor = (quarantine_cursor + 1) % len(quarantine_phases)
+                stage = f"topology-quarantine/{phase}"
+                if time.monotonic() >= quarantine_retry_after.get(phase, 0.0):
+                    phase_batch = (effective_cfg.background_batch_size if phase == "vectors"
+                                   else min(4, effective_cfg.background_batch_size))
+                    await run_stage(
+                        stage, quarantine_ineligible_vectors_once,
+                        db, replace(effective_cfg, batch_size=phase_batch),
+                        phase=phase,
+                    )
+                    if stage in failed:
+                        streak = quarantine_failures.get(phase, 0) + 1
+                        quarantine_failures[phase] = streak
+                        # Query budgets and independent HUD retrieval should not
+                        # be continually contended by a pathological global scan.
+                        cooldown = min(300.0, 30.0 * (2 ** min(streak, 4)))
+                        quarantine_retry_after[phase] = time.monotonic() + cooldown
+                        logger.warning(
+                            "Topology quarantine phase=%s cooldown=%.0fs after %d failures",
+                            phase, cooldown, streak,
+                        )
+                    else:
+                        quarantine_failures[phase] = 0
+                        quarantine_retry_after.pop(phase, None)
+                quarantine_next_at = time.monotonic() + quarantine_min_interval
             _emit_telemetry({"service": "semantic_topology",
                              "state": "DEGRADED" if failed else ("DRAINING" if any(work.values()) else "CAUGHT_UP"),
                              "stage": "retry" if failed else "idle", "stage_started_at": None})

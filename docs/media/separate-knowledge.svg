@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 720 350" role="img" aria-labelledby="title desc">
+<title id="title">Separate knowledge and beliefs</title><desc id="desc">Two distinct people observe a shared world while holding separate information.</desc>
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#102c42"/><stop offset="1" stop-color="#163b50"/></linearGradient>
+ <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="#ffffff" stroke-opacity=".07"/></pattern>
+ <radialGradient id="halo"><stop stop-color="#ffffff" stop-opacity=".18"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+ <filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="10"/></filter>
+</defs>
+<rect width="720" height="350" rx="24" fill="url(#bg)"/><rect width="720" height="350" rx="24" fill="url(#grid)"/>
+<circle cx="560" cy="150" r="200" fill="url(#halo)" opacity=".45"/>
+<text x="38" y="48" fill="#ffffff" fill-opacity=".55" font-family="Arial,Helvetica,sans-serif" font-size="17" letter-spacing="4">02 / AIOS</text>
+
+<circle cx="357" cy="176" r="85" fill="#24536a" stroke="#a3d7dc" stroke-width="2"/><ellipse cx="357" cy="176" rx="34" ry="85" fill="none" stroke="#82b5c1" opacity=".7" stroke-width="1.5"/><path d="M272 176H442M286 137H429M286 215H429" stroke="#82b5c1" opacity=".7" stroke-width="1.5"/>
+<path d="M326 152L349 131 364 149 376 154 374 184 351 198 326 186Z" fill="#72c5b0" opacity=".6"/><path d="M385 194L405 175 432 181 420 212 402 224Z" fill="#72c5b0" opacity=".6"/>
+<path d="M255 176H271M444 176H460" stroke="#fff" stroke-dasharray="5 5" stroke-width="2" opacity=".65"/>
+<circle cx="158" cy="153" r="48" fill="#d6b6fd"/><path d="M73 274C74 225 104 205 156 205S243 225 245 274" fill="#8b6dcc" stroke="#cdb1fa" stroke-width="2.5"/>
+<path d="M112 143Q119 96 159 104Q196 104 203 142Q181 118 150 128Z" fill="#513e7a"/>
+<circle cx="558" cy="153" r="48" fill="#b0e6df"/><path d="M471 274C472 225 507 205 558 205S642 225 644 274" fill="#3e999b" stroke="#b6e6e0" stroke-width="2.5"/>
+<path d="M513 135Q523 102 564 104Q599 108 607 143Q580 119 548 131Z" fill="#295465"/>
+<g><rect x="83" y="74" width="120" height="27" rx="12" fill="#694999" stroke="#e1c6ff"/><circle cx="103" cy="87" r="5" fill="#efbdfd"/><rect x="117" y="83" width="67" height="7" rx="3" fill="#f1dbff" opacity=".8"/>
+<rect x="513" y="74" width="120" height="27" rx="12" fill="#25686b" stroke="#abeee1"/><circle cx="533" cy="87" r="5" fill="#73dccc"/><rect x="547" y="83" width="67" height="7" rx="3" fill="#d4fff6" opacity=".8"/></g>
+<path d="M211 111Q250 75 296 115M503 111Q465 76 421 115" fill="none" stroke="#fff" stroke-width="2" stroke-dasharray="4 6" opacity=".55"/>
+</svg>

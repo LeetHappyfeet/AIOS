@@ -109,6 +109,28 @@ def validate_frame(source: str, frame: Mapping, *, speaker_id: str | None = None
         reasons.append("subject_gender_contradicts_source")
     original_subject = _norm(source_subject)
     original_object = _norm(source_object)
+    # Fidelity of participant ownership is source-local. A grammatical I/me
+    # belongs to the message speaker, not the observer/target character.
+    # Abstain rather than invent an alias when the source identity differs.
+    speaker = _norm(speaker_id)
+    first_person = {"i", "me", "my", "mine", "myself", "we", "us", "our", "ours"}
+    original_first_person = original_subject in first_person
+    source_first_person = bool(re.search(
+        r"\b(?:i|i'm|i've|i'd|i'll|me|my|mine|myself|we|us|our|ours)\b",
+        source.casefold().replace("’", "'"),
+    ))
+    if original_first_person and speaker and subject not in {speaker, original_subject}:
+        return IntegrityResult("incomplete", ("speaker_owned_subject_not_grounded",))
+    # Residual first-person objects in a third-person paraphrase are neither
+    # an unambiguous Alex/observer reference nor a legitimate speaker switch.
+    # A quoted passage is not sufficient evidence to repair this downstream.
+    if source_first_person and speaker and subject not in first_person and (
+        re.search(r"\b(?:i|me|my|mine|myself|we|us|our|ours)\b", obj)
+        or (original_object in first_person and obj in first_person)
+    ):
+        return IntegrityResult("incomplete", ("mixed_perspective_source_reference",))
+    if original_object in first_person and speaker and obj not in {speaker, original_object}:
+        return IntegrityResult("incomplete", ("speaker_owned_object_not_grounded",))
     feminine = {"she", "her", "hers"}
     masculine = {"he", "him", "his"}
     if original_subject in feminine and subject in masculine:
@@ -169,7 +191,9 @@ def revision_key(source: str, frames: list[dict], *, version: str = INTEGRITY_VE
 async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
     """Persist a durable receipt for the currently selected frame revision."""
     row = await db.fetchrow(
-        """SELECT cc.raw_text, dn.speaker_id, ds.content AS source_section, dn.node_id
+        """SELECT cc.raw_text, dn.speaker_id, ds.content AS source_section,
+                  es.sentence_text AS source_sentence,
+                  ds.section_id AS source_section_id, dn.node_id
            FROM aios.claim_candidate cc
            JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
            JOIN aios.document_section ds ON ds.section_id=es.section_id
@@ -209,14 +233,20 @@ async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
                  "predicate": f["predicate_canonical"] or f["predicate_surface"],
                  "object": f["resolved_object"] or f["object_text"],
                  "polarity": f["polarity"], "modality": f["modality"]} for f in frames]
-    # Bind the receipt to its containing source paragraph and DAG coordinate.
-    # Changing the paragraph invalidates the receipt without inventing referents.
+    # Bind the claim to the source paragraph, extracted sentence and DAG origin.
+    # Reparenting an unchanged sentence to a different speaker invalidates V4.
     section_digest = hashlib.sha256(str(row["source_section"] or "").encode()).hexdigest()
-    revision = revision_key(row["raw_text"], snapshot, context_digest=section_digest)
+    sentence_digest = hashlib.sha256(str(row["source_sentence"] or "").encode()).hexdigest()
+    revision = revision_key(
+        row["raw_text"], snapshot,
+        context_digest=f'{row["source_section_id"]}:{row["node_id"]}:{section_digest}:{sentence_digest}',
+    )
     await db.execute(
         """INSERT INTO aios.claim_semantic_integrity
-             (claim_id, revision_key, validator_version, status, reason_codes, source_text, frame_snapshot)
-           VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb)
+             (claim_id, revision_key, validator_version, status, reason_codes, source_text,
+              frame_snapshot, source_section_digest, source_section_id,
+              source_sentence_digest, source_node_id)
+           VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8,$9,$10,$11)
            ON CONFLICT (claim_id) DO UPDATE SET
              revision_key=EXCLUDED.revision_key,
              validator_version=EXCLUDED.validator_version,
@@ -224,9 +254,20 @@ async def validate_claim(db, *, claim_id: UUID) -> IntegrityResult:
              reason_codes=EXCLUDED.reason_codes,
              source_text=EXCLUDED.source_text,
              frame_snapshot=EXCLUDED.frame_snapshot,
+             source_section_digest=EXCLUDED.source_section_digest,
+             source_section_id=EXCLUDED.source_section_id,
+             source_sentence_digest=EXCLUDED.source_sentence_digest,
+             source_node_id=EXCLUDED.source_node_id,
              checked_at=now()
            WHERE aios.claim_semantic_integrity.revision_key IS DISTINCT FROM EXCLUDED.revision_key
-              OR aios.claim_semantic_integrity.validator_version IS DISTINCT FROM EXCLUDED.validator_version""",
+              OR aios.claim_semantic_integrity.validator_version IS DISTINCT FROM EXCLUDED.validator_version
+              OR aios.claim_semantic_integrity.status IS DISTINCT FROM EXCLUDED.status
+              OR aios.claim_semantic_integrity.reason_codes IS DISTINCT FROM EXCLUDED.reason_codes
+              OR aios.claim_semantic_integrity.source_section_digest IS DISTINCT FROM EXCLUDED.source_section_digest
+              OR aios.claim_semantic_integrity.source_section_id IS DISTINCT FROM EXCLUDED.source_section_id
+              OR aios.claim_semantic_integrity.source_sentence_digest IS DISTINCT FROM EXCLUDED.source_sentence_digest
+              OR aios.claim_semantic_integrity.source_node_id IS DISTINCT FROM EXCLUDED.source_node_id""",
         claim_id, revision, INTEGRITY_VERSION, result.status,
-        json.dumps(result.reasons), row["raw_text"], json.dumps(snapshot))
+        json.dumps(result.reasons), row["raw_text"], json.dumps(snapshot),
+        section_digest, row["source_section_id"], sentence_digest, row["node_id"])
     return result

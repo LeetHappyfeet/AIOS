@@ -18,6 +18,8 @@ class FakeDB:
         self.goal_id=uuid4()
         self.instance_id=uuid4()
         self.goal_status="active"
+        self.attempt_id=uuid4()
+        self.review_eligible=True
         self.executed=[]
 
     async def execute(self, sql, *args):
@@ -35,6 +37,10 @@ class FakeDB:
         return None
 
     async def fetchrow(self, sql, *args):
+        if "SELECT attempt_id FROM aios.character_goal_attempt" in sql:
+            return {"attempt_id":self.attempt_id}
+        if "AS eligible" in sql and "character_goal_attempt" in sql:
+            return {"eligible":self.review_eligible}
         if "SELECT status,meta FROM aios.character_agent_goal" in sql:
             return {"status":self.goal_status,"meta":{"resolution_kind":"reviewed_satisfied"}}
         if "SELECT t.goal_id" in sql:
@@ -89,7 +95,8 @@ async def test_bounded_goal_review_can_validate_completion():
     await lifecycle.reconcile_operation(
         operation={"operation_id":uuid4(),"instance_id":db.instance_id,
                    "thread_id":uuid4(),"operation_type":"planning.review",
-                   "input":{"goal_id":str(db.goal_id)},"source_node_id":None},
+                   "input":{"goal_id":str(db.goal_id)},
+                   "goal_attempt_id":db.attempt_id,"source_node_id":uuid4()},
         result={"kind":"choice","option_index":2,
                 "label":"The available evidence satisfies this goal."},
         terminal_status="succeeded",
@@ -123,3 +130,39 @@ async def test_irrelevant_goal_review_parks_goal_as_dormant():
     evidence=[args for sql,args in db.executed
               if "INSERT INTO aios.character_goal_evidence" in sql]
     assert any(args[3]=="withdrawal" for args in evidence)
+
+
+@pytest.mark.asyncio
+async def test_same_origin_or_stale_goal_review_cannot_close_goal():
+    db=FakeDB()
+    db.review_eligible=False
+    lifecycle=CognitiveLifecycleReconciler(db)
+    await lifecycle.reconcile_operation(
+        operation={"operation_id":uuid4(),"instance_id":db.instance_id,
+                   "thread_id":uuid4(),"operation_type":"planning.review",
+                   "goal_attempt_id":db.attempt_id,
+                   "input":{"goal_id":str(db.goal_id)},"source_node_id":uuid4()},
+        result={"kind":"choice","option_index":2,
+                "label":"The available evidence satisfies this goal."},
+        terminal_status="succeeded",
+    )
+    assert db.goal_status=="active"
+    assert not any(
+        args[3]=="completion_candidate"
+        for sql,args in db.executed if "INSERT INTO aios.character_goal_evidence" in sql
+    )
+
+
+@pytest.mark.asyncio
+async def test_review_without_bound_attempt_cannot_close_goal():
+    db=FakeDB()
+    lifecycle=CognitiveLifecycleReconciler(db)
+    await lifecycle.reconcile_operation(
+        operation={"operation_id":uuid4(),"instance_id":db.instance_id,
+                   "thread_id":uuid4(),"operation_type":"planning.review",
+                   "input":{"goal_id":str(db.goal_id)},"source_node_id":uuid4()},
+        result={"kind":"choice","option_index":2,
+                "label":"The available evidence satisfies this goal."},
+        terminal_status="succeeded",
+    )
+    assert db.goal_status=="active"

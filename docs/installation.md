@@ -1,4 +1,4 @@
-# Running AIOS Development
+# Install and run AIOS
 
 AIOS keeps its Python application native while Docker Compose manages PostgreSQL, Apache Jena Fuseki, and Qdrant.
 
@@ -7,18 +7,27 @@ AIOS keeps its Python application native while Docker Compose manages PostgreSQL
 Install these before running AIOS:
 
 - Python 3.10+
+- Git
 - Docker with Docker Compose v2
 
 The setup script checks both and stops with a direct error if either is unavailable.
 
+The provided scripts use Bash and a POSIX virtual environment layout. Use a
+Linux environment for this walkthrough; native Windows PowerShell is not the
+script interface. Windows users can use a Linux environment such as WSL with
+Docker access, but a clean WSL release-validation run is still required.
+
 ## Repository/package layout
 
-The repository root is also the `aios_app` Python package. For now, clone it into a directory named `aios_app`:
+The repository root is the `aios_app` Python package. `setup.sh` registers a
+package alias in the virtual environment, so the checkout can be named `AIOS`,
+`aios_app`, or another directory name. The virtual environment is created in
+the checkout’s parent directory. Use one dedicated workspace per installation:
 
 ```text
 workspace/
 ├── .venv/
-└── aios_app/
+└── AIOS/
     ├── compose.yaml
     ├── setup.sh
     ├── run.sh
@@ -32,8 +41,8 @@ workspace/
 mkdir -p ~/AIOS-workspace
 cd ~/AIOS-workspace
 
-git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git aios_app
-cd aios_app
+git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git AIOS
+cd AIOS
 ./setup.sh
 ```
 
@@ -104,7 +113,7 @@ Optional infrastructure overrides are documented in `.env.example`. A normal fre
 After setup:
 
 ```bash
-cd ~/AIOS-workspace/aios_app
+cd ~/AIOS-workspace/AIOS
 ./run.sh
 ```
 
@@ -138,7 +147,7 @@ Press `Ctrl+C` to stop the native AIOS processes. PostgreSQL, Qdrant, and Fuseki
 When you also want the Compose services stopped:
 
 ```bash
-cd ~/AIOS-workspace/aios_app
+cd ~/AIOS-workspace/AIOS
 ./stop.sh
 ```
 
@@ -224,7 +233,10 @@ Install your operating system's Python venv package, then run `./setup.sh` again
 
 ### `No module named aios_app`
 
-The repository currently needs to be named `aios_app`, with the virtual environment and Python invocation located in its parent directory. The provided setup and run scripts enforce this layout automatically.
+Run `bash setup.sh` to repair the virtual environment’s `aios_app` package
+alias, then use `bash run.sh`. An unrelated Python environment will not have
+that alias. For manual module commands, use `../.venv/bin/python` from the
+repository root. Moving a checkout can invalidate its alias; rerun setup.
 
 ## Architecture boundary
 
@@ -246,4 +258,6 @@ Native AIOS
 
 The scripts are orchestration only. They do not duplicate migrations, ontology definitions, or runtime logic.
 
-For the system design after startup, see [architecture.md](architecture.md).
+Next, run the [integration tutorial](integration.md). For daily operations see
+[runtime.md](runtime.md), or use [inspection.md](inspection.md) to trace a
+message through the system. For system design see [architecture.md](architecture.md).

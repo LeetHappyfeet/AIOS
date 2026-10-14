@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -33,9 +34,38 @@ from aios_app.epistemic.retrieval_policy import (
     DEFAULT_COGNITIVE_RETRIEVAL_POLICY,
 )
 
-_EXPLICIT_RESEARCH_PATTERNS = (
-    re.compile(r"\b(?:research|look up|search for|find out about)\b", re.IGNORECASE),
+_DIRECT_RESEARCH_COMMAND = re.compile(
+    r"^(?:renamon[,.:]\s*)?(?:please\s+)?"
+    r"(?:(?:can|could|would|will)\s+you\s+)?"
+    r"(?:research|look\s+up|search\s+for|find\s+out\s+about|"
+    r"tell\s+me\s+about|find\s+(?:studies|sources)\s+(?:on|about))"
+    r"\s+(?P<subject>.{2,160})$", re.I,
 )
+_EXTERNAL_FACT_QUESTION = re.compile(
+    r"^(?:renamon[,.:]\s*)?(?:what|who|where|when|why|how|which)\b"
+    r"[^!?\n]{2,155}\?$", re.I,
+)
+
+
+def focused_corpus_research_query(source: str) -> str | None:
+    """Only a direct information request, not narration about somebody searching.
+
+    Restrict the subsequent missing-knowledge query to the request's subject;
+    never OR the first 24 arbitrary tokens of an entire roleplay message.
+    """
+    focus = str(source or "").strip()
+    if not focus:
+        return None
+    spoken = re.findall(r'["“]([^"”\n]{3,200})["”]', focus)
+    clauses = spoken + re.split(r"(?<=[.!?])\s+|\n+", focus)
+    for clause in clauses:
+        clause = clause.strip(" \t*'\"“”")
+        command = _DIRECT_RESEARCH_COMMAND.fullmatch(clause)
+        if command:
+            return command.group("subject").strip(" \t*'\"“”?!.,")
+        if _EXTERNAL_FACT_QUESTION.fullmatch(clause):
+            return clause.strip(" \t*'\"“”")
+    return None
 
 
 logger = logging.getLogger("aios.epistemic.cognitive_context")
@@ -78,6 +108,7 @@ class CognitiveKnowledgeSnapshot:
     anchored_knowledge_count: int
     visible_world_context_count: int
     invisible_anchor_count: int
+    topology_unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,6 +117,7 @@ class PreparedRetrievalSnapshot:
     legacy_knowledge: list[dict[str, Any]]
     missing_modes: dict[str, bool]
     prepared_at: float
+    topology_unavailable: bool = False
 
 
 def _json_value(value: Any, default: Any) -> Any:
@@ -168,19 +200,13 @@ def automatic_corpus_research_allowed(
         return False
     if speaker_role == "assistant":
         return False
-    # Scene narration is not a request to research the cold corpus. Otherwise
-    # its unmatched words become a broad OR query and incidental fanwork hits
-    # are fed back into the generation context.
-    focus = str(focus_row.get("message_text") or "").strip()
-    explicit_research = any(pattern.search(focus) for pattern in _EXPLICIT_RESEARCH_PATTERNS)
-    external_question = (
-        "?" in focus
-        and resolve_retrieval_demand(focus, character_id=character_id).reason
-        == "external_knowledge_question"
-    )
-    if not (explicit_research or external_question):
+    # Search only on a direct external information request. Describing a
+    # library search or quoting another speaker's instructions is not one.
+    request = focused_corpus_research_query(str(focus_row.get("message_text") or ""))
+    if not request:
         return False
-    return True
+    return resolve_retrieval_demand(request, character_id=character_id).route != "character"
+
 
 
 def admit_cognitive_candidates(
@@ -536,6 +562,7 @@ class CognitiveContextService:
             legacy_knowledge=legacy_knowledge,
             missing_modes=missing_modes,
             prepared_at=time.monotonic(),
+            topology_unavailable=bool(getattr(self.retriever, "topology_degraded", False)),
         )
         self._prepared_retrieval[key] = snapshot
         while len(self._prepared_retrieval) > PREPARED_RETRIEVAL_CACHE_SIZE:
@@ -579,6 +606,17 @@ class CognitiveContextService:
             node_id=context.source_head_node_id,
         )
         fast_knowledge: list[dict[str, Any]] = []
+        # Current external narration is already in RECENT EVENTS. A fast model
+        # cannot turn its first-person grammar into the character's own memory.
+        head_row = next(
+            (event for event in attention.recent_newest
+             if str(event.get("node_id")) == str(context.source_head_node_id)),
+            None,
+        )
+        character_authored_head = bool(
+            head_row and str(head_row.get("speaker_id") or "") == context.character_id
+            and str(head_row.get("speaker_role") or "").lower() in {"character", "assistant"}
+        )
         for rank, row in enumerate(fast_rows):
             kind = str(row.get("claim_kind") or "BELIEF").upper()
             text = str(row.get("text") or "").strip()
@@ -586,6 +624,8 @@ class CognitiveContextService:
                 continue
             confidence = float(row.get("confidence") or 0.5)
             meta = _json_value(row.get("meta"), {})
+            if kind in {"MEMORY", "EVENT"} and not character_authored_head:
+                continue
             semantic_owner = meta.get("semantic_owner")
             parsed_predicate = meta.get("predicate")
             parsed_object = meta.get("object")
@@ -727,9 +767,14 @@ class CognitiveContextService:
             if item.get("subject_norm") or item.get("predicate_norm")
                or item.get("object_norm") or item.get("topic_key")
         ]
+        allow_automatic_corpus = automatic_corpus_research_allowed(
+            attention, character_id=context.character_id,
+        )
+        research_focus = focused_corpus_research_query(attention.focus_text) if allow_automatic_corpus else None
+        demand_focus = research_focus or attention.retrieval_focus_text
         if structured_knowledge:
             corpus_demand = self.semantic_knowledge_coverage.resolve(
-                attention.retrieval_focus_text,
+                demand_focus,
                 knowledge=structured_knowledge,
                 minimum_terms=2,
                 threshold=0.60,
@@ -741,19 +786,15 @@ class CognitiveContextService:
                 if item.get("text")
             ]
             corpus_demand = self.knowledge_demand.resolve(
-                attention.retrieval_focus_text,
+                demand_focus,
                 known_texts=known_texts,
             )
         corpus_references: list[dict[str, Any]] = []
         corpus_result = None
-        allow_automatic_corpus = automatic_corpus_research_allowed(
-            attention,
-            character_id=context.character_id,
-        )
-        if corpus_demand.needed and allow_automatic_corpus:
+        if corpus_demand.needed and allow_automatic_corpus and research_focus:
             # Search the missing concepts rather than replaying the entire turn.
             # This keeps dialogue/scaffolding words out of the FTS query.
-            corpus_query = " OR ".join(corpus_demand.missing_terms)
+            corpus_query = " OR ".join(corpus_demand.missing_terms[:10])
             try:
                 corpus_result = await self.research.search(
                     instance_id=context.instance_id,
@@ -788,7 +829,14 @@ class CognitiveContextService:
                     knowledge=structured_knowledge,
                     current_research_id=current_research_id,
                 )
-                if corpus_result is not None and corpus_result.hits:
+                # Stage 3 keeps automatic lookup and reinforcement, but
+                # a search hit must no longer silently become a source-consumption
+                # event. Deliberate research.study is the default acquisition path.
+                # Operators can opt back into the earlier heuristic policy.
+                legacy_auto_acquire = os.getenv(
+                    "AIOS_LEGACY_AUTO_CORPUS_ACQUIRE", "0").strip().lower() in {
+                        "1","true","yes","on"}
+                if legacy_auto_acquire and corpus_result is not None and corpus_result.hits:
                     await self.corpus_learning.evaluate_and_acquire(
                         instance_id=context.instance_id,
                         research_id=corpus_result.research_id,
@@ -845,6 +893,7 @@ class CognitiveContextService:
             anchored_knowledge_count=anchored_knowledge_count,
             visible_world_context_count=visible_world_context_count,
             invisible_anchor_count=invisible_anchor_count,
+            topology_unavailable=prepared.topology_unavailable,
         )
 
     async def lookup_character_knowledge(
@@ -879,6 +928,7 @@ class CognitiveContextService:
             """
             SELECT
                 ck.instance_id AS evidence_instance_id,
+                COALESCE(evidence_ci.current_world_id,evidence_ci.world_id) AS evidence_world_id,
                 array_position($1::uuid[], ck.instance_id) - 1 AS instance_depth,
                 ck.epistemic_status,
                 ck.confidence,
@@ -907,6 +957,7 @@ class CognitiveContextService:
                 ctx.dag_node_id AS source_node_id,
                 COALESCE(conflicts.items, '[]'::jsonb) AS conflicts
             FROM aios.character_proposition_knowledge ck
+            JOIN aios.character_instance evidence_ci ON evidence_ci.instance_id=ck.instance_id
             JOIN aios.proposition p ON p.proposition_id=ck.proposition_id
             LEFT JOIN LATERAL (
                 SELECT ccr.claim_kind, ccr.predicate_family, ccr.world_id, ccr.dag_node_id
@@ -967,7 +1018,7 @@ class CognitiveContextService:
                     f"{item.get('topic_key','')} {item.get('subject_norm','')} "
                     f"{item.get('predicate_norm','')} {item.get('object_norm','')} {item.get('text','')}"
                 ),
-                candidate_world_id=context.world_id,
+                candidate_world_id=item.get("evidence_world_id") or context.world_id,
                 candidate_entity_id=item.get("source_entity_id"),
                 epistemic_status=item.get("epistemic_status"),
                 confidence=item.get("effective_confidence") or item.get("confidence"),

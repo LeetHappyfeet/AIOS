@@ -29,6 +29,10 @@ _AFTER_EMBEDDED_SPEECH = re.compile(
     r"(?:imagined|thought\s+about|considered|pretended)\s+"
     r"(?:saying|telling|announcing)\b", re.I,
 )
+_HYPOTHETICAL_LEAD = re.compile(
+    r"\b(?:perhaps|maybe|possibly|hypothetically|if\s+only)\b.{0,90}$",
+    re.I | re.S,
+)
 _BARE_REFERENCE = re.compile(
     r"\b(?:it|them|this|that|these|those|one|ones)\b"
     r"(?=\s*(?:$|[,.!?;:]|\b(?:in|on|over|under|down|up|away|out|back)\b))",
@@ -42,6 +46,13 @@ _SCENE_ACTION = re.compile(
     r"^(?:to\s+|be\s+)?(?:put|putting|set|setting|place|placing|"
     r"pick|picking|move|moving|sit|sitting|stand|standing|"
     r"turn|turning|look|looking|reach|reaching)\b", re.I,
+)
+_SHORT_ERRAND_ACTION = re.compile(
+    r"^(?:to\s+)?(?:get|fetch|grab|pour|drink)\s+"
+    r"(?:(?:a|some|the|my|your)\s+)?(?:glass|cup|bottle|water|coffee|tea|drink|snack|pizza)\b", re.I,
+)
+_LOCATIVE_ACTION = re.compile(
+    r"^(?:to\s+)?be\s+(?:over\s+)?(?:here|there|nearby)\b", re.I,
 )
 _EXTENDED_TIME = re.compile(
     r"\b(?:tomorrow|next\s+(?:week|month|year)|"
@@ -84,6 +95,8 @@ def review_goal_source(
             or _AFTER_EMBEDDED_SPEECH.search(source)):
         return GoalAdmission("nonliteral_statement",
                              "narrator_implied_or_imagined_first_person", "narration")
+    if _HYPOTHETICAL_LEAD.search(prefix):
+        return GoalAdmission("insufficient_commitment", "hypothetical_intention", "source")
     if not action.strip():
         return GoalAdmission("insufficient_commitment", "empty_objective", "unknown")
     if _BARE_REFERENCE.search(action):
@@ -91,7 +104,8 @@ def review_goal_source(
                              "objective_contains_unresolved_reference", "source")
     if str(horizon or "").lower() == "immediate":
         return GoalAdmission("scene_only", "immediate_intention", "source")
-    if (_SCENE_ACTION.search(action)
+    if ((_SCENE_ACTION.search(action) or _SHORT_ERRAND_ACTION.search(action)
+         or _LOCATIVE_ACTION.search(action))
             and (_NEAR_TIME.search(source) or not _EXTENDED_TIME.search(source))):
         return GoalAdmission("scene_only", "transient_scene_action", "source")
     return GoalAdmission("admit", "source_grounded_managed_intention", "source")

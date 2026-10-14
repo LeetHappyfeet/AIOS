@@ -219,3 +219,23 @@ def test_api_stop_and_invalid_date(monkeypatch):
     assert client.post(base, json={"since_at": "2026-09-30T00:00:00"}).status_code == 422
     assert client.post(base + "/" + str(exp) + "/stop").json() == {"shadow": True, "status": "stopped"}
     assert calls == [(instance, exp)]
+
+
+def test_enrollment_refuses_missing_shadow_worker_with_503(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from aios_app.agent.api import install_external_agency_routes
+
+    async def unavailable(self, instance_id, **kwargs):
+        raise RuntimeError("Participation shadow evaluator unavailable: worker_never_registered")
+
+    monkeypatch.setattr(ParticipationService, "start", unavailable)
+    app = FastAPI()
+    install_external_agency_routes(app, None)
+    instance = uuid4()
+    response = TestClient(app).post(
+        f"/agent/instance/{instance}/participation/experiments",
+        json={"max_claims": 2},
+    )
+    assert response.status_code == 503
+    assert "worker_never_registered" in response.json()["detail"]

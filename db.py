@@ -1,4 +1,6 @@
 import json
+import asyncio
+from contextvars import ContextVar
 import asyncpg
 from contextlib import asynccontextmanager
 from typing import Optional, Any, Dict
@@ -13,6 +15,7 @@ class Database:
         self._max_size = max_size
         self._server_settings = server_settings
         self.pool: Optional[asyncpg.Pool] = None
+        self._transaction_connection = ContextVar(f"aios_transaction_{id(self)}", default=None)
 
     # -------------------------------------------------
     # Connection management
@@ -33,28 +36,44 @@ class Database:
 
     @asynccontextmanager
     async def connection(self):
-        """Hold one pooled PostgreSQL session across a critical section."""
+        """Reuse a transaction connection only in its owning asyncio task."""
+        bound = self._transaction_connection.get()
+        if bound is not None and bound[0] is asyncio.current_task():
+            yield bound[1]
+            return
         assert self.pool
         async with self.pool.acquire() as con:
             yield con
+
+    @asynccontextmanager
+    async def atomic(self):
+        """Share one transaction across services; nested scopes use savepoints.
+
+        Child tasks acquire separate sessions rather than concurrently using
+        asyncpg's single connection. Critical writes must stay in this task.
+        """
+        async with self.connection() as con:
+            token = self._transaction_connection.set((asyncio.current_task(), con))
+            try:
+                async with con.transaction():
+                    yield
+            finally:
+                self._transaction_connection.reset(token)
 
     # -------------------------------------------------
     # Basic query helpers
     # -------------------------------------------------
 
     async def fetchrow(self, sql: str, *args):
-        assert self.pool
-        async with self.pool.acquire() as con:
+        async with self.connection() as con:
             return await con.fetchrow(sql, *args)
 
     async def fetch(self, sql: str, *args):
-        assert self.pool
-        async with self.pool.acquire() as con:
+        async with self.connection() as con:
             return await con.fetch(sql, *args)
 
     async def fetchval(self, sql: str, *args):
-        assert self.pool
-        async with self.pool.acquire() as con:
+        async with self.connection() as con:
             return await con.fetchval(sql, *args)
 
     async def fetch_bounded(self, sql: str, *args, timeout_seconds: float = 5.0):
@@ -71,14 +90,12 @@ class Database:
                 return await con.fetch(sql, *args, timeout=timeout_seconds + 1.0)
 
     async def execute(self, sql: str, *args):
-        assert self.pool
-        async with self.pool.acquire() as con:
+        async with self.connection() as con:
             return await con.execute(sql, *args)
 
     async def execute_returning_row(self, sql: str, *args):
         """Execute a statement that returns a single row."""
-        assert self.pool
-        async with self.pool.acquire() as con:
+        async with self.connection() as con:
             return await con.fetchrow(sql, *args)
 
     # -------------------------------------------------

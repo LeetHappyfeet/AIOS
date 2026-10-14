@@ -50,6 +50,11 @@ class CognitiveThreadService:
             subject_id,goal_id,
         )
         thread_id = row["thread_id"]
+        evidence=opportunity.get("evidence") or []
+        if isinstance(evidence,str):
+            evidence=json.loads(evidence)
+        if not isinstance(evidence,list):
+            raise ValueError("thread crossing evidence must be a JSON array")
         crossing=await self.db.execute_returning_row(
             """INSERT INTO aios.character_cognitive_thread_crossing(
                    thread_id,opportunity_id,source_node_id,crossing_type,evidence,strength)
@@ -58,7 +63,7 @@ class CognitiveThreadService:
                RETURNING crossing_id""",
             thread_id, opportunity["opportunity_id"], opportunity.get("source_node_id"),
             str(opportunity.get("opportunity_type") or "unknown"),
-            json.dumps(opportunity.get("evidence") or [], default=str), strength,
+            json.dumps(evidence, default=str), strength,
         )
         if crossing:
             await self.db.execute(

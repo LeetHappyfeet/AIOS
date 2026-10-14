@@ -86,3 +86,15 @@ def test_domains_are_bounded_and_normalized():
     assert normalize_domain("  Geography ") == "geography"
     with pytest.raises(ValueError):
         normalize_domain("historical events / alternate canon")
+
+
+@pytest.mark.asyncio
+async def test_explicit_history_continuation_is_supported_without_auto_linkage():
+    db = FakeDB()
+    await set_world_relation(
+        db, world_id=db.world_id, source_world_id=db.parent_id,
+        domains=["history", "general"], relation="continues",
+        meta={"cognitive_continuity": "explicit"},
+    )
+    assert db.returning_args[2] == "continues"
+    assert db.returning_args[4] == ["history", "general"]

@@ -10,6 +10,7 @@ from qdrant_client.http import models as qm
 PAYLOAD_INDEXES = {
     "object_type": qm.PayloadSchemaType.KEYWORD,
     "section_id": qm.PayloadSchemaType.KEYWORD,
+    "document_id": qm.PayloadSchemaType.KEYWORD,
     "proposition_id": qm.PayloadSchemaType.KEYWORD,
     "claim_kind": qm.PayloadSchemaType.KEYWORD,
     "predicate_family": qm.PayloadSchemaType.KEYWORD,
@@ -19,6 +20,12 @@ PAYLOAD_INDEXES = {
     "timeline_id": qm.PayloadSchemaType.KEYWORD,
     "source_type": qm.PayloadSchemaType.KEYWORD,
     "source_domain": qm.PayloadSchemaType.KEYWORD,
+    "topic_id": qm.PayloadSchemaType.KEYWORD,
+    "topic_kind": qm.PayloadSchemaType.KEYWORD,
+    "namespace": qm.PayloadSchemaType.KEYWORD,
+    "visibility": qm.PayloadSchemaType.KEYWORD,
+    "owner_character_id": qm.PayloadSchemaType.KEYWORD,
+    "topic_status": qm.PayloadSchemaType.KEYWORD,
     "epistemic_status": qm.PayloadSchemaType.KEYWORD,
     "created_at": qm.PayloadSchemaType.DATETIME,
 }

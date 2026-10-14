@@ -118,15 +118,42 @@ class CognitiveLifecycleReconciler:
                 }
                 relation=relation_by_option.get(option_index)
                 if option_index == 2:
-                    await self.complete_goal(
-                        instance_id=operation["instance_id"],goal_id=goal_id,
-                        resolution_kind="reviewed_satisfied",
-                        evidence_type="bounded_goal_review",
-                        evidence_id=str(operation["operation_id"]),
-                        source_node_id=operation.get("source_node_id"),confidence=.8,
-                        meta={"label":result.get("label"),"option_index":option_index},
-                        attempt_id=attempt_id,
-                    )
+                    # A review is not proof that its originating message has
+                    # already fulfilled a new intention. Only a live attempt
+                    # with a later source node on the same timeline can close.
+                    review_source = operation.get("source_node_id")
+                    review_valid = False
+                    if attempt_id and review_source:
+                        review = await self.db.fetchrow(
+                            """SELECT (
+                                  g.status='active' AND a.closed_at IS NULL
+                                  AND (a.source_timeline_id IS NULL
+                                       OR current_node.timeline_id=a.source_timeline_id)
+                                  AND (origin.node_id IS NULL
+                                       OR (origin.timeline_id=current_node.timeline_id
+                                           AND current_node.event_id>origin.event_id))
+                                 ) AS eligible
+                               FROM aios.character_goal_attempt a
+                               JOIN aios.character_agent_goal g ON g.goal_id=a.goal_id
+                                  AND g.instance_id=a.instance_id
+                               JOIN aios.dag_node current_node ON current_node.node_id=$4
+                               LEFT JOIN aios.dag_node origin ON origin.node_id=g.source_node_id
+                               WHERE a.goal_id=$1 AND a.instance_id=$2
+                                 AND a.attempt_id=$3""",
+                            goal_id, operation["instance_id"], attempt_id, review_source,
+                        )
+                        review_valid = bool(review and review["eligible"])
+                    if review_valid:
+                        await self.complete_goal(
+                            instance_id=operation["instance_id"],goal_id=goal_id,
+                            resolution_kind="reviewed_satisfied",
+                            evidence_type="bounded_goal_review",
+                            evidence_id=str(operation["operation_id"]),
+                            source_node_id=review_source,confidence=.8,
+                            meta={"label":result.get("label"),"option_index":option_index,
+                                  "source_after_goal":True},
+                            attempt_id=attempt_id,
+                        )
                 elif relation is not None:
                     lifecycle_effect=(
                         "opportunity_missed" if option_index==3

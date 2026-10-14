@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -12,18 +13,46 @@ from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.research import KnowledgeDemandResolver
 from aios_app.agent.cognitive_operation_registry import CognitiveOperationRegistry
+from aios_app.agent.goal_dependencies import GoalKnowledgeDependencyService
 from aios_app.agent.cognitive_subjects import (
     CognitiveSubjectBuilder, SubjectKnowledgeDemandResolver,
     GoalSubjectProjector, GoalKnowledgeDemandResolver,
 )
 
+def goal_research_operation(
+    next_source: str, last_status: str | None, last_reason: str = "",
+    *, coverage_status: str = "missing", retrieval_state: str = "available",
+    access_changed: bool = False,
+) -> str | None:
+    """One memory inquiry before a persistent dossier; never infer completion.
+
+    A retrieval timeout is not ignorance. Once a scoped inquiry has a terminal
+    result but the durable requirement is still unsatisfied, progress to Stage 3.
+    Availability/exhaustion of that dossier is checked separately.
+    """
+    if (retrieval_state == "unavailable" or coverage_status in {"sufficient","unavailable"}
+            or next_source not in {"memory","corpus"}):
+        return None
+    if last_reason == "no_access" and not access_changed:
+        return None  # A newer index epoch (or explicit retry) must justify another lookup.
+    if last_status in {"queued","planning","already_claimed"}:
+        return None
+    if last_status in {"unresolved","partial","resolved","conflicting"}:
+        return "research.advance"
+    if last_status is None:
+        return "inquiry.resolve"
+    return None
+
+
 _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
 
 def _json_default(value: Any) -> Any:
-    """Normalize typed identifiers at the JSON/JSONB persistence boundary."""
+    """Normalize typed identifiers and timestamps at the JSON/JSONB persistence boundary."""
     if isinstance(value, UUID):
         return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
@@ -53,6 +82,7 @@ class CognitiveOpportunityService:
         self.subject_demand=SubjectKnowledgeDemandResolver()
         self.goal_subjects=GoalSubjectProjector(db)
         self.goal_demand=GoalKnowledgeDemandResolver(db)
+        self.goal_dependencies=GoalKnowledgeDependencyService(db)
         self.cognitive_operations=CognitiveOperationRegistry()
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
@@ -111,6 +141,25 @@ class CognitiveOpportunityService:
             if primary_subject else None
         )
         goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
+        active_goal_ids=[g.goal_id for g in goals if g.goal_id]
+        goal_inquiry_rows = (await self.db.fetch(
+            """SELECT DISTINCT ON (goal_id) goal_id,status,result->>'reason' AS reason,
+                      updated_at
+               FROM aios.character_inquiry
+               WHERE instance_id=$1 AND goal_id=ANY($2::uuid[])
+                 AND evidence_scope='character_accessible'
+               ORDER BY goal_id,updated_at DESC,inquiry_id DESC""",
+            instance_id,active_goal_ids,
+        )) if active_goal_ids else []
+        latest_goal_inquiry={
+            row["goal_id"]:(str(row["status"]),str(row["reason"] or ""),row["updated_at"])
+            for row in goal_inquiry_rows}
+        # A prior no_access remains terminal until new reference-index work
+        # appears. One epoch lookup is shared by all active goal demands.
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        corpus_epoch=(await ProgressiveResearchService(self.db).corpus_change_epoch(instance_id)
+            if any(value[1]=="no_access" for value in latest_goal_inquiry.values())
+            else None)
         for goal in goals:
             if not goal.goal_id:
                 continue
@@ -118,21 +167,49 @@ class CognitiveOpportunityService:
             if goal_subject is None:
                 continue
             demand=await self.goal_demand.resolve(
-                instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge))
+                instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge),
+                retrieval_unavailable=snapshot.topology_unavailable)
             goal_subject_demands[goal.goal_id]=(goal_subject,demand)
-            if demand["next_source"]=="corpus":
+            try:
+                requirement=await self.goal_dependencies.reconcile(
+                    instance_id=instance_id,goal_id=goal.goal_id,
+                    question=goal_subject.question or f"What knowledge helps satisfy: {goal.text}?",
+                    query_text=demand["query"],demand=demand,
+                    source_node_id=source_node_id or context.source_head_node_id)
+            except (PermissionError, ValueError):
+                # A goal can resolve during this snapshot or have a too-short
+                # legacy label. Do not let optional knowledge planning fail
+                # the remaining cognition opportunities or mutate the goal.
+                continue
+            last_status,last_reason,inquiry_at=latest_goal_inquiry.get(
+                goal.goal_id,(None,"",None))
+            access_changed=bool(last_reason=="no_access" and corpus_epoch
+                                and inquiry_at and corpus_epoch>inquiry_at)
+            research_op=goal_research_operation(
+                demand["next_source"],last_status,last_reason,
+                coverage_status=demand["coverage_status"],
+                retrieval_state=demand["retrieval_state"],
+                access_changed=access_changed)
+            if research_op:
                 gap=max(0.0,1.0-float(demand["internal_coverage"]))
+                needs_dossier=research_op=="research.advance"
                 proposals.append(self._p(
                     "knowledge_gap",f"Find knowledge needed for my goal: {goal.text}",
-                    "corpus.search",
-                    {"query":demand["query"],"focus":goal_subject.retrieval_text,
-                     "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id)},
+                    research_op,
+                    {"query":demand["query"],"allow_model":False if needs_dossier else gap >= .75,
+                     "focus":goal_subject.retrieval_text,
+                     "subject_id":str(goal_subject.subject_id),"goal_id":str(goal.goal_id),
+                     "requirement_id":str(requirement["requirement_id"])},
                     source_node_id or context.source_head_node_id,context,
                     relevance=.72,goal_affinity=.85,knowledge_gap=gap,novelty=.65,recency=1,
                     evidence=[{"kind":"goal_knowledge_demand","goal_id":str(goal.goal_id),
                                "internal_coverage":demand["internal_coverage"],
-                               "coverage_source":demand["coverage_source"]}],
-                    key=f"goal-research:{goal.goal_id}",
+                               "coverage_source":demand["coverage_source"],
+                               "coverage_status":demand["coverage_status"],
+                               "retrieval_state":demand["retrieval_state"],
+                               "requirement_id":str(requirement["requirement_id"]),
+                               "prior_inquiry_status":last_status}],
+                    key=f"goal-research:{goal.goal_id}:{research_op}",
                     subject_id=goal_subject.subject_id))
 
         # Established topology recall is already character-relative and ranked.
@@ -158,8 +235,9 @@ class CognitiveOpportunityService:
             query=structured_demand["query"]
             gap=max(0.0,1.0-float(structured_demand["internal_coverage"]))
             proposals.append(self._p(
-                "knowledge_gap",f"Find out more about {subject}.","corpus.search",
-                {"query":query,"focus":primary_subject.retrieval_text,
+                "knowledge_gap",f"Investigate {subject} progressively.","research.advance",
+                {"query":query,"allow_model":gap >= .75,
+                 "focus":primary_subject.retrieval_text,
                  "subject_id":str(primary_subject.subject_id)},
                 source_node_id or context.source_head_node_id,context,
                 relevance=.7,knowledge_gap=gap,novelty=.7,recency=1,
@@ -178,11 +256,52 @@ class CognitiveOpportunityService:
                 if subject:
                     gap=max(0,min(1,1-float(kd.get("coverage") or 0)))
                     proposals.append(self._p(
-                        "knowledge_gap",f"Find out more about {subject}.","corpus.search",
-                        {"query":subject,"focus":focus},source_node_id or context.source_head_node_id,
+                        "knowledge_gap",f"Investigate {subject} progressively.","research.advance",
+                        {"query":subject,"focus":focus,"allow_model":False},
+                        source_node_id or context.source_head_node_id,
                         context,relevance=.65,knowledge_gap=gap,novelty=.7,recency=1,
                         evidence=[{"kind":"corpus_demand","reason":kd.get("reason")}],
                         key=f"research:{subject.lower()[:100]}"))
+
+        # A reference found in an earlier, open research dossier can be offered
+        # for deliberate study. A vector hit ALONE does not consume the source.
+        # The study executor independently rechecks current corpus authorization.
+        proposed_study=await self.db.fetchrow(
+            """SELECT d.dossier_id,s.section_id,s.last_research_id
+               FROM aios.character_research_dossier d
+               JOIN aios.character_research_source s ON s.dossier_id=d.dossier_id
+               JOIN aios.corpus_section current_section
+                 ON current_section.section_id=s.section_id
+                AND md5(current_section.content)=s.source_text_digest
+               JOIN aios.character_corpus_exposure exposure
+                 ON exposure.research_id=s.last_research_id
+                AND exposure.section_id=s.section_id
+               LEFT JOIN aios.character_research_materialization material
+                 ON material.dossier_id=s.dossier_id AND material.section_id=s.section_id
+               WHERE d.instance_id=$1 AND d.status='open' AND s.status='discovered'
+                 AND $2::boolean
+                 AND material.section_id IS NULL AND
+                 d.max_materializations > (
+                    SELECT count(*) FROM aios.character_research_materialization reserved
+                    WHERE reserved.dossier_id=d.dossier_id
+                      AND reserved.status IN ('pending','submitted'))
+               ORDER BY d.updated_at DESC,s.best_score DESC,s.last_seen_at DESC LIMIT 1""",
+            instance_id,
+            bool(re.search(r"\b(?:study|read (?:this|the|a) (?:article|passage|source|reference)|learn from (?:this|the|a))\b",
+                           focus,re.IGNORECASE)))
+        if proposed_study:
+            proposals.append(self._p(
+                "knowledge_gap","Consider studying one discovered source from my open research.",
+                "research.study",
+                {"dossier_id":str(proposed_study["dossier_id"]),
+                 "section_id":str(proposed_study["section_id"])},
+                source_node_id or context.source_head_node_id,context,
+                relevance=.57,knowledge_gap=.6,novelty=.45,recency=.65,
+                evidence=[{"kind":"authorized_research_exposure",
+                           "research_id":str(proposed_study["last_research_id"]),
+                           "section_id":str(proposed_study["section_id"])}],
+                key=f"research-study:{proposed_study['dossier_id']}:{proposed_study['section_id']}",
+                subject_id=primary_subject.subject_id if primary_subject else None))
 
         goal_words=set(re.findall(r"[a-z0-9']+",focus.lower()))
         # Review is budgeted, not eligibility-limited. Rank every active goal
@@ -203,6 +322,16 @@ class CognitiveOpportunityService:
                GROUP BY g.goal_id""",
             instance_id)
         last_reviewed={row["goal_id"]:row["last_reviewed_at"] for row in review_rows}
+        # A bounded, already scoped source-turn window lets planning.review
+        # inspect the character's preceding answer and the participant's
+        # acknowledgment, not just the current focus string.
+        recent_source_events=[
+            {"node_id":str(row.get("node_id") or ""),
+             "speaker_id":str(row.get("speaker_id") or ""),
+             "message_text":_clip(row.get("message_text") or "",300)}
+            for row in attention.recent_newest
+            if row.get("event_stream")=="source" and row.get("message_text")
+        ][:4]
         review_candidates=[]
         for index,goal in enumerate(goals):
             g=_clip(goal.text,160)
@@ -212,10 +341,13 @@ class CognitiveOpportunityService:
             # Never-reviewed goals outrank already-reviewed zero-affinity goals;
             # otherwise older reviews rotate forward deterministically.
             starvation=1.0 if reviewed is None else 0.0
-            review_candidates.append((starvation,affinity,reviewed,index,goal,g))
+            completion_due=bool(goal_states.get(goal.goal_id,{}).get("completion_candidate_count"))
+            relevant=overlap>0
+            review_candidates.append((completion_due,relevant,starvation,affinity,reviewed,index,goal,g))
         review_candidates.sort(
-            key=lambda x:(-x[0],-x[1],x[2] is not None,x[2],x[3]))
-        for starvation,affinity,reviewed,index,goal,g in review_candidates[:3]:
+            key=lambda x:(-int(x[0]),-int(x[1]),-x[2],-x[3],
+                          x[4] is not None,x[4],x[5]))
+        for completion_due,relevant,starvation,affinity,reviewed,index,goal,g in review_candidates[:3]:
             goal_id=str(goal.goal_id) if goal.goal_id else None
             goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
             goal_subject=goal_subject_entry[0] if goal_subject_entry else None
@@ -224,6 +356,7 @@ class CognitiveOpportunityService:
                 "goal_review",f"Consider whether what just happened changes my goal: {g}",
                 "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
                 "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
+                "recent_source_events":recent_source_events,
                 "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),
                 "current_scene":{
                     "location":current_scene.get("location"),
@@ -238,7 +371,7 @@ class CognitiveOpportunityService:
                 goal_affinity=max(.35,affinity)+(.15 if starvation else 0),recency=1,
                 evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g,
                            "last_reviewed_at":str(reviewed) if reviewed else None}],
-                key=f"goal:{goal_id or g.lower()[:100]}",
+                key=f"goal:{goal_id or g.lower()[:100]}",freshness="strict",
                 subject_id=goal_subject.subject_id if goal_subject else
                            (primary_subject.subject_id if primary_subject else None)))
 
@@ -268,6 +401,21 @@ class CognitiveOpportunityService:
                     key=f"scene:{slot}:{after.lower()[:80]}",
                     subject_id=primary_subject.subject_id if primary_subject else None))
 
+        # A completed/closed dossier should not generate the same source-gap
+        # operation indefinitely on every later conversation turn.
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        progressive=ProgressiveResearchService(self.db)
+        eligible_proposals=[]
+        for proposed in proposals:
+            if proposed["operation_type"]=="research.advance":
+                query=str(proposed["operation_payload"].get("query") or "")
+                try:
+                    if not await progressive.available(instance_id=instance_id,question=query):
+                        continue
+                except ValueError:
+                    continue
+            eligible_proposals.append(proposed)
+        proposals=eligible_proposals
         proposals.sort(key=lambda x:x["priority_score"],reverse=True)
         budget=max(1,min(limit,16))
         # Goal lifecycle has a reserved downstream slot, so preserve one review
@@ -281,8 +429,15 @@ class CognitiveOpportunityService:
         reserved=[p for p in (due_review,due_formation) if p is not None]
         budgeted=([p for p in proposals if p not in reserved][
                     :max(0,budget-len(reserved))] + reserved)
+        return await self._persist_proposals(instance_id, budgeted)
+
+    async def _persist_proposals(self, instance_id: UUID,
+                                 budgeted: list[dict[str, Any]]) -> OpportunityBatch:
+        # Validate the whole selected batch before writing any opportunity.
+        encoded=[(p, _json_dumps(p["operation_payload"]), _json_dumps(p["evidence"]))
+                 for p in budgeted]
         stored=[]
-        for p in budgeted:
+        for p, payload_json, evidence_json in encoded:
             row=await self.db.execute_returning_row(
                 """INSERT INTO aios.character_cognitive_opportunity(
                    instance_id,opportunity_type,natural_language,operation_type,operation_payload,
@@ -300,11 +455,11 @@ class CognitiveOpportunityService:
                      updated_at=now()
                    RETURNING *""",
                 instance_id,p["opportunity_type"],p["natural_language"],p["operation_type"],
-                _json_dumps(p["operation_payload"]),p["source_node_id"],p["source_timeline_id"],
+                payload_json,p["source_node_id"],p["source_timeline_id"],
                 p["source_state_version"],p["novelty"],p["relevance"],p["urgency"],p["uncertainty"],
                 p["goal_affinity"],p["memory_affinity"],p["knowledge_gap"],p["recency"],
                 p["priority_score"],p["freshness_policy"],p["supersession_key"],
-                _json_dumps(p["evidence"]),p.get("subject_id"))
+                evidence_json,p.get("subject_id"))
             if row: stored.append(dict(row))
         return OpportunityBatch(instance_id,tuple(stored))
 

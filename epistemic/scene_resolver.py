@@ -95,21 +95,10 @@ class CharacterSceneResolver:
                          "task_type":str(task["task_type"]),"status":str(task["status"]),
                          "text":str(task["objective"])}
 
+        # A DAG turn is dialogue/evidence, NOT a physical scene transition.
+        # In particular a <aios_action> request must not become Last change.
+        # Scene transitions are projected from their own authoritative slots.
         last=None
-        if context.source_head_node_id:
-            source=await self.db.fetchrow(
-                """SELECT node_id,message_text,speaker_id,speaker_role::text AS speaker_role,event_id
-                   FROM aios.dag_node WHERE node_id=$1""",
-                context.source_head_node_id)
-            if source and str(source["message_text"] or "").strip():
-                last={
-                    "text":str(source["message_text"]).strip(),
-                    "source_node_id":str(source["node_id"]),
-                    "event_id":source["event_id"],
-                    "speaker_id":source["speaker_id"],
-                    "speaker_role":source["speaker_role"],
-                    "source":"dag_node",
-                }
 
         evidence=tuple(dict.fromkeys(v for v in
             (context.source_head_node_id,context.head_node_id) if v))

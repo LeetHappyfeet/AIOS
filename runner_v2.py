@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict
 
 from aios_app import runner as base
@@ -39,6 +40,17 @@ async def handle_compact_character_world_epistemic(db: Database, job: Dict[str, 
 
 base.JOB_HANDLERS["compact_character_world_epistemic"] = handle_compact_character_world_epistemic
 
+async def handle_semantic_hygiene_shadow(db: Database, job: Dict[str, Any]) -> None:
+    """Read-only /char inspection; writes ONLY semantic_hygiene_shadow_audit/cursor."""
+    from aios_app.epistemic.semantic_hygiene import run_shadow_batch
+    population = str((job.get("payload") or {}).get("population") or "v3_only")
+    fuseki = base.FusekiClient(settings.fuseki_base_url, timeout=12.0, retries=0)
+    await run_shadow_batch(db, fuseki, population=population, limit=16)
+
+
+base.JOB_HANDLERS["semantic_hygiene_shadow"] = handle_semantic_hygiene_shadow
+
+
 async def handle_agent_wake(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
     from aios_app.agent.autonomy import AutonomyScheduler
@@ -70,7 +82,9 @@ async def handle_internal_cognition_inference(db: Database, job: Dict[str, Any])
     transaction_id=job.get("payload",{}).get("transaction_id")
     if not transaction_id:
         raise ValueError("internal_cognition_inference requires transaction_id")
-    await InternalCognitionTransactions(db).run(UUID(str(transaction_id)))
+    result = await InternalCognitionTransactions(db).run(UUID(str(transaction_id)))
+    if result.status in {"running","proposed"}:
+        raise RuntimeError("cognition transaction is still claimed; recovery must reconcile its owner")
 
 base.JOB_HANDLERS["internal_cognition_inference"] = handle_internal_cognition_inference
 
@@ -84,6 +98,32 @@ async def handle_goal_formulation_inference(db: Database, job: Dict[str, Any]) -
 
 base.JOB_HANDLERS["goal_formulation_inference"] = handle_goal_formulation_inference
 
+
+async def handle_character_inquiry_inference(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.cognitive_operations import CognitiveOperationEngine
+    operation_id = (job.get("payload") or {}).get("operation_id")
+    if not operation_id:
+        raise ValueError("character_inquiry_inference requires operation_id")
+    await CognitiveOperationEngine(db).complete_inquiry(UUID(str(operation_id)))
+
+
+base.JOB_HANDLERS["character_inquiry_inference"] = handle_character_inquiry_inference
+
+
+async def handle_character_inquiry_shadow(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.epistemic.inquiry.shadow import scan_v11_rejections
+    payload = job.get("payload") or {}
+    if not payload.get("instance_id") or not payload.get("node_id"):
+        raise ValueError("character_inquiry_shadow needs instance_id and node_id")
+    await scan_v11_rejections(
+        db, instance_id=UUID(str(payload["instance_id"])),
+        node_id=UUID(str(payload["node_id"])))
+
+
+base.JOB_HANDLERS["character_inquiry_shadow"] = handle_character_inquiry_shadow
+
 async def handle_message_cognition_enrichment(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
     from aios_app.epistemic.message_cognition_enrichment import MessageCognitionEnricher
@@ -93,6 +133,23 @@ async def handle_message_cognition_enrichment(db: Database, job: Dict[str, Any])
     await MessageCognitionEnricher(db).run(
         instance_id=UUID(str(payload["instance_id"])),
         node_id=UUID(str(payload["node_id"])))
+    # Post-enrichment shadow diagnostic is independently queued; lookup never
+    # blocks parser admission or historical completion.
+    try:
+        completed = await db.fetchrow(
+            """SELECT summary FROM aios.message_cognitive_commit
+               WHERE instance_id=$1 AND node_id=$2
+                 AND enrichment_completed_at IS NOT NULL""",
+            UUID(str(payload["instance_id"])),UUID(str(payload["node_id"])))
+        summary = str(completed["summary"]) if completed else ""
+        if ("source_admission:unresolved_reference:" in summary or
+                "source_admission:attribution_unresolved:" in summary):
+            await enqueue_job(
+                db,job_type="character_inquiry_shadow",
+                payload={"instance_id":str(payload["instance_id"]),
+                         "node_id":str(payload["node_id"])},priority=35)
+    except Exception:
+        logger.exception("Optional source inquiry shadow enqueue failed")
 
 base.JOB_HANDLERS["message_cognition_enrichment"] = handle_message_cognition_enrichment
 
@@ -161,7 +218,7 @@ _original_resolve_partition_key = base._resolve_partition_key
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
-    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup"} and payload.get("instance_id"):
+    if job_type in {"agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference"} and payload.get("instance_id"):
         return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])
@@ -727,6 +784,36 @@ async def _projection_scheduler_loop() -> None:
                         payload={},
                         priority=250,
                     )
+
+                # Explicit opt-in; at most one small shadow batch per minute.
+                # This must never compete continuously with live RDF projection.
+                if os.getenv("AIOS_SEMANTIC_HYGIENE_SHADOW_ENABLED", "0").lower() in {
+                    "1", "true", "yes", "on",
+                }:
+                    from aios_app.epistemic.semantic_hygiene import POLICY_VERSION
+                    hygiene_state = await db.fetchrow(
+                        """
+                        SELECT population
+                        FROM aios.semantic_hygiene_shadow_cursor
+                        WHERE policy_version=$1 AND completed_at IS NULL
+                          AND NOT EXISTS (
+                            SELECT 1 FROM aios.pipeline_job pj
+                            WHERE pj.job_type='semantic_hygiene_shadow'
+                              AND (pj.status IN ('queued','running')
+                                OR pj.created_at > now() - interval '60 seconds')
+                          )
+                        ORDER BY CASE WHEN population='v3_only' THEN 0 ELSE 1 END
+                        LIMIT 1
+                        """,
+                        POLICY_VERSION,
+                    )
+                    if hygiene_state:
+                        await enqueue_job(
+                            db,
+                            job_type="semantic_hygiene_shadow",
+                            payload={"population": str(hygiene_state["population"])},
+                            priority=290,
+                        )
             except Exception:
                 logger.exception("Failed to schedule dirty semantic topology scopes")
             await asyncio.sleep(RDF_PROJECTION_SCHEDULER_SECONDS)
@@ -740,6 +827,7 @@ async def _deferred_cognition_recovery_loop(
 ) -> None:
     """Independent restart recovery: no dependency on a surviving catch-up job."""
     from aios_app.epistemic.cognition_recovery_sweep import enqueue_abandoned_enrichment
+    from aios_app.epistemic.inquiry.shadow import enqueue_v11_inquiry_shadow
     from aios_app.inference.providers import InferenceProviderStore
 
     db = Database(settings.db_dsn, min_size=1, max_size=2)
@@ -751,10 +839,11 @@ async def _deferred_cognition_recovery_loop(
                 # currently executing; only expired leases may be mutated.
                 reaped = await InferenceProviderStore(db).reap_stale_requests()
                 enqueued = await enqueue_abandoned_enrichment(db, limit=16)
-                if reaped or enqueued:
+                shadowed = await enqueue_v11_inquiry_shadow(db, limit=8)
+                if reaped or enqueued or shadowed:
                     logger.info(
-                        "Deferred cognition sweep reaped=%s enqueued=%s",
-                        reaped, enqueued,
+                        "Deferred cognition sweep reaped=%s enqueued=%s inquiry=%s",
+                        reaped, enqueued, shadowed,
                     )
             except Exception:
                 logger.exception("Failed deferred cognition recovery sweep")

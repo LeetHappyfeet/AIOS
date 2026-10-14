@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 720 350" role="img" aria-labelledby="title desc">
+<title id="title">Knowledge acquisition</title><desc id="desc">Source documents and an open book lead to selective learned information.</desc>
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#422538"/><stop offset="1" stop-color="#6c3a31"/></linearGradient>
+ <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="#ffffff" stroke-opacity=".07"/></pattern>
+ <radialGradient id="halo"><stop stop-color="#ffffff" stop-opacity=".18"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+ <filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="10"/></filter>
+</defs>
+<rect width="720" height="350" rx="24" fill="url(#bg)"/><rect width="720" height="350" rx="24" fill="url(#grid)"/>
+<circle cx="560" cy="150" r="200" fill="url(#halo)" opacity=".45"/>
+<text x="38" y="48" fill="#ffffff" fill-opacity=".55" font-family="Arial,Helvetica,sans-serif" font-size="17" letter-spacing="4">03 / AIOS</text>
+
+<g transform="translate(77 105) rotate(-7)"><rect x="0" y="0" width="155" height="115" rx="10" fill="#b96f5e" stroke="#f8ccb5" stroke-width="2"/><rect x="23" y="27" width="105" height="8" rx="3" fill="#ffe4cf"/><rect x="23" y="45" width="92" height="7" rx="3" fill="#ffe4cf" opacity=".8"/><rect x="23" y="62" width="112" height="7" rx="3" fill="#ffe4cf" opacity=".8"/><rect x="23" y="79" width="66" height="7" rx="3" fill="#ffe4cf" opacity=".8"/></g>
+<g transform="translate(189 81) rotate(9)"><rect x="0" y="0" width="132" height="119" rx="8" fill="#6b475e" stroke="#efbd9b" stroke-width="2"/><rect x="23" y="25" width="87" height="7" rx="3" fill="#ffe4cf" opacity=".75"/><rect x="23" y="43" width="74" height="7" rx="3" fill="#ffe4cf" opacity=".65"/><rect x="23" y="61" width="80" height="7" rx="3" fill="#ffe4cf" opacity=".65"/><rect x="23" y="79" width="59" height="7" rx="3" fill="#ffe4cf" opacity=".65"/></g>
+<path d="M114 241Q175 211 242 242L245 299Q178 271 113 299Z" fill="#ffe1b8" stroke="#f7ac74" stroke-width="3"/><path d="M242 242Q311 211 375 242L376 299Q310 273 245 299Z" fill="#f9c68d" stroke="#f7ac74" stroke-width="3"/><path d="M243 242L245 299" stroke="#ab6c66" stroke-width="3"/>
+<path d="M380 165C440 165 438 165 472 165" stroke="#ffd397" stroke-dasharray="6 7" stroke-width="3" fill="none"/>
+<circle cx="484" cy="165" r="8" fill="#fbd28c"/>
+<circle cx="570" cy="175" r="88" fill="#ffcb84" opacity=".13" stroke="#ffe3bd" stroke-width="2"/>
+<path d="M570 95L623 123V178Q622 219 570 244Q519 220 518 178V123Z" fill="#b87558" stroke="#ffe3bd" stroke-width="2.5"/>
+<path d="M541 166L560 186 601 144" stroke="#ffe3bd" stroke-width="7" stroke-linejoin="round" stroke-linecap="round" fill="none"/>
+</svg>

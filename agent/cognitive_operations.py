@@ -19,18 +19,36 @@ class CognitiveOperationEngine:
 
     async def create_from_opportunity(self, *, opportunity: Mapping[str, Any],
                                       thread_id: UUID | None, priority: int = 100,
-                                      source_task_id: UUID | None = None) -> UUID:
+                                      source_task_id: UUID | None = None,
+                                      episode_id: UUID | None = None,
+                                      episode_role: str = "attention") -> UUID:
+        async with self.db.atomic():
+            await self.db.fetchval("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                                   f"cognitive-opportunity:{opportunity['opportunity_id']}")
+            existing = await self.db.fetchrow(
+                """SELECT operation_id FROM aios.character_cognitive_operation
+                   WHERE opportunity_id=$1 AND episode_id IS NOT DISTINCT FROM $2
+                     AND source_task_id IS NOT DISTINCT FROM $3 LIMIT 1""",
+                opportunity["opportunity_id"],episode_id,source_task_id)
+            if existing:
+                return existing["operation_id"]
+            return await self._create_from_opportunity(
+                opportunity=opportunity,thread_id=thread_id,priority=priority,
+                source_task_id=source_task_id,episode_id=episode_id,episode_role=episode_role)
+
+    async def _create_from_opportunity(self, *, opportunity, thread_id, priority,
+                                       source_task_id, episode_id, episode_role):
         row = await self.db.execute_returning_row(
             """INSERT INTO aios.character_cognitive_operation(
                    thread_id,instance_id,opportunity_id,operation_type,input,
-                   source_state_version,source_timeline_id,source_node_id,freshness_policy,source_task_id)
-               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10) RETURNING operation_id""",
+                   source_state_version,source_timeline_id,source_node_id,freshness_policy,source_task_id,episode_id,episode_role)
+               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12) RETURNING operation_id""",
             thread_id, opportunity["instance_id"], opportunity["opportunity_id"],
             opportunity["operation_type"],
             json.dumps(self._mapping(opportunity.get("operation_payload")), default=str),
             opportunity.get("source_state_version"), opportunity.get("source_timeline_id"),
             opportunity.get("source_node_id"), opportunity.get("freshness_policy") or "contextual",
-            source_task_id,
+            source_task_id,episode_id,episode_role if episode_id else None,
         )
         operation_id=row["operation_id"]
         if thread_id:
@@ -38,9 +56,11 @@ class CognitiveOperationEngine:
                 """UPDATE aios.character_cognitive_thread
                    SET status='working',updated_at=now()
                    WHERE thread_id=$1 AND status IN ('open','working')""",thread_id)
-        await enqueue_job(self.db,job_type="cognitive_operation",
+        job_id=await enqueue_job(self.db,job_type="cognitive_operation",
             payload={"instance_id":str(opportunity["instance_id"]),"operation_id":str(operation_id)},
             priority=priority)
+        if job_id is None:
+            raise RuntimeError("could not enqueue cognitive operation")
         return operation_id
 
     async def execute(self, operation_id: UUID) -> None:
@@ -49,6 +69,7 @@ class CognitiveOperationEngine:
                SET status='running',started_at=COALESCE(started_at,now()),updated_at=now()
                WHERE operation_id=$1 AND status='queued' RETURNING *""",operation_id)
         if not row:
+            await self.reconcile_terminal(operation_id)
             return
         op=dict(row)
         try:
@@ -62,6 +83,82 @@ class CognitiveOperationEngine:
                     instance_id=op["instance_id"],query=str(payload.get("query") or ""),limit=8)
                 await self._finish(op,{"kind":"inquiry","research_id":str(found.research_id),
                                        "status":found.status,"hits":found.reference_context()})
+            elif kind=="research.advance":
+                from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+                payload=self._mapping(op["input"])
+                query=str(payload.get("query") or "").strip()[:600]
+                if not query:
+                    raise ValueError("progressive research requires a topic query")
+                service=ProgressiveResearchService(self.db)
+                dossier=await service.start(
+                    instance_id=op["instance_id"],question=query,
+                    origin="goal" if payload.get("goal_id") else "cognition",
+                    goal_id=UUID(str(payload["goal_id"])) if payload.get("goal_id") else None,
+                    requirement_id=UUID(str(payload["requirement_id"]))
+                    if payload.get("requirement_id") else None)
+                result=await service.advance(
+                    instance_id=op["instance_id"],dossier_id=UUID(dossier["dossier_id"]),
+                    request_id=op["operation_id"],include_fanwork=False)
+                # Preserve bounded receipts in operation JSON. Original text
+                # belongs to source/exposure and is available only via authorized
+                # corpus research, not copied into long-running goal state.
+                result.pop("references",None)
+                await self._finish(op,{"kind":"research_dossier",
+                                       "requirement_id":payload.get("requirement_id"),
+                                       "goal_id":payload.get("goal_id"),**result})
+            elif kind=="research.study":
+                from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+                payload=self._mapping(op["input"])
+                dossier_id=UUID(str(payload["dossier_id"]))
+                section_id=UUID(str(payload["section_id"]))
+                result=await ProgressiveResearchService(self.db).study(
+                    instance_id=op["instance_id"],dossier_id=dossier_id,
+                    request_id=op["operation_id"],section_ids=[section_id])
+                await self._finish(op,{"kind":"research_study",**result})
+            elif kind=="inquiry.resolve":
+                from aios_app.epistemic.inquiry.contracts import InquiryDemand
+                from aios_app.epistemic.inquiry.service import CharacterInquiryService
+                payload=self._mapping(op["input"])
+                if isinstance(payload.get("demand"), dict):
+                    demand=InquiryDemand.from_dict(payload["demand"])
+                    if demand.instance_id != op["instance_id"]:
+                        raise PermissionError("inquiry instance mismatch")
+                else:
+                    question=str(payload.get("query") or payload.get("focus") or "").strip()[:600]
+                    demand=InquiryDemand(
+                        instance_id=op["instance_id"], source_node_id=op.get("source_node_id"),
+                        origin="character_cognition", uncertainty_kind="explicit_question",
+                        question=question, evidence_scope="character_accessible",
+                        evidence_revision=f"{op.get('source_state_version')}:{op.get('source_node_id')}",
+                        goal_id=UUID(str(payload["goal_id"]))
+                        if payload.get("goal_id") else None)
+                service=CharacterInquiryService(self.db)
+                receipt=await service.resolve(
+                    demand,allow_model=bool(payload.get("allow_model",False)))
+                if (receipt.get("plan_eligible") and
+                        await service.claim_plan(UUID(receipt["inquiry_id"]))):
+                    await self.db.execute(
+                        """UPDATE aios.character_cognitive_operation SET
+                           status='waiting_inference',result=$2::jsonb,updated_at=now()
+                           WHERE operation_id=$1 AND status='running'""",
+                        op["operation_id"],json.dumps(receipt))
+                    job_id=await enqueue_job(
+                        self.db,job_type="character_inquiry_inference",
+                        payload={"instance_id":str(op["instance_id"]),
+                                 "operation_id":str(op["operation_id"])},priority=140)
+                    if job_id is None:
+                        await self.db.execute(
+                            """UPDATE aios.character_inquiry SET status=$2,updated_at=now()
+                               WHERE inquiry_id=$1 AND status='planning'""",
+                            UUID(receipt["inquiry_id"]),receipt["status"])
+                        await self.db.execute(
+                            """UPDATE aios.character_cognitive_operation SET status='running'
+                               WHERE operation_id=$1 AND status='waiting_inference'""",
+                            op["operation_id"])
+                        await self._finish(op,{"kind":"inquiry",**receipt,
+                                              "planner_status":"not_queued"})
+                else:
+                    await self._finish(op,{"kind":"inquiry",**receipt})
             elif kind in {"reflection.review","planning.review","executive.review"}:
                 await self._queue_decision(op)
             elif kind=="planning.form_goal":
@@ -75,6 +172,30 @@ class CognitiveOperationEngine:
         except Exception as exc:
             await self._fail(op, exc)
             raise
+
+    async def complete_inquiry(self, operation_id: UUID) -> None:
+        """Run the optional planner off the deterministic cognitive-operation lane."""
+        row=await self.db.fetchrow(
+            """SELECT * FROM aios.character_cognitive_operation
+               WHERE operation_id=$1 AND status='waiting_inference'
+                 AND operation_type='inquiry.resolve'""",operation_id)
+        if not row:
+            return
+        op=dict(row)
+        receipt=self._mapping(op.get("result"))
+        if not receipt.get("inquiry_id"):
+            await self._fail(op,ValueError("missing inquiry audit identifier"))
+            return
+        from aios_app.epistemic.inquiry.service import CharacterInquiryService
+        result=await CharacterInquiryService(self.db).plan_and_retry(
+            UUID(str(receipt["inquiry_id"])))
+        changed=await self.db.execute_returning_row(
+            """UPDATE aios.character_cognitive_operation SET status='running',
+                      updated_at=now()
+               WHERE operation_id=$1 AND status='waiting_inference'
+               RETURNING operation_id""",operation_id)
+        if changed:
+            await self._finish(op,{"kind":"inquiry",**result})
 
     async def form_goal(self, operation_id: UUID) -> None:
         """One bounded planning inference, executed in the isolated inference lane."""
@@ -99,6 +220,7 @@ class CognitiveOperationEngine:
                 return
             from aios_app.inference.broker import InferenceBroker, InferenceRequest
             from aios_app.epistemic.goals import CharacterGoalService
+            from aios_app.epistemic.goal_formation_admission import verify_formed_goal
             source_text=str(source["message_text"])[:1800]
             existing=await CharacterGoalService(self.db).resolve_active(op["instance_id"])
             prompt=(
@@ -128,39 +250,78 @@ class CognitiveOperationEngine:
             if not isinstance(goal,str) or len(goal.strip())<12 or len(goal)>140:
                 await self._finish(op,{"kind":"rejected_goal","reason":"invalid text"})
                 return
-            # The inference can formulate an objective, but cannot introduce
-            # unrelated people, places, or activities into the character state.
-            tokens=set(re.findall(r"[a-z]{4,}",goal.lower()))
-            evidence=set(re.findall(r"[a-z]{4,}",source_text.lower()))
-            if len(tokens & evidence)<2 or any(g.text.casefold()==goal.strip().casefold()
-                                                for g in existing.active):
-                await self._finish(op,{"kind":"rejected_goal","reason":"ungrounded or duplicate"})
+            # The planning model is a selector, NOT an intention author.
+            # Derive the admitted objective and topic exclusively from original
+            # character-owned, positive V11 source units. Lexical overlap alone
+            # used to allow hypothetical or foreign speech to form executive goals.
+            reviewed=verify_formed_goal(
+                source_text=source_text, proposal=goal,
+                character_id=context.character_id,
+                speaker_id=source["speaker_id"], speaker_role=source["speaker_role"],
+            )
+            if not reviewed.eligible:
+                await self._finish(op,{"kind":"rejected_goal","reason":reviewed.reason})
+                return
+            unit=reviewed.unit
+            if any(g.text.casefold()==unit.text.casefold() for g in existing.active):
+                await self._finish(op,{"kind":"rejected_goal","reason":"duplicate"})
                 return
             horizon=str(raw.get("horizon") or "session")
+            # Persistent formation requires the source's explicit future horizon.
             if horizon not in {"scene","session","persistent"}:
                 horizon="session"
+            if horizon == "persistent" and not re.search(
+                    r"\b(?:next|every|each|until|tomorrow|in\s+\d+\s+(?:days?|weeks?|months?|years?))\b",
+                    str(unit.meta.get("source_text") or ""),re.I):
+                horizon="session"
             if source["speaker_role"] not in {"character","assistant"}:
-                horizon="session" if horizon=="persistent" else horizon
+                await self._finish(op,{"kind":"rejected_goal","reason":"foreign_speaker"})
+                return
             # Recheck after inference. A new turn may have arrived meanwhile.
             current=await HUDContextResolver(self.db).resolve(op["instance_id"])
             if (current.source_head_node_id != op["source_node_id"] or
                 current.state_version != op["source_state_version"]):
                 await self._stale(op,"goal formation context advanced")
                 return
-            created=await CharacterGoalService(self.db).create(
-                instance_id=op["instance_id"],text=goal.strip(),
-                source_node_id=op["source_node_id"],
-                meta={"created_by":"planning_formation","horizon":horizon,
-                      "source_operation_id":str(operation_id)})
-            await self._finish(op,{"kind":"formed_goal","goal_id":str(created.goal_id)})
+            created=await CharacterGoalService(self.db).reconcile_evidence(
+                instance_id=op["instance_id"],text=unit.text,
+                topic_key=unit.topic_key,polarity=unit.polarity,
+                source_node_id=op["source_node_id"],confidence=unit.confidence,
+                salience=unit.salience,intent_type=unit.meta.get("intent_type"),
+                horizon=horizon,objective=unit.meta.get("objective"),
+                source_text=unit.meta.get("source_text"),
+                parse_reason=unit.meta.get("parse_reason"),
+                source_span=unit.meta.get("source_span"))
+            if created is None:
+                await self._finish(op,{"kind":"rejected_goal","reason":"goal_lifecycle_not_admitted"})
+                return
+            await self._finish(op,{"kind":"formed_goal","goal_id":str(created.goal_id),
+                "admission":"source_grounded","proposal":goal,
+                "source_objective":unit.meta.get("objective")})
         except Exception as exc:
             await self._fail(op,exc)
             raise
 
     async def _queue_decision(self, op: Mapping[str,Any]) -> None:
+        async with self.db.atomic():
+            await self._create_decision_transaction(op)
+
+    async def _create_decision_transaction(self, op):
         from aios_app.agent.transactions import InternalCognitionTransactions
         payload=self._mapping(op["input"])
-        subject=" ".join(str(v) for v in payload.values() if v)[:220]
+        if str(op["operation_type"])=="planning.review":
+            turns=payload.get("recent_source_events") or []
+            excerpts=[
+                f"{str(turn.get('speaker_id') or 'unknown')}: {str(turn.get('message_text') or '')[:260]}"
+                for turn in turns[:4] if isinstance(turn,Mapping)
+            ]
+            subject=(
+                f"Goal: {str(payload.get('goal') or '')[:180]}. "
+                f"Current focus: {str(payload.get('focus') or '')[:300]}. "
+                f"Recent source turns (newest first): {' | '.join(excerpts)}."
+            )[:1200]
+        else:
+            subject=" ".join(str(v) for v in payload.values() if v)[:220]
         labels={
             "reflection.review":[
                 f"This seems important; keep it in mind: {subject}.",
@@ -178,7 +339,8 @@ class CognitiveOperationEngine:
                 "I should preserve this concern but not act yet.",
                 "This no longer needs action."],
         }[str(op["operation_type"])]
-        choice_freshness="strict" if str(op["operation_type"])=="executive.review" else str(op.get("freshness_policy") or "contextual")
+        choice_freshness=("strict" if str(op["operation_type"]) in {"executive.review","planning.review"}
+                          else str(op.get("freshness_policy") or "contextual"))
         candidates=[{"key":k,"label":label,"operation":"operation_choice",
                      "operation_id":str(op["operation_id"]),"option_index":i,
                      "freshness_policy":choice_freshness}
@@ -197,14 +359,17 @@ class CognitiveOperationEngine:
         tx=await InternalCognitionTransactions(self.db).create(
             instance_id=op["instance_id"], candidates=candidates, priority=120,
             ttl_seconds=300, worker_profile=faculty_profile,
-            focus_text=subject, subject=subject)
+            focus_text=subject, subject=subject,transaction_kind="decision",
+            episode_id=op.get("episode_id"))
         await self.db.execute(
             """UPDATE aios.character_cognitive_operation SET status='waiting_inference',
                transaction_id=$2,updated_at=now() WHERE operation_id=$1""",
             op["operation_id"],tx)
-        await enqueue_job(self.db,job_type="internal_cognition_inference",
+        job_id=await enqueue_job(self.db,job_type="internal_cognition_inference",
             payload={"instance_id":str(op["instance_id"]),"transaction_id":str(tx),
                      "operation_id":str(op["operation_id"])},priority=120)
+        if job_id is None:
+            raise RuntimeError("could not enqueue decision transaction")
 
     async def accept_choice(self, operation_id: UUID, selected: Mapping[str,Any]) -> bool:
         row=await self.db.fetchrow(
@@ -217,7 +382,7 @@ class CognitiveOperationEngine:
             await self._stale(op,"source timeline changed while inference was running")
             return False
         policy=str(op.get("freshness_policy") or "contextual")
-        if str(op["operation_type"])=="executive.review":
+        if str(op["operation_type"]) in {"executive.review","planning.review"}:
             policy="strict"
         if policy=="strict" and (
             current.state_version != op.get("source_state_version")
@@ -234,7 +399,7 @@ class CognitiveOperationEngine:
             operation_id,json.dumps(result,default=str))
         if not changed:
             return False
-        await self._finish_side_effects(op,result)
+        await self.reconcile_terminal(operation_id)
         return True
 
     async def _stale(self, op: Mapping[str,Any], reason: str) -> None:
@@ -245,8 +410,7 @@ class CognitiveOperationEngine:
                RETURNING operation_id""",
             op["operation_id"],json.dumps({"reason":reason}))
         if changed:
-            await self._terminal_side_effects(op,status="stale",result={"reason":reason})
-            await self._rearm_failed_episode(op)
+            await self.reconcile_terminal(op["operation_id"])
 
     async def _fail(self, op: Mapping[str,Any], exc: Exception) -> None:
         result={"error":str(exc)[:1000],"error_type":type(exc).__name__}
@@ -257,13 +421,12 @@ class CognitiveOperationEngine:
                RETURNING operation_id""",
             op["operation_id"],json.dumps(result))
         if changed:
-            await self._terminal_side_effects(op,status="failed",result=result)
-            await self._rearm_failed_episode(op)
+            await self.reconcile_terminal(op["operation_id"])
 
     async def _rearm_failed_episode(self, op: Mapping[str,Any]) -> None:
         """Retry only unacknowledged host-delta work, never arbitrary cognition."""
         source_node_id=op.get("source_node_id")
-        if not source_node_id:
+        if op.get("episode_id") or not source_node_id:
             return
         runtime=await self.db.fetchrow(
             """SELECT pending_cognitive_source_node_id,pending_cognitive_event_count,
@@ -278,16 +441,10 @@ class CognitiveOperationEngine:
                 or int(runtime["pending_cognitive_event_count"]) <
                    int(runtime["cognitive_batch_size"])):
             return
-        previous=await self.db.fetchval(
-            """SELECT COALESCE(max((payload->>'retry_attempt')::int),0)
-               FROM aios.character_wake_event
-               WHERE instance_id=$1 AND event_type='COGNITIVE_DELTA_READY'
-                 AND source_id=$2 AND payload ? 'retry_attempt'""",
-            op["instance_id"],str(source_node_id))
         from aios_app.agent.runtime import AgentRuntimeStore
         await AgentRuntimeStore(self.db).rearm_cognitive_delta(
             instance_id=op["instance_id"],source_node_id=source_node_id,
-            retry_attempt=int(previous or 0)+1,max_attempts=3)
+            max_attempts=3)
 
     async def _terminal_side_effects(
         self, op: Mapping[str,Any], *, status: str, result: Mapping[str,Any]
@@ -308,12 +465,53 @@ class CognitiveOperationEngine:
                completed_at=now(),updated_at=now()
                WHERE operation_id=$1 AND status='running' RETURNING operation_id""",
             op["operation_id"],json.dumps(result,default=str))
-        if not changed:
-            return
-        await self._finish_side_effects(op,result)
+        await self.reconcile_terminal(op["operation_id"])
+
+    async def reconcile_terminal(self, operation_id: UUID) -> None:
+        episode_id = None
+        async with self.db.atomic():
+            row = await self.db.fetchrow(
+                "SELECT * FROM aios.character_cognitive_operation WHERE operation_id=$1 FOR UPDATE",
+                operation_id)
+            if not row or row["status"] not in {"succeeded","failed","stale"}:
+                return
+            op = dict(row)
+            episode_id = op.get("episode_id")
+            if not op.get("reconciled_at"):
+                result = self._mapping(op.get("result"))
+                if op["status"] == "succeeded":
+                    await self._finish_side_effects(op,result)
+                else:
+                    await self._terminal_side_effects(op,status=op["status"],result=result)
+                    await self._resume_source_task(op,status=op["status"],result=result)
+                    await self._rearm_failed_episode(op)
+                await self.db.execute(
+                    "UPDATE aios.character_cognitive_operation SET reconciled_at=now() WHERE operation_id=$1",
+                    operation_id)
+        if episode_id:
+            from .episodes import CognitiveEpisodeStore
+            await CognitiveEpisodeStore(self.db).reconcile(episode_id)
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
-        if op.get("source_node_id"):
+        if op.get("operation_type") in {"inquiry.resolve","research.advance","research.study"}:
+            # Searching is not goal progress or source admission. Still close
+            # the opportunity and record the thread receipt so it cannot stick
+            # in 'selected' or 'working' indefinitely.
+            if op.get("opportunity_id"):
+                await self.db.execute(
+                    """UPDATE aios.character_cognitive_opportunity
+                       SET status='executed',resolved_at=now(),updated_at=now()
+                       WHERE opportunity_id=$1""",op["opportunity_id"])
+            from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
+            await CognitiveLifecycleReconciler(self.db).reconcile_operation(
+                operation=op,result=result,terminal_status="inquiry_observation")
+            if op.get("source_node_id") and not op.get("episode_id"):
+                from .admission import AutonomyAdmissionService
+                await AutonomyAdmissionService(self.db).mark_episode_succeeded(
+                    instance_id=op["instance_id"],through_node_id=op["source_node_id"])
+            await self._resume_source_task(op,status="succeeded",result=result)
+            return
+        if op.get("source_node_id") and not op.get("episode_id"):
             from aios_app.agent.admission import AutonomyAdmissionService
             await AutonomyAdmissionService(self.db).mark_episode_succeeded(
                 instance_id=op["instance_id"], through_node_id=op["source_node_id"])

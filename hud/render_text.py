@@ -66,6 +66,19 @@ def _epistemic_label(item: Mapping[str, Any]) -> str:
     return (" [" + " | ".join(bits) + "]") if bits else ""
 
 
+def _content_status(item: Mapping[str, Any]) -> str:
+    """A source-observation is not direct observation of derived content."""
+    status = str(item.get("epistemic_status") or "known").strip()
+    origin = str(item.get("origin_kind") or "").strip().replace("-", "_").lower()
+    mode = str(item.get("epistemic_mode") or "").strip().replace("-", "_").lower()
+    if origin in {"model_inference", "user_testimony", "character_testimony"} or mode in {
+        "inference", "testimony", "reported", "derived"
+    }:
+        if status.lower() in {"observed", "known"}:
+            return "reported/derived; underlying event not independently observed"
+    return status
+
+
 def _scene_text(value: Any) -> str:
     if isinstance(value, Mapping):
         return str(value.get("text") or value.get("label") or "").strip()
@@ -124,14 +137,34 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     pending_work = working_scene.get("pending_work") or working_scene.get("pending_action")
     last_change = working_scene.get("last_significant_change")
     if _scene_text(immediate_goal):
-        scene_lines.append(f"Immediate goal: {_scene_text(immediate_goal)}")
+        scene_lines.append(f"Immediate managed goal: {_scene_text(immediate_goal)[:180]}")
+        if isinstance(immediate_goal, Mapping):
+            for requirement in (immediate_goal.get("knowledge_requirements") or [])[:2]:
+                status=str(requirement.get("coverage_status") or "unassessed")
+                count=len(requirement.get("dossier_ids") or [])
+                scene_lines.append(
+                    f"Goal knowledge: {status}; linked research dossiers: {count}")
     if _scene_text(pending_work):
         scene_lines.append(f"Pending work: {_scene_text(pending_work)}")
-    if _scene_text(last_change):
-        scene_lines.append(f"Last change: {_scene_text(last_change)}")
+    # A pre-patch scene can still contain a copied DAG turn. Suppress it.
+    if (not isinstance(last_change, Mapping) or
+            last_change.get("source") != "dag_node"):
+        if _scene_text(last_change):
+            scene_lines.append(f"Last scene change: {_scene_text(last_change)[:220]}")
     if scene_lines:
         lines.append("\nCURRENT SCENE:")
         lines.extend(f"- {value}" for value in scene_lines)
+    research = frame.get("research_activity") or {}
+    if research:
+        status=str(research.get("status") or "requested")
+        outcome=str(research.get("outcome") or "").strip()
+        detail=f" ({outcome})" if outcome and outcome != status else ""
+        lines.append("\nRESEARCH ACTIVITY:")
+        lines.append(f"- {status}{detail}: {str(research.get('question') or '')[:180]}")
+        if status=="completed":
+            lines.append(
+                f"- Authorized references found: {int(research.get('source_count') or 0)}"
+                " (not acquired knowledge)")
     relationships = frame.get("relationships") or []
     if relationships:
         lines.append("\nRELATIONSHIPS:")
@@ -154,7 +187,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if memories:
         lines.append("\nACTIVE MEMORY:")
         for item in memories:
-            lines.append(f"-{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
+            provenance = _content_status(item)
+            qualifier = f" [{provenance}]" if provenance.startswith("reported/derived") else ""
+            lines.append(f"-{qualifier}{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
     retrieval_evidence = frame.get("retrieval_evidence") or {}
     if retrieval_evidence.get("route") == "character":
         status = str(retrieval_evidence.get("status") or "").strip().lower()
@@ -177,7 +212,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if beliefs:
         lines.append("\nKNOWLEDGE / BELIEFS:")
         for item in beliefs:
-            status = item.get("epistemic_status") or "known"
+            status = _content_status(item)
             confidence = item.get("effective_confidence")
             suffix = f" confidence={confidence:.2f}" if isinstance(confidence, (float, int)) else ""
             lines.append(f"- [{status}{suffix}]{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
@@ -213,10 +248,12 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             continue
         rendered_goals.append((goal, text))
     if rendered_goals:
-        lines.append("\nGOALS:")
+        lines.append("\nOTHER ACTIVE GOALS:")
         for goal, text in rendered_goals:
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
-            lines.append(f"-{annotation} {text}")
+            requirements=(goal.get("knowledge_requirements") or []) if isinstance(goal, Mapping) else []
+            demand=f" [knowledge: {requirements[0].get('coverage_status', 'unassessed')}]" if requirements else ""
+            lines.append(f"-{annotation} {text}{demand}")
     scheduled_goals = frame.get("scheduled_goals") or []
     if scheduled_goals:
         lines.append("\nFUTURE GOALS (SCHEDULED FOR REVIEW):")
@@ -250,7 +287,13 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
                 stream = event.get("event_stream") or "runtime"
                 role = event.get("speaker_role") or "other"
                 speaker = event.get("speaker_id") or "unknown"
-                lines.append(f"- [{stream}|{role}:{speaker}] {rendered_text}")
+                if role=="character":
+                    # Preserve the complete source in SQL; show the tool
+                    # request separately under RESEARCH ACTIVITY in the HUD.
+                    from aios_app.agent.research_action import strip_tool_markup
+                    rendered_text=strip_tool_markup(rendered_text)
+                if rendered_text:
+                    lines.append(f"- [{stream}|{role}:{speaker}] {rendered_text}")
             else:
                 lines.append(f"- {rendered_text}")
     actions = frame.get("actions") or []

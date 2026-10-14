@@ -86,8 +86,7 @@ def test_retention_state_round_trips_quarantine():
 def test_missing_predicate_is_repairable_not_automatic_trash():
     migration = (
         Path(__file__).resolve().parents[1]
-        / "migrations"
-        / "20260912_semantic_retention_repairable_incomplete.sql"
+        / "aios_baseline.sql"
     ).read_text(encoding="utf-8")
 
     structural_block = migration.split(
@@ -97,5 +96,5 @@ def test_missing_predicate_is_repairable_not_automatic_trash():
     assert "'internal_frame_reference'" in structural_block
     assert "'serialized_semantic_component'" in structural_block
     assert "'missing_semantic_predicate'" not in structural_block
-    assert "repairable_incomplete_semantic_extraction" in migration
+    assert "should remain available for semantic repair" in migration
     assert "recompute_semantic_evidence_admission" not in structural_block

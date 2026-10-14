@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 from uuid import UUID
 
 from aios_app.db import Database
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRuntimeStore:
@@ -63,11 +67,21 @@ class AgentRuntimeStore:
 
     async def rearm_cognitive_delta(
         self, *, instance_id: UUID, source_node_id: UUID,
-        retry_attempt: int, max_attempts: int = 3,
+        retry_attempt: int | None = None, max_attempts: int = 3,
     ) -> UUID | None:
         """Re-arm an unacknowledged host cognition episode with bounded backoff."""
+        if retry_attempt is None:
+            previous = await self.db.fetchval(
+                """SELECT COALESCE(max((payload->>'retry_attempt')::int),0)
+                   FROM aios.character_wake_event
+                   WHERE instance_id=$1 AND event_type='COGNITIVE_DELTA_READY'
+                     AND source_id=$2 AND payload ? 'retry_attempt'""",
+                instance_id, str(source_node_id))
+            retry_attempt = int(previous or 0) + 1
         attempt = max(1, int(retry_attempt))
         if attempt > max(1, int(max_attempts)):
+            logger.warning("Host cognition retries exhausted instance=%s source=%s",
+                           instance_id, source_node_id)
             return None
         await self.ensure(instance_id)
         row = await self.db.execute_returning_row(
