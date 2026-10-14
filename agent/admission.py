@@ -107,6 +107,18 @@ class AutonomyAdmissionService:
                 END,
                 updated_at=now()
             WHERE instance_id=$1
+              AND EXISTS (
+                  SELECT 1 FROM aios.dag_node incoming
+                  LEFT JOIN aios.dag_node previous ON previous.node_id=last_cognitive_source_node_id
+                  LEFT JOIN aios.dag_node pending ON pending.node_id=pending_cognitive_source_node_id
+                  WHERE incoming.node_id=$2
+                    AND EXISTS (SELECT 1 FROM aios.character_runtime_state state
+                                WHERE state.instance_id=$1 AND state.source_timeline_id=incoming.timeline_id)
+                    AND (pending.node_id IS NULL OR pending.timeline_id=incoming.timeline_id)
+                    AND (previous.node_id IS NULL
+                         OR (previous.timeline_id=incoming.timeline_id AND previous.event_id<=incoming.event_id)
+                         OR (previous.timeline_id<>incoming.timeline_id AND pending.timeline_id=incoming.timeline_id))
+              )
             """,
             instance_id, through_node_id,
         )

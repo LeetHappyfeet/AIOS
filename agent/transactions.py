@@ -50,6 +50,7 @@ class InternalCognitionTransactions:
         worker_profile: str = "attention",
         focus_text: str | None = None,
         subject: str | None = None,
+        episode_id: UUID | None = None, transaction_kind: str = "route",
     ) -> UUID:
         choices = [dict(x) for x in candidates][:5]
         hud = await self.huds.build(
@@ -60,15 +61,15 @@ class InternalCognitionTransactions:
             """INSERT INTO aios.internal_cognition_transaction(
                  instance_id,source_task_id,priority,source_state_version,
                  source_timeline_id,source_node_id,context_fingerprint,clues,
-                 candidates,prompt_text,prompt_hash,expires_at,opportunity_ids)
+                 candidates,prompt_text,prompt_hash,expires_at,opportunity_ids,episode_id,transaction_kind)
                VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,
-                      now()+($12*interval '1 second'),$13::uuid[])
+                      now()+($12*interval '1 second'),$13::uuid[],$14,$15)
                RETURNING transaction_id""",
             instance_id, source_task_id, int(priority), hud.state_version,
             hud.source_timeline_id, hud.source_node_id, hud.fingerprint,
             json.dumps(list(clues)[:2]), json.dumps(choices), hud.prompt,
             hashlib.sha256(hud.prompt.encode()).hexdigest(),
-            max(10,min(int(ttl_seconds),3600)), list(opportunity_ids),
+            max(10,min(int(ttl_seconds),3600)), list(opportunity_ids),episode_id,transaction_kind,
         )
         return row["transaction_id"]
 
@@ -80,11 +81,13 @@ class InternalCognitionTransactions:
                RETURNING *""", transaction_id,
         )
         if not row:
-            await self.db.execute(
-                """UPDATE aios.internal_cognition_transaction
-                   SET status='stale',rejection_reason='expired before claim',updated_at=now()
-                   WHERE transaction_id=$1 AND status='pending'""", transaction_id,
-            )
+            current=await self.db.fetchrow(
+                "SELECT * FROM aios.internal_cognition_transaction WHERE transaction_id=$1",transaction_id)
+            if current and current["status"] == "pending":
+                return await self._reject(transaction_id,"stale","expired before claim")
+            if current:
+                await self.reconcile_terminal(transaction_id)
+                return TransactionResult(transaction_id,current["status"],current["choice_key"],None,None)
             return TransactionResult(transaction_id,"stale",None,None,None)
 
         tx=dict(row); candidates=self._json(tx["candidates"],[])
@@ -118,23 +121,29 @@ class InternalCognitionTransactions:
             timely,reason=await self._timely(tx,selected)
             if not timely:
                 return await self._reject(transaction_id,"stale",reason,choice,selected.get("operation"),focus)
-            materialized=await self._materialize(tx,selected,focus)
-            result={"operation":selected.get("operation"),"focus":focus,"choice":choice,
-                    "materialized":materialized}
-            await self.db.execute(
-                """UPDATE aios.internal_cognition_transaction SET status='consumed',
-                     result=$2::jsonb,completed_at=now(),consumed_at=now(),updated_at=now()
-                   WHERE transaction_id=$1 AND status='proposed'""",
-                transaction_id,json.dumps(result),
-            )
+            async with self.db.atomic():
+                owned=await self.db.fetchrow(
+                    "SELECT status FROM aios.internal_cognition_transaction WHERE transaction_id=$1 FOR UPDATE",
+                    transaction_id)
+                if not owned or owned["status"] != "proposed":
+                    return TransactionResult(transaction_id,"stale",choice,None,None)
+                timely,reason=await self._timely(tx,selected)
+                if not timely:
+                    return await self._reject(transaction_id,"stale",reason,choice,selected.get("operation"),focus)
+                materialized=await self._materialize(tx,selected,focus)
+                if materialized.get("kind") == "stale_opportunity" or materialized.get("accepted") is False:
+                    return await self._reject(transaction_id,"stale","choice no longer admissible",choice)
+                result={"operation":selected.get("operation"),"focus":focus,"choice":choice,
+                        "materialized":materialized}
+                await self.db.execute(
+                    """UPDATE aios.internal_cognition_transaction SET status='consumed',
+                         result=$2::jsonb,completed_at=now(),consumed_at=now(),updated_at=now()
+                       WHERE transaction_id=$1 AND status='proposed'""",
+                    transaction_id,json.dumps(result))
+            await self.reconcile_terminal(transaction_id)
             return TransactionResult(transaction_id,"consumed",choice,str(selected.get("operation")),focus)
         except Exception as exc:
-            await self.db.execute(
-                """UPDATE aios.internal_cognition_transaction SET status='failed',
-                     rejection_reason=$2,completed_at=now(),updated_at=now()
-                   WHERE transaction_id=$1 AND status IN ('running','proposed')""",
-                transaction_id,str(exc)[:1000],
-            )
+            await self._reject(transaction_id,"failed",str(exc)[:1000])
             raise
 
     async def _materialize(self, tx: Mapping[str,Any], selected: Mapping[str,Any],
@@ -158,7 +167,7 @@ class InternalCognitionTransactions:
         oid=selected.get("opportunity_id")
         if not oid: return {"kind":"none"}
         opportunity=await self.db.fetchrow(
-            "SELECT * FROM aios.character_cognitive_opportunity WHERE opportunity_id=$1",UUID(str(oid)))
+            "SELECT * FROM aios.character_cognitive_opportunity WHERE opportunity_id=$1 FOR UPDATE",UUID(str(oid)))
         if not opportunity or opportunity["status"] not in {"pending","offered"}:
             return {"kind":"stale_opportunity"}
         opportunity=dict(opportunity)
@@ -176,7 +185,8 @@ class InternalCognitionTransactions:
         operation_id=await CognitiveOperationEngine(self.db).create_from_opportunity(
             opportunity=opportunity,
             thread_id=UUID(str(thread_id)) if thread_id else None,
-            priority=int(tx["priority"]), source_task_id=tx.get("source_task_id"))
+            priority=int(tx["priority"]), source_task_id=tx.get("source_task_id"),
+            episode_id=tx.get("episode_id"),episode_role="attention")
         return {"kind":"cognitive_operation","operation_id":str(operation_id),
                 "opportunity_id":str(oid),"operation_type":str(opportunity["operation_type"])}
 
@@ -215,10 +225,70 @@ class InternalCognitionTransactions:
         await self.db.execute(
             """UPDATE aios.internal_cognition_transaction SET status=$2,
                  rejection_reason=$3,completed_at=now(),updated_at=now()
-               WHERE transaction_id=$1 AND status IN ('running','proposed')""",
+               WHERE transaction_id=$1 AND status IN ('pending','running','proposed')""",
             transaction_id,status,reason[:1000],
         )
+        await self.reconcile_terminal(transaction_id)
         return TransactionResult(transaction_id,status,choice,operation,focus)
+
+    async def reconcile_terminal(self, transaction_id: UUID) -> None:
+        episode_id = None
+        async with self.db.atomic():
+            row=await self.db.fetchrow(
+                "SELECT * FROM aios.internal_cognition_transaction WHERE transaction_id=$1 FOR UPDATE",
+                transaction_id)
+            if not row or row["status"] not in {"consumed","stale","invalid","superseded","failed"}:
+                return
+            tx=dict(row)
+            episode_id=tx.get("episode_id")
+            if not tx.get("reconciled_at"):
+                if tx["status"] != "consumed":
+                    offered=list(tx.get("opportunity_ids") or [])
+                    if offered:
+                        await self.db.execute(
+                            """UPDATE aios.character_cognitive_opportunity
+                               SET status='suppressed',resolved_at=now(),updated_at=now()
+                               WHERE opportunity_id=ANY($1::uuid[]) AND status='offered'""",offered)
+                    candidate_ids=[UUID(str(c["operation_id"]))
+                                   for c in self._json(tx.get("candidates"),[]) if c.get("operation_id")]
+                    operations=await self.db.fetch(
+                        """SELECT * FROM aios.character_cognitive_operation
+                           WHERE (transaction_id=$1 OR operation_id=ANY($2::uuid[]))
+                             AND status IN ('queued','running','waiting_inference')""",
+                        transaction_id,candidate_ids)
+                    from .cognitive_operations import CognitiveOperationEngine
+                    engine=CognitiveOperationEngine(self.db)
+                    for op in operations:
+                        await engine._stale(dict(op),f"decision transaction {tx['status']}")
+                    if tx.get("source_task_id"):
+                        from .lifecycle import CharacterAgencyStore
+                        agency=CharacterAgencyStore(self.db)
+                        task=await agency.get_task(tx["source_task_id"])
+                        if task and task.status in {"waiting","running","queued"}:
+                            await agency.transition_task(task.task_id,"failed",error=f"attention transaction {tx['status']}")
+                            from .runtime import AgentRuntimeStore
+                            runtime=AgentRuntimeStore(self.db)
+                            await runtime.finish_semantic_turn(task.instance_id,semantic=False)
+                            if task.parent_task_id:
+                                await runtime.wake(instance_id=task.instance_id,
+                                    event_type="COGNITIVE_TASK_FAILED",source_type="cognitive_task",
+                                    source_id=str(task.task_id),priority=max(1,task.priority-1),
+                                    payload={"task_id":str(task.task_id),"parent_task_id":str(task.parent_task_id),
+                                             "status":"failed","result":{"transaction_id":str(transaction_id)}},
+                                    dedupe_key=f"task:{task.task_id}:failed")
+                elif (not episode_id and not tx.get("source_task_id")
+                      and tx.get("transaction_kind") == "route"):
+                    result=self._json(tx.get("result"),{})
+                    if result.get("operation") == "wait":
+                        from .admission import AutonomyAdmissionService
+                        await AutonomyAdmissionService(self.db).mark_episode_succeeded(
+                            instance_id=tx["instance_id"],through_node_id=tx.get("source_node_id"))
+                await self.db.execute(
+                    "UPDATE aios.internal_cognition_transaction SET reconciled_at=now() WHERE transaction_id=$1",
+                    transaction_id)
+        if episode_id:
+            from .episodes import CognitiveEpisodeStore
+            await CognitiveEpisodeStore(self.db).reconcile(episode_id)
 
     @staticmethod
     def _json(value:Any,default:Any)->Any:

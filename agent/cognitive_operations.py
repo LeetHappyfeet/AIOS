@@ -19,18 +19,36 @@ class CognitiveOperationEngine:
 
     async def create_from_opportunity(self, *, opportunity: Mapping[str, Any],
                                       thread_id: UUID | None, priority: int = 100,
-                                      source_task_id: UUID | None = None) -> UUID:
+                                      source_task_id: UUID | None = None,
+                                      episode_id: UUID | None = None,
+                                      episode_role: str = "attention") -> UUID:
+        async with self.db.atomic():
+            await self.db.fetchval("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                                   f"cognitive-opportunity:{opportunity['opportunity_id']}")
+            existing = await self.db.fetchrow(
+                """SELECT operation_id FROM aios.character_cognitive_operation
+                   WHERE opportunity_id=$1 AND episode_id IS NOT DISTINCT FROM $2
+                     AND source_task_id IS NOT DISTINCT FROM $3 LIMIT 1""",
+                opportunity["opportunity_id"],episode_id,source_task_id)
+            if existing:
+                return existing["operation_id"]
+            return await self._create_from_opportunity(
+                opportunity=opportunity,thread_id=thread_id,priority=priority,
+                source_task_id=source_task_id,episode_id=episode_id,episode_role=episode_role)
+
+    async def _create_from_opportunity(self, *, opportunity, thread_id, priority,
+                                       source_task_id, episode_id, episode_role):
         row = await self.db.execute_returning_row(
             """INSERT INTO aios.character_cognitive_operation(
                    thread_id,instance_id,opportunity_id,operation_type,input,
-                   source_state_version,source_timeline_id,source_node_id,freshness_policy,source_task_id)
-               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10) RETURNING operation_id""",
+                   source_state_version,source_timeline_id,source_node_id,freshness_policy,source_task_id,episode_id,episode_role)
+               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12) RETURNING operation_id""",
             thread_id, opportunity["instance_id"], opportunity["opportunity_id"],
             opportunity["operation_type"],
             json.dumps(self._mapping(opportunity.get("operation_payload")), default=str),
             opportunity.get("source_state_version"), opportunity.get("source_timeline_id"),
             opportunity.get("source_node_id"), opportunity.get("freshness_policy") or "contextual",
-            source_task_id,
+            source_task_id,episode_id,episode_role if episode_id else None,
         )
         operation_id=row["operation_id"]
         if thread_id:
@@ -38,9 +56,11 @@ class CognitiveOperationEngine:
                 """UPDATE aios.character_cognitive_thread
                    SET status='working',updated_at=now()
                    WHERE thread_id=$1 AND status IN ('open','working')""",thread_id)
-        await enqueue_job(self.db,job_type="cognitive_operation",
+        job_id=await enqueue_job(self.db,job_type="cognitive_operation",
             payload={"instance_id":str(opportunity["instance_id"]),"operation_id":str(operation_id)},
             priority=priority)
+        if job_id is None:
+            raise RuntimeError("could not enqueue cognitive operation")
         return operation_id
 
     async def execute(self, operation_id: UUID) -> None:
@@ -49,6 +69,7 @@ class CognitiveOperationEngine:
                SET status='running',started_at=COALESCE(started_at,now()),updated_at=now()
                WHERE operation_id=$1 AND status='queued' RETURNING *""",operation_id)
         if not row:
+            await self.reconcile_terminal(operation_id)
             return
         op=dict(row)
         try:
@@ -282,6 +303,10 @@ class CognitiveOperationEngine:
             raise
 
     async def _queue_decision(self, op: Mapping[str,Any]) -> None:
+        async with self.db.atomic():
+            await self._create_decision_transaction(op)
+
+    async def _create_decision_transaction(self, op):
         from aios_app.agent.transactions import InternalCognitionTransactions
         payload=self._mapping(op["input"])
         if str(op["operation_type"])=="planning.review":
@@ -334,14 +359,17 @@ class CognitiveOperationEngine:
         tx=await InternalCognitionTransactions(self.db).create(
             instance_id=op["instance_id"], candidates=candidates, priority=120,
             ttl_seconds=300, worker_profile=faculty_profile,
-            focus_text=subject, subject=subject)
+            focus_text=subject, subject=subject,transaction_kind="decision",
+            episode_id=op.get("episode_id"))
         await self.db.execute(
             """UPDATE aios.character_cognitive_operation SET status='waiting_inference',
                transaction_id=$2,updated_at=now() WHERE operation_id=$1""",
             op["operation_id"],tx)
-        await enqueue_job(self.db,job_type="internal_cognition_inference",
+        job_id=await enqueue_job(self.db,job_type="internal_cognition_inference",
             payload={"instance_id":str(op["instance_id"]),"transaction_id":str(tx),
                      "operation_id":str(op["operation_id"])},priority=120)
+        if job_id is None:
+            raise RuntimeError("could not enqueue decision transaction")
 
     async def accept_choice(self, operation_id: UUID, selected: Mapping[str,Any]) -> bool:
         row=await self.db.fetchrow(
@@ -371,7 +399,7 @@ class CognitiveOperationEngine:
             operation_id,json.dumps(result,default=str))
         if not changed:
             return False
-        await self._finish_side_effects(op,result)
+        await self.reconcile_terminal(operation_id)
         return True
 
     async def _stale(self, op: Mapping[str,Any], reason: str) -> None:
@@ -382,8 +410,7 @@ class CognitiveOperationEngine:
                RETURNING operation_id""",
             op["operation_id"],json.dumps({"reason":reason}))
         if changed:
-            await self._terminal_side_effects(op,status="stale",result={"reason":reason})
-            await self._rearm_failed_episode(op)
+            await self.reconcile_terminal(op["operation_id"])
 
     async def _fail(self, op: Mapping[str,Any], exc: Exception) -> None:
         result={"error":str(exc)[:1000],"error_type":type(exc).__name__}
@@ -394,13 +421,12 @@ class CognitiveOperationEngine:
                RETURNING operation_id""",
             op["operation_id"],json.dumps(result))
         if changed:
-            await self._terminal_side_effects(op,status="failed",result=result)
-            await self._rearm_failed_episode(op)
+            await self.reconcile_terminal(op["operation_id"])
 
     async def _rearm_failed_episode(self, op: Mapping[str,Any]) -> None:
         """Retry only unacknowledged host-delta work, never arbitrary cognition."""
         source_node_id=op.get("source_node_id")
-        if not source_node_id:
+        if op.get("episode_id") or not source_node_id:
             return
         runtime=await self.db.fetchrow(
             """SELECT pending_cognitive_source_node_id,pending_cognitive_event_count,
@@ -439,9 +465,32 @@ class CognitiveOperationEngine:
                completed_at=now(),updated_at=now()
                WHERE operation_id=$1 AND status='running' RETURNING operation_id""",
             op["operation_id"],json.dumps(result,default=str))
-        if not changed:
-            return
-        await self._finish_side_effects(op,result)
+        await self.reconcile_terminal(op["operation_id"])
+
+    async def reconcile_terminal(self, operation_id: UUID) -> None:
+        episode_id = None
+        async with self.db.atomic():
+            row = await self.db.fetchrow(
+                "SELECT * FROM aios.character_cognitive_operation WHERE operation_id=$1 FOR UPDATE",
+                operation_id)
+            if not row or row["status"] not in {"succeeded","failed","stale"}:
+                return
+            op = dict(row)
+            episode_id = op.get("episode_id")
+            if not op.get("reconciled_at"):
+                result = self._mapping(op.get("result"))
+                if op["status"] == "succeeded":
+                    await self._finish_side_effects(op,result)
+                else:
+                    await self._terminal_side_effects(op,status=op["status"],result=result)
+                    await self._resume_source_task(op,status=op["status"],result=result)
+                    await self._rearm_failed_episode(op)
+                await self.db.execute(
+                    "UPDATE aios.character_cognitive_operation SET reconciled_at=now() WHERE operation_id=$1",
+                    operation_id)
+        if episode_id:
+            from .episodes import CognitiveEpisodeStore
+            await CognitiveEpisodeStore(self.db).reconcile(episode_id)
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
         if op.get("operation_type") in {"inquiry.resolve","research.advance","research.study"}:
@@ -456,9 +505,13 @@ class CognitiveOperationEngine:
             from aios_app.agent.cognitive_lifecycle import CognitiveLifecycleReconciler
             await CognitiveLifecycleReconciler(self.db).reconcile_operation(
                 operation=op,result=result,terminal_status="inquiry_observation")
+            if op.get("source_node_id") and not op.get("episode_id"):
+                from .admission import AutonomyAdmissionService
+                await AutonomyAdmissionService(self.db).mark_episode_succeeded(
+                    instance_id=op["instance_id"],through_node_id=op["source_node_id"])
             await self._resume_source_task(op,status="succeeded",result=result)
             return
-        if op.get("source_node_id"):
+        if op.get("source_node_id") and not op.get("episode_id"):
             from aios_app.agent.admission import AutonomyAdmissionService
             await AutonomyAdmissionService(self.db).mark_episode_succeeded(
                 instance_id=op["instance_id"], through_node_id=op["source_node_id"])

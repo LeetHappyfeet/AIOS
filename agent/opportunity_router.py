@@ -23,6 +23,31 @@ class OpportunityRouter:
     async def admit(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                     source_task_id:UUID|None=None, enqueue_inference:bool=True,
                     task=None) -> UUID|None:
+        # The same task owns all admission writes, including its queued jobs.
+        async with self.db.atomic():
+            await self.db.fetchval(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                f"cognitive-admission:{instance_id}")
+            episode_id = None
+            if source_node_id is not None and source_task_id is None and task is None:
+                from .episodes import CognitiveEpisodeStore
+                episodes = CognitiveEpisodeStore(self.db)
+                episode = await episodes.open(instance_id, source_node_id)
+                if episode["sealed_at"]:
+                    return episode["route_transaction_id"]
+                episode_id = episode["episode_id"]
+            tx = await self._admit(instance_id=instance_id,source_node_id=source_node_id,
+                source_task_id=source_task_id,enqueue_inference=enqueue_inference,
+                task=task,episode_id=episode_id)
+            if episode_id:
+                await episodes.seal(episode_id,tx)
+        if episode_id:
+            await episodes.reconcile(episode_id)
+        return tx
+
+    async def _admit(self, *, instance_id: UUID, source_node_id: UUID | None,
+                     source_task_id: UUID | None, enqueue_inference: bool,
+                     task, episode_id: UUID | None) -> UUID | None:
         if task is not None:
             from .task_opportunities import TaskOpportunityPlanner
             task_rows=await TaskOpportunityPlanner(self.db).generate(task,limit=5)
@@ -71,14 +96,16 @@ class OpportunityRouter:
         tx=await self.transactions.create(
             instance_id=instance_id,candidates=candidates,priority=priority,ttl_seconds=300,
             opportunity_ids=[x["opportunity_id"] for x in selected],
-            source_task_id=source_task_id)
+            source_task_id=source_task_id,episode_id=episode_id)
         await self.db.execute(
             """UPDATE aios.character_cognitive_opportunity SET status='offered',updated_at=now()
                WHERE opportunity_id=ANY($1::uuid[]) AND status='pending'""",
             [x["opportunity_id"] for x in selected])
         if enqueue_inference:
-            await enqueue_job(self.db,job_type="internal_cognition_inference",
+            job_id=await enqueue_job(self.db,job_type="internal_cognition_inference",
                 payload={"instance_id":str(instance_id),"transaction_id":str(tx)},priority=priority)
+            if job_id is None:
+                raise RuntimeError("could not enqueue attention transaction")
 
         # Goal lifecycle maintenance has one reserved slot per admitted host
         # cognition episode. It does not compete with the attention choice and
@@ -89,7 +116,7 @@ class OpportunityRouter:
             from .cognitive_operations import CognitiveOperationEngine
             await CognitiveOperationEngine(self.db).create_from_opportunity(
                 opportunity=goal_review,thread_id=maintenance_thread,priority=priority,
-                source_task_id=source_task_id)
+                source_task_id=source_task_id,episode_id=episode_id,episode_role="maintenance")
             await self.db.execute(
                 """UPDATE aios.character_cognitive_opportunity
                    SET status='selected',selected_at=COALESCE(selected_at,now()),updated_at=now()

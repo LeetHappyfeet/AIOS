@@ -82,7 +82,9 @@ async def handle_internal_cognition_inference(db: Database, job: Dict[str, Any])
     transaction_id=job.get("payload",{}).get("transaction_id")
     if not transaction_id:
         raise ValueError("internal_cognition_inference requires transaction_id")
-    await InternalCognitionTransactions(db).run(UUID(str(transaction_id)))
+    result = await InternalCognitionTransactions(db).run(UUID(str(transaction_id)))
+    if result.status in {"running","proposed"}:
+        raise RuntimeError("cognition transaction is still claimed; recovery must reconcile its owner")
 
 base.JOB_HANDLERS["internal_cognition_inference"] = handle_internal_cognition_inference
 

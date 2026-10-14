@@ -74,6 +74,11 @@ class AutonomyScheduler:
                        AND o.status IN ('queued','running','waiting_inference')
                  )
                  AND NOT EXISTS (
+                     SELECT 1 FROM aios.character_cognitive_episode e
+                     WHERE e.instance_id=ar.instance_id AND e.source_node_id=ar.pending_cognitive_source_node_id
+                       AND e.status='active'
+                 )
+                 AND NOT EXISTS (
                      SELECT 1 FROM aios.character_wake_event w
                      WHERE w.instance_id=ar.instance_id AND w.status='cancelled'
                        AND w.payload->>'scheduling_exhausted'='true'
