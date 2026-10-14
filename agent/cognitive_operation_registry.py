@@ -13,6 +13,9 @@ class CognitiveOperationSpec:
 
 
 SPECS = {
+    "planning.propose": CognitiveOperationSpec(
+        "planning.propose", frozenset({"planning","executive"}), "strict"
+    ),
     "memory.retrieve": CognitiveOperationSpec(
         "memory.retrieve", frozenset({"reflection","planning","executive"})
     ),

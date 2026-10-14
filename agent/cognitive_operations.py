@@ -74,6 +74,18 @@ class CognitiveOperationEngine:
         op=dict(row)
         try:
             kind=str(op["operation_type"])
+            plan_input = self._mapping(op.get("input"))
+            if plan_input.get("planning_only"):
+                context = await HUDContextResolver(self.db).resolve(op["instance_id"])
+                active = await self.db.fetchval(
+                    """SELECT 1 FROM aios.character_goal_attempt a
+                       JOIN aios.character_agent_goal g ON g.goal_id=a.goal_id AND g.instance_id=a.instance_id
+                       WHERE a.instance_id=$1 AND a.attempt_id=$2 AND g.status='active' AND a.closed_at IS NULL""",
+                    op["instance_id"], UUID(plan_input["attempt_id"]))
+                if (not active or context.source_timeline_id != op["source_timeline_id"]
+                        or context.source_head_node_id != op["source_node_id"]):
+                    await self._stale(op, "planning dependency context advanced")
+                    return
             if kind=="memory.retrieve":
                 result={"kind":"recall","input":self._mapping(op["input"])}
                 await self._finish(op,result)
@@ -161,6 +173,12 @@ class CognitiveOperationEngine:
                     await self._finish(op,{"kind":"inquiry",**receipt})
             elif kind in {"reflection.review","planning.review","executive.review"}:
                 await self._queue_decision(op)
+            elif kind=="planning.propose":
+                job_id=await enqueue_job(self.db,job_type="goal_planning_inference",
+                    payload={"instance_id":str(op["instance_id"]),
+                             "operation_id":str(op["operation_id"])},priority=140)
+                if job_id is None:
+                    raise RuntimeError("could not enqueue goal planning")
             elif kind=="planning.form_goal":
                 job_id=await enqueue_job(self.db,job_type="goal_formulation_inference",
                     payload={"instance_id":str(op["instance_id"]),
@@ -196,6 +214,24 @@ class CognitiveOperationEngine:
                RETURNING operation_id""",operation_id)
         if changed:
             await self._finish(op,{"kind":"inquiry",**result})
+
+    async def propose_plan(self, operation_id: UUID) -> None:
+        row = await self.db.fetchrow(
+            "SELECT * FROM aios.character_cognitive_operation WHERE operation_id=$1",
+            operation_id)
+        if not row or row["status"] != "running" or row["operation_type"] != "planning.propose":
+            return
+        op = dict(row)
+        try:
+            from .goal_planning import GoalPlanningService
+            result = await GoalPlanningService(self.db).propose(op)
+            if result.get("status") == "stale":
+                await self._stale(op, "goal planning context advanced")
+            else:
+                await self._finish(op, result)
+        except Exception as exc:
+            await self._fail(op, exc)
+            raise
 
     async def form_goal(self, operation_id: UUID) -> None:
         """One bounded planning inference, executed in the isolated inference lane."""
@@ -426,7 +462,7 @@ class CognitiveOperationEngine:
     async def _rearm_failed_episode(self, op: Mapping[str,Any]) -> None:
         """Retry only unacknowledged host-delta work, never arbitrary cognition."""
         source_node_id=op.get("source_node_id")
-        if op.get("episode_id") or not source_node_id:
+        if op.get("episode_id") or not source_node_id or self._mapping(op.get("input")).get("planning_only"):
             return
         runtime=await self.db.fetchrow(
             """SELECT pending_cognitive_source_node_id,pending_cognitive_event_count,
@@ -478,6 +514,8 @@ class CognitiveOperationEngine:
             op = dict(row)
             episode_id = op.get("episode_id")
             if not op.get("reconciled_at"):
+                from .goal_planning import GoalPlanningService
+                await GoalPlanningService(self.db).reconcile_terminal(op)
                 result = self._mapping(op.get("result"))
                 if op["status"] == "succeeded":
                     await self._finish_side_effects(op,result)
@@ -493,6 +531,13 @@ class CognitiveOperationEngine:
             await CognitiveEpisodeStore(self.db).reconcile(episode_id)
 
     async def _finish_side_effects(self, op: Mapping[str,Any], result: Mapping[str,Any]) -> None:
+        if self._mapping(op.get("input")).get("planning_only"):
+            # Background plans/queries cannot acknowledge an unrelated host delta.
+            from .cognitive_lifecycle import CognitiveLifecycleReconciler
+            await CognitiveLifecycleReconciler(self.db).reconcile_operation(
+                operation=op, result=result, terminal_status="planning_observation")
+            await self._resume_source_task(op, status="succeeded", result=result)
+            return
         if op.get("operation_type") in {"inquiry.resolve","research.advance","research.study"}:
             # Searching is not goal progress or source admission. Still close
             # the opportunity and record the thread receipt so it cannot stick

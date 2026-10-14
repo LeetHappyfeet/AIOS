@@ -94,7 +94,7 @@ class GoalKnowledgeDependencyService:
         if not goal_ids:
             return {}
         rows = await self.db.fetch(
-            """SELECT r.requirement_id,r.goal_id,r.question,r.query_text,
+            """SELECT r.requirement_id,r.goal_id,r.requirement_key,r.question,r.query_text,
                       r.coverage_status,r.coverage_score,r.retrieval_state,
                       coalesce((
                           SELECT array_agg(l.dossier_id ORDER BY l.linked_at DESC)
@@ -113,6 +113,7 @@ class GoalKnowledgeDependencyService:
         for row in rows:
             result.setdefault(row["goal_id"], []).append({
                 "requirement_id": str(row["requirement_id"]),
+                "requirement_key": row["requirement_key"],
                 "question": row["question"],
                 "coverage_status": row["coverage_status"],
                 "coverage_score": float(row["coverage_score"]),

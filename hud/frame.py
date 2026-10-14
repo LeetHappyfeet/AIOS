@@ -266,12 +266,16 @@ class HUDAssembler:
             instance_id=context.instance_id,
             goal_ids=[g.goal_id for g in attention.goals if g.goal_id is not None],
         )
+        from aios_app.agent.goal_planning import GoalPlanningService
+        plans_by_goal = await GoalPlanningService(self.db).for_goals(
+            context.instance_id, [g.goal_id for g in attention.goals if g.goal_id is not None])
         goal_items = []
         for goal in attention.goals:
             item = goal.hud_item()
             if goal.goal_id is not None:
                 item["lifecycle"] = goal_states.get(goal.goal_id, {})
                 item["knowledge_requirements"] = dependency_by_goal.get(goal.goal_id, [])
+                item["plan"] = plans_by_goal.get(goal.goal_id)
             goal_items.append(item)
         scheduled_goal_items = await self.cognition.goals.list_scheduled(
             context.instance_id, limit=8

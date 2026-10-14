@@ -85,6 +85,22 @@ def _scene_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _render_goal_plan(plan: Mapping[str, Any] | None) -> list[str]:
+    if not plan:
+        return []
+    proposal = plan.get("proposal") or {}
+    if not proposal:
+        return ["Planning pending."]
+    lines = ([] if plan.get("context_current", True) else ["Earlier advisory plan; context has changed."])
+    lines += ["Tentative approach (not evidence of progress): " + str(proposal.get("strategy") or "")]
+    for step in proposal.get("steps") or []:
+        lines.append("Proposed step: " + str(step))
+    for question in proposal.get("open_questions") or []:
+        lines.append(f"Unknown ({question['kind']}): {question['question']}")
+    lines.append("Next: " + str(proposal.get("next") or "wait").replace("_", " "))
+    return lines
+
+
 def render_hud_text(frame: Mapping[str, Any]) -> str:
     """Deterministically render the canonical HUD JSON into an LLM-facing surface."""
     identity = frame.get("identity") or {}
@@ -139,6 +155,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if _scene_text(immediate_goal):
         scene_lines.append(f"Immediate managed goal: {_scene_text(immediate_goal)[:180]}")
         if isinstance(immediate_goal, Mapping):
+            scene_lines.extend(_render_goal_plan(immediate_goal.get("plan")))
             for requirement in (immediate_goal.get("knowledge_requirements") or [])[:2]:
                 status=str(requirement.get("coverage_status") or "unassessed")
                 count=len(requirement.get("dossier_ids") or [])
@@ -254,6 +271,8 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             requirements=(goal.get("knowledge_requirements") or []) if isinstance(goal, Mapping) else []
             demand=f" [knowledge: {requirements[0].get('coverage_status', 'unassessed')}]" if requirements else ""
             lines.append(f"-{annotation} {text}{demand}")
+            if isinstance(goal, Mapping):
+                lines.extend("  " + entry for entry in _render_goal_plan(goal.get("plan")))
     scheduled_goals = frame.get("scheduled_goals") or []
     if scheduled_goals:
         lines.append("\nFUTURE GOALS (SCHEDULED FOR REVIEW):")
@@ -299,26 +318,5 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     actions = frame.get("actions") or []
     if actions:
         lines.append("\nAVAILABLE ACTIONS: " + ", ".join(str(action) for action in actions))
-    toolkit = frame.get("toolkit") or []
-    if toolkit:
-        lines.append("\nAIOS TOOLKIT:")
-        lines.append("For missing context or another relevant thread, request one narrow operation.")
-        labels = {
-            "memory_lookup": "MEMORY LOOKUP",
-            "world_lookup": "WORLD LOOKUP",
-            "research": "RESEARCH",
-            "action": "ACTION",
-        }
-        for item in toolkit:
-            if isinstance(item, Mapping):
-                key = str(item.get("key") or "").strip()
-                guidance = str(item.get("guidance") or "").strip()
-            else:
-                key = str(item).strip()
-                guidance = ""
-            if not key:
-                continue
-            label = labels.get(key, key.replace("_", " ").upper())
-            lines.append(f"- {label} — {guidance}" if guidance else f"- {label}")
     lines.append("\nStay inside this HUD's epistemic and branch boundaries.")
     return "\n".join(lines)

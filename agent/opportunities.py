@@ -160,6 +160,8 @@ class CognitiveOpportunityService:
         corpus_epoch=(await ProgressiveResearchService(self.db).corpus_change_epoch(instance_id)
             if any(value[1]=="no_access" for value in latest_goal_inquiry.values())
             else None)
+        from .goal_planning import GoalPlanningService
+        planned_goals = await GoalPlanningService(self.db).for_goals(instance_id, active_goal_ids)
         for goal in goals:
             if not goal.goal_id:
                 continue
@@ -190,7 +192,7 @@ class CognitiveOpportunityService:
                 coverage_status=demand["coverage_status"],
                 retrieval_state=demand["retrieval_state"],
                 access_changed=access_changed)
-            if research_op:
+            if research_op and goal.goal_id not in planned_goals:
                 gap=max(0.0,1.0-float(demand["internal_coverage"]))
                 needs_dossier=research_op=="research.advance"
                 proposals.append(self._p(
