@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -8,6 +9,9 @@ from aios_app.db import Database
 from aios_app.pipeline.jobs import enqueue_job
 from .lifecycle import CharacterAgencyStore
 from .runtime import AgentRuntimeStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class AutonomyScheduler:
@@ -69,14 +73,31 @@ class AutonomyScheduler:
                        AND o.source_node_id=ar.pending_cognitive_source_node_id
                        AND o.status IN ('queued','running','waiting_inference')
                  )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM aios.character_wake_event w
+                     WHERE w.instance_id=ar.instance_id AND w.status='cancelled'
+                       AND w.payload->>'scheduling_exhausted'='true'
+                       AND (w.source_id=ar.pending_cognitive_source_node_id::text
+                            OR w.payload->>'source_through_node_id'=ar.pending_cognitive_source_node_id::text)
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM aios.character_wake_event w
+                     WHERE w.instance_id=ar.instance_id
+                       AND w.event_type='COGNITIVE_DELTA_READY'
+                       AND w.source_id=ar.pending_cognitive_source_node_id::text
+                       AND (w.payload->>'retry_attempt')::int >= 3
+                 )
                ORDER BY ar.updated_at
                LIMIT $1""",
             max(1,min(int(limit),1000)))
         for row in stranded:
-            await self.runtime.rearm_cognitive_delta(
-                instance_id=row["instance_id"],
-                source_node_id=row["pending_cognitive_source_node_id"],
-                retry_attempt=1,max_attempts=3)
+            try:
+                await self.runtime.rearm_cognitive_delta(
+                    instance_id=row["instance_id"],
+                    source_node_id=row["pending_cognitive_source_node_id"],
+                    max_attempts=3)
+            except Exception:
+                logger.exception("Host cognition recovery failed instance=%s", row["instance_id"])
 
         direct = await self._enqueue_existing_tasks(limit)
         rows = await self.db.fetch(
@@ -102,11 +123,49 @@ class AutonomyScheduler:
         )
         scheduled = direct
         for row in rows:
-            if await self._schedule_instance(row["instance_id"]):
-                scheduled += 1
+            try:
+                if await self._schedule_instance(row["instance_id"]):
+                    scheduled += 1
+            except Exception:
+                logger.exception("Autonomy scheduling failed instance=%s", row["instance_id"])
         return scheduled
 
     async def _schedule_instance(self, instance_id: UUID) -> bool:
+        events = await self._ready_events(instance_id)
+        if not events:
+            return False
+        try:
+            return await self._route_events(instance_id, events)
+        except Exception as exc:
+            # Preserve the unacknowledged episode, but stop hot-looping its wake.
+            for event in events:
+                try:
+                    payload = event.get("payload")
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    attempt = int(payload.get("scheduling_retry_attempt", 0)) + 1
+                except (TypeError, ValueError, AttributeError):
+                    attempt = 1
+                exhausted = attempt > 3
+                await self.db.execute(
+                    """UPDATE aios.character_wake_event
+                       SET payload=CASE WHEN jsonb_typeof(payload)='object'
+                                        THEN payload ELSE '{}'::jsonb END || $2::jsonb,
+                           status=CASE WHEN $3 THEN 'cancelled' ELSE status END,
+                           available_at=now()+($4*interval '1 second')
+                       WHERE wake_id=$1 AND status='pending'""",
+                    event["wake_id"], json.dumps({
+                        "scheduling_retry_attempt": attempt,
+                        "scheduling_exhausted": exhausted,
+                        "scheduling_error": str(exc)[:1000],
+                    }), exhausted, min(60, 2 ** min(attempt, 6)),
+                )
+                if exhausted:
+                    logger.error("Autonomy scheduling retries exhausted instance=%s wake=%s",
+                                 instance_id, event["wake_id"])
+            raise
+
+    async def _ready_events(self, instance_id: UUID) -> list[dict[str, Any]]:
         events = await self.db.fetch(
             """
             SELECT wake_id,event_type,source_type,source_id,payload,priority
@@ -116,9 +175,16 @@ class AutonomyScheduler:
             """,
             instance_id,
         )
-        if not events:
-            return False
+        return [dict(event) for event in events]
 
+    async def _route_events(self, instance_id: UUID, events: list[dict[str, Any]]) -> bool:
+        for event in events:
+            payload = event.get("payload")
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                raise ValueError("wake payload must be a JSON object")
+            event["payload"] = payload
         # A fired goal timer is only a review opportunity. If the goal became
         # terminal or was parked again after the wake was written, consume the
         # stale event deterministically and avoid an unnecessary LLM turn.

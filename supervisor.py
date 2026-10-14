@@ -464,6 +464,28 @@ async def enqueue_stage_jobs(db: Database, stage: Stage, *, batch_size: int) -> 
     return count
 
 
+async def _schedule_agent_work(db: Database) -> None:
+    # Heartbeats are cheap events; ready inboxes coalesce into one wake job.
+    try:
+        from aios_app.agent.autonomy import AutonomyScheduler
+        from aios_app.agent.runtime import AgentRuntimeStore
+        from aios_app.agent.temporal import TemporalTriggerStore
+        temporal = TemporalTriggerStore(db)
+        await temporal.reset_stale_firing()
+        await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)
+        await temporal.emit_due(limit=100)
+        await AutonomyScheduler(db).schedule_ready(limit=100)
+    except Exception:
+        logger.exception("Agent autonomy scheduling failed")
+
+    # Disposable micro-HUD work is independent of wake admission.
+    try:
+        from aios_app.agent.transaction_scheduler import TransactionScheduler
+        await TransactionScheduler(db).run_pending(limit=8)
+    except Exception:
+        logger.exception("Internal cognition transaction scheduling failed")
+
+
 async def run_supervisor() -> None:
     poll_interval = settings.supervisor_poll_interval
     batch_size = settings.supervisor_batch_size
@@ -482,22 +504,7 @@ async def run_supervisor() -> None:
                 except Exception:
                     logger.exception("Failed to renew unfinished foreground work")
                 last_foreground_refresh = time.monotonic()
-            # Heartbeats are cheap events; ready inboxes coalesce into one wake job.
-            try:
-                from aios_app.agent.autonomy import AutonomyScheduler
-                from aios_app.agent.runtime import AgentRuntimeStore
-                from aios_app.agent.temporal import TemporalTriggerStore
-                temporal = TemporalTriggerStore(db)
-                await temporal.reset_stale_firing()
-                await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)
-                await temporal.emit_due(limit=100)
-                await AutonomyScheduler(db).schedule_ready(limit=100)
-                # Disposable micro-HUD work opportunistically consumes free
-                # donated inference capacity and never survives its receipt.
-                from aios_app.agent.transaction_scheduler import TransactionScheduler
-                await TransactionScheduler(db).run_pending(limit=8)
-            except Exception:
-                logger.exception("Agent autonomy scheduling failed")
+            await _schedule_agent_work(db)
 
             # Shadow appraisal is durable background work, never an agent wake
             # or a dependency of autonomy/inference scheduling.

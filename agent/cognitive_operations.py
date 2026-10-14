@@ -415,16 +415,10 @@ class CognitiveOperationEngine:
                 or int(runtime["pending_cognitive_event_count"]) <
                    int(runtime["cognitive_batch_size"])):
             return
-        previous=await self.db.fetchval(
-            """SELECT COALESCE(max((payload->>'retry_attempt')::int),0)
-               FROM aios.character_wake_event
-               WHERE instance_id=$1 AND event_type='COGNITIVE_DELTA_READY'
-                 AND source_id=$2 AND payload ? 'retry_attempt'""",
-            op["instance_id"],str(source_node_id))
         from aios_app.agent.runtime import AgentRuntimeStore
         await AgentRuntimeStore(self.db).rearm_cognitive_delta(
             instance_id=op["instance_id"],source_node_id=source_node_id,
-            retry_attempt=int(previous or 0)+1,max_attempts=3)
+            max_attempts=3)
 
     async def _terminal_side_effects(
         self, op: Mapping[str,Any], *, status: str, result: Mapping[str,Any]

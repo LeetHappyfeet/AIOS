@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -47,9 +48,11 @@ _WORDS=re.compile(r"[A-Za-z0-9][A-Za-z0-9_' -]{1,80}")
 
 
 def _json_default(value: Any) -> Any:
-    """Normalize typed identifiers at the JSON/JSONB persistence boundary."""
+    """Normalize typed identifiers and timestamps at the JSON/JSONB persistence boundary."""
     if isinstance(value, UUID):
         return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
@@ -426,8 +429,15 @@ class CognitiveOpportunityService:
         reserved=[p for p in (due_review,due_formation) if p is not None]
         budgeted=([p for p in proposals if p not in reserved][
                     :max(0,budget-len(reserved))] + reserved)
+        return await self._persist_proposals(instance_id, budgeted)
+
+    async def _persist_proposals(self, instance_id: UUID,
+                                 budgeted: list[dict[str, Any]]) -> OpportunityBatch:
+        # Validate the whole selected batch before writing any opportunity.
+        encoded=[(p, _json_dumps(p["operation_payload"]), _json_dumps(p["evidence"]))
+                 for p in budgeted]
         stored=[]
-        for p in budgeted:
+        for p, payload_json, evidence_json in encoded:
             row=await self.db.execute_returning_row(
                 """INSERT INTO aios.character_cognitive_opportunity(
                    instance_id,opportunity_type,natural_language,operation_type,operation_payload,
@@ -445,11 +455,11 @@ class CognitiveOpportunityService:
                      updated_at=now()
                    RETURNING *""",
                 instance_id,p["opportunity_type"],p["natural_language"],p["operation_type"],
-                _json_dumps(p["operation_payload"]),p["source_node_id"],p["source_timeline_id"],
+                payload_json,p["source_node_id"],p["source_timeline_id"],
                 p["source_state_version"],p["novelty"],p["relevance"],p["urgency"],p["uncertainty"],
                 p["goal_affinity"],p["memory_affinity"],p["knowledge_gap"],p["recency"],
                 p["priority_score"],p["freshness_policy"],p["supersession_key"],
-                _json_dumps(p["evidence"]),p.get("subject_id"))
+                evidence_json,p.get("subject_id"))
             if row: stored.append(dict(row))
         return OpportunityBatch(instance_id,tuple(stored))
 
