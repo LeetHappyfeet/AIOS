@@ -79,3 +79,22 @@ ORDER BY p.created_at DESC;
 Focused tests: `tests/test_goal_planning.py` and
 `tests/test_goal_planning_postgres.py`. PostgreSQL tests use the existing
 isolated PGlite bridge and never contact the application database or a model.
+
+## Queue identity correction
+
+Migration `20261014_03_cognitive_job_identity.sql` removes cognitive jobs from
+the legacy global job-type singleton index. Active work is deduplicated by
+operation, transaction, task, or instance identity, while true global jobs
+remain singletons. Distinct operations can coexist even within one instance.
+
+This fixes `could not enqueue goal planning` during and after startup. The
+queue had silently rejected distinct jobs through `ON CONFLICT DO NOTHING`.
+The migration requeues only the latest plan per instance whose operation
+failed with that exact enqueue error, preserving the error in
+`input.enqueue_repair`. Existing recovery supplies its missing queue job.
+Initial admissions that rolled back are retried by the normal scheduler.
+Other model, validation, or stale-context failures remain terminal.
+
+Stop services, pull, migrate, and restart; no manual goal reset is needed.
+`tests/test_cognitive_job_identity.py` reproduces the legacy collision and uses
+the real enqueue SQL and both index versions to verify the correction.

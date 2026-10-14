@@ -34,11 +34,14 @@ CREATE TABLE aios.character_hud_readiness(instance_id uuid PRIMARY KEY,status te
 CREATE TABLE aios.character_cognitive_operation(operation_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
  instance_id uuid,operation_type text,input jsonb,status text DEFAULT 'queued',result jsonb,
  source_state_version bigint,source_timeline_id uuid,source_node_id uuid,freshness_policy text,
- completed_at timestamptz);
+ started_at timestamptz,completed_at timestamptz,reconciled_at timestamptz,updated_at timestamptz DEFAULT now());
 CREATE TABLE aios.character_goal_knowledge_requirement(requirement_id uuid,goal_id uuid,instance_id uuid,
  requirement_key text,question text,query_text text,coverage_status text,coverage_score float,retrieval_state text,created_at timestamptz);
 CREATE TABLE aios.character_goal_research_requirement_link(requirement_id uuid,instance_id uuid,dossier_id uuid,linked_at timestamptz);
-CREATE TABLE aios.pipeline_job(job_id uuid DEFAULT gen_random_uuid(),job_type text,payload jsonb);
+CREATE TABLE aios.pipeline_job(job_id uuid DEFAULT gen_random_uuid(),job_type text,payload jsonb,
+ status text DEFAULT 'queued',priority integer,run_after timestamptz,resource_class text,
+ scheduling_lane text,partition_key text,foreground_instance_id uuid,foreground_node_id uuid,
+ foreground_until timestamptz);
 '''
 
 
