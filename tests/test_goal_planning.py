@@ -96,3 +96,46 @@ async def test_background_plan_does_not_acknowledge_host_delta(monkeypatch):
     await CognitiveOperationEngine(object())._finish_side_effects(
         {"operation_type": "planning.propose", "instance_id": uuid4(), "operation_id": uuid4(),
          "source_node_id": uuid4(), "input": {"planning_only": True}}, {"kind": "goal_plan"})
+
+
+@pytest.mark.asyncio
+async def test_no_linked_evidence_skips_all_memory_retrieval():
+    class DB:
+        async def fetch(self, *args): raise AssertionError("must not search")
+    rows,status=await GoalPlanningService(DB()).linked_knowledge(
+        SimpleNamespace(instance_id=uuid4()), [])
+    assert rows==[] and status=='no_linked_evidence'
+
+
+@pytest.mark.asyncio
+async def test_linked_lookup_has_a_deadline_and_does_not_infer_ignorance(monkeypatch):
+    cancelled=asyncio.Event()
+    class DB:
+        async def fetch(self,*args):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+    monkeypatch.setattr('aios_app.agent.goal_planning.LINKED_KNOWLEDGE_TIMEOUT',0.01)
+    rows,status=await GoalPlanningService(DB()).linked_knowledge(
+        SimpleNamespace(instance_id=uuid4()), [{'evidence_ids':[str(uuid4())]}])
+    assert rows==[] and status=='unavailable' and cancelled.is_set()
+    prompt,_=build_plan_prompt('Learn to cook',[],rows,[],{},[],knowledge_status=status)
+    assert '"not_exhaustive": true' in prompt
+    assert 'absent linked evidence does not mean no knowledge exists' in prompt
+
+
+@pytest.mark.asyncio
+async def test_linked_lookup_limits_identifiers_and_preserves_knowledge_labels():
+    ids=[uuid4() for _ in range(20)]
+    owner=uuid4()
+    class DB:
+        async def fetch(self,sql,owners,refs):
+            assert owners==[owner] and refs==ids[:8]
+            assert 'LIMIT 3' in sql
+            return [{'proposition_id':ids[0],'text':'Reported cooking advice',
+                     'subject_norm':'Renamon','predicate_norm':'learned','object_norm':'cooking',
+                     'epistemic_status':'believed','origin_kind':'testimony'}]
+    rows,status=await GoalPlanningService(DB()).linked_knowledge(
+        SimpleNamespace(instance_id=owner), [{'evidence_ids':['not-a-uuid']+[str(i) for i in ids]}])
+    assert status=='linked_only' and rows[0]['epistemic_status']=='believed'

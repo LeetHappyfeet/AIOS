@@ -5,9 +5,11 @@ Only host-created inquiry/research operations may follow a validated proposal.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import time
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -17,6 +19,7 @@ from aios_app.pipeline.jobs import enqueue_job
 logger = logging.getLogger(__name__)
 KINDS = {"personal", "procedure", "environment"}
 NEXT = {"internal_lookup", "research", "request_information", "wait"}
+LINKED_KNOWLEDGE_TIMEOUT = 0.75
 
 
 def mapping(value: Any) -> dict:
@@ -85,7 +88,8 @@ def validate_plan(raw: Any, evidence_ids: set[str]) -> dict:
 
 
 def build_plan_prompt(goal: str, messages: list[dict], knowledge: list[dict],
-                      requirements: list[dict], previous: dict, receipts: list[dict]) -> tuple[str, set[str]]:
+                      requirements: list[dict], previous: dict, receipts: list[dict], *,
+                      knowledge_status: str = "linked_only") -> tuple[str, set[str]]:
     evidence = {"goal"}
     source = []
     for row in messages:
@@ -106,6 +110,9 @@ def build_plan_prompt(goal: str, messages: list[dict], knowledge: list[dict],
                       "origin": row.get("origin_kind")})
     context = {"objective": goal[:600], "objective_evidence_id": "goal",
                "source_messages_chronological": source, "character_evidence": known,
+               "knowledge_context": {"status": knowledge_status,
+                                     "scope": "previously_goal_linked_evidence_only",
+                                     "not_exhaustive": True},
                "knowledge_requirements": [{"question": str(r.get("question") or "")[:220],
                                            "coverage_status": r.get("coverage_status"),
                                            "retrieval_state": r.get("retrieval_state"),
@@ -121,6 +128,7 @@ def build_plan_prompt(goal: str, messages: list[dict], knowledge: list[dict],
         "References found are not acquired knowledge. You cannot execute an action or mark progress. "
         "If the first question concerns environment, next must be request_information or wait. "
         "Unavailable retrieval is temporary unavailability, not proof of ignorance. "
+        "This context is not a complete memory search; absent linked evidence does not mean no knowledge exists. "
         "Do not repeat unsuccessful lookups without changed evidence/access. "
         'Return exactly {"strategy":"short approach","steps":["one to three tentative steps"],'
         '"open_questions":[{"kind":"personal|procedure|environment","question":"..."}],'
@@ -133,6 +141,62 @@ def build_plan_prompt(goal: str, messages: list[dict], knowledge: list[dict],
 class GoalPlanningService:
     def __init__(self, db):
         self.db = db
+
+    async def linked_knowledge(self, context, requirements: list[dict]) -> tuple[list[dict], str]:
+        """Read at most three already-linked /char records, never a recall pipeline.
+
+        No halo, graph traversal, world lookup, semantic server, corpus search,
+        or learning. Missing links mean unassessed, not ignorant. Even this
+        supplementary point lookup has a latency ceiling under DB contention.
+        """
+        ids = []
+        for requirement in requirements:
+            for value in requirement.get("evidence_ids") or []:
+                try:
+                    key = UUID(str(value))
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                if key not in ids:
+                    ids.append(key)
+                if len(ids) >= 8:
+                    break
+            if len(ids) >= 8:
+                break
+        if not ids:
+            return [], "no_linked_evidence"
+        owners = list(getattr(context, "cognitive_instance_ids", ()) or
+                      getattr(context, "lineage_instance_ids", ()) or (context.instance_id,))
+        try:
+            rows = await asyncio.wait_for(self.db.fetch(
+                """SELECT DISTINCT ON (p.proposition_id) p.proposition_id,
+                          p.canonical_text AS text,ck.epistemic_status,ck.acquisition_mode AS origin_kind,
+                          p.subject_norm,p.predicate_norm,p.object_norm,
+                          ck.confidence,ck.effective_confidence,
+                          'established'::text AS authority_state
+                   FROM aios.character_proposition_knowledge ck
+                   JOIN aios.proposition p ON p.proposition_id=ck.proposition_id
+                   WHERE ck.instance_id=ANY($1::uuid[]) AND ck.proposition_id=ANY($2::uuid[])
+                     AND EXISTS (
+                       SELECT 1 FROM aios.knowledge_acquisition_event kae
+                       LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+                       LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+                       LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+                       LEFT JOIN aios.dag_node dn ON dn.node_id=ds.node_id
+                       LEFT JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
+                       WHERE kae.instance_id=ck.instance_id AND kae.proposition_id=ck.proposition_id
+                         AND (kae.claim_id IS NULL OR ie.superseded_at IS NULL))
+                   ORDER BY p.proposition_id,array_position($1::uuid[],ck.instance_id)
+                   LIMIT 3""", owners, ids), timeout=LINKED_KNOWLEDGE_TIMEOUT)
+        except Exception as exc:
+            logger.warning("Goal plan linked evidence unavailable instance=%s reason=%s",
+                           context.instance_id, type(exc).__name__)
+            return [], "unavailable"
+        # Reuse the existing pure admission filter, without building a context
+        # service or starting any of its retrieval/learning machinery.
+        from aios_app.epistemic.cognitive_context import admit_cognitive_candidates
+        admitted, _ = admit_cognitive_candidates(
+            [dict(row) for row in rows], visible_source_node_ids=frozenset())
+        return admitted, "linked_only"
 
     async def snapshot(self, instance_id: UUID, goal_id: UUID) -> dict | None:
         context = await HUDContextResolver(self.db).resolve(instance_id)
@@ -245,6 +309,7 @@ class GoalPlanningService:
         if not self.fresh(plan, snap, op):
             return {"kind": "goal_plan", "status": "stale"}
         ctx = snap["context"]
+        started = time.perf_counter()
         messages = await self.db.fetch(
             """SELECT dn.node_id,dn.speaker_id,dn.speaker_role,dn.message_text
                FROM aios.dag_node dn JOIN aios.ingest_event ie ON ie.event_id=dn.event_id
@@ -252,17 +317,16 @@ class GoalPlanningService:
                WHERE dn.timeline_id=$1 AND dn.event_id<=head.event_id AND ie.superseded_at IS NULL
                  AND dn.message_text IS NOT NULL ORDER BY dn.event_id DESC LIMIT 4""",
             ctx.source_timeline_id, ctx.source_head_node_id)
-        from aios_app.epistemic.cognitive_context import CognitiveContextService
-        cognition = CognitiveContextService(self.db)
-        runtime = await self.db.fetchrow("SELECT * FROM aios.character_runtime_state WHERE instance_id=$1", op["instance_id"])
-        attention = await cognition.resolve_attention_inputs(ctx, dict(runtime), {}, recent_limit=4,
-                                                             focus_text=snap["goal_text"])
-        knowledge = await cognition.resolve_knowledge(ctx, None, attention)
+        knowledge, knowledge_status = await self.linked_knowledge(ctx, snap["requirements"])
         previous = await self.current(op["instance_id"], goal_id)
         prompt, evidence = build_plan_prompt(
             snap["goal_text"], list(reversed([dict(r) for r in messages])),
-            list(knowledge.knowledge), snap["requirements"],
-            previous.get("proposal", {}) if previous else {}, snap["receipts"])
+            knowledge, snap["requirements"],
+            previous.get("proposal", {}) if previous else {}, snap["receipts"],
+            knowledge_status=knowledge_status)
+        logger.info("Goal planning context instance=%s source_messages=%d linked_knowledge=%d "
+                    "knowledge_status=%s elapsed_ms=%.1f", op["instance_id"], len(messages),
+                    len(knowledge), knowledge_status, (time.perf_counter()-started)*1000)
         from aios_app.inference import InferenceBroker, InferenceRequest
         result = await InferenceBroker(self.db).infer(InferenceRequest(
             instance_id=op["instance_id"], worker_class="planning", source_node_id=op.get("source_node_id"),
@@ -288,9 +352,11 @@ class GoalPlanningService:
             await self.db.execute(
                 "UPDATE aios.character_goal_plan SET proposal=$2::jsonb,status=$3,updated_at=now() WHERE plan_id=$1",
                 plan_id, json.dumps(proposal), status)
-            await self.continue_once(op, proposal, latest)
+            if knowledge_status != "unavailable":
+                await self.continue_once(op, proposal, latest)
         return {"kind": "goal_plan", "status": status, "plan_id": str(plan_id),
-                "inference_request_id": str(result.request_id), "admission_effect": "none"}
+                "inference_request_id": str(result.request_id), "admission_effect": "none",
+                "knowledge_context_status": knowledge_status}
 
     @staticmethod
     def fresh(plan, snap, op) -> bool:

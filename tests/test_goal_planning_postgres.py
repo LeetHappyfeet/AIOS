@@ -36,7 +36,7 @@ CREATE TABLE aios.character_cognitive_operation(operation_id uuid PRIMARY KEY DE
  source_state_version bigint,source_timeline_id uuid,source_node_id uuid,freshness_policy text,
  started_at timestamptz,completed_at timestamptz,reconciled_at timestamptz,updated_at timestamptz DEFAULT now());
 CREATE TABLE aios.character_goal_knowledge_requirement(requirement_id uuid,goal_id uuid,instance_id uuid,
- requirement_key text,question text,query_text text,coverage_status text,coverage_score float,retrieval_state text,created_at timestamptz);
+ evidence jsonb DEFAULT '{}'::jsonb,requirement_key text,question text,query_text text,coverage_status text,coverage_score float,retrieval_state text,created_at timestamptz);
 CREATE TABLE aios.character_goal_research_requirement_link(requirement_id uuid,instance_id uuid,dossier_id uuid,linked_at timestamptz);
 CREATE TABLE aios.pipeline_job(job_id uuid DEFAULT gen_random_uuid(),job_type text,payload jsonb,
  status text DEFAULT 'queued',priority integer,run_after timestamptz,resource_class text,
@@ -71,10 +71,10 @@ async def env(monkeypatch):
     async def enqueue(db, *, job_type, payload, **kwargs):
         return await db.fetchval('INSERT INTO aios.pipeline_job(job_type,payload) VALUES($1,$2::jsonb) RETURNING job_id', job_type, json.dumps(payload))
     monkeypatch.setattr('aios_app.agent.goal_planning.enqueue_job', enqueue)
-    async def attention(*args, **kwargs): return None
-    async def knowledge(*args, **kwargs): return SimpleNamespace(knowledge=[])
-    monkeypatch.setattr('aios_app.epistemic.cognitive_context.CognitiveContextService.resolve_attention_inputs', attention)
-    monkeypatch.setattr('aios_app.epistemic.cognitive_context.CognitiveContextService.resolve_knowledge', knowledge)
+    async def forbidden_foreground(*args, **kwargs):
+        raise AssertionError("small planner must not invoke foreground retrieval")
+    monkeypatch.setattr('aios_app.epistemic.cognitive_context.CognitiveContextService.resolve_attention_inputs', forbidden_foreground)
+    monkeypatch.setattr('aios_app.epistemic.cognitive_context.CognitiveContextService.resolve_knowledge', forbidden_foreground)
     async def infer(*args, **kwargs):
         return SimpleNamespace(request_id=uuid4(), response=SimpleNamespace(raw=proposal()))
     monkeypatch.setattr('aios_app.inference.InferenceBroker.infer', infer)
@@ -218,3 +218,54 @@ async def test_malformed_model_response_preserves_previous_accepted_plan(env):
     op['status']='failed'
     await e.service.reconcile_terminal(op)
     assert (await e.service.current(e.instance,e.goal))['revision']==1
+
+
+@pytest.mark.asyncio
+async def test_linked_knowledge_requires_accessible_owner_and_live_acquisition(env):
+    e=env
+    await e.db.pool.con.query('''
+      CREATE TABLE aios.proposition(proposition_id uuid PRIMARY KEY,canonical_text text,
+        subject_norm text DEFAULT 'Renamon',predicate_norm text DEFAULT 'learned',object_norm text DEFAULT 'cooking');
+      CREATE TABLE aios.character_proposition_knowledge(instance_id uuid,proposition_id uuid,
+        epistemic_status text,acquisition_mode text,confidence float DEFAULT 1,
+        effective_confidence float DEFAULT 1,PRIMARY KEY(instance_id,proposition_id));
+      CREATE TABLE aios.knowledge_acquisition_event(instance_id uuid,proposition_id uuid,claim_id uuid);
+      CREATE TABLE aios.claim_candidate(claim_id uuid,sentence_id uuid);
+      CREATE TABLE aios.extracted_sentence(sentence_id uuid,section_id uuid);
+      CREATE TABLE aios.document_section(section_id uuid,node_id uuid);
+    ''',exec=True)
+    valid,sibling,no_receipt,superseded=[uuid4() for _ in range(4)]
+    other=uuid4()
+    for key,owner in [(valid,e.instance),(sibling,other),(no_receipt,e.instance),(superseded,e.instance)]:
+        await e.db.execute("INSERT INTO aios.proposition(proposition_id,canonical_text) VALUES($1,'A reported fact')",key)
+        await e.db.execute("INSERT INTO aios.character_proposition_knowledge(instance_id,proposition_id,epistemic_status,acquisition_mode) VALUES($1,$2,'believed','testimony')",owner,key)
+        if key!=no_receipt:
+            await e.db.execute('INSERT INTO aios.knowledge_acquisition_event VALUES($1,$2,NULL)',owner,key)
+    claim,sentence,section,node=[uuid4() for _ in range(4)]
+    await e.db.execute('INSERT INTO aios.ingest_event VALUES(9,now())')
+    await e.db.execute('INSERT INTO aios.dag_node(node_id,event_id) VALUES($1,9)',node)
+    await e.db.execute('INSERT INTO aios.document_section VALUES($1,$2)',section,node)
+    await e.db.execute('INSERT INTO aios.extracted_sentence VALUES($1,$2)',sentence,section)
+    await e.db.execute('INSERT INTO aios.claim_candidate VALUES($1,$2)',claim,sentence)
+    await e.db.execute('UPDATE aios.knowledge_acquisition_event SET claim_id=$1 WHERE proposition_id=$2',claim,superseded)
+    rows,status=await e.service.linked_knowledge(e.ctx,[{'evidence_ids':[str(i) for i in (valid,sibling,no_receipt,superseded)]}])
+    assert status=='linked_only' and [r['proposition_id'] for r in rows]==[valid]
+    assert rows[0]['epistemic_status']=='believed'
+    await e.db.execute('UPDATE aios.character_proposition_knowledge SET effective_confidence=0 WHERE proposition_id=$1',valid)
+    rows,status=await e.service.linked_knowledge(e.ctx,[{'evidence_ids':[str(valid)]}])
+    assert rows==[] and status=='linked_only'
+
+
+@pytest.mark.asyncio
+async def test_optional_evidence_timeout_does_not_trigger_more_retrieval(env):
+    e=env
+    async def unavailable(*args,**kwargs): return [],'unavailable'
+    e.monkeypatch.setattr(e.service,'linked_knowledge',unavailable)
+    async def wants_research(*args,**kwargs):
+        return SimpleNamespace(request_id=uuid4(),response=SimpleNamespace(
+            raw=proposal(kind='procedure',next_step='research')))
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',wants_research)
+    op=await running(e)
+    result=await e.service.propose(op)
+    assert result['knowledge_context_status']=='unavailable'
+    assert await e.db.fetchval('SELECT count(*) FROM aios.character_cognitive_operation')==1

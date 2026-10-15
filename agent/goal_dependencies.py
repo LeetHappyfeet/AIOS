@@ -95,7 +95,7 @@ class GoalKnowledgeDependencyService:
             return {}
         rows = await self.db.fetch(
             """SELECT r.requirement_id,r.goal_id,r.requirement_key,r.question,r.query_text,
-                      r.coverage_status,r.coverage_score,r.retrieval_state,
+                      r.coverage_status,r.coverage_score,r.retrieval_state,r.evidence,
                       coalesce((
                           SELECT array_agg(l.dossier_id ORDER BY l.linked_at DESC)
                           FROM aios.character_goal_research_requirement_link l
@@ -111,6 +111,10 @@ class GoalKnowledgeDependencyService:
         )
         result: dict[UUID, list[dict[str, Any]]] = {}
         for row in rows:
+            evidence = row["evidence"]
+            if isinstance(evidence, str):
+                evidence = json.loads(evidence)
+            evidence = evidence if isinstance(evidence, dict) else {}
             result.setdefault(row["goal_id"], []).append({
                 "requirement_id": str(row["requirement_id"]),
                 "requirement_key": row["requirement_key"],
@@ -118,6 +122,7 @@ class GoalKnowledgeDependencyService:
                 "coverage_status": row["coverage_status"],
                 "coverage_score": float(row["coverage_score"]),
                 "retrieval_state": row["retrieval_state"],
+                "evidence_ids": list(evidence.get("proposition_ids") or [])[:8],
                 "dossier_ids": [str(d) for d in row["dossier_ids"]],
             })
         return result

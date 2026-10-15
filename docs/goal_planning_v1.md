@@ -16,8 +16,8 @@ the existing isolated inference job mechanism (`goal_planning_inference`,
 background lane) and the configured `planning` inference provider.
 
 The prompt contains the admitted objective, at most four chronological source
-messages on the current timeline through the source head, up to three relevant
-character evidence items, knowledge requirements, information receipts, and the
+messages on the current timeline through the source head, up to three already
+goal-linked character evidence items, knowledge requirements, information receipts, and the
 previous proposal. Long messages preserve both their opening and their ending.
 Source text is labeled as reported material, not independent world truth.
 
@@ -98,3 +98,24 @@ Other model, validation, or stale-context failures remain terminal.
 Stop services, pull, migrate, and restart; no manual goal reset is needed.
 `tests/test_cognitive_job_identity.py` reproduces the legacy collision and uses
 the real enqueue SQL and both index versions to verify the correction.
+
+## Bounded plan context
+
+Plan preparation no longer calls `CognitiveContextService.resolve_knowledge` or
+builds foreground attention. Those paths traverse memory, belief, goal, event,
+and rule topology, use world/semantic fallbacks, and may do supplementary corpus
+work. A small plan must not repeat that generation-time retrieval pipeline.
+
+The planner reads at most eight proposition IDs already recorded on its goal's
+knowledge requirements and returns at most three currently owned character
+records. The point lookup rechecks acquisition receipts and source supersession,
+uses the existing permitted character lineage, and has a 750 ms deadline. With
+no linked IDs it performs no memory query. Timeout returns `unavailable`, not
+ignorance. A prompt always states that this evidence subset is not a complete
+memory search. Explicit inquiry/research remains the route for deeper questions.
+
+Logs now include `Goal planning context` with source-message count, linked
+knowledge count, knowledge status, and context preparation duration. This change
+requires a code update and service restart, but no additional migration beyond
+the queue correction above. Independent semantic-index SQL/lock contention may
+still require separate investigation.
