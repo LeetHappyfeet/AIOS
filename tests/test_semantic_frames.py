@@ -110,7 +110,7 @@ def test_phrase_prunes_entire_relative_clause_branch():
     assert "itself" not in stretch.subject.lower()
 
 
-def test_local_antecedent_candidates_prefer_current_claim_order():
+def test_local_candidates_do_not_force_ambiguous_neutral_pronoun_resolution():
     from aios_app.epistemic.semantic_frames_legacy import (
         _choose_antecedent,
         _draft_antecedent_candidates,
@@ -123,5 +123,5 @@ def test_local_antecedent_candidates_prefer_current_claim_order():
     candidates = _draft_antecedent_candidates(frames, resolved.index)
     antecedent, _, confidence = _choose_antecedent(resolved.subject, candidates)
     assert antecedent is not None
-    assert "ember" in antecedent.lower()
-    assert confidence > 0.20
+    assert antecedent.lower() == "it"
+    assert confidence <= 0.20

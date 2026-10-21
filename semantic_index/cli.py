@@ -12,6 +12,7 @@ from typing import Any
 from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
+from aios_app.entity_memory.service import collect_entity_memory_once, project_entity_memory_once
 from aios_app.topic_atlas.collector import collect_topics_once
 from aios_app.topic_atlas.projection import (
     index_topics_once, project_topics_once, prune_retired_topic_vectors_once,
@@ -235,6 +236,8 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
             if time.monotonic() - last_topic_scan >= 10.0:
                 # Topic mentions are advisory and run behind the critical vector
                 # stages on a bounded cadence, not on HUD's hot path.
+                await run_stage("entity-memory", collect_entity_memory_once, db,
+                                limit=cfg.background_batch_size)
                 found = await run_stage("topic-discovery", collect_topics_once, db,
                                         limit=cfg.background_batch_size)
                 retired_bad = await run_stage(
@@ -332,6 +335,8 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
             # verified decisions and RDF deltas from progressing.
             effective_cfg = replace(cfg,**batch_sizes)
             work = await _run_topology_stages(db, fuseki, effective_cfg, run_stage)
+            work["entity_memory_projected"] = await run_stage(
+                "rdf-entity-memory", project_entity_memory_once, db, fuseki, limit=1)
             work["topics_projected"] = await run_stage(
                 "rdf-topics", project_topics_once, db, fuseki,
                 limit=1)  # One acknowledged graph replacement per topology cycle.
