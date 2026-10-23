@@ -246,6 +246,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     corpus_references = frame.get("corpus_references") or []
     if corpus_references:
         lines.append("\nCORPUS REFERENCES (LOOKED UP; NOT MEMORY OR BELIEF):")
+        lines.append("External references describe their source setting; they do not establish personal experiences, relationships, possessions, or goal completion in this instance.")
         for item in corpus_references:
             source_bits = [
                 str(value)
@@ -254,7 +255,12 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             ]
             source = " / ".join(source_bits)
             prefix = f"[{source}] " if source else ""
-            lines.append(f"- {prefix}{item.get('text', '')}")
+            attribution = ""
+            if item.get("section_id"):
+                attribution = (f" [source={item['section_id']}; namespace={item.get('epistemic_namespace', 'reference')}; "
+                               f"binding={item.get('identity_binding', 'external')}; "
+                               f"chars={item.get('passage_start', 0)}:{item.get('passage_end', 0)}]")
+            lines.append(f"- {prefix}{item.get('text', '')}{attribution}")
 
     goals = frame.get("goals") or []
     immediate_goal_id = (

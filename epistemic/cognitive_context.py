@@ -27,6 +27,7 @@ from aios_app.epistemic.research import (
     RetrievalDemand,
     assess_retrieval_evidence,
     resolve_retrieval_demand,
+    research_terms,
 )
 
 from aios_app.epistemic.retrieval_policy import (
@@ -35,19 +36,19 @@ from aios_app.epistemic.retrieval_policy import (
 )
 
 _DIRECT_RESEARCH_COMMAND = re.compile(
-    r"^(?:renamon[,.:]\s*)?(?:please\s+)?"
+    r"^(?:please\s+)?"
     r"(?:(?:can|could|would|will)\s+you\s+)?"
     r"(?:research|look\s+up|search\s+for|find\s+out\s+about|"
     r"tell\s+me\s+about|find\s+(?:studies|sources)\s+(?:on|about))"
     r"\s+(?P<subject>.{2,160})$", re.I,
 )
 _EXTERNAL_FACT_QUESTION = re.compile(
-    r"^(?:renamon[,.:]\s*)?(?:what|who|where|when|why|how|which)\b"
+    r"^(?:what|who|where|when|why|how|which)\b"
     r"[^!?\n]{2,155}\?$", re.I,
 )
 
 
-def focused_corpus_research_query(source: str) -> str | None:
+def focused_corpus_research_query(source: str, *, character_id: str = "") -> str | None:
     """Only a direct information request, not narration about somebody searching.
 
     Restrict the subsequent missing-knowledge query to the request's subject;
@@ -56,10 +57,14 @@ def focused_corpus_research_query(source: str) -> str | None:
     focus = str(source or "").strip()
     if not focus:
         return None
+    if character_id:
+        focus = re.sub(r"^" + re.escape(character_id) + r"[,.:]\s*", "", focus, flags=re.I)
     spoken = re.findall(r'["“]([^"”\n]{3,200})["”]', focus)
     clauses = spoken + re.split(r"(?<=[.!?])\s+|\n+", focus)
     for clause in clauses:
         clause = clause.strip(" \t*'\"“”")
+        if character_id:
+            clause = re.sub(r"^" + re.escape(character_id) + r"[,.:]\s*", "", clause, flags=re.I)
         command = _DIRECT_RESEARCH_COMMAND.fullmatch(clause)
         if command:
             return command.group("subject").strip(" \t*'\"“”?!.,")
@@ -88,6 +93,7 @@ class CognitiveAttentionInputs:
     knowledge_route: str = "general"
     demand_reason: str = "unclassified"
     retrieval_demand: RetrievalDemand | None = None
+    focus_source: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -188,9 +194,9 @@ def automatic_corpus_research_allowed(
     character_id: str,
 ) -> bool:
     """Allow automatic lookup only when the current focus came from outside the character."""
-    focus_row = next(
-        (row for row in attention.recent_newest if row.get("message_text")),
-        None,
+    focus_row = attention.focus_source or next(
+        (row for row in attention.recent_newest
+         if row.get("message_text") == attention.focus_text), None,
     )
     if not focus_row:
         return False
@@ -204,11 +210,29 @@ def automatic_corpus_research_allowed(
         return False
     # Search only on a direct external information request. Describing a
     # library search or quoting another speaker's instructions is not one.
-    request = focused_corpus_research_query(str(focus_row.get("message_text") or ""))
+    request = focused_corpus_research_query(attention.focus_text, character_id=character_id)
     if not request:
         return False
     return resolve_retrieval_demand(request, character_id=character_id).route != "character"
 
+
+
+def contextual_corpus_query(attention: CognitiveAttentionInputs, *, character_id: str) -> str | None:
+    """Reference context for a topic, never evidence of personal history/desire."""
+    text = attention.focus_text.strip()
+    descriptive = bool(re.search(r"\bwhat (?:kind|type|species)\b.*\bare you\b", text, re.I))
+    personal = resolve_retrieval_demand(text, character_id=character_id).route == "character"
+    if (attention.knowledge_route == "character" or personal) and not descriptive:
+        return None
+    # Dialogue glue and the character's name alone are not a corpus topic.
+    ignored = set(research_terms(character_id)) | {
+        "you", "your", "yours", "me", "my", "we", "our", "she", "her", "he", "his",
+        "they", "them", "said", "says", "asked", "would", "could", "should", "can",
+        "have", "has", "had", "ever", "before", "does", "did", "do", "about",
+        "kind", "type", "tell", "want", "know", "think", "like", "please", "now",
+    }
+    terms = [term for term in research_terms(text, limit=48) if term not in ignored][:12]
+    return " OR ".join(terms) if terms else None
 
 
 def admit_cognitive_candidates(
@@ -249,6 +273,7 @@ class CognitiveContextService:
         self.retrieval_policy = retrieval_policy or DEFAULT_COGNITIVE_RETRIEVAL_POLICY
         self._prepared_retrieval: dict[tuple[Any, ...], PreparedRetrievalSnapshot] = {}
         self._rdf_prewarm_flights = AsyncSingleFlight()
+        self._corpus_flights = AsyncSingleFlight()
         self._prepared_retrieval_flights: AsyncSingleFlight[
             tuple[Any, ...], PreparedRetrievalSnapshot
         ] = AsyncSingleFlight()
@@ -340,7 +365,7 @@ class CognitiveContextService:
             if signal.get("focus_text")
         )
         focus_row = next(
-            (row for row in recent_newest if row.get("message_text")),
+            (row for row in recent_newest if row.get("message_text") == resolved_focus_text),
             None,
         )
         question = question_semantics(
@@ -385,6 +410,7 @@ class CognitiveContextService:
             recent_newest=recent_newest,
             visible_source_node_ids=visible_source_node_ids,
             focus_text=resolved_focus_text,
+            focus_source=focus_row,
             plugin_focus_text=plugin_focus_text,
             retrieval_focus_text=retrieval_focus_text,
             goals=goals,
@@ -793,7 +819,7 @@ class CognitiveContextService:
         allow_automatic_corpus = automatic_corpus_research_allowed(
             attention, character_id=context.character_id,
         )
-        research_focus = focused_corpus_research_query(attention.focus_text) if allow_automatic_corpus else None
+        research_focus = focused_corpus_research_query(attention.focus_text, character_id=context.character_id) if allow_automatic_corpus else None
         demand_focus = research_focus or attention.retrieval_focus_text
         if structured_knowledge:
             corpus_demand = self.semantic_knowledge_coverage.resolve(
@@ -814,19 +840,48 @@ class CognitiveContextService:
             )
         corpus_references: list[dict[str, Any]] = []
         corpus_result = None
+        lookup_status = "not_requested"
+        contextual_query = contextual_corpus_query(attention, character_id=context.character_id)
+        corpus_query = contextual_query
+        if contextual_query and not (corpus_demand.needed and allow_automatic_corpus and research_focus):
+            try:
+                async def lookup():
+                    async def search():
+                        result = await self.research.search(
+                            instance_id=context.instance_id, query=contextual_query,
+                            limit=self.retrieval_policy.corpus_reference_limit,
+                            include_fanwork=False, assigned_only=True, lexical_only=True)
+                        if result.status == "no_results":
+                            result = await self.research.search(
+                                instance_id=context.instance_id, query=contextual_query,
+                                limit=self.retrieval_policy.corpus_reference_limit,
+                                include_fanwork=False, assigned_only=True)
+                        return result
+                    return await asyncio.wait_for(search(), timeout=self.retrieval_policy.corpus_timeout_seconds)
+                corpus_result = await self._corpus_flights.run(
+                    (str(context.instance_id), str(context.source_head_node_id), context.state_version, contextual_query), lookup)
+                corpus_references = corpus_result.reference_context()
+                lookup_status = "references_found" if corpus_references else (
+                    "no_assignment" if corpus_result.status == "no_assignment" else
+                    "no_authorized_sections" if corpus_result.status == "no_access" else "no_relevant_matches")
+            except Exception:
+                lookup_status = "lookup_unavailable"
+                logger.warning("Contextual corpus lookup unavailable instance=%s", context.instance_id, exc_info=True)
         if corpus_demand.needed and allow_automatic_corpus and research_focus:
             # Search the missing concepts rather than replaying the entire turn.
             # This keeps dialogue/scaffolding words out of the FTS query.
             corpus_query = " OR ".join(corpus_demand.missing_terms[:10])
             try:
-                corpus_result = await self.research.search(
+                corpus_result = await asyncio.wait_for(self.research.search(
                     instance_id=context.instance_id,
                     query=corpus_query,
-                    limit=5,
+                    limit=self.retrieval_policy.corpus_reference_limit,
                     include_fanwork=False,
-                )
+                ), timeout=self.retrieval_policy.corpus_timeout_seconds)
                 corpus_references = corpus_result.reference_context()
+                lookup_status = "references_found" if corpus_references else "no_relevant_matches"
             except Exception:
+                lookup_status = "lookup_unavailable"
                 # Corpus lookup is supplementary. A missing migration, unavailable
                 # corpus, or search failure must never block normal cognition.
                 logger.exception(
@@ -874,6 +929,15 @@ class CognitiveContextService:
                 )
 
         corpus_demand_meta = {
+            "lookup_status": lookup_status,
+            "query": corpus_query,
+            "request": research_focus or attention.focus_text,
+            "lookup_mode": "hybrid" if research_focus else "assigned_lexical_then_semantic",
+            "candidate_count": corpus_result.candidate_count if corpus_result else 0,
+            "result_count": len(corpus_references),
+            "focus_node_id": str((attention.focus_source or {}).get("node_id") or "") or None,
+            "focus_speaker_id": (attention.focus_source or {}).get("speaker_id"),
+            "focus_origin": "source_message" if attention.focus_source else "explicit_or_unbound_focus",
             "needed": corpus_demand.needed,
             "terms": list(corpus_demand.terms),
             "missing_terms": list(corpus_demand.missing_terms),

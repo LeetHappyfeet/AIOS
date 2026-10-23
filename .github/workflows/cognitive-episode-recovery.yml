@@ -1,9 +1,9 @@
 name: Cognitive episode recovery
 on:
   push:
-    paths: ['agent/**', 'inference/**', 'pipeline/jobs.py', 'runner.py', 'db.py', 'migrate.py', 'migrations/current/**', 'tests/*cognit*', 'tests/*goal*', '.github/workflows/cognitive-episode-recovery.yml']
+    paths: ['agent/**', 'epistemic/**', 'hud/**', 'tests/*corpus*', 'inference/**', 'pipeline/jobs.py', 'runner.py', 'db.py', 'migrate.py', 'migrations/current/**', 'tests/*cognit*', 'tests/*goal*', '.github/workflows/cognitive-episode-recovery.yml']
   pull_request:
-    paths: ['agent/**', 'inference/**', 'pipeline/jobs.py', 'runner.py', 'db.py', 'migrate.py', 'migrations/current/**', 'tests/*cognit*', 'tests/*goal*', '.github/workflows/cognitive-episode-recovery.yml']
+    paths: ['agent/**', 'epistemic/**', 'hud/**', 'tests/*corpus*', 'inference/**', 'pipeline/jobs.py', 'runner.py', 'db.py', 'migrate.py', 'migrations/current/**', 'tests/*cognit*', 'tests/*goal*', '.github/workflows/cognitive-episode-recovery.yml']
 jobs:
   isolated-postgres:
     runs-on: ubuntu-latest
@@ -23,6 +23,8 @@ jobs:
           ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/pythonpath/aios_app"
           AIOS_PGLITE_MODULE="$RUNNER_TEMP/pglite/node_modules/@electric-sql/pglite/dist/index.js" \
           PYTHONPATH="$RUNNER_TEMP/pythonpath" python -m pytest -q \
+            tests/test_contextual_corpus_postgres.py \
+            tests/test_corpus_research.py \
             tests/test_goal_planning_repair.py \
             tests/test_goal_review_source_contract.py \
             tests/test_goal_planning.py \

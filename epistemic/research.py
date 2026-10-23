@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_left
 import json
 import logging
 import re
@@ -291,6 +292,19 @@ class KnowledgeDemandResolver:
         )
 
 
+def corpus_passage(content: str, query: str, *, max_chars: int = 700) -> tuple[str, int, int]:
+    """Choose a bounded, query-dense passage, retaining source character offsets."""
+    terms = research_terms(query)
+    matches = list(re.finditer(r"[A-Za-z0-9_-]+", content))
+    positions = [m.start() for m in matches
+                 if any(m.group().lower().startswith(term) for term in terms)]
+    starts = {max(0, pos - 100) for pos in positions} or {0}
+    start = max(starts, key=lambda pos: (
+        bisect_left(positions, pos + max_chars) - bisect_left(positions, pos), -pos))
+    end = min(len(content), start + max_chars)
+    return content[start:end], start, end
+
+
 @dataclass(frozen=True)
 class CorpusResearchHit:
     section_id: UUID
@@ -301,6 +315,11 @@ class CorpusResearchHit:
     excerpt: str
     scopes: tuple[str, ...]
     retrieval_methods: tuple[str, ...] = ()
+    source_uri: str | None = None
+    epistemic_namespace: str = "reference"
+    identity_binding: str = "external"
+    passage_start: int = 0
+    passage_end: int = 0
 
 
 @dataclass(frozen=True)
@@ -312,6 +331,7 @@ class CorpusResearchResult:
     terms: tuple[str, ...]
     hits: tuple[CorpusResearchHit, ...]
     status: str
+    candidate_count: int = 0
 
     def reference_context(self) -> list[dict]:
         """Render temporary context without crossing the acquisition boundary."""
@@ -327,6 +347,11 @@ class CorpusResearchResult:
                 "score": hit.score,
                 "scopes": list(hit.scopes),
                 "retrieval_methods": list(hit.retrieval_methods),
+                "source_uri": hit.source_uri,
+                "epistemic_namespace": hit.epistemic_namespace,
+                "identity_binding": hit.identity_binding,
+                "passage_start": hit.passage_start,
+                "passage_end": hit.passage_end,
                 "durable_knowledge": False,
             }
             for hit in self.hits
@@ -347,6 +372,8 @@ class CorpusSearchService:
         query: str,
         limit: int = 8,
         include_fanwork: bool = True,
+        assigned_only: bool = False,
+        lexical_only: bool = False,
     ) -> CorpusResearchResult:
         query = query.strip()
         if not query:
@@ -361,6 +388,18 @@ class CorpusSearchService:
         if not instance:
             raise ValueError(f"unknown character instance {instance_id}")
         character_id = str(instance["character_id"])
+
+        if assigned_only:
+            assigned = await self.db.fetchval(
+                """SELECT EXISTS (SELECT 1 FROM aios.character_knowledge_domain
+                                  WHERE character_id=$1 AND enabled)
+                       OR EXISTS (SELECT 1 FROM aios.character_corpus_access
+                                  WHERE character_id=$1 AND allowed)""", character_id)
+            if not assigned:
+                research_id = await self._record_search(
+                    instance_id, character_id, query, terms, "skipped", 0)
+                return CorpusResearchResult(
+                    research_id, instance_id, character_id, query, terms, (), "no_assignment")
 
         access = await self.db.fetchrow(
             """
@@ -410,7 +449,7 @@ class CorpusSearchService:
         vector_sections: list[UUID] = []
         suggested_topics: list[UUID] = []
         try:
-            candidates = await asyncio.to_thread(
+            candidates = [] if lexical_only else await asyncio.to_thread(
                 self.semantic.search_corpus_discovery,
                 re.sub(r"\s+OR\s+", " ", query, flags=re.IGNORECASE),
                 corpus_k=96, topic_k=12)
@@ -438,7 +477,7 @@ class CorpusSearchService:
         # Qdrant topic IDs are verified against active catalog SQL identities,
         # then expanded only one relationship hop. Every resulting source still
         # passes the *same* per-character ACL as full-text candidates.
-        related_sections = await self.db.fetch(
+        related_sections = [] if lexical_only else await self.db.fetch(
             """
             WITH verified AS (
                 SELECT t.topic_id
@@ -526,7 +565,7 @@ class CorpusSearchService:
             """
             WITH q AS (SELECT websearch_to_tsquery('english',$2) AS query),
             candidate AS (
-              SELECT cs.section_id,cs.document_id,cd.title,cs.heading,cs.content,
+              SELECT cs.section_id,cs.document_id,cd.title,cd.source_uri,cd.epistemic_namespace,cd.identity_binding,cs.heading,cs.content,
                      cs.search_vector,
                      CASE WHEN cs.search_vector @@ q.query
                           THEN ts_rank_cd(cs.search_vector,q.query) ELSE 0.0 END
@@ -548,6 +587,28 @@ class CorpusSearchService:
               CROSS JOIN q
               WHERE (cs.search_vector @@ q.query OR cs.section_id=ANY($6::uuid[])
                      OR cs.section_id=ANY($7::uuid[]))
+                AND (NOT $8::boolean OR (
+                  EXISTS (SELECT 1 FROM aios.corpus_document_domain dd
+                          JOIN aios.character_knowledge_domain kd
+                            ON kd.character_id=$1 AND kd.enabled
+                           AND kd.knowledge_domain=dd.knowledge_domain
+                          WHERE dd.document_id=cs.document_id)
+                  OR EXISTS (SELECT 1 FROM aios.corpus_document_collection dc
+                             JOIN aios.corpus_source_profile sp ON sp.profile_id=dc.profile_id AND sp.enabled
+                             JOIN aios.character_knowledge_domain kd
+                               ON kd.character_id=$1 AND kd.enabled
+                              AND kd.knowledge_domain=sp.knowledge_domain
+                             WHERE dc.document_id=cs.document_id)
+                  OR EXISTS (SELECT 1 FROM aios.corpus_document_scope ds
+                             JOIN aios.character_corpus_access ac ON ac.character_id=$1 AND ac.allowed
+                               AND (ds.scope_key=ac.scope_key OR
+                                    left(ds.scope_key,length(ac.scope_key)+1)=ac.scope_key||'.')
+                             WHERE ds.document_id=cs.document_id)))
+                AND (NOT $8::boolean OR cs.section_id=ANY($6::uuid[]) OR
+                  (SELECT count(*) FROM unnest($4::text[]) term
+                   WHERE cs.search_vector @@ plainto_tsquery('english',term))
+                    >= LEAST(2,cardinality($4::text[])))
+                AND ($5::boolean OR cd.epistemic_namespace !~* '(^|[.:])fanwork([.:]|$)')
                 AND ($5::boolean OR NOT EXISTS (
                   SELECT 1 FROM aios.corpus_document_scope fan_scope
                   WHERE fan_scope.document_id=cs.document_id
@@ -600,7 +661,8 @@ class CorpusSearchService:
               FROM candidate
             )
             SELECT ranked.section_id,ranked.document_id,ranked.title,ranked.heading,
-               left(ranked.content,1800) AS excerpt,
+               ranked.content AS excerpt, ranked.source_uri,
+               ranked.epistemic_namespace, ranked.identity_binding,
                COALESCE((SELECT array_agg(DISTINCT cds.scope_key ORDER BY cds.scope_key)
                          FROM aios.corpus_document_scope cds
                          WHERE cds.document_id=ranked.document_id),'{}'::text[]) AS scopes,
@@ -618,15 +680,16 @@ class CorpusSearchService:
             ORDER BY score DESC,section_id LIMIT $3
             """,
             character_id,query,max(64,min(256,bounded_limit*10)),
-            list(terms),include_fanwork,vector_sections,topic_sections,
+            list(terms),include_fanwork,vector_sections,topic_sections,assigned_only,
         )
+        candidate_count = len(rows)
         # Avoid a single long reference document crowding out independent sources.
         selected = []
         overflow = []
         by_document = {}
         for row in rows:
             doc_id = row["document_id"]
-            if by_document.get(doc_id,0) < 2:
+            if by_document.get(doc_id,0) < 1:
                 selected.append(row)
                 by_document[doc_id] = by_document.get(doc_id,0)+1
             else:
@@ -644,13 +707,19 @@ class CorpusSearchService:
                 score=float(row["score"] or 0.0),
                 title=row["title"],
                 heading=row["heading"],
-                excerpt=row["excerpt"] or "",
+                excerpt=passage[0],
+                source_uri=row.get("source_uri"),
+                epistemic_namespace=row.get("epistemic_namespace") or "reference",
+                identity_binding=row.get("identity_binding") or "external",
+                passage_start=passage[1],
+                passage_end=passage[2],
                 scopes=tuple(row["scopes"] or ()),
                 retrieval_methods=tuple(kind for kind, present in (
                     ("lexical",row["lexical_hit"]),("semantic",row["semantic_hit"]),
                     ("topic",row["topic_hit"])) if present),
             )
             for row in rows
+            for passage in [corpus_passage(row["excerpt"] or "", query)]
         )
         status = "searched" if hits else "no_results"
         research_id = await self._record_search(
@@ -674,7 +743,7 @@ class CorpusSearchService:
             )
 
         return CorpusResearchResult(
-            research_id, instance_id, character_id, query, terms, hits, status
+            research_id, instance_id, character_id, query, terms, hits, status, candidate_count
         )
 
     async def _record_search(
@@ -723,10 +792,13 @@ class CharacterResearchService:
         query: str,
         limit: int = 8,
         include_fanwork: bool = True,
+        assigned_only: bool = False,
+        lexical_only: bool = False,
     ) -> CorpusResearchResult:
         return await self.searcher.search(
             instance_id=instance_id, query=query, limit=limit,
             include_fanwork=include_fanwork,
+            assigned_only=assigned_only, lexical_only=lexical_only,
         )
 
     async def acquire(

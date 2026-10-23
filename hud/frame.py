@@ -80,6 +80,25 @@ def _trim_to_budget(
     return selected
 
 
+def _budget_corpus_references(items: Iterable[dict[str, Any]], token_cap: int, query: str) -> list[dict[str, Any]]:
+    """Share the reference budget and preserve passage coordinates when clipping."""
+    from aios_app.epistemic.research import corpus_passage
+    selected = []
+    remaining = max(0, token_cap * 4)
+    for item in items:
+        overhead = len(str(item.get("title") or "")) + len(str(item.get("heading") or "")) + 100
+        available = remaining - overhead
+        if available < 100:
+            continue
+        text, start, end = corpus_passage(str(item.get("text") or ""), query, max_chars=min(700, available))
+        clipped = dict(item, text=text,
+                       passage_start=int(item.get("passage_start") or 0) + start,
+                       passage_end=int(item.get("passage_start") or 0) + end)
+        selected.append(clipped)
+        remaining -= overhead + len(text)
+    return selected
+
+
 class HUDAssembler:
     """Build the canonical prompt-ready HUD from already-resolved cognition.
 
@@ -322,12 +341,10 @@ class HUDAssembler:
             lambda x: x.get("message_text") or x.get("text") or "",
         )
 
-        corpus_references = _trim_to_budget(
+        corpus_references = _budget_corpus_references(
             cognitive_snapshot.corpus_references,
             section_caps["corpus_references"],
-            lambda x: (
-                f"{x.get('title') or ''} {x.get('heading') or ''} {x.get('text') or ''}"
-            ),
+            attention.focus_text,
         )
 
         rdf_evidence = _trim_to_budget(
@@ -497,6 +514,8 @@ class HUDAssembler:
                 },
                 "corpus_research": {
                     "reference_count": len(corpus_references),
+                    "retrieved_count": len(cognitive_snapshot.corpus_references),
+                    "budget_excluded_count": max(0, len(cognitive_snapshot.corpus_references) - len(corpus_references)),
                     "demand": cognitive_snapshot.corpus_demand,
                     "durable_knowledge": False,
                 },

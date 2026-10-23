@@ -423,3 +423,37 @@ def test_explicit_source_question_uses_request_not_full_narrative():
         "What was Renamon originally going to be named?"
     )
     assert focused_corpus_research_query("I type search three.") is None
+
+
+def test_contextual_corpus_uses_topic_and_dynamic_character_name():
+    from aios_app.epistemic.cognitive_context import contextual_corpus_query, focused_corpus_research_query
+    from dataclasses import replace
+    base = _corpus_attention(speaker_id='Mia', speaker_role='user')
+    assert focused_corpus_research_query('Arbitrary Fox, research Digimon evolution.', character_id='Arbitrary Fox') == 'Digimon evolution'
+    assert focused_corpus_research_query('"Arbitrary Fox, research Digimon evolution."', character_id='Arbitrary Fox') == 'Digimon evolution'
+    ordinary = replace(base, focus_text='Digimon evolution follows branching paths.')
+    assert 'digimon' in contextual_corpus_query(ordinary, character_id='Arbitrary Fox')
+    personal = replace(base, focus_text='Have you ever liked sleeves before today?', knowledge_route='character')
+    assert contextual_corpus_query(personal, character_id='Arbitrary Fox') is None
+    descriptive = replace(base, focus_text='What kind of Digimon are you?', knowledge_route='character')
+    assert contextual_corpus_query(descriptive, character_id='Arbitrary Fox') == 'digimon'
+
+
+def test_focus_override_is_not_authorized_using_unrelated_message():
+    from dataclasses import replace
+    base = _corpus_attention(speaker_id='Mia', speaker_role='user')
+    overridden = replace(base, focus_text='What have you worn before?', knowledge_route='character')
+    assert not automatic_corpus_research_allowed(overridden, character_id='Renamon')
+    unmatched = replace(base, focus_text='What are quartz crystals?')
+    assert not automatic_corpus_research_allowed(unmatched, character_id='Renamon')
+
+
+def test_corpus_budget_preserves_source_offsets_and_hides_excluded_items():
+    from aios_app.epistemic.research import corpus_passage
+    from aios_app.hud.frame import _budget_corpus_references
+    content = 'Introductory material. ' * 200 + 'Digimon evolution changes form.'
+    passage, start, end = corpus_passage(content, 'Digimon evolution')
+    selected = _budget_corpus_references([{'text':passage,'passage_start':start,'passage_end':end}], 64, 'Digimon evolution')
+    assert selected and 'Digimon evolution' in selected[0]['text']
+    assert content[selected[0]['passage_start']:selected[0]['passage_end']] == selected[0]['text']
+    assert _budget_corpus_references([{'text':passage}],0,'Digimon') == []
