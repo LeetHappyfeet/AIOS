@@ -6,7 +6,8 @@ from typing import Any, Mapping
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.pipeline.jobs import enqueue_job
+from aios_app.pipeline.jobs import enqueue_job, JobDeferred
+from aios_app.inference import InferenceUnavailable
 from aios_app.epistemic.research import CorpusSearchService
 from aios_app.hud.context import HUDContextResolver
 
@@ -32,6 +33,19 @@ class CognitiveOperationEngine:
                 opportunity["opportunity_id"],episode_id,source_task_id)
             if existing:
                 return existing["operation_id"]
+            payload=self._mapping(opportunity.get("operation_payload"))
+            revision=payload.get("review_revision")
+            if opportunity["operation_type"] == "planning.review" and revision:
+                await self.db.fetchval("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                    f"goal-review:{opportunity['instance_id']}:{revision}")
+                existing=await self.db.fetchrow(
+                    """SELECT operation_id FROM aios.character_cognitive_operation
+                       WHERE instance_id=$1 AND operation_type='planning.review'
+                         AND input->>'review_revision'=$2
+                         AND status IN ('queued','running','waiting_inference','succeeded')
+                       LIMIT 1""", opportunity["instance_id"],revision)
+                if existing:
+                    return existing["operation_id"]
             return await self._create_from_opportunity(
                 opportunity=opportunity,thread_id=thread_id,priority=priority,
                 source_task_id=source_task_id,episode_id=episode_id,episode_role=episode_role)
@@ -233,9 +247,19 @@ class CognitiveOperationEngine:
             from .goal_planning import GoalPlanningService
             result = await GoalPlanningService(self.db).propose(op)
             if result.get("status") == "stale":
-                await self._stale(op, "goal planning context advanced")
+                await self._stale(op, str(result.get("reason") or "goal planning context advanced"), details=result)
             else:
                 await self._finish(op, result)
+        except InferenceUnavailable as exc:
+            previous=self._mapping(op.get("result"))
+            count=int(previous.get("deferral_count") or 0)+1
+            delay=min(300,15 * 2 ** min(count-1,5))
+            await self.db.execute(
+                """UPDATE aios.character_cognitive_operation SET result=$2::jsonb,updated_at=now()
+                   WHERE operation_id=$1 AND status='running'""",op["operation_id"],
+                json.dumps({"kind":"provider_deferred","reason":str(exc)[:1000],
+                            "deferral_count":count,"retry_delay_seconds":delay}))
+            raise JobDeferred(str(exc), delay_seconds=delay) from exc
         except Exception as exc:
             await self._fail(op, exc)
             raise
@@ -352,17 +376,36 @@ class CognitiveOperationEngine:
     async def _create_decision_transaction(self, op):
         from aios_app.agent.transactions import InternalCognitionTransactions
         payload=self._mapping(op["input"])
+        review_context = None
         if str(op["operation_type"])=="planning.review":
+            from .goal_review import source_excerpt
+            if payload.get("attempt_id") and str(op.get("goal_attempt_id")) != payload["attempt_id"]:
+                await self._stale(op,"review attempt changed before inference")
+                return
             turns=payload.get("recent_source_events") or []
-            excerpts=[
-                f"{str(turn.get('speaker_id') or 'unknown')}: {str(turn.get('message_text') or '')[:260]}"
-                for turn in turns[:4] if isinstance(turn,Mapping)
-            ]
-            subject=(
-                f"Goal: {str(payload.get('goal') or '')[:180]}. "
-                f"Current focus: {str(payload.get('focus') or '')[:300]}. "
-                f"Recent source turns (newest first): {' | '.join(excerpts)}."
-            )[:1200]
+            # Read original, still-live branch-local messages for legacy queued reviews too.
+            ids=[str(t.get("node_id") or "") for t in turns[:4] if isinstance(t,Mapping)]
+            rows=await self.db.fetch(
+                """SELECT n.node_id,n.speaker_id,n.speaker_role,n.message_text
+                   FROM aios.dag_node n JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+                   JOIN aios.dag_node head ON head.node_id=$3 AND head.timeline_id=$2
+                   WHERE n.node_id::text=ANY($1::text[]) AND n.timeline_id=$2
+                     AND n.event_id<=head.event_id AND ie.superseded_at IS NULL""",
+                ids,op.get("source_timeline_id"),op.get("source_node_id"))
+            by_id={str(r["node_id"]):dict(r) for r in rows}
+            payload["recent_source_events"]=[source_excerpt(by_id[i],str(payload.get("goal") or ""))
+                                             for i in ids if i in by_id]
+            # New reviews must not silently use retracted/edited evidence under an old revision.
+            original={str(t.get("node_id")):t.get("source_hash") for t in turns if isinstance(t,Mapping)}
+            if payload.get("review_revision") and (len(payload["recent_source_events"]) != len(ids) or any(
+                original.get(t["node_id"]) != t["source_hash"] for t in payload["recent_source_events"])):
+                await self._stale(op,"review source evidence changed before inference")
+                return
+            if not payload["recent_source_events"]:
+                await self._stale(op,"review source evidence unavailable before inference")
+                return
+            review_context=payload
+            subject=f"Goal: {str(payload.get('goal') or '')[:600]}"
         else:
             subject=" ".join(str(v) for v in payload.values() if v)[:220]
         labels={
@@ -403,7 +446,7 @@ class CognitiveOperationEngine:
             instance_id=op["instance_id"], candidates=candidates, priority=120,
             ttl_seconds=300, worker_profile=faculty_profile,
             focus_text=subject, subject=subject,transaction_kind="decision",
-            episode_id=op.get("episode_id"))
+            episode_id=op.get("episode_id"),review_context=review_context)
         await self.db.execute(
             """UPDATE aios.character_cognitive_operation SET status='waiting_inference',
                transaction_id=$2,updated_at=now() WHERE operation_id=$1""",
@@ -445,13 +488,13 @@ class CognitiveOperationEngine:
         await self.reconcile_terminal(operation_id)
         return True
 
-    async def _stale(self, op: Mapping[str,Any], reason: str) -> None:
+    async def _stale(self, op: Mapping[str,Any], reason: str, *, details: Mapping | None = None) -> None:
         changed=await self.db.execute_returning_row(
             """UPDATE aios.character_cognitive_operation SET status='stale',result=$2::jsonb,
                completed_at=now(),updated_at=now()
                WHERE operation_id=$1 AND status IN ('queued','running','waiting_inference')
                RETURNING operation_id""",
-            op["operation_id"],json.dumps({"reason":reason}))
+            op["operation_id"],json.dumps({**dict(details or {}),"reason":reason},default=str))
         if changed:
             await self.reconcile_terminal(op["operation_id"])
 

@@ -33,6 +33,36 @@ class InferenceProviderBusy(RuntimeError):
 class InferenceProviderExecutionError(RuntimeError):
     """Remote endpoint/transport failure, unlike an AIOS database failure."""
 
+    def __init__(self, message: str, *, status_code: int | None = None,
+                 retry_after: float = 60.0):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = max(15.0,min(float(retry_after),300.0))
+
+
+def provider_failure(exc: Exception, provider: InferenceProvider) -> InferenceProviderExecutionError:
+    """Keep bounded provider diagnostics, excluding configured credentials."""
+    message = str(exc)
+    code = getattr(exc,"code",None)
+    retry_after = 60.0
+    if isinstance(exc,urllib.error.HTTPError):
+        try:
+            data = json.loads(exc.read(2048).decode("utf-8",errors="replace"))
+            error = data.get("error",{}) if isinstance(data,dict) else {}
+            if isinstance(error,dict):
+                detail = {k:error[k] for k in ("type","code","message") if k in error}
+                message += ": " + json.dumps(detail,ensure_ascii=True)
+        except (ValueError,OSError):
+            pass
+        try:
+            retry_after = float(exc.headers.get("Retry-After","60"))
+        except (ValueError,TypeError,AttributeError):
+            pass
+    for secret in (provider.api_key_secret,os.getenv(provider.api_key_env or "")):
+        if secret:
+            message = message.replace(secret,"[redacted]")
+    return InferenceProviderExecutionError(message[:1000],status_code=code,retry_after=retry_after)
+
 
 class InferencePersistenceError(RuntimeError):
     """Host-owned SQL/admission failure; must not damage provider health."""
@@ -190,9 +220,13 @@ class InferenceBroker:
                 continue
             except InferenceProviderExecutionError as exc:
                 last_error = exc
-                await self.providers.record_health(
-                    provider.provider_id, ok=False, error=str(exc)[:1000]
-                )
+                if exc.status_code == 429:
+                    await self.providers.record_rate_limit(provider.provider_id,
+                        delay_seconds=exc.retry_after,error=str(exc))
+                else:
+                    await self.providers.record_health(
+                        provider.provider_id, ok=False, error=str(exc)[:1000]
+                    )
             except Exception:
                 # SQL, schema and host-side programming faults are not evidence
                 # of an unhealthy donated inference provider. Preserve traceback.
@@ -272,7 +306,7 @@ class InferenceBroker:
             try:
                 text = await self.client.complete(provider, request)
             except Exception as exc:
-                raise InferenceProviderExecutionError(str(exc)) from exc
+                raise provider_failure(exc,provider) from exc
             if request.choice_keys:
                 raw_choice = text.strip()
                 # The control protocol remains host-owned. Accept either the

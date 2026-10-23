@@ -41,8 +41,8 @@ progressive reference research. Environmental questions wait for supplied
 information; this version adds no simulator, sensor, or physical action adapter.
 Research exposure is not study or acquisition. There is no automatic study.
 
-Deduplication uses the goal attempt, objective, source timeline/head and state version, requirement
-coverage, bounded information receipt summaries, and corpus/access epoch. It
+Deduplication uses the goal attempt, objective, source timeline/head, requirement
+coverage, bounded information receipt summaries, and relevant corpus/access epoch after a no-access result. It
 does not include planning timestamps or proposal revisions. Identical inputs
 (including failed requests) do not trigger another model call. Relevant later
 chat messages, changed requirements/receipts, or a new corpus/access epoch can
@@ -51,7 +51,7 @@ permit a new revision. Polling itself performs no inference on unchanged inputs.
 Plan-owned operations do not acknowledge host cognition deltas or record goal
 progress. Waiting for information finishes the operation; it does not keep a
 cognitive episode open. Existing operation recovery cleans up failed/stale work.
-Goal attempt, timeline/head, state version, input fingerprint, and live operation
+Goal attempt, timeline/head, input fingerprint, and live operation
 ownership are checked before accepting model output. Invalid or stale responses
 preserve the preceding accepted plan. The HUD labels earlier-context plans.
 Closing or deactivating a goal closes its visible plans; new attempts never
@@ -61,9 +61,9 @@ inherit an old attempt's plan. There are no planning writes during HUD assembly.
 
 Stop old processes, pull `AIOS-development`, run `python -m aios_app.migrate`,
 and restart services. Apply immutable migration
-`20261014_02_goal_planning.sql`; no reset or reingestion is required. Mixed old
+`20261014_02_goal_planning.sql` and `20261023_01_goal_review_repair.sql`; no reset or reingestion is required. Mixed old
 and new workers are not supported. A configured planning provider is required
-for proposals; provider failures remain failed operation receipts.
+for proposals. Unavailable providers defer the existing planning job with bounded backoff.
 
 Inspect proposals and their inference operation:
 
@@ -119,3 +119,57 @@ knowledge count, knowledge status, and context preparation duration. This change
 requires a code update and service restart, but no additional migration beyond
 the queue correction above. Independent semantic-index SQL/lock contention may
 still require separate investigation.
+
+
+## Source review and planning repair
+
+Goal reviews use a dedicated bounded prompt containing up to four source messages,
+with opening, ending and lexically relevant middle passages. Each passage carries
+its original character offsets and source node, speaker and role. Before inference,
+original messages are reloaded under the operation's source timeline/head and checked
+against the stored hashes. Legacy queued reviews are reloaded too. The micro-HUD
+subject limit no longer removes this evidence. Reports remain reports; the prompt
+separates the goal owner, speaker and intended performer, attempts, progress and
+satisfaction. It does not promote narration to independently verified success.
+
+A review revision includes the attempt, goal text, source coordinates, message
+hashes (including attribution), and the latest non-review goal evidence ID.
+Successful or outstanding reviews of the same revision are suppressed. Failed/stale
+reviews have a 60-second retry hold. An advisory lock and partial unique index
+protect concurrent admissions. A changed attempt, source or external evidence can
+permit a new review; a review's own progress receipt cannot cause another review.
+Completion reviews retain strict state/head checks and the lifecycle's later-source
+and live-attempt guards. This release does not rewrite existing goal statuses.
+
+Advisory plan fingerprints exclude the generic runtime state version. Source
+changes, different attempts, changed knowledge inputs and operation ownership
+still invalidate work. `character_goal_plan.input_context` retains the components
+used for the fingerprint. Stale operation results now record `reason`, `stage`
+(`before_inference`/`after_inference`), `changed_inputs` and, when available,
+`inference_request_id`. A state-only change no longer makes the HUD label an
+otherwise current advisory plan as outdated.
+
+The planner checks routable provider capacity before admission. A race with capacity
+or a later provider outage defers the same operation and pipeline lease, preserving
+attempt identity and the preceding accepted plan. Backoff increases from 15 seconds
+to a 300-second maximum, recorded in the operation result. The runner uses its
+existing ownership-checked deferral rather than consuming queue failure attempts.
+HTTP 429 responses immediately set a shared provider cooldown (15–300 seconds,
+using numeric Retry-After when supplied); they do not declare the endpoint offline.
+Provider errors retain bounded JSON error details with configured credentials
+redacted, so HTTP 400 failures can be diagnosed without weakening plan validation.
+
+Inspect the new diagnostics with:
+
+```sql
+SELECT operation_type,status,result->>'reason' AS reason,
+       result->>'stage' AS stage,count(*)
+FROM aios.character_cognitive_operation
+WHERE operation_type IN ('planning.propose','planning.review')
+GROUP BY operation_type,status,result->>'reason',result->>'stage';
+```
+
+Regression tests also cover bounded evidence reaching the actual transaction prompt,
+source/attempt changes, duplicate review admission, unavailable providers, rate-limit
+cooldown, and state-only changes during inference. Run the cognitive-episode-recovery
+workflow, including its isolated PostgreSQL fixtures, before deployment.

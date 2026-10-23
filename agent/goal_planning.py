@@ -15,6 +15,7 @@ from uuid import UUID
 
 from aios_app.hud.context import HUDContextResolver
 from aios_app.pipeline.jobs import enqueue_job
+from aios_app.inference.providers import InferenceProviderStore
 
 logger = logging.getLogger(__name__)
 KINDS = {"personal", "procedure", "environment"}
@@ -258,9 +259,10 @@ class GoalPlanningService:
         epoch = await ProgressiveResearchService(self.db).corpus_change_epoch(instance_id)
         inputs = {"goal": str(goal["goal_id"]), "objective": goal["goal_text"],
                   "attempt": str(goal["attempt_id"]), "timeline": str(context.source_timeline_id),
-                  "node": str(context.source_head_node_id), "state_version": context.state_version,
+                  "node": str(context.source_head_node_id),
                   "requirements": requirements,
-                  "receipts": summaries, "corpus_epoch": str(epoch)}
+                  "receipts": summaries,
+                  "corpus_epoch": str(epoch) if any(r.get("reason")=="no_access" for r in summaries) else None}
         # Only an already-requested internal lookup needs an RDF evidence epoch.
         # This is bounded SQL over indexed coordinates, never a recall pipeline.
         for requirement in requirements:
@@ -271,10 +273,12 @@ class GoalPlanningService:
                     inputs.setdefault("rdf_evidence_revisions",[]).append((requirement["requirement_id"],revision))
         fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
         return {**dict(goal), "context": context, "requirements": requirements,
-                "receipts": summaries, "fingerprint": fingerprint}
+                "receipts": summaries, "fingerprint": fingerprint, "input_context": inputs}
 
     async def schedule_due(self, limit: int = 8) -> int:
         # One primary active goal per instance, independently of chat batching.
+        if not await InferenceProviderStore(self.db).routable("planning"):
+            return 0
         rows = await self.db.fetch(
             """SELECT primary_goal.instance_id,primary_goal.goal_id FROM (
                  SELECT DISTINCT ON (g.instance_id) g.instance_id,g.goal_id,g.priority
@@ -306,18 +310,21 @@ class GoalPlanningService:
                    WHERE instance_id=$1 AND input->>'planning_only'='true'
                      AND status IN ('queued','running','waiting_inference') LIMIT 1""", instance_id):
                 return False
+            if not await InferenceProviderStore(self.db).routable("planning"):
+                return False
             snap = await self.snapshot(instance_id, goal_id)
             if not snap:
                 return False
             ctx = snap["context"]
             row = await self.db.fetchrow(
                 """INSERT INTO aios.character_goal_plan(instance_id,goal_id,attempt_id,revision,
-                       input_fingerprint,source_timeline_id,source_node_id,source_state_version)
-                   SELECT $1,$2,$3,COALESCE(max(revision),0)+1,$4,$5,$6,$7
+                       input_fingerprint,source_timeline_id,source_node_id,source_state_version,input_context)
+                   SELECT $1,$2,$3,COALESCE(max(revision),0)+1,$4,$5,$6,$7,$8::jsonb
                    FROM aios.character_goal_plan WHERE instance_id=$1 AND goal_id=$2 AND attempt_id=$3
                    ON CONFLICT(instance_id,goal_id,attempt_id,input_fingerprint) DO NOTHING RETURNING plan_id""",
                 instance_id, goal_id, snap["attempt_id"], snap["fingerprint"],
-                ctx.source_timeline_id, ctx.source_head_node_id, ctx.state_version)
+                ctx.source_timeline_id, ctx.source_head_node_id, ctx.state_version,
+                json.dumps(snap["input_context"],default=str))
             if not row:
                 return False
             payload = {"goal_id": str(goal_id), "plan_id": str(row["plan_id"]), "planning_only": True, "attempt_id": str(snap["attempt_id"])}
@@ -340,8 +347,9 @@ class GoalPlanningService:
         plan = await self.db.fetchrow("SELECT * FROM aios.character_goal_plan WHERE plan_id=$1 AND instance_id=$2",
                                       plan_id, op["instance_id"])
         snap = await self.snapshot(op["instance_id"], goal_id)
-        if not self.fresh(plan, snap, op):
-            return {"kind": "goal_plan", "status": "stale"}
+        reason = self.stale_reason(plan, snap, op)
+        if reason:
+            return self.stale_result(plan,snap,reason,"before_inference")
         ctx = snap["context"]
         started = time.perf_counter()
         messages = await self.db.fetch(
@@ -376,8 +384,9 @@ class GoalPlanningService:
             plan = await self.db.fetchrow("SELECT * FROM aios.character_goal_plan WHERE plan_id=$1 FOR UPDATE", plan_id)
             live = await self.db.fetchval("SELECT 1 FROM aios.character_cognitive_operation WHERE operation_id=$1 AND status='running'",
                                           op["operation_id"])
-            if not live or not self.fresh(plan, latest, op):
-                return {"kind": "goal_plan", "status": "stale"}
+            reason = "operation_inactive" if not live else self.stale_reason(plan,latest,op)
+            if reason:
+                return self.stale_result(plan,latest,reason,"after_inference",str(result.request_id))
             status = "waiting_information" if proposal["open_questions"] else "ready"
             await self.db.execute(
                 """UPDATE aios.character_goal_plan SET status='superseded',updated_at=now()
@@ -393,15 +402,31 @@ class GoalPlanningService:
                 "knowledge_context_status": knowledge_status}
 
     @staticmethod
-    def fresh(plan, snap, op) -> bool:
-        if not plan or not snap or plan["status"] != "queued":
-            return False
+    def stale_reason(plan, snap, op) -> str | None:
+        if not plan:
+            return "plan_missing"
+        if not snap:
+            return "goal_attempt_inactive_or_runtime_paused"
         ctx = snap["context"]
-        return (plan["operation_id"] == op["operation_id"] and plan["attempt_id"] == snap["attempt_id"]
-                and plan["input_fingerprint"] == snap["fingerprint"]
-                and plan["source_timeline_id"] == ctx.source_timeline_id
-                and plan["source_node_id"] == ctx.source_head_node_id
-                and plan["source_state_version"] == ctx.state_version)
+        checks = ((plan["status"] == "queued", "plan_not_queued"),
+                  (plan["operation_id"] == op["operation_id"], "operation_replaced"),
+                  (plan["attempt_id"] == snap["attempt_id"], "attempt_changed"),
+                  (plan["source_timeline_id"] == ctx.source_timeline_id, "source_timeline_changed"),
+                  (plan["source_node_id"] == ctx.source_head_node_id, "source_node_changed"),
+                  (plan["input_fingerprint"] == snap["fingerprint"], "planning_inputs_changed"))
+        return next((reason for matches,reason in checks if not matches),None)
+
+    @classmethod
+    def fresh(cls,plan,snap,op) -> bool:
+        return cls.stale_reason(plan,snap,op) is None
+
+    @staticmethod
+    def stale_result(plan,snap,reason,stage,inference_request_id=None) -> dict:
+        old = mapping(plan.get("input_context")) if plan else {}
+        new = json.loads(json.dumps(snap.get("input_context",{}),default=str)) if snap else {}
+        changed = sorted(k for k in old.keys() | new.keys() if old.get(k) != new.get(k))
+        return {"kind":"goal_plan","status":"stale","reason":reason,"stage":stage,
+                "changed_inputs":changed,"inference_request_id":inference_request_id}
 
     async def continue_once(self, op: dict, proposal: dict, snap: dict) -> None:
         """One host-constructed lookup; no physical actions and no study/admission."""
@@ -487,8 +512,7 @@ class GoalPlanningService:
             return {}
         rows = await self.db.fetch(
             """SELECT DISTINCT ON (p.goal_id) p.*,
-                      (p.source_node_id IS NOT DISTINCT FROM rs.source_head_node_id
-                       AND p.source_state_version=rs.state_version) AS context_current
+                      (p.source_node_id IS NOT DISTINCT FROM rs.source_head_node_id) AS context_current
                FROM aios.character_goal_plan p
                JOIN aios.character_agent_goal g ON g.goal_id=p.goal_id AND g.instance_id=p.instance_id
                JOIN aios.character_goal_attempt a ON a.attempt_id=p.attempt_id AND a.closed_at IS NULL

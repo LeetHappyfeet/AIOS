@@ -11,6 +11,14 @@ from ..db import Database
 from .job_registry import SchedulingLane, job_spec, scheduling_lane
 
 
+
+class JobDeferred(RuntimeError):
+    """Transient admission failure; retain the same durable queue owner."""
+
+    def __init__(self, reason: str, *, delay_seconds: float = 15.0):
+        super().__init__(reason)
+        self.delay_seconds = max(1.0, min(float(delay_seconds), 300.0))
+
 # ---------------------------------------------------------------------
 # Enqueue
 # ---------------------------------------------------------------------

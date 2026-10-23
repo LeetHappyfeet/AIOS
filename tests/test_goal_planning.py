@@ -63,7 +63,7 @@ async def test_waiting_environment_dependency_performs_no_lookup():
     await GoalPlanningService(DB()).continue_once({}, validate_plan(proposal(next_step="wait"), {"goal"}), {})
 
 
-def test_freshness_requires_live_attempt_branch_state_and_fingerprint():
+def test_freshness_requires_live_attempt_source_and_fingerprint():
     ctx = SimpleNamespace(source_timeline_id=uuid4(), source_head_node_id=uuid4(), state_version=3)
     op = {"operation_id": uuid4()}
     snap = {"context": ctx, "attempt_id": uuid4(), "fingerprint": "same"}
@@ -71,9 +71,11 @@ def test_freshness_requires_live_attempt_branch_state_and_fingerprint():
             "input_fingerprint": "same", "source_timeline_id": ctx.source_timeline_id,
             "source_node_id": ctx.source_head_node_id, "source_state_version": 3}
     assert GoalPlanningService.fresh(plan, snap, op)
+    ctx.state_version += 1
+    assert GoalPlanningService.fresh(plan, snap, op)
     for key, changed in (("status", "closed"), ("attempt_id", uuid4()),
                          ("source_timeline_id", uuid4()), ("source_node_id", uuid4()),
-                         ("source_state_version", 4), ("input_fingerprint", "changed")):
+                         ("input_fingerprint", "changed")):
         assert not GoalPlanningService.fresh({**plan, key: changed}, snap, op)
 
 

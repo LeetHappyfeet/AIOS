@@ -57,6 +57,7 @@ async def env(monkeypatch):
     db = Database('isolated'); db.pool = PGPool(con)
     await con.query(BOOTSTRAP, exec=True)
     await con.query((ROOT/'migrations/current/20261014_02_goal_planning.sql').read_text(), exec=True)
+    await con.query((ROOT/'migrations/current/20261023_01_goal_review_repair.sql').read_text(), exec=True)
     instance, goal, attempt, timeline, node = [uuid4() for _ in range(5)]
     await db.execute('INSERT INTO aios.character_instance VALUES($1)', instance)
     await db.execute("INSERT INTO aios.character_agent_goal(goal_id,instance_id,goal_text) VALUES($1,$2,'Learn to cook')", goal, instance)
@@ -81,6 +82,8 @@ async def env(monkeypatch):
         raise AssertionError("small planner must not invoke foreground retrieval")
     monkeypatch.setattr('aios_app.epistemic.cognitive_context.CognitiveContextService.resolve_attention_inputs', forbidden_foreground)
     monkeypatch.setattr('aios_app.epistemic.cognitive_context.CognitiveContextService.resolve_knowledge', forbidden_foreground)
+    async def available(*args, **kwargs): return [object()]
+    monkeypatch.setattr('aios_app.inference.providers.InferenceProviderStore.routable',available)
     async def infer(*args, **kwargs):
         return SimpleNamespace(request_id=uuid4(), response=SimpleNamespace(raw=proposal()))
     monkeypatch.setattr('aios_app.inference.InferenceBroker.infer', infer)
@@ -133,7 +136,7 @@ async def test_late_inference_is_rejected_and_previous_plan_survives_failure(env
     await e.db.execute('UPDATE aios.character_runtime_state SET source_head_node_id=$1', e.ctx.source_head_node_id)
     op=await running(e)
     async def late(*args, **kwargs):
-        e.ctx.state_version+=1
+        e.ctx.source_head_node_id=uuid4()
         return SimpleNamespace(request_id=uuid4(),response=SimpleNamespace(raw=proposal()))
     e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',late)
     assert (await e.service.propose(op))['status']=='stale'
@@ -302,3 +305,82 @@ async def test_environment_inquiry_is_internal_once_per_relevant_evidence_revisi
     await e.service.continue_once(op,proposal(next_step='internal_lookup'),snap)
     assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'")==2
     assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='research.advance'")==0
+
+
+@pytest.mark.asyncio
+async def test_runtime_only_changes_do_not_invalidate_advisory_plan(env):
+    e=env
+    op=await running(e)
+    first=await e.service.snapshot(e.instance,e.goal)
+    async def state_change(*args,**kwargs):
+        e.ctx.state_version+=1
+        await e.db.execute('UPDATE aios.character_runtime_state SET state_version=$1',e.ctx.state_version)
+        return SimpleNamespace(request_id=uuid4(),response=SimpleNamespace(raw=proposal(next_step='wait')))
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',state_change)
+    assert (await e.service.propose(op))['status']=='waiting_information'
+    assert first['fingerprint']==(await e.service.snapshot(e.instance,e.goal))['fingerprint']
+    assert (await e.service.current(e.instance,e.goal))['context_current']
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded'")
+    assert not await e.service.schedule(e.instance,e.goal)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_provider_creates_no_plan_or_operation(env):
+    e=env
+    async def unavailable(*args,**kwargs): return []
+    e.monkeypatch.setattr('aios_app.inference.providers.InferenceProviderStore.routable',unavailable)
+    assert not await e.service.schedule(e.instance,e.goal)
+    assert await e.service.schedule_due()==0
+    assert await e.db.fetchval('SELECT count(*) FROM aios.character_goal_plan')==0
+    assert await e.db.fetchval('SELECT count(*) FROM aios.character_cognitive_operation')==0
+
+
+@pytest.mark.asyncio
+async def test_source_change_audit_records_before_inference_and_consumes_no_model(env):
+    e=env
+    op=await running(e)
+    async def forbidden(*args,**kwargs): raise AssertionError('obsolete source must not reach inference')
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',forbidden)
+    e.ctx.source_head_node_id=uuid4()
+    result=await e.service.propose(op)
+    assert result['reason']=='source_node_changed'
+    assert result['stage']=='before_inference'
+    assert result['inference_request_id'] is None
+    assert 'node' in result['changed_inputs']
+
+
+@pytest.mark.asyncio
+async def test_review_revision_index_suppresses_repeated_success_but_allows_retry(env):
+    e=env
+    payload=json.dumps({'review_revision':'same-attempt-evidence'})
+    async def insert(status):
+        return await e.db.execute("""INSERT INTO aios.character_cognitive_operation(
+            instance_id,operation_type,input,status) VALUES($1,'planning.review',$2::jsonb,$3)""",
+            e.instance,payload,status)
+    await insert('succeeded')
+    with pytest.raises(RuntimeError,match='unique'):
+        await insert('queued')
+    # A genuinely different evidence/attempt revision can be reviewed.
+    await e.db.execute("""INSERT INTO aios.character_cognitive_operation(instance_id,operation_type,input)
+        VALUES($1,'planning.review','{"review_revision":"new-attempt-evidence"}')""",e.instance)
+    assert await e.db.fetchval('SELECT count(*) FROM aios.character_cognitive_operation')==2
+
+
+@pytest.mark.asyncio
+async def test_deferred_queue_lease_retains_identity_and_checks_owner(env):
+    from aios_app.pipeline.jobs import defer_claimed_job
+    e=env
+    op=await running(e)
+    await e.db.execute('''ALTER TABLE aios.pipeline_job
+        ADD COLUMN worker_id text, ADD COLUMN attempts int DEFAULT 1,
+        ADD COLUMN claimed_at timestamptz, ADD COLUMN heartbeat_at timestamptz,
+        ADD COLUMN lease_expires_at timestamptz, ADD COLUMN updated_at timestamptz DEFAULT now()''')
+    job=await e.db.fetchval("""UPDATE aios.pipeline_job SET status='running',worker_id='owner',run_after=now()
+        RETURNING job_id""")
+    assert not await defer_claimed_job(e.db,job,worker_id='wrong-owner',delay_seconds=60)
+    assert await defer_claimed_job(e.db,job,worker_id='owner',delay_seconds=60)
+    row=await e.db.fetchrow('SELECT status,worker_id,attempts,run_after>now() AS delayed FROM aios.pipeline_job')
+    assert row['status']=='queued' and row['worker_id'] is None and row['attempts']==0 and row['delayed']
+    assert await e.db.fetchval('SELECT status FROM aios.character_cognitive_operation')=='running'
+    assert await e.db.fetchval('SELECT status FROM aios.character_agent_goal')=='active'
+    assert await e.db.fetchval('SELECT operation_id FROM aios.character_goal_plan')==op['operation_id']

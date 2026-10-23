@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from aios_app.db import Database
+from .goal_review import source_excerpt, review_revision
 from aios_app.hud.context import HUDContextResolver
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
@@ -311,32 +312,51 @@ class CognitiveOpportunityService:
         # review slots. This prevents goals 4-N from becoming immortal merely
         # because older goals sort ahead of them.
         review_rows=await self.db.fetch(
-            """SELECT g.goal_id,
+            """SELECT g.goal_id, a.attempt_id,
+                      (SELECT e.goal_evidence_id FROM aios.character_goal_evidence e
+                       WHERE e.goal_id=g.goal_id AND e.instance_id=g.instance_id
+                         AND e.evidence_type<>'bounded_goal_review'
+                       ORDER BY e.created_at DESC,e.goal_evidence_id DESC LIMIT 1) AS evidence_revision,
                       max(o.completed_at) FILTER (
                         WHERE o.operation_type='planning.review'
                           AND o.status='succeeded'
                       ) AS last_reviewed_at
                FROM aios.character_agent_goal g
+               JOIN aios.character_goal_attempt a ON a.goal_id=g.goal_id
+                 AND a.instance_id=g.instance_id AND a.closed_at IS NULL
                LEFT JOIN aios.character_cognitive_operation o
                  ON o.instance_id=g.instance_id
                 AND o.input->>'goal_id'=g.goal_id::text
                WHERE g.instance_id=$1 AND g.status='active'
-               GROUP BY g.goal_id""",
+               GROUP BY g.goal_id,a.attempt_id""",
             instance_id)
         last_reviewed={row["goal_id"]:row["last_reviewed_at"] for row in review_rows}
         # A bounded, already scoped source-turn window lets planning.review
         # inspect the character's preceding answer and the participant's
         # acknowledgment, not just the current focus string.
-        recent_source_events=[
-            {"node_id":str(row.get("node_id") or ""),
-             "speaker_id":str(row.get("speaker_id") or ""),
-             "message_text":_clip(row.get("message_text") or "",300)}
-            for row in attention.recent_newest
-            if row.get("event_stream")=="source" and row.get("message_text")
-        ][:4]
+        source_events=[row for row in attention.recent_newest
+                       if row.get("event_stream")=="source" and row.get("message_text")][:4]
+        review_coordinates={row["goal_id"]: row for row in review_rows}
+        prior_revisions=await self.db.fetch(
+            """SELECT input->>'review_revision' AS revision
+               FROM aios.character_cognitive_operation
+               WHERE instance_id=$1 AND operation_type='planning.review'
+                 AND input ? 'review_revision'
+                 AND (status IN ('queued','running','waiting_inference','succeeded')
+                      OR updated_at>now()-interval '60 seconds')""", instance_id)
+        attempted_revisions={r["revision"] for r in prior_revisions}
         review_candidates=[]
         for index,goal in enumerate(goals):
-            g=_clip(goal.text,160)
+            g=_clip(goal.text,600)
+            coordinate=review_coordinates.get(goal.goal_id)
+            if coordinate is None:
+                continue
+            recent_source_events=[source_excerpt(row,g) for row in source_events]
+            revision=review_revision(g,coordinate["attempt_id"],context.source_timeline_id,
+                source_node_id or context.source_head_node_id,recent_source_events,
+                coordinate["evidence_revision"])
+            if revision in attempted_revisions:
+                continue
             overlap=len(goal_words & set(re.findall(r"[a-z0-9']+",g.lower())))
             affinity=min(1,.25*overlap)
             reviewed=last_reviewed.get(goal.goal_id)
@@ -345,11 +365,11 @@ class CognitiveOpportunityService:
             starvation=1.0 if reviewed is None else 0.0
             completion_due=bool(goal_states.get(goal.goal_id,{}).get("completion_candidate_count"))
             relevant=overlap>0
-            review_candidates.append((completion_due,relevant,starvation,affinity,reviewed,index,goal,g))
+            review_candidates.append((completion_due,relevant,starvation,affinity,reviewed,index,goal,g,revision,recent_source_events,coordinate["attempt_id"]))
         review_candidates.sort(
             key=lambda x:(-int(x[0]),-int(x[1]),-x[2],-x[3],
                           x[4] is not None,x[4],x[5]))
-        for completion_due,relevant,starvation,affinity,reviewed,index,goal,g in review_candidates[:3]:
+        for completion_due,relevant,starvation,affinity,reviewed,index,goal,g,revision,recent_source_events,attempt_id in review_candidates[:3]:
             goal_id=str(goal.goal_id) if goal.goal_id else None
             goal_subject_entry=goal_subject_demands.get(goal.goal_id) if goal.goal_id else None
             goal_subject=goal_subject_entry[0] if goal_subject_entry else None
@@ -357,6 +377,7 @@ class CognitiveOpportunityService:
             proposals.append(self._p(
                 "goal_review",f"Consider whether what just happened changes my goal: {g}",
                 "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
+                "attempt_id":str(attempt_id),"review_revision":revision,
                 "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
                 "recent_source_events":recent_source_events,
                 "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),

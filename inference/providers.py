@@ -195,6 +195,16 @@ class InferenceProviderStore:
             provider_id, error[:1000],
         )
 
+    async def record_rate_limit(self, provider_id: UUID, *, delay_seconds: float,
+                                error: str) -> None:
+        # A reachable but throttled endpoint is not an offline provider.
+        await self.db.execute(
+            """UPDATE aios.inference_provider SET
+                 status=CASE WHEN enabled THEN 'degraded' ELSE 'disabled' END,
+                 cooldown_until=GREATEST(cooldown_until,now()+($2*interval '1 second')),
+                 last_failure_at=now(),last_error=$3,updated_at=now()
+               WHERE provider_id=$1""",provider_id,max(15.0,min(delay_seconds,300.0)),error[:1000])
+
     async def record_health(self, provider_id: UUID, *, ok: bool, error: str | None = None, latency_ms: int | None = None) -> None:
         await self.db.execute(
             """UPDATE aios.inference_provider SET
@@ -205,7 +215,8 @@ class InferenceProviderStore:
                  last_success_at=CASE WHEN $2 THEN now() ELSE last_success_at END,
                  last_failure_at=CASE WHEN $2 THEN last_failure_at ELSE now() END,
                  cooldown_until=CASE WHEN NOT $2 AND consecutive_failures + 1 >= 3
-                                     THEN now() + interval '60 seconds' ELSE NULL END,
+                                     THEN GREATEST(cooldown_until,now() + interval '60 seconds')
+                                     WHEN cooldown_until>now() THEN cooldown_until ELSE NULL END,
                  last_error=CASE WHEN $2 THEN NULL ELSE $3 END, updated_at=now()
                WHERE provider_id=$1""", provider_id, ok, error, latency_ms,
         )
