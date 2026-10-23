@@ -49,6 +49,13 @@ class InquiryLookup:
         if target == "source":
             return await self._source(ctx, demand, limit=limit)
         if target == "personal":
+            from aios_app.entity_memory.retrieval import RDFRecallService
+            recalled = await RDFRecallService(self.db).search(ctx, q, consumer="inquiry")
+            if recalled.hits:
+                hits = tuple(InquiryHit(h["source"], h["evidence_id"], h["text"],
+                    {**h["provenance"], "rdf_ref": ref, "rdf_trace_id": recalled.trace_id},
+                    h["durable_knowledge"]) for h,ref in zip(recalled.hits,recalled.refs))
+                return InquiryEvidence("partial", hits[:limit], "rdf_assisted_recall")
             from aios_app.epistemic.cognitive_context import CognitiveContextService
             items = await CognitiveContextService(self.db).lookup_character_knowledge(
                 ctx, None, limit=30)

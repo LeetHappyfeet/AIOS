@@ -18,9 +18,9 @@ def proposal(kind="environment", next_step="request_information"):
 
 def test_missing_environment_cannot_be_routed_to_research():
     assert validate_plan(proposal(), {"goal"})["next"] == "request_information"
-    for next_step in ("internal_lookup", "research"):
-        with pytest.raises(ValueError):
-            validate_plan(proposal(next_step=next_step), {"goal"})
+    assert validate_plan(proposal(next_step="internal_lookup"), {"goal"})["next"]=="internal_lookup"
+    with pytest.raises(ValueError):
+        validate_plan(proposal(next_step="research"), {"goal"})
 
 
 def test_plan_rejects_actions_outcomes_unknown_evidence_and_unbounded_text():
@@ -57,10 +57,10 @@ async def test_successful_plan_is_not_goal_progress():
 
 
 @pytest.mark.asyncio
-async def test_environment_dependency_performs_no_lookup():
+async def test_waiting_environment_dependency_performs_no_lookup():
     class DB:
         async def fetchrow(self, *args): raise AssertionError("must not look up inventory")
-    await GoalPlanningService(DB()).continue_once({}, validate_plan(proposal(), {"goal"}), {})
+    await GoalPlanningService(DB()).continue_once({}, validate_plan(proposal(next_step="wait"), {"goal"}), {})
 
 
 def test_freshness_requires_live_attempt_branch_state_and_fingerprint():

@@ -73,10 +73,10 @@ def validate_plan(raw: Any, evidence_ids: set[str]) -> dict:
     next_step = raw["next"]
     if not isinstance(next_step, str) or next_step not in NEXT:
         raise ValueError("invalid next step")
-    # Environment questions always require external information; reference
-    # lookup must never be dispatched as a way to establish local inventory.
-    if next_step in {"internal_lookup", "research"} and (
-        not checked or checked[0]["kind"] == "environment"
+    # Internal source recall can answer what was previously reported; external
+    # reference research cannot establish current local inventory.
+    if (next_step in {"internal_lookup", "research"} and not checked) or (
+        next_step == "research" and checked and checked[0]["kind"] == "environment"
     ):
         raise ValueError("lookup cannot answer the first dependency")
     refs = raw["evidence_ids"]
@@ -100,14 +100,16 @@ def build_plan_prompt(goal: str, messages: list[dict], knowledge: list[dict],
                        "reported_text": clip_message(str(row.get("message_text") or ""))})
     known = []
     for row in knowledge[:3]:
-        key = str(row.get("proposition_id") or "")
+        key = str(row.get("proposition_id") or row.get("evidence_id") or "")
         if not key:
             continue
         evidence.add(key)
         known.append({"id": key, "text": str(row.get("text") or row.get("canonical_text") or "")[:300],
                       "authority": row.get("authority_state"),
                       "epistemic_status": row.get("epistemic_status"),
-                      "origin": row.get("origin_kind")})
+                      "origin": row.get("origin_kind"),
+                      "source_reference": row.get("source_reference"),
+                      "current_world_state": False if row.get("source_reference") else None})
     context = {"objective": goal[:600], "objective_evidence_id": "goal",
                "source_messages_chronological": source, "character_evidence": known,
                "knowledge_context": {"status": knowledge_status,
@@ -126,7 +128,7 @@ def build_plan_prompt(goal: str, messages: list[dict], knowledge: list[dict],
         "Express unknown prerequisites as questions. Use conditional steps, not assertions that "
         "resources exist. Distinguish procedural knowledge from current environmental state. "
         "References found are not acquired knowledge. You cannot execute an action or mark progress. "
-        "If the first question concerns environment, next must be request_information or wait. "
+        "For environment, use internal_lookup to recall prior reports, or request_information/wait. Never research local inventory. "
         "Unavailable retrieval is temporary unavailability, not proof of ignorance. "
         "This context is not a complete memory search; absent linked evidence does not mean no knowledge exists. "
         "Do not repeat unsuccessful lookups without changed evidence/access. "
@@ -142,7 +144,7 @@ class GoalPlanningService:
     def __init__(self, db):
         self.db = db
 
-    async def linked_knowledge(self, context, requirements: list[dict]) -> tuple[list[dict], str]:
+    async def _linked_propositions(self, context, requirements: list[dict]) -> tuple[list[dict], str]:
         """Read at most three already-linked /char records, never a recall pipeline.
 
         No halo, graph traversal, world lookup, semantic server, corpus search,
@@ -198,6 +200,30 @@ class GoalPlanningService:
             [dict(row) for row in rows], visible_source_node_ids=frozenset())
         return admitted, "linked_only"
 
+    async def linked_knowledge(self, context, requirements: list[dict]) -> tuple[list[dict], str]:
+        """Point reads of existing goal links, including revalidated source refs."""
+        refs = [ref for r in requirements for ref in r.get("rdf_refs",[])][:3]
+        rdf_ids = {r.get("proposition_id") for r in refs if r.get("kind")=="atom"}
+        traditional = [{**r, "evidence_ids":[v for v in r.get("evidence_ids",[]) if v not in rdf_ids]}
+                       for r in requirements]
+        rows,status = await self._linked_propositions(context,traditional)
+        if not refs:
+            return rows,status
+        from aios_app.entity_memory.retrieval import RDFRecallService
+        try:
+            result = await asyncio.wait_for(RDFRecallService(self.db).validate_refs(context,refs),
+                                            timeout=LINKED_KNOWLEDGE_TIMEOUT)
+        except Exception:
+            return rows,"unavailable" if not rows else status
+        seen = {str(r.get("proposition_id")) for r in rows}
+        for hit in result.hits:
+            if hit["source"] == "char" and hit["evidence_id"] in seen:
+                continue
+            rows.append({"evidence_id":hit["evidence_id"],"text":hit["text"],
+                "authority_state":hit["provenance"].get("authority_state","source_report_only"),
+                "origin_kind":hit["source"],"source_reference":hit["provenance"]})
+        return rows[:3],"linked_source_evidence" if result.hits else status
+
     async def snapshot(self, instance_id: UUID, goal_id: UUID) -> dict | None:
         context = await HUDContextResolver(self.db).resolve(instance_id)
         goal = await self.db.fetchrow(
@@ -235,6 +261,14 @@ class GoalPlanningService:
                   "node": str(context.source_head_node_id), "state_version": context.state_version,
                   "requirements": requirements,
                   "receipts": summaries, "corpus_epoch": str(epoch)}
+        # Only an already-requested internal lookup needs an RDF evidence epoch.
+        # This is bounded SQL over indexed coordinates, never a recall pipeline.
+        for requirement in requirements:
+            if requirement.get("recall_receipt",{}).get("revision"):
+                from aios_app.entity_memory.retrieval import RDFRecallService
+                revision = await RDFRecallService(self.db).discovery_revision(context,requirement["question"])
+                if revision is not None:
+                    inputs.setdefault("rdf_evidence_revisions",[]).append((requirement["requirement_id"],revision))
         fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
         return {**dict(goal), "context": context, "requirements": requirements,
                 "receipts": summaries, "fingerprint": fingerprint}
@@ -371,10 +405,25 @@ class GoalPlanningService:
 
     async def continue_once(self, op: dict, proposal: dict, snap: dict) -> None:
         """One host-constructed lookup; no physical actions and no study/admission."""
-        if proposal["next"] not in {"internal_lookup", "research"}:
+        if not proposal["open_questions"]:
             return
         question = proposal["open_questions"][0]
-        if question["kind"] == "environment":
+        environment = question["kind"] == "environment"
+        if proposal["next"] not in {"internal_lookup", "research"} and not (
+            environment and proposal["next"] == "request_information"
+        ):
+            return
+        revision = f"{snap['attempt_id']}:{snap['context'].source_head_node_id}"
+        if environment:
+            from aios_app.entity_memory.retrieval import RDFRecallService
+            existing_question = next((r["question"] for r in snap["requirements"]
+                if r.get("requirement_key")==f"knowledge:plan:{snap['attempt_id']}"),question["question"])
+            revision = await RDFRecallService(self.db).discovery_revision(snap["context"],existing_question)
+            if revision is None:
+                return  # Unavailable inspection is not evidence of an empty environment.
+            revision = f"{snap['attempt_id']}:{revision}"
+        if environment and any(r.get("recall_receipt",{}).get("revision")==revision
+                               for r in snap["requirements"]):
             return
         if await self.db.fetchval(
             """SELECT 1 FROM aios.character_cognitive_operation
@@ -392,8 +441,9 @@ class GoalPlanningService:
         research = ProgressiveResearchService(self.db)
         epoch = await research.corpus_change_epoch(op["instance_id"])
         changed = bool(prior and epoch and prior["updated_at"] < epoch)
-        kind = goal_research_operation("memory", prior["status"] if prior else None,
-                                       (prior["reason"] or "") if prior else "", access_changed=changed)
+        kind = ("inquiry.resolve" if environment else goal_research_operation(
+            "memory", prior["status"] if prior else None,
+            (prior["reason"] or "") if prior else "", access_changed=changed))
         if question["kind"] == "personal" and kind != "inquiry.resolve":
             return
         if kind is None:
@@ -415,7 +465,8 @@ class GoalPlanningService:
             requirement_key=requirement_key, source_node_id=op.get("source_node_id"),
             demand={"coverage_status": "missing", "retrieval_state": "available"})
         payload = {"goal_id": str(snap["goal_id"]), "requirement_id": str(requirement["requirement_id"]),
-                   "query": query, "allow_model": False, "planning_only": True, "attempt_id": str(snap["attempt_id"])}
+                   "query": query, "allow_model": False, "planning_only": True, "attempt_id": str(snap["attempt_id"]),
+                   "internal_only": environment, "recall_revision": revision}
         context = snap["context"]
         operation = await self.db.fetchval(
             """INSERT INTO aios.character_cognitive_operation(instance_id,operation_type,input,

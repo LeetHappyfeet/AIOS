@@ -211,3 +211,12 @@ def test_canonical_event_collapse_leaves_unconsolidated_event_available():
     }
 
     assert TopologyRetriever._collapse_canonical_events([item], {}) == [item]
+
+
+def test_rdf_source_report_is_attributed_and_separate_from_beliefs():
+    text=render_hud_text({'rdf_evidence':[{'text':'Mia said there was a cookbook.',
+        'provenance':{'speaker_id':'Mia'}}]})
+    assert 'RECALLED SOURCE REPORTS' in text
+    assert 'NOT VERIFIED CURRENT WORLD STATE' in text
+    assert '[Mia; earlier report]' in text
+    assert 'KNOWLEDGE / BELIEFS:' not in text

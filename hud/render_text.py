@@ -235,6 +235,14 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"- [{status}{suffix}]{_epistemic_label(item)}{_knowledge_annotation(item)} {item.get('text', '')}")
             for conflict in (item.get("conflicts") or [])[:3]:
                 lines.append(f"  ! conflicts with: {conflict.get('text', '')}")
+    rdf_evidence = frame.get("rdf_evidence") or []
+    if rdf_evidence:
+        lines.append("\nRECALLED SOURCE REPORTS (ATTRIBUTED; NOT VERIFIED CURRENT WORLD STATE):")
+        for item in rdf_evidence[:3]:
+            provenance = item.get("provenance") or {}
+            speaker = provenance.get("speaker_id") or "source"
+            lines.append(f"- [{speaker}; earlier report] {item.get('text', '')}")
+
     corpus_references = frame.get("corpus_references") or []
     if corpus_references:
         lines.append("\nCORPUS REFERENCES (LOOKED UP; NOT MEMORY OR BELIEF):")

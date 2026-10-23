@@ -190,3 +190,45 @@ def test_goal_research_progression_does_not_spin_on_partial_or_access_denied():
                                    access_changed=True) == "research.advance"
     assert goal_research_operation("memory", "planning") is None
     assert goal_research_operation("none", "unresolved") is None
+
+
+@pytest.mark.asyncio
+async def test_internal_only_inquiry_never_uses_external_fallback_or_model():
+    from aios_app.epistemic.inquiry.service import CharacterInquiryService
+    class DB:
+        async def fetchrow(self, sql, *args):
+            if 'INSERT INTO' in sql:
+                assert args[2].endswith(':internal')
+                return dict(inquiry_id=NODE, status='queued', result={}, model_calls=0)
+            return dict(inquiry_id=NODE)
+    service = CharacterInquiryService(DB())
+    targets = []
+    async def search(demand, *, target):
+        targets.append(target)
+        return InquiryEvidence('unresolved', (), reason='no_internal_match')
+    service.lookup.search = search
+    receipt = await service.resolve(demand(), internal_only=True, allow_model=True)
+    assert targets == ['personal']
+    assert receipt['status'] == 'unresolved'
+    assert not receipt['plan_eligible']
+
+
+@pytest.mark.asyncio
+async def test_cached_rdf_inquiry_drops_revoked_references(monkeypatch):
+    from aios_app.epistemic.inquiry.service import CharacterInquiryService, HUDContextResolver
+    from aios_app.entity_memory.retrieval import RDFRecallService, RecallResult
+    class DB:
+        async def fetchrow(self, sql, *args):
+            return dict(inquiry_id=NODE, status='partial', model_calls=0,
+                result={'hits':[{'provenance':{'rdf_ref':{'kind':'atom','proposition_id':str(NODE)}}}]})
+    async def context(self, instance_id):
+        return SimpleNamespace(instance_id=instance_id)
+    async def validate(self, ctx, refs):
+        assert refs[0]['proposition_id'] == str(NODE)
+        return RecallResult()
+    monkeypatch.setattr(HUDContextResolver, 'resolve', context)
+    monkeypatch.setattr(RDFRecallService, 'validate_refs', validate)
+    receipt = await CharacterInquiryService(DB()).resolve(demand())
+    assert receipt['cached'] and receipt['status'] == 'unresolved'
+    assert receipt['result']['reason'] == 'stale_rdf_evidence'
+    assert receipt['result']['hits'] == []

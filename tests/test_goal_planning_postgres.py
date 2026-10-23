@@ -35,8 +35,12 @@ CREATE TABLE aios.character_cognitive_operation(operation_id uuid PRIMARY KEY DE
  instance_id uuid,operation_type text,input jsonb,status text DEFAULT 'queued',result jsonb,
  source_state_version bigint,source_timeline_id uuid,source_node_id uuid,freshness_policy text,
  started_at timestamptz,completed_at timestamptz,reconciled_at timestamptz,updated_at timestamptz DEFAULT now());
-CREATE TABLE aios.character_goal_knowledge_requirement(requirement_id uuid,goal_id uuid,instance_id uuid,
- evidence jsonb DEFAULT '{}'::jsonb,requirement_key text,question text,query_text text,coverage_status text,coverage_score float,retrieval_state text,created_at timestamptz);
+CREATE TABLE aios.character_goal_knowledge_requirement(requirement_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),goal_id uuid,instance_id uuid,
+ evidence jsonb DEFAULT '{}'::jsonb,requirement_key text,question text,query_text text,
+ coverage_status text,coverage_score float,coverage_source text,retrieval_state text,source_node_id uuid,
+ created_at timestamptz DEFAULT now(),updated_at timestamptz DEFAULT now(),UNIQUE(instance_id,goal_id,requirement_key));
+CREATE TABLE aios.character_inquiry(instance_id uuid,goal_id uuid,evidence_scope text,status text,
+ result jsonb,updated_at timestamptz DEFAULT now());
 CREATE TABLE aios.character_goal_research_requirement_link(requirement_id uuid,instance_id uuid,dossier_id uuid,linked_at timestamptz);
 CREATE TABLE aios.pipeline_job(job_id uuid DEFAULT gen_random_uuid(),job_type text,payload jsonb,
  status text DEFAULT 'queued',priority integer,run_after timestamptz,resource_class text,
@@ -64,6 +68,8 @@ async def env(monkeypatch):
     await db.execute("INSERT INTO aios.dag_node VALUES($1,$2,1,'Mia','user','You need to learn independently.')", node, timeline)
     ctx = SimpleNamespace(source_timeline_id=timeline, source_head_node_id=node, state_version=1,
                           instance_id=instance, character_id='Renamon')
+    async def recall_revision(*args): return "relevant-evidence-revision"
+    monkeypatch.setattr('aios_app.entity_memory.retrieval.RDFRecallService.discovery_revision', recall_revision)
     async def context(*args): return ctx
     monkeypatch.setattr('aios_app.agent.goal_planning.HUDContextResolver.resolve', context)
     async def epoch(*args): return None
@@ -100,8 +106,8 @@ async def test_atomic_admission_dedup_and_waiting_plan(env):
     assert result['status']=='waiting_information'
     current=await e.service.current(e.instance,e.goal)
     assert current['proposal']==proposal()
-    assert await e.db.fetchval("SELECT count(*) FROM aios.pipeline_job")==1
-    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded'")
+    assert await e.db.fetchval("SELECT count(*) FROM aios.pipeline_job")==2
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded' WHERE operation_type='planning.propose'")
     assert not await e.service.schedule(e.instance,e.goal)
     assert await e.db.fetchval("SELECT status FROM aios.character_hud_readiness")=='dirty'
 
@@ -181,7 +187,7 @@ async def test_procedure_dispatches_only_one_host_owned_inquiry_and_no_access_st
     from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
     op=await running(e)
     snap=await e.service.snapshot(e.instance,e.goal)
-    await e.db.execute('''CREATE TABLE aios.character_inquiry(instance_id uuid,goal_id uuid,
+    await e.db.execute('''CREATE TABLE IF NOT EXISTS aios.character_inquiry(instance_id uuid,goal_id uuid,
         evidence_scope text,status text,result jsonb,updated_at timestamptz DEFAULT now())''')
     requirement=AsyncMock(return_value={'requirement_id':uuid4()})
     e.monkeypatch.setattr(GoalKnowledgeDependencyService,'reconcile',requirement)
@@ -269,3 +275,30 @@ async def test_optional_evidence_timeout_does_not_trigger_more_retrieval(env):
     result=await e.service.propose(op)
     assert result['knowledge_context_status']=='unavailable'
     assert await e.db.fetchval('SELECT count(*) FROM aios.character_cognitive_operation')==1
+
+
+@pytest.mark.asyncio
+async def test_environment_inquiry_is_internal_once_per_relevant_evidence_revision(env):
+    from aios_app.agent.goal_dependencies import GoalKnowledgeDependencyService
+    from aios_app.entity_memory.retrieval import RDFRecallService
+    e=env
+    op=await running(e)
+    snap=await e.service.snapshot(e.instance,e.goal)
+    await e.service.continue_once(op,proposal(next_step='internal_lookup'),snap)
+    child=await e.db.fetchrow("SELECT * FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'")
+    payload=json.loads(child['input']) if isinstance(child['input'],str) else child['input']
+    assert payload['internal_only'] and not payload['allow_model']
+    deps=GoalKnowledgeDependencyService(e.db)
+    await deps.record_inquiry(instance_id=e.instance,goal_id=e.goal,
+        requirement_id=UUID(payload['requirement_id']),revision=payload['recall_revision'],
+        receipt={'inquiry_id':str(uuid4()),'status':'unresolved','result':{'hits':[],'reason':'not_found'}})
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded' WHERE operation_type='inquiry.resolve'")
+    snap=await e.service.snapshot(e.instance,e.goal)
+    await e.service.continue_once(op,proposal(next_step='internal_lookup'),snap)
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'")==1
+    async def changed(*args): return 'new-relevant-evidence'
+    e.monkeypatch.setattr(RDFRecallService,'discovery_revision',changed)
+    snap=await e.service.snapshot(e.instance,e.goal)
+    await e.service.continue_once(op,proposal(next_step='internal_lookup'),snap)
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'")==2
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='research.advance'")==0

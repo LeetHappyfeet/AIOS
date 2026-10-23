@@ -141,12 +141,19 @@ class CognitiveOperationEngine:
                         instance_id=op["instance_id"], source_node_id=op.get("source_node_id"),
                         origin="character_cognition", uncertainty_kind="explicit_question",
                         question=question, evidence_scope="character_accessible",
-                        evidence_revision=f"{op.get('source_state_version')}:{op.get('source_node_id')}",
+                        evidence_revision=str(payload.get("recall_revision") or f"{op.get('source_state_version')}:{op.get('source_node_id')}"),
                         goal_id=UUID(str(payload["goal_id"]))
                         if payload.get("goal_id") else None)
                 service=CharacterInquiryService(self.db)
                 receipt=await service.resolve(
-                    demand,allow_model=bool(payload.get("allow_model",False)))
+                    demand,allow_model=bool(payload.get("allow_model",False)),
+                    internal_only=bool(payload.get("internal_only",False)))
+                if payload.get("requirement_id") and payload.get("goal_id"):
+                    from .goal_dependencies import GoalKnowledgeDependencyService
+                    await GoalKnowledgeDependencyService(self.db).record_inquiry(
+                        instance_id=op["instance_id"],goal_id=UUID(str(payload["goal_id"])),
+                        requirement_id=UUID(str(payload["requirement_id"])),receipt=receipt,
+                        revision=payload.get("recall_revision"))
                 if (receipt.get("plan_eligible") and
                         await service.claim_plan(UUID(receipt["inquiry_id"]))):
                     await self.db.execute(

@@ -7,7 +7,7 @@ from uuid import UUID, uuid5
 
 from aios_app.epistemic.epistemic_scope import classify_scope
 
-POLICY_VERSION = "entity-memory-v1"
+POLICY_VERSION = "entity-memory-v2"
 _ID_NAMESPACE = UUID("31e62fe1-2340-4e93-a313-94fe4c5d9755")
 MAX_MENTIONS = 256
 # Conservative exclusions, not an attempted dictionary of every concrete noun.
@@ -69,6 +69,7 @@ def extract_memory(doc, *, scope: str, section_id: str, identities=None, partici
             matches = set(identities.get(normalized(root.text), ()))
         mention = {"text": text, "start": span.start_char, "end": span.end_char,
                    "head": head, "ner_label": label, "entity_id": None,
+                   "sentence_start": root.sent.start_char, "sentence_end": root.sent.end_char,
                    "status": "unresolved", "reason": "unsupported_nominal"}
         mentions.append(mention)
         if not any(c.isalpha() for c in text):

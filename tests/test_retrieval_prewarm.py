@@ -28,6 +28,7 @@ class _FakeRetriever:
         mode,
         focus_text="",
         goals=(),
+        include_world=True,
         max_hops=None,
         limit=None,
     ):
@@ -68,6 +69,7 @@ def _context(node_id):
         source_head_node_id=node_id,
         state_version=3,
         lineage_instance_ids=(instance_id,),
+        cognitive_instance_ids=(instance_id,),
         world_id=uuid4(),
     )
 
@@ -147,3 +149,16 @@ async def test_prepare_retrieval_does_not_cross_source_heads():
         "memory", "belief", "goal", "event", "rule",
         "memory", "belief", "goal", "event", "rule",
     ]
+
+@pytest.mark.asyncio
+async def test_rdf_is_prepared_once_and_never_called_by_hot_cache_reads(monkeypatch):
+    from unittest.mock import AsyncMock
+    from aios_app.entity_memory.retrieval import RDFRecallService,RecallResult
+    search=AsyncMock(return_value=RecallResult())
+    monkeypatch.setattr(RDFRecallService,'search',search)
+    service=CognitiveContextService(object())
+    service.retriever=_FakeRetriever()
+    ctx=_context(uuid4())
+    await service.prepare_retrieval(ctx,_Scorer(),_attention(),_policy())
+    await service.prepare_retrieval(ctx,_Scorer(),_attention(),_policy())
+    assert search.await_count==1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import UUID
@@ -329,6 +330,20 @@ class HUDAssembler:
             ),
         )
 
+        rdf_evidence = _trim_to_budget(
+            getattr(cognitive_snapshot, "rdf_evidence", []),
+            min(300, max(0, int(hud_profile.token_budget * 0.08))),
+            lambda x: x.get("text", ""),
+        )
+
+        rdf_retrieval = dict(getattr(cognitive_snapshot, "rdf_retrieval", {}))
+        rdf_retrieval["injected_source_ids"] = [h["evidence_id"] for h in rdf_evidence]
+        rdf_retrieval["injected_proposition_ids"] = [str(h["proposition_id"]) for h in
+            (memories + beliefs + goal_items + rule_items)
+            if h.get("retrieval_reason") == "rdf_semantic_atom"]
+        if rdf_retrieval.get("trace_id"):
+            logging.getLogger(__name__).info("RDF recall HUD selection %s", rdf_retrieval)
+
         # Scene state is projected by CharacterSceneProjector at mutation/event
         # boundaries. HUD assembly is deliberately read-only. The actors/objects
         # above remain relevance-ranked presentation context and are never
@@ -421,6 +436,8 @@ class HUDAssembler:
             "rules": rule_items,
             "recent_events": event_items,
             "corpus_references": corpus_references,
+            "rdf_evidence": rdf_evidence,
+            "rdf_retrieval": rdf_retrieval,
             "plugins": plugin_snapshot.get("plugins") or {},
             "plugin_sections": plugin_snapshot.get("sections") or [],
             "actions": [

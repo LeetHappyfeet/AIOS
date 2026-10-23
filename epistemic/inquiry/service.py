@@ -29,8 +29,10 @@ class CharacterInquiryService:
         self.lookup = InquiryLookup(db)
 
     async def resolve(self, demand: InquiryDemand, *,
-                      allow_model: bool = False) -> dict:
+                      allow_model: bool = False, internal_only: bool = False) -> dict:
         """Persist one evidence-relative inquiry. No LLM in this worker/lane."""
+        allow_model = allow_model and not internal_only
+        storage_fingerprint = demand.fingerprint + (":internal" if internal_only else "")
         if demand.goal_id is not None:
             active = await self.db.fetchrow(
                 """SELECT goal_id FROM aios.character_agent_goal
@@ -49,22 +51,39 @@ class CharacterInquiryService:
                ON CONFLICT (instance_id,demand_fingerprint)
                DO UPDATE SET updated_at=now()
                RETURNING inquiry_id,status,result,model_calls""",
-            demand.instance_id, demand.source_node_id, demand.fingerprint,
+            demand.instance_id, demand.source_node_id, storage_fingerprint,
             demand.origin, demand.uncertainty_kind, demand.evidence_scope,
             demand.evidence_revision, demand.policy_version,
             json.dumps(demand.as_dict()), demand.goal_id)
         inquiry_id = row["inquiry_id"]
         if row["status"] != "queued":
+            saved = _object(row["result"])
+            refs = [h.get("provenance",{}).get("rdf_ref") for h in saved.get("hits",[])
+                    if h.get("provenance",{}).get("rdf_ref")]
+            if refs:
+                # Cached inquiry receipts are not an authority/cache bypass.
+                from aios_app.entity_memory.retrieval import RDFRecallService
+                ctx = await HUDContextResolver(self.db).resolve(demand.instance_id)
+                try:
+                    current = await RDFRecallService(self.db).validate_refs(ctx,refs)
+                except Exception:
+                    current = None
+                hits = [] if current is None else [InquiryHit(h["source"],h["evidence_id"],h["text"],
+                    {**h["provenance"],"rdf_ref":ref},h["durable_knowledge"]).as_dict()
+                    for h,ref in zip(current.hits,current.refs)]
+                return {"inquiry_id":str(inquiry_id),"status":"partial" if hits else "unresolved",
+                        "result":{"hits":hits,"reason":"revalidated_rdf_recall" if hits else "stale_rdf_evidence"},
+                        "cached":True,"plan_eligible":False}
             eligible = bool(allow_model and demand.evidence_scope != "source_local" and
                             should_escalate(demand, str(row["status"]),
                                             existing_model_calls=int(row["model_calls"])))
             return {"inquiry_id": str(inquiry_id), "status": row["status"],
                     "result": _object(row["result"]), "cached": True,
                     "plan_eligible": eligible}
-        evidence = await self.lookup.search(demand)
+        evidence = await self.lookup.search(demand, target="personal" if internal_only and demand.evidence_scope != "source_local" else "auto")
         # Only an unanswered character-level question permits bounded fallback.
         # Source-local V11 repair cannot consult subjective or reference memory.
-        if (evidence.status == "unresolved" and
+        if (not internal_only and evidence.status == "unresolved" and
                 demand.evidence_scope == "character_accessible" and
                 demand.uncertainty_kind in {"explicit_question", "failed_retrieval",
                                            "ambiguous_meaning"}):

@@ -119,7 +119,7 @@ async def collect_entity_memory_once(db, *, limit=4):
                     participants = {normalized(v): v for v in (source["speaker_id"], source["recipient_id"]) if v} if chat else {}
                     payload = extract_memory(doc, scope=scope, section_id=str(section_id),
                                              identities=identities, participants=participants)
-                    payload.update(scope=scope, owner=owner, world_id=str(source["world_id"]) if source["world_id"] else None,
+                    payload.update(source_sha256=source["content_sha256"], scope=scope, owner=owner, world_id=str(source["world_id"]) if source["world_id"] else None,
                                    timeline_id=str(source["timeline_id"]), node_id=str(source["node_id"]),
                                    section_id=str(section_id), contexts=[{k: str(v) if v is not None else None
                                                                          for k,v in dict(c).items()} for c in contexts])
@@ -143,6 +143,10 @@ async def collect_entity_memory_once(db, *, limit=4):
     return count
 
 
+def payload_hash(payload):
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def graph_iri(section_id):
     return "urn:aios:entity-memory:section:" + str(section_id)
 
@@ -161,6 +165,7 @@ def rdf_update(section_id, payload):
         emit(source, "type", "EntityMemorySource")
         emit(source, "authority", "evidence_only")
         emit(source, "policyVersion", payload["policy_version"])
+        emit(source, "payloadHash", payload_hash(payload))
         emit(source, "scope", payload["scope"])
         for field in ("owner", "world_id", "timeline_id", "node_id", "section_id"):
             if payload.get(field):
@@ -176,7 +181,7 @@ def rdf_update(section_id, payload):
         for item in payload["mentions"]:
             mention = graph + ":mention:" + str(item["start"]) + ":" + str(item["end"])
             emit(source, "hasMention", mention, iri=True)
-            for field in ("text", "start", "end", "head", "ner_label", "status", "reason"):
+            for field in ("text", "start", "end", "head", "ner_label", "status", "reason", "sentence_start", "sentence_end"):
                 if item.get(field) is not None:
                     emit(mention, field, item[field])
             if item["entity_id"]:

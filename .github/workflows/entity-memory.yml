@@ -1,9 +1,9 @@
 name: Entity memory RDF
 on:
   push:
-    paths: ['entity_memory/**', 'semantic_index/cli.py', 'migrations/current/**', 'tests/test_entity_memory*', '.github/workflows/entity-memory.yml']
+    paths: ['entity_memory/**', 'epistemic/**', 'agent/**', 'hud/**', 'tests/test_rdf_recall*', 'tests/test_goal_planning*', 'tests/test_retrieval_prewarm.py', 'tests/test_hud.py', 'tests/test_character_inquiry.py', 'semantic_index/cli.py', 'migrations/current/**', 'tests/test_entity_memory*', '.github/workflows/entity-memory.yml']
   pull_request:
-    paths: ['entity_memory/**', 'semantic_index/cli.py', 'migrations/current/**', 'tests/test_entity_memory*', '.github/workflows/entity-memory.yml']
+    paths: ['entity_memory/**', 'epistemic/**', 'agent/**', 'hud/**', 'tests/test_rdf_recall*', 'tests/test_goal_planning*', 'tests/test_retrieval_prewarm.py', 'tests/test_hud.py', 'tests/test_character_inquiry.py', 'semantic_index/cli.py', 'migrations/current/**', 'tests/test_entity_memory*', '.github/workflows/entity-memory.yml']
 jobs:
   entity-memory:
     runs-on: ubuntu-latest
@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: python -m pip install pytest pytest-asyncio asyncpg requests pydantic python-dotenv 'spacy>=3.7,<4' rdflib
+      - run: python -m pip install pytest pytest-asyncio asyncpg requests pydantic python-dotenv 'spacy>=3.7,<4' rdflib qdrant-client fastapi beautifulsoup4 lxml
       - run: python -m spacy download en_core_web_sm
       - run: npm install --prefix "$RUNNER_TEMP/pglite" @electric-sql/pglite@0.5.10 --no-audit --no-fund
       - name: Verify cached extraction and RDF lifecycle
@@ -26,4 +26,7 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/pythonpath" python -m pytest -q \
             tests/test_entity_memory.py tests/test_entity_memory_postgres.py \
             tests/test_linguistic_projection.py tests/test_semantic_frames.py \
-            tests/test_migration_transaction_contract.py
+            tests/test_migration_transaction_contract.py \
+            tests/test_rdf_recall_postgres.py tests/test_goal_planning.py \
+            tests/test_goal_planning_postgres.py tests/test_retrieval_prewarm.py \
+            tests/test_hud.py tests/test_character_inquiry.py

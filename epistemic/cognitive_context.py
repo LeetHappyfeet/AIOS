@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Protocol
 
 from aios_app.db import Database
@@ -109,6 +109,8 @@ class CognitiveKnowledgeSnapshot:
     visible_world_context_count: int
     invisible_anchor_count: int
     topology_unavailable: bool = False
+    rdf_evidence: list[dict[str, Any]] = field(default_factory=list)
+    rdf_retrieval: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -246,6 +248,7 @@ class CognitiveContextService:
         )
         self.retrieval_policy = retrieval_policy or DEFAULT_COGNITIVE_RETRIEVAL_POLICY
         self._prepared_retrieval: dict[tuple[Any, ...], PreparedRetrievalSnapshot] = {}
+        self._rdf_prewarm_flights = AsyncSingleFlight()
         self._prepared_retrieval_flights: AsyncSingleFlight[
             tuple[Any, ...], PreparedRetrievalSnapshot
         ] = AsyncSingleFlight()
@@ -426,6 +429,16 @@ class CognitiveContextService:
         always read fresh by ``resolve_knowledge`` so a prewarm that starts
         before fast cognition completes can never freeze an incomplete turn.
         """
+        from aios_app.entity_memory.retrieval import RDFRecallService, focus_query
+        prepared_key = self._prepared_retrieval_key(context, attention, retrieval_policy)
+        existing = self._prepared_retrieval.get(prepared_key)
+        if existing is None or time.monotonic()-existing.prepared_at>PREPARED_RETRIEVAL_TTL_SECONDS:
+            try:
+                await self._rdf_prewarm_flights.run(prepared_key, lambda: asyncio.wait_for(
+                    RDFRecallService(self.db).search(context,
+                        focus_query(attention.retrieval_focus_text,attention.goals),consumer="prewarm"), timeout=2.5))
+            except Exception:
+                logger.debug("Optional RDF prewarm unavailable", exc_info=True)
         snapshot, cache_hit = await self._prepared_or_resolve(
             context,
             scorer,
@@ -694,7 +707,17 @@ class CognitiveContextService:
                 (time.monotonic() - prepared.prepared_at) * 1000.0,
             )
 
-        merged = list(fast_knowledge) + list(topology_knowledge)
+        from aios_app.entity_memory.retrieval import RDFRecallService, RecallResult, focus_query
+        try:
+            rdf_recall = await asyncio.wait_for(RDFRecallService(self.db).cached(
+                context, focus_query(attention.retrieval_focus_text,attention.goals), consumer="hud"), timeout=0.2)
+        except Exception:
+            rdf_recall = RecallResult(status="unavailable")
+        # Read-side source reports remain separate from durable memories/beliefs.
+        rdf_evidence = [h for h in rdf_recall.hits if not h["durable_knowledge"]
+            and str(h["provenance"].get("source_node_id")) not in attention.visible_source_node_ids]
+        rdf_knowledge = [h["knowledge"] for h in rdf_recall.hits if h.get("knowledge")]
+        merged = list(fast_knowledge) + list(topology_knowledge) + rdf_knowledge
         for item in legacy_knowledge:
             kind = str(item.get("claim_kind") or "BELIEF").upper()
             if (
@@ -894,6 +917,9 @@ class CognitiveContextService:
             visible_world_context_count=visible_world_context_count,
             invisible_anchor_count=invisible_anchor_count,
             topology_unavailable=prepared.topology_unavailable,
+            rdf_evidence=rdf_evidence,
+            rdf_retrieval={"status":rdf_recall.status,"trace_id":rdf_recall.trace_id,
+                           "source_count":len(rdf_evidence),"knowledge_count":len(rdf_knowledge)},
         )
 
     async def lookup_character_knowledge(
