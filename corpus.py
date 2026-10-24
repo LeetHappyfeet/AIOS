@@ -75,7 +75,7 @@ async def import_corpus_document(
     catalog_route: CorpusRoute | None = None,
     facets: Iterable[CorpusFacet] | None = None,
 ) -> dict:
-    """Store a document as cold searchable material with no semantic side effects."""
+    """Store cold reference text without acquisitions or world assertions."""
     if not text.strip():
         raise ValueError("corpus document text is empty")
 

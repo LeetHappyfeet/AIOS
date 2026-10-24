@@ -77,6 +77,7 @@ async def _domain_table() -> list[list[Any]]:
 
 
 async def _domain_summary(domain_key: str) -> dict[str, Any]:
+    from aios_app.corpus_rdf.service import corpus_reference_status
     row = await db.fetchrow(
         """SELECT kd.domain_key, kd.display_name, kd.domain_kind,
                   parent.domain_key AS parent_domain_key, kd.default_scope_key,
@@ -127,6 +128,7 @@ async def _domain_summary(domain_key: str) -> dict[str, Any]:
         "epistemic_namespace": row["default_epistemic_namespace"],
         "enabled": bool(row["enabled"]),
         "counts": dict(counts),
+        "rdf": await corpus_reference_status(db, domain_key),
         "sources": [dict(p) for p in profiles],
         "characters": [dict(c) for c in characters],
     }

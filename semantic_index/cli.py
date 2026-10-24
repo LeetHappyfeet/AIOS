@@ -12,6 +12,7 @@ from typing import Any
 from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.rdf.fuseki import FusekiClient
+from aios_app.corpus_rdf.service import collect_corpus_references_once, project_corpus_references_once
 from aios_app.entity_memory.service import collect_entity_memory_once, project_entity_memory_once
 from aios_app.topic_atlas.collector import collect_topics_once
 from aios_app.topic_atlas.projection import (
@@ -245,6 +246,8 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                     limit=cfg.background_batch_size)
                 totals["topic_hygiene_retired"] = retired_bad
                 totals["topics_collected"] = sum(found.values()) if isinstance(found,dict) else 0
+                await run_stage("corpus-reference-build", collect_corpus_references_once, db,
+                                limit=2)
                 last_topic_scan = time.monotonic()
             corpus_due = time.monotonic()-last_corpus_scan >= cfg.corpus_refresh_seconds
             totals.update(await _run_vector_stages(
@@ -337,6 +340,8 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
             work = await _run_topology_stages(db, fuseki, effective_cfg, run_stage)
             work["entity_memory_projected"] = await run_stage(
                 "rdf-entity-memory", project_entity_memory_once, db, fuseki, limit=1)
+            work["corpus_references_projected"] = await run_stage(
+                "rdf-corpus-reference", project_corpus_references_once, db, fuseki, limit=1)
             work["topics_projected"] = await run_stage(
                 "rdf-topics", project_topics_once, db, fuseki,
                 limit=1)  # One acknowledged graph replacement per topology cycle.
