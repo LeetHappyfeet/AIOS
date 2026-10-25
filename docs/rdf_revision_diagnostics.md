@@ -76,3 +76,27 @@ Check source versus atom execution time, recursive ancestry row counts, sequenti
 scans, filter removals, nested-loop counts, sort work and buffer reads. Compare a
 cold launch with a warmed run. Actual production plans are required before
 claiming which cost dominates or choosing a new index.
+
+## First captured PostgreSQL 16.11 plan
+
+The captured report's source plan executes in 2.1 ms. Its atom plan executes in
+310.659 ms (328.8 ms elapsed including planning/transport), returns zero rows,
+and does not execute the ancestry CTE. The owner index finds 55 acquisition
+candidates in 0.042 ms. The acquisition bitmap heap scan, whose filter calls
+`semantic_acquisition_source_eligible(acquisition_id)`, takes 307.994 ms and
+returns 51 rows. That scan reports 9,379 shared-buffer hits and 653 reads,
+including its function work. Topic matching happens later and removes the
+remaining candidates. This sample points to early eligibility work, not ancestry
+or a missing owner index, as the immediate cost concentration. It does not explain
+every seven-second timeout under concurrent startup load.
+
+The next query optimization to evaluate is to materialize the topic/owner/authority
+candidate set before invoking expensive source eligibility, while retaining every
+admission and branch predicate on the eventual results. Actual performance and
+identical authorization results need comparison before deploying that rewrite.
+
+The launch log also exposed a separate inquiry fallback defect: RDF failure or
+an empty result led to character knowledge retrieval with `scorer=None`, which
+then called `scorer.score()`. Inquiry now supplies a query-focused scorer, and
+the optional-scorer knowledge API initializes its default when omitted. This fixes
+the AttributeError without changing source-access SQL or the seven-second window.

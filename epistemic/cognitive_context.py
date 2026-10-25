@@ -1020,6 +1020,10 @@ class CognitiveContextService:
         context: HUDContext,
         scorer: RelevanceScorer | None,
     ) -> list[dict[str, Any]]:
+        # This API accepts an optional scorer, including explicit inquiry
+        # fallback callers. Never require a foreground HUD scoring context.
+        if scorer is None:
+            scorer = CognitiveRelevanceScorer(context)
         rows = await self.db.fetch(
             """
             SELECT

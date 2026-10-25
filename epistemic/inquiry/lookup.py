@@ -57,8 +57,9 @@ class InquiryLookup:
                     h["durable_knowledge"]) for h,ref in zip(recalled.hits,recalled.refs))
                 return InquiryEvidence("partial", hits[:limit], "rdf_assisted_recall")
             from aios_app.epistemic.cognitive_context import CognitiveContextService
+            from aios_app.epistemic.relevance import CognitiveRelevanceScorer
             items = await CognitiveContextService(self.db).lookup_character_knowledge(
-                ctx, None, limit=30)
+                ctx, CognitiveRelevanceScorer(ctx, focus_text=q), limit=30)
             selected = _matching(items, q, limit)
             hits = tuple(InquiryHit("char", str(row.get("proposition_id") or ""),
                        str(row.get("text") or row.get("canonical_text") or "")[:650],
