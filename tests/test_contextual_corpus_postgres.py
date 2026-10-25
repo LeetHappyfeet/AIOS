@@ -153,3 +153,83 @@ async def test_semantic_fallback_remains_assigned_and_denied_sources_stay_hidden
     assert len(result.hits)==1 and 'semantic' in result.hits[0].retrieval_methods
     await e.db.execute("INSERT INTO aios.character_corpus_access VALUES('Arbitrary Fox','canon.digimon',false)")
     assert not (await e.searcher.search(instance_id=e.instance,query='transformation',assigned_only=True,include_fanwork=False)).hits
+
+
+@pytest.mark.asyncio
+async def test_slow_corpus_maintenance_rolls_back_and_preserves_hud_references(env, monkeypatch, caplog):
+    from aios_app.entity_memory.retrieval import RDFRecallService, RecallResult
+    from aios_app.epistemic import cognitive_context as module
+    e = env
+    service = CognitiveContextService(e.db)
+    service.research.searcher = e.searcher
+    service.retrieval_policy = replace(service.retrieval_policy, corpus_maintenance_timeout_seconds=.03)
+    monkeypatch.setattr(module, 'current_message_cognition', AsyncMock(return_value=[]))
+    service._prepared_or_resolve = AsyncMock(return_value=(PreparedRetrievalSnapshot([], [], {}, time.monotonic()), False))
+    monkeypatch.setattr(RDFRecallService, 'cached', AsyncMock(return_value=RecallResult()))
+    ctx = SimpleNamespace(instance_id=e.instance, character_id='Arbitrary Fox', source_head_node_id=uuid4(), state_version=3)
+    focus = attention('What is digimon evolution?')
+    cancelled = asyncio.Event()
+
+    async def blocked_maintenance(**kw):
+        await e.db.execute("INSERT INTO aios.character_corpus_access VALUES('Arbitrary Fox','maintenance_marker',true)")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    service.corpus_reinforcement.reinforce_from_focus = AsyncMock(side_effect=blocked_maintenance)
+    service.semantic_corpus_reinforcement.reinforce_from_knowledge = AsyncMock()
+    snapshot = await asyncio.wait_for(service.resolve_knowledge(ctx, SimpleNamespace(), focus), 2)
+    assert cancelled.is_set()
+    assert snapshot.corpus_references
+    assert snapshot.corpus_demand['maintenance_status'] == 'deferred'
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_corpus_access WHERE scope_key='maintenance_marker'") == 0
+    service.semantic_corpus_reinforcement.reinforce_from_knowledge.assert_not_awaited()
+    assert 'CORPUS REFERENCES' in render_hud_text({'corpus_references': snapshot.corpus_references})
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_timed_out_lookup_skips_maintenance_and_returns_cognition(env, monkeypatch, caplog):
+    from aios_app.entity_memory.retrieval import RDFRecallService, RecallResult
+    from aios_app.epistemic import cognitive_context as module
+    e = env
+    service = CognitiveContextService(e.db)
+    service.retrieval_policy = replace(service.retrieval_policy, corpus_timeout_seconds=.01)
+    monkeypatch.setattr(module, 'current_message_cognition', AsyncMock(return_value=[]))
+    service._prepared_or_resolve = AsyncMock(return_value=(PreparedRetrievalSnapshot([], [], {}, time.monotonic()), False))
+    monkeypatch.setattr(RDFRecallService, 'cached', AsyncMock(return_value=RecallResult()))
+    async def blocked_search(**kw):
+        await asyncio.Event().wait()
+    service.research.search = AsyncMock(side_effect=blocked_search)
+    service.corpus_reinforcement.reinforce_from_focus = AsyncMock()
+    service.semantic_corpus_reinforcement.reinforce_from_knowledge = AsyncMock()
+    ctx = SimpleNamespace(instance_id=e.instance, character_id='Arbitrary Fox', source_head_node_id=uuid4(), state_version=3)
+    for text in ('Digimon evolution follows branching paths.', 'What is digimon evolution?'):
+        snapshot = await asyncio.wait_for(service.resolve_knowledge(ctx, SimpleNamespace(), attention(text)), 1)
+        assert snapshot.corpus_demand['lookup_status'] == 'lookup_unavailable'
+        assert snapshot.corpus_references == []
+        assert snapshot.current_events[0]['message_text'] == text
+    service.corpus_reinforcement.reinforce_from_focus.assert_not_awaited()
+    service.semantic_corpus_reinforcement.reinforce_from_knowledge.assert_not_awaited()
+    assert len(caplog.records) == 2
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_many_denied_lexical_candidates_cannot_hide_authorized_references(env):
+    e = env
+    await e.db.execute("INSERT INTO aios.character_corpus_access VALUES('Arbitrary Fox','canon.blocked',false)")
+    await e.db.execute("INSERT INTO aios.corpus_scope VALUES('canon.blocked','domain')")
+    await e.db.execute("""INSERT INTO aios.corpus_document(document_id,title)
+        SELECT gen_random_uuid(),'Denied '||i FROM generate_series(1,80) i""")
+    await e.db.execute("""INSERT INTO aios.corpus_section(section_id,document_id,heading,content)
+        SELECT gen_random_uuid(),document_id,'Blocked',repeat('Digimon evolution ',20)
+        FROM aios.corpus_document WHERE title LIKE 'Denied %'""")
+    await e.db.execute("""INSERT INTO aios.corpus_document_scope
+        SELECT document_id,'canon.blocked' FROM aios.corpus_document WHERE title LIKE 'Denied %'""")
+    await e.db.execute("""INSERT INTO aios.corpus_document_domain
+        SELECT document_id,'digimon' FROM aios.corpus_document WHERE title LIKE 'Denied %'""")
+    result = await search(e)
+    assert {hit.document_id for hit in result.hits} == {e.primary[0], e.second[0]}
+    assert result.candidate_count == 2

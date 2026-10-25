@@ -864,6 +864,10 @@ class CognitiveContextService:
                 lookup_status = "references_found" if corpus_references else (
                     "no_assignment" if corpus_result.status == "no_assignment" else
                     "no_authorized_sections" if corpus_result.status == "no_access" else "no_relevant_matches")
+            except asyncio.TimeoutError:
+                lookup_status = "lookup_unavailable"
+                logger.warning("Contextual corpus lookup timed out instance=%s budget_seconds=%.2f",
+                               context.instance_id, self.retrieval_policy.corpus_timeout_seconds)
             except Exception:
                 lookup_status = "lookup_unavailable"
                 logger.warning("Contextual corpus lookup unavailable instance=%s", context.instance_id, exc_info=True)
@@ -880,6 +884,10 @@ class CognitiveContextService:
                 ), timeout=self.retrieval_policy.corpus_timeout_seconds)
                 corpus_references = corpus_result.reference_context()
                 lookup_status = "references_found" if corpus_references else "no_relevant_matches"
+            except asyncio.TimeoutError:
+                lookup_status = "lookup_unavailable"
+                logger.warning("Corpus reference lookup timed out instance=%s budget_seconds=%.2f",
+                               context.instance_id, self.retrieval_policy.corpus_timeout_seconds)
             except Exception:
                 lookup_status = "lookup_unavailable"
                 # Corpus lookup is supplementary. A missing migration, unavailable
@@ -892,44 +900,51 @@ class CognitiveContextService:
         # Repeated external focus is stronger evidence of attention than a
         # one-turn lookup. Character-generated output must not recursively
         # reinforce or teach from corpus references either.
-        if allow_automatic_corpus:
-            try:
-                current_research_id = (
-                    corpus_result.research_id if corpus_result is not None else None
-                )
-                await self.corpus_reinforcement.reinforce_from_focus(
-                    instance_id=context.instance_id,
-                    focus_text=attention.retrieval_focus_text,
-                    current_research_id=current_research_id,
-                )
-                await self.semantic_corpus_reinforcement.reinforce_from_knowledge(
-                    instance_id=context.instance_id,
-                    knowledge=structured_knowledge,
-                    current_research_id=current_research_id,
-                )
-                # Stage 3 keeps automatic lookup and reinforcement, but
-                # a search hit must no longer silently become a source-consumption
-                # event. Deliberate research.study is the default acquisition path.
-                # Operators can opt back into the earlier heuristic policy.
-                legacy_auto_acquire = os.getenv(
-                    "AIOS_LEGACY_AUTO_CORPUS_ACQUIRE", "0").strip().lower() in {
-                        "1","true","yes","on"}
-                if legacy_auto_acquire and corpus_result is not None and corpus_result.hits:
-                    await self.corpus_learning.evaluate_and_acquire(
-                        instance_id=context.instance_id,
-                        research_id=corpus_result.research_id,
-                        section_ids=[hit.section_id for hit in corpus_result.hits],
+        maintenance_status = "not_requested"
+        if allow_automatic_corpus and lookup_status != "lookup_unavailable":
+            async def maintain_corpus():
+                async with self.db.atomic():
+                    current_research_id = (
+                        corpus_result.research_id if corpus_result is not None else None
                     )
+                    await self.corpus_reinforcement.reinforce_from_focus(
+                        instance_id=context.instance_id,
+                        focus_text=attention.retrieval_focus_text,
+                        current_research_id=current_research_id,
+                    )
+                    await self.semantic_corpus_reinforcement.reinforce_from_knowledge(
+                        instance_id=context.instance_id,
+                        knowledge=structured_knowledge,
+                        current_research_id=current_research_id,
+                    )
+                    # Stage 3 keeps automatic lookup and reinforcement, but
+                    # a search hit must no longer silently become a source-consumption
+                    # event. Deliberate research.study is the default acquisition path.
+                    # Operators can opt back into the earlier heuristic policy.
+                    legacy_auto_acquire = os.getenv(
+                        "AIOS_LEGACY_AUTO_CORPUS_ACQUIRE", "0").strip().lower() in {
+                            "1","true","yes","on"}
+                    if legacy_auto_acquire and corpus_result is not None and corpus_result.hits:
+                        await self.corpus_learning.evaluate_and_acquire(
+                            instance_id=context.instance_id,
+                            research_id=corpus_result.research_id,
+                            section_ids=[hit.section_id for hit in corpus_result.hits],
+                        )
+            try:
+                await asyncio.wait_for(maintain_corpus(),
+                    timeout=self.retrieval_policy.corpus_maintenance_timeout_seconds)
+                maintenance_status = "completed"
+            except asyncio.TimeoutError:
+                maintenance_status = "deferred"
+                logger.warning("Corpus maintenance deferred instance=%s budget_seconds=%.2f",
+                               context.instance_id, self.retrieval_policy.corpus_maintenance_timeout_seconds)
             except Exception:
-                # Learning is subordinate to cognition exactly like corpus search.
-                # Failed acquisition must not make the HUD unavailable.
-                logger.exception(
-                    "Corpus learning evaluation failed instance=%s",
-                    context.instance_id,
-                )
+                maintenance_status = "unavailable"
+                logger.exception("Corpus learning evaluation failed instance=%s", context.instance_id)
 
         corpus_demand_meta = {
             "lookup_status": lookup_status,
+            "maintenance_status": maintenance_status,
             "query": corpus_query,
             "request": research_focus or attention.focus_text,
             "lookup_mode": "hybrid" if research_focus else "assigned_lexical_then_semantic",

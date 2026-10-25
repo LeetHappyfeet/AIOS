@@ -17,6 +17,7 @@ class CognitiveRetrievalPolicy:
     recent_context_limit: int = 12
     corpus_reference_limit: int = 3
     corpus_timeout_seconds: float = 3.0
+    corpus_maintenance_timeout_seconds: float = 0.35
 
     @property
     def memory_limit(self) -> int:

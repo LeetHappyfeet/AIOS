@@ -564,7 +564,14 @@ class CorpusSearchService:
         rows = await self.db.fetch(
             """
             WITH q AS (SELECT websearch_to_tsquery('english',$2) AS query),
-            candidate AS (
+            matching_sections AS MATERIALIZED (
+              SELECT cs.section_id FROM aios.corpus_section cs CROSS JOIN q
+              WHERE cs.search_vector @@ q.query
+              UNION
+              SELECT unnest($6::uuid[])
+              UNION
+              SELECT unnest($7::uuid[])
+            ), candidate AS (
               SELECT cs.section_id,cs.document_id,cd.title,cd.source_uri,cd.epistemic_namespace,cd.identity_binding,cs.heading,cs.content,
                      cs.search_vector,
                      CASE WHEN cs.search_vector @@ q.query
@@ -582,7 +589,8 @@ class CorpusSearchService:
                         SELECT 1 FROM aios.corpus_document_facet facet
                         WHERE facet.document_id=cs.document_id
                           AND lower(facet.facet_value)=ANY($4::text[])) AS facet_match
-              FROM aios.corpus_section cs
+              FROM matching_sections matches
+              JOIN aios.corpus_section cs ON cs.section_id=matches.section_id
               JOIN aios.corpus_document cd ON cd.document_id=cs.document_id
               CROSS JOIN q
               WHERE (cs.search_vector @@ q.query OR cs.section_id=ANY($6::uuid[])

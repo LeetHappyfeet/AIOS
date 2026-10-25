@@ -13,7 +13,7 @@ async def record_corpus_lookup(db, context, diagnostics: dict) -> None:
     # Do not duplicate chat text in the diagnostic store. Keep routing/status
     # even when a search never reaches its ordinary research-event write.
     data = {key: diagnostics.get(key) for key in (
-        "lookup_status", "query", "lookup_mode", "candidate_count", "result_count",
+        "lookup_status", "maintenance_status", "query", "lookup_mode", "candidate_count", "result_count",
         "focus_node_id", "focus_speaker_id", "focus_origin", "knowledge_route",
         "demand_reason", "automatic_lookup_allowed", "reason")}
     query = str(data.get("query") or "")

@@ -126,3 +126,39 @@ particular production speedup. Point-lookup equivalence is also covered by the
 SQL regression tests. Equal-time duplicate acquisitions can
 have unspecified tie ordering in the legacy query; review any reported difference
 rather than treating the comparison as authorization to expose extra evidence.
+
+## HUD corpus deadlines are separate
+
+A `Contextual corpus lookup` traceback from `CognitiveContextService` is the
+interactive corpus search's three-second deadline, not a seven-second RDF
+revision failure. That error is caught and the HUD continues without corpus
+references. Expected corpus timeouts now log a concise warning; unexpected
+errors still include their traceback.
+
+Optional corpus reinforcement previously had no deadline after that search.
+It now has a separate 350 ms budget (`corpus_maintenance_timeout_seconds`),
+runs in a transaction, and rolls back its partial updates on cancellation.
+A failed lookup skips reinforcement for that build. Successful reference hits
+remain available even if maintenance times out. The lookup trace records
+`maintenance_status` as well as `lookup_status`.
+
+Corpus candidate SQL now materializes the union of FTS matches and suggested
+section IDs before evaluating assignment and access predicates. There is no
+candidate cap before access filtering. Deny rules, fanwork exclusion, ranking
+and section passage coordinates are unchanged. This query shape permits an
+independent FTS index scan; production plans are still needed to measure its
+impact under load.
+
+These changes do not bypass HUD readiness. `generation_ready:false` still
+means the requested source needs its current message-cognition commit and
+matching scene projection, or the source/runtime coordinates changed. A large
+LIVE backlog can delay those even while topology reports `CAUGHT_UP`.
+When investigating a missing SillyTavern HUD, preserve the status and JSON
+response from `POST /instance/{id}/hud`, especially `generation_ready`,
+`freshness`, and `frame.hud`. A corpus timeout alone does not establish which
+of those conditions occurred. `wait_ms` controls readiness polling, not the
+whole HTTP request deadline.
+
+No additional migration is needed for this HUD corpus change. The continuation
+worker still requires its existing migration and the seven-second RDF discovery
+window is unchanged.
