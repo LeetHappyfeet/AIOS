@@ -228,3 +228,43 @@ async def test_discovery_revision_changes_with_relevant_evidence_not_just_a_new_
     assert await e.service.discovery_revision(e.ctx,'blue mug')==first
     await e.db.execute("UPDATE aios.ingest_event SET superseded_at=now() WHERE event_id=1")
     assert await e.service.discovery_revision(e.ctx,'blue mug')!=first
+
+
+@pytest.mark.asyncio
+async def test_read_only_query_plan_diagnostic_uses_production_sql(env):
+    from aios_app.entity_memory.diagnostics import query_plans
+    from test_cognitive_episode_postgres import PGConnection, PGPool
+    e = env
+    # The diagnostic uses nested savepoints; use the savepoint-capable bridge
+    # on the same isolated database for this test.
+    e.db.pool = PGPool(PGConnection(e.db.pool.con.process))
+    for analyze in (False, True):
+        report = await query_plans(e.db, e.ctx, 'blue mug', analyze=analyze)
+        assert not report.get('timed_out')
+        assert report['analyze'] == analyze
+        assert set(report['plans']) == {'sources', 'atoms'}
+        for stage in ('sources', 'atoms'):
+            entry = report['plans'][stage]
+            assert 'error' not in entry, entry
+            assert entry['explain'][0]['Plan']['Node Type']
+            if analyze:
+                assert entry['explain'][0]['Execution Time'] >= 0
+    assert await e.db.fetchval('SELECT count(*) FROM aios.entity_memory_projection') > 0
+
+
+@pytest.mark.asyncio
+async def test_query_plan_diagnostic_cannot_write(env, monkeypatch):
+    from aios_app.entity_memory.diagnostics import query_plans
+    from aios_app.entity_memory.retrieval import _ATOM_SQL
+    from test_cognitive_episode_postgres import PGConnection, PGPool
+    e = env
+    e.db.pool = PGPool(PGConnection(e.db.pool.con.process))
+    original = e.db.fetch
+    async def attempted_write(sql, *args):
+        if sql.startswith('EXPLAIN') and _ATOM_SQL in sql:
+            await e.db.execute('DELETE FROM aios.entity_memory_projection')
+        return await original(sql, *args)
+    monkeypatch.setattr(e.db, 'fetch', attempted_write)
+    report = await query_plans(e.db, e.ctx, 'blue mug', analyze=True)
+    assert 'read-only' in report['plans']['atoms']['detail'].lower()
+    assert await e.db.fetchval('SELECT count(*) FROM aios.entity_memory_projection') > 0

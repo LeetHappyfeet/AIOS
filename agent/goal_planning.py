@@ -573,7 +573,9 @@ class GoalPlanningService:
             return result("queued", "lookup_in_progress")
         revision = f"{snap['attempt_id']}:{snap['context'].source_head_node_id}"
         if environment or question["kind"] == "personal":
-            discovered = await RDFRecallService(self.db).discovery_revision(snap["context"], query)
+            recall = RDFRecallService(self.db)
+            discovered = await recall.discovery_revision(snap["context"], query)
+            outcome["revision_check"] = recall.discovery_diagnostics
             if discovered is None:
                 return result("unavailable", "evidence_revision_unavailable")
             revision = f"{snap['attempt_id']}:{discovered}"

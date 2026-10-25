@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from urllib.parse import quote
 from uuid import UUID
@@ -19,6 +20,9 @@ MAX_REFERENCES = 24
 MAX_HITS = 3
 # SQL plus transport have separate hard limits. No inference, ANN, or learning.
 SQL_BUDGET = 0.35
+# Background change detection gets one seven-second window for both reads,
+# including connection acquisition. Interactive recall keeps its short budget.
+REVISION_SQL_BUDGET = 7.0
 TRANSPORT_BUDGET = 0.8
 _STOP = set("what where when which why how who whom have has had does did are was were been being there their this that these those with from about would could should will can any some into then than them they your you our and the for not remember recall know seen saw find available resources".split())
 
@@ -157,6 +161,7 @@ class RDFRecallService:
     def __init__(self,db,fuseki=None):
         self.db=db
         self.fuseki=fuseki
+        self.discovery_diagnostics = {}
 
     async def _rows(self,ctx,terms,*,sections=(),propositions=(),sources=True):
         return await asyncio.wait_for(self.db.fetch(_SOURCE_SQL if sources else _ATOM_SQL,
@@ -170,20 +175,52 @@ class RDFRecallService:
         return await asyncio.wait_for(asyncio.to_thread(client.query,"char",query),TRANSPORT_BUDGET+0.1)
 
     async def discovery_revision(self,ctx,query):
-        """Cheap SQL fingerprint of eligible, relevant coordinates; no RDF read."""
+        """Fingerprint eligible coordinates with one background SQL deadline."""
         terms=terms_for(query,ctx.character_id)
+        self.discovery_diagnostics = {"stage": "empty_focus", "budget_seconds": REVISION_SQL_BUDGET}
         if not terms:
             return hashlib.sha256(b"empty_focus").hexdigest()
-        try:
-            # Preserve the caller transaction when a SQL failure is converted
-            # into temporary unavailability.
+        started = time.monotonic()
+        stage = "connection"
+        timings = {}
+        async def read_coordinates():
+            nonlocal stage
+            # wait_for owns this task. Both reads share its transaction/session;
+            # no nested per-query tasks reserve additional pool connections.
             async with self.db.atomic():
-                sources=await self._rows(ctx,terms)
-                atoms=await self._rows(ctx,terms,sources=False)
+                args = (getattr(ctx,"source_head_node_id",None),
+                        getattr(ctx,"source_timeline_id",None),ctx.character_id,
+                        owners_for(ctx),[],terms)
+                stage = "sources"
+                phase = time.monotonic()
+                sources = await self.db.fetch(_SOURCE_SQL, *args)
+                timings["sources_ms"] = round((time.monotonic()-phase)*1000,1)
+                stage = "atoms"
+                phase = time.monotonic()
+                atoms = await self.db.fetch(_ATOM_SQL, *args)
+                timings["atoms_ms"] = round((time.monotonic()-phase)*1000,1)
+                return sources, atoms
+        try:
+            sources, atoms = await asyncio.wait_for(read_coordinates(), REVISION_SQL_BUDGET)
         except Exception as exc:
-            log.warning("RDF discovery revision unavailable instance=%s reason=%s",
-                        ctx.instance_id, type(exc).__name__, exc_info=True)
+            elapsed = round((time.monotonic()-started)*1000,1)
+            self.discovery_diagnostics = {"stage": stage, "elapsed_ms": elapsed,
+                "budget_seconds": REVISION_SQL_BUDGET, "failure": type(exc).__name__, **timings}
+            if isinstance(exc, asyncio.TimeoutError):
+                # Deadline cancellation is expected, not a second application error.
+                log.warning("RDF discovery revision timed out instance=%s stage=%s elapsed_ms=%s budget_seconds=%s",
+                            ctx.instance_id, stage, elapsed, REVISION_SQL_BUDGET)
+            else:
+                log.warning("RDF discovery revision unavailable instance=%s stage=%s reason=%s elapsed_ms=%s",
+                            ctx.instance_id, stage, type(exc).__name__, elapsed, exc_info=True)
             return None
+        elapsed = round((time.monotonic()-started)*1000,1)
+        self.discovery_diagnostics = {"stage": "completed", "elapsed_ms": elapsed,
+            "budget_seconds": REVISION_SQL_BUDGET, "source_count": len(sources),
+            "atom_count": len(atoms), **timings}
+        if elapsed >= SQL_BUDGET*1000:
+            log.info("RDF discovery revision slow instance=%s elapsed_ms=%s sources_ms=%s atoms_ms=%s sources=%s atoms=%s",
+                     ctx.instance_id, elapsed, timings["sources_ms"], timings["atoms_ms"], len(sources), len(atoms))
         coordinates=[sorted((str(r["section_id"]),r["revision"]) for r in sources),
             sorted((str(r["proposition_id"]),r["authority_state"],r["polarity"],r["modality"],
                     hashlib.sha256((r["content"] or r["canonical_text"]).encode()).hexdigest())
