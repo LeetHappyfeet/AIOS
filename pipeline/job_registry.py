@@ -20,6 +20,7 @@ class ResourceClass(str, Enum):
     RDF = "RDF"
     RECONCILIATION = "RECONCILIATION"
     GLOBAL = "GLOBAL"
+    LOOKUP = "LOOKUP"
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "materialize_event_occurrences": JobSpec(ResourceClass.SEMANTIC, "claim_id", True),
     "derive_semantic_episodes": JobSpec(ResourceClass.SEMANTIC, "global", True),
     "assign_narratives": JobSpec(ResourceClass.GLOBAL, "global", True),
+    "goal_plan_continuation": JobSpec(ResourceClass.LOOKUP, "instance_id", True),
     "agent_wake": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
     "cognitive_operation": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
     "internal_cognition_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
@@ -78,7 +80,7 @@ def job_spec(job_type: str) -> JobSpec:
 
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
-    if job_type in {"goal_planning_inference", "message_cognition_catchup","character_inquiry_shadow",
+    if job_type in {"goal_plan_continuation", "goal_planning_inference", "message_cognition_catchup","character_inquiry_shadow",
                     "character_inquiry_inference"}:
         return SchedulingLane.BACKGROUND
     if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "goal_formulation_inference", "message_cognition_enrichment"}:

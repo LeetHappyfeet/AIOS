@@ -71,6 +71,7 @@ class Settings(BaseModel):
     runner_vector_workers: int = int(os.getenv("AIOS_RUNNER_VECTOR_WORKERS", "1"))
     runner_rdf_workers: int = int(os.getenv("AIOS_RUNNER_RDF_WORKERS", "1"))
     runner_reconciliation_workers: int = int(os.getenv("AIOS_RUNNER_RECONCILIATION_WORKERS", "1"))
+    runner_lookup_workers: int = int(os.getenv("AIOS_RUNNER_LOOKUP_WORKERS", "1"))
     runner_global_workers: int = int(os.getenv("AIOS_RUNNER_GLOBAL_WORKERS", "1"))
 
     db_pool_min_size: int = int(os.getenv("AIOS_DB_POOL_MIN_SIZE", "1"))

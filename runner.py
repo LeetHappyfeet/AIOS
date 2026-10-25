@@ -964,6 +964,7 @@ def _worker_limits() -> dict[ResourceClass, int]:
         ResourceClass.RDF: max(0, settings.runner_rdf_workers),
         ResourceClass.RECONCILIATION: max(0, settings.runner_reconciliation_workers),
         ResourceClass.GLOBAL: max(0, settings.runner_global_workers),
+        ResourceClass.LOOKUP: max(0, settings.runner_lookup_workers),
     }
 
 

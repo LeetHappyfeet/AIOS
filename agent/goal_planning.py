@@ -11,7 +11,7 @@ import json
 import logging
 import time
 from typing import Any, Mapping
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from aios_app.hud.context import HUDContextResolver
 from aios_app.pipeline.jobs import enqueue_job
@@ -424,57 +424,176 @@ class GoalPlanningService:
                 "changed_inputs":changed,"inference_request_id":inference_request_id}
 
     async def continue_due(self, limit: int = 8) -> int:
-        """Retry accepted plans without requiring a donated inference provider."""
+        """Supervisor admission only: enqueue bounded, leased LOOKUP work."""
         rows = await self.db.fetch(
             """SELECT plan_id FROM aios.character_goal_plan
                WHERE status='waiting_information' AND continuation_check_at<=now()
+                 AND (continuation_lease_until IS NULL OR continuation_lease_until<=now())
                ORDER BY continuation_check_at LIMIT $1""", max(1, min(limit, 32)))
         count = 0
         for row in rows:
             try:
                 async with self.db.atomic():
-                    # Same lock order as propose(): goal, runtime, then plan.
-                    coordinate = await self.db.fetchrow(
-                        "SELECT instance_id,goal_id FROM aios.character_goal_plan WHERE plan_id=$1", row["plan_id"])
-                    if not coordinate:
-                        continue
-                    await self.db.fetchrow("SELECT goal_id FROM aios.character_agent_goal WHERE goal_id=$1 FOR UPDATE",
-                                           coordinate["goal_id"])
-                    await self.db.fetchrow("SELECT instance_id FROM aios.character_runtime_state WHERE instance_id=$1 FOR UPDATE",
-                                           coordinate["instance_id"])
                     plan = await self.db.fetchrow(
                         """SELECT * FROM aios.character_goal_plan WHERE plan_id=$1
                            AND status='waiting_information' AND continuation_check_at<=now()
+                           AND (continuation_lease_until IS NULL OR continuation_lease_until<=now())
                            FOR UPDATE SKIP LOCKED""", row["plan_id"])
                     if not plan:
                         continue
-                    snap = await self.snapshot(plan["instance_id"], plan["goal_id"])
-                    if snap is None:
-                        # A paused runtime can resume with unchanged planning
-                        # inputs; preserve its retry slot rather than stranding it.
+                    active = await self.db.fetchval(
+                        """SELECT 1 FROM aios.pipeline_job WHERE job_type='goal_plan_continuation'
+                           AND (payload->>'plan_id'=$1 OR payload->>'instance_id'=$2)
+                           AND status IN ('queued','running') LIMIT 1""",
+                        str(plan["plan_id"]), str(plan["instance_id"]))
+                    if active:
                         await self.db.execute(
-                            """UPDATE aios.character_goal_plan SET continuation_check_at=now()+interval '60 seconds'
-                               WHERE plan_id=$1""", plan["plan_id"])
+                            "UPDATE aios.character_goal_plan SET continuation_check_at=now()+interval '15 seconds' WHERE plan_id=$1",
+                            plan["plan_id"])
                         continue
-                    if (plan["attempt_id"] != snap["attempt_id"]
-                            or plan["source_timeline_id"] != snap["context"].source_timeline_id
-                            or plan["source_node_id"] != snap["context"].source_head_node_id):
-                        await self.db.execute("UPDATE aios.character_goal_plan SET continuation_check_at=NULL WHERE plan_id=$1",
-                                              plan["plan_id"])
-                        continue
-                    op = {"instance_id": plan["instance_id"], "operation_id": plan["operation_id"],
-                          "source_node_id": plan["source_node_id"], "input": {"plan_id": str(plan["plan_id"])}}
-                    await self.continue_once(op, mapping(plan["proposal"]), snap)
+                    job = await enqueue_job(self.db, job_type="goal_plan_continuation",
+                        payload={"instance_id": str(plan["instance_id"]), "plan_id": str(plan["plan_id"]), "request_id": str(uuid4())},
+                        priority=170)
+                    if job is None:
+                        raise RuntimeError("could not enqueue plan continuation")
+                    await self.db.execute(
+                        """UPDATE aios.character_goal_plan SET continuation_check_at=now()+interval '60 seconds'
+                           WHERE plan_id=$1""", plan["plan_id"])
                     count += 1
             except Exception:
-                logger.exception("Goal continuation failed plan=%s", row["plan_id"])
-                # Back off even when admission rolled back, and expose the failure.
+                logger.exception("Goal continuation admission failed plan=%s", row["plan_id"])
                 await self.db.execute(
                     """UPDATE aios.character_goal_plan SET continuation=$2::jsonb,
                        continuation_check_at=now()+interval '60 seconds',updated_at=now()
                        WHERE plan_id=$1 AND status='waiting_information'""", row["plan_id"],
                     json.dumps({"status": "unavailable", "reason": "continuation_failed"}))
         return count
+
+    async def _locked_continuation(self, plan, token, request_id):
+        """Short admission locks, in the same order as proposal/goal closure."""
+        await self.db.fetchrow("SELECT goal_id FROM aios.character_agent_goal WHERE goal_id=$1 FOR UPDATE",
+                               plan["goal_id"])
+        await self.db.fetchrow("SELECT instance_id FROM aios.character_runtime_state WHERE instance_id=$1 FOR UPDATE",
+                               plan["instance_id"])
+        live = await self.db.fetchrow(
+            """SELECT *,continuation_lease_until>clock_timestamp() AS lease_current
+               FROM aios.character_goal_plan WHERE plan_id=$1 FOR UPDATE""", plan["plan_id"])
+        if (not live or live["status"] != "waiting_information"
+                or live["continuation_token"] != token or not live["lease_current"]):
+            return None
+        snap = await self.snapshot(plan["instance_id"], plan["goal_id"])
+        reason = None
+        if snap is None:
+            paused = await self.db.fetchval(
+                "SELECT 1 FROM aios.character_agent_runtime WHERE instance_id=$1 AND state='paused'", plan["instance_id"])
+            reason = "runtime_paused" if paused else "goal_attempt_inactive"
+        elif live["attempt_id"] != snap["attempt_id"]:
+            reason = "attempt_changed"
+        elif (live["source_timeline_id"] != snap["context"].source_timeline_id
+                or live["source_node_id"] != snap["context"].source_head_node_id):
+            reason = "source_context_advanced"
+        if reason:
+            await self.db.execute(
+                """UPDATE aios.character_goal_plan SET continuation=$3::jsonb,
+                   continuation_token=NULL,continuation_lease_until=NULL,
+                   continuation_completed_request_id=$5,
+                   continuation_check_at=CASE WHEN $4 THEN now()+interval '60 seconds' ELSE NULL END,
+                   updated_at=now() WHERE plan_id=$1 AND continuation_token=$2""",
+                plan["plan_id"], token, json.dumps({"status": "waiting" if reason == "runtime_paused" else "stale", "reason": reason}),
+                reason == "runtime_paused", request_id)
+            return None
+        return snap
+
+    async def _ensure_dependencies(self, op, proposal, snap):
+        from .goal_dependencies import GoalKnowledgeDependencyService
+        for question in proposal.get("open_questions", [])[:3]:
+            key, existing = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
+            if existing:
+                continue
+            requirement = await GoalKnowledgeDependencyService(self.db).reconcile(
+                instance_id=op["instance_id"], goal_id=snap["goal_id"],
+                question=question["question"], query_text=question["question"],
+                requirement_key=key, source_node_id=op.get("source_node_id"),
+                demand={"coverage_status": "missing", "retrieval_state": "available",
+                        "dependency_kind": question["kind"]})
+            snap["requirements"].append({**requirement, "requirement_key": key,
+                                         "dependency_kind": question["kind"]})
+
+    async def run_continuation(self, plan_id: UUID, *, request_id: UUID | None = None) -> bool:
+        """Lease, release locks for discovery, then fence/revalidate admission."""
+        token = uuid4()
+        request_id = request_id or uuid4()
+        async with self.db.atomic():
+            plan = await self.db.fetchrow(
+                """UPDATE aios.character_goal_plan SET continuation_token=$2,
+                   continuation_lease_until=now()+interval '90 seconds'
+                   WHERE plan_id=$1 AND status='waiting_information'
+                     AND (continuation_lease_until IS NULL OR continuation_lease_until<=now())
+                     AND continuation_completed_request_id IS DISTINCT FROM $3
+                   RETURNING *""", plan_id, token, request_id)
+            if not plan:
+                if await self.db.fetchval(
+                    "SELECT 1 FROM aios.character_goal_plan WHERE plan_id=$1 AND continuation_completed_request_id=$2", plan_id, request_id):
+                    return False
+                if await self.db.fetchval(
+                    "SELECT 1 FROM aios.character_goal_plan WHERE plan_id=$1 AND status='waiting_information'", plan_id):
+                    from aios_app.pipeline.jobs import JobDeferred
+                    raise JobDeferred("plan continuation lease is held", delay_seconds=15)
+                return False
+        op = {"instance_id": plan["instance_id"], "operation_id": plan["operation_id"],
+              "source_node_id": plan["source_node_id"], "input": {"plan_id": str(plan_id)}}
+        proposal = mapping(plan["proposal"])
+        try:
+            async with self.db.atomic():
+                snap = await self._locked_continuation(plan, token, request_id)
+                if snap is None:
+                    return False
+                if proposal.get("next") != "wait":
+                    await self._ensure_dependencies(op, proposal, snap)
+            # No plan, runtime or goal row lock is held during these reads.
+            discoveries = {}
+            async def discover():
+                from aios_app.entity_memory.retrieval import RDFRecallService
+                if proposal.get("next") == "wait":
+                    return
+                for question in proposal.get("open_questions", [])[:3]:
+                    if question["kind"] not in {"environment", "personal"}:
+                        continue
+                    key, requirement = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
+                    if key in discoveries or requirement.get("coverage_status") == "sufficient":
+                        continue
+                    if await self.db.fetchval(
+                        """SELECT 1 FROM aios.character_cognitive_operation WHERE instance_id=$1
+                           AND input->>'requirement_id'=$2 AND status IN ('queued','running','waiting_inference')
+                           AND operation_type IN ('inquiry.resolve','research.advance','research.study') LIMIT 1""",
+                        plan["instance_id"], str(requirement["requirement_id"])):
+                        continue
+                    recall = RDFRecallService(self.db)
+                    revision = await recall.discovery_revision(snap["context"], requirement["question"])
+                    discoveries[key] = (revision, recall.discovery_diagnostics)
+            try:
+                # At most three seven-second checks, with bounded cancellation.
+                await asyncio.wait_for(discover(), timeout=25.0)
+            except asyncio.TimeoutError:
+                logger.warning("Goal continuation discovery window elapsed plan=%s", plan_id)
+            async with self.db.atomic():
+                latest = await self._locked_continuation(plan, token, request_id)
+                if latest is None:
+                    return False
+                await self.continue_once(op, proposal, latest, discoveries=discoveries)
+                await self.db.execute(
+                    """UPDATE aios.character_goal_plan SET continuation_token=NULL,continuation_lease_until=NULL,
+                       continuation_completed_request_id=$3
+                       WHERE plan_id=$1 AND continuation_token=$2""", plan_id, token, request_id)
+            return True
+        except Exception:
+            await self.db.execute(
+                """UPDATE aios.character_goal_plan SET continuation=$3::jsonb,
+                   continuation_token=NULL,continuation_lease_until=NULL,
+                   continuation_check_at=now()+interval '60 seconds',updated_at=now()
+                   WHERE plan_id=$1 AND continuation_token=$2 AND status='waiting_information'""",
+                plan_id, token, json.dumps({"status": "unavailable", "reason": "continuation_failed"}))
+            raise
 
     @staticmethod
     def dependency_identity(question: dict, requirements: list[dict], attempt_id) -> tuple[str, dict | None]:
@@ -500,7 +619,7 @@ class GoalPlanningService:
         key = prefix + hashlib.sha256(normalized.encode()).hexdigest()[:20]
         return key, next((r for r in requirements if r.get("requirement_key") == key), None)
 
-    async def continue_once(self, op: dict, proposal: dict, snap: dict) -> list[dict]:
+    async def continue_once(self, op: dict, proposal: dict, snap: dict, *, discoveries=None) -> list[dict]:
         """Resolve up to three independent prerequisites; never execute or learn."""
         plan_id = mapping(op.get("input")).get("plan_id")
         if not proposal.get("open_questions") or proposal.get("next") == "wait":
@@ -513,23 +632,14 @@ class GoalPlanningService:
         outcomes = []
         # A proposal-level request_information still permits independent procedural
         # lookup. It never permits external research to establish local inventory.
-        from .goal_dependencies import GoalKnowledgeDependencyService
+        await self._ensure_dependencies(op, proposal, snap)
         for question in proposal["open_questions"][:3]:
-            key, existing = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
-            if not existing:
-                requirement = await GoalKnowledgeDependencyService(self.db).reconcile(
-                    instance_id=op["instance_id"], goal_id=snap["goal_id"],
-                    question=question["question"], query_text=question["question"],
-                    requirement_key=key, source_node_id=op.get("source_node_id"),
-                    demand={"coverage_status": "missing", "retrieval_state": "available",
-                            "dependency_kind": question["kind"]})
-                snap["requirements"].append({**requirement, "requirement_key": key,
-                                             "dependency_kind": question["kind"]})
+            key, _ = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
             try:
                 # A child admission failure rolls back only this dependency's
                 # operation/job; its information need and other work survive.
                 async with self.db.atomic():
-                    outcomes.append(await self._continue_dependency(op, question, snap))
+                    outcomes.append(await self._continue_dependency(op, question, snap, discoveries=discoveries))
             except Exception:
                 logger.exception("Goal dependency continuation unavailable requirement=%s", key)
                 _, requirement = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
@@ -544,11 +654,11 @@ class GoalPlanningService:
                 json.dumps({"dependencies": outcomes}))
         return outcomes
 
-    async def _continue_dependency(self, op: dict, question: dict, snap: dict) -> dict:
+    async def _continue_dependency(self, op: dict, question: dict, snap: dict, *, discoveries=None) -> dict:
         from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
         from aios_app.entity_memory.retrieval import RDFRecallService
         environment = question["kind"] == "environment"
-        _, requirement = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
+        key, requirement = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
         if requirement is None:
             raise RuntimeError("dependency must be persisted before lookup admission")
         query = requirement["question"]
@@ -573,9 +683,15 @@ class GoalPlanningService:
             return result("queued", "lookup_in_progress")
         revision = f"{snap['attempt_id']}:{snap['context'].source_head_node_id}"
         if environment or question["kind"] == "personal":
-            recall = RDFRecallService(self.db)
-            discovered = await recall.discovery_revision(snap["context"], query)
-            outcome["revision_check"] = recall.discovery_diagnostics
+            if discoveries is None:
+                # Compatibility for explicit single-shot callers. Queue workers
+                # always supply discovery performed outside admission locks.
+                recall = RDFRecallService(self.db)
+                discovered = await recall.discovery_revision(snap["context"], query)
+                diagnostics = recall.discovery_diagnostics
+            else:
+                discovered, diagnostics = discoveries.get(key, (None, {"stage": "discovery_window_exhausted"}))
+            outcome["revision_check"] = diagnostics
             if discovered is None:
                 return result("unavailable", "evidence_revision_unavailable")
             revision = f"{snap['attempt_id']}:{discovered}"

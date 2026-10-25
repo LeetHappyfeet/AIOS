@@ -32,6 +32,7 @@ class AdmissionDecision:
 
 
 COSTS = {
+    "goal_plan_continuation": 2,
     "resolve_claim_context": 2,
     "normalize_proposition": 1,
     "materialize_event_occurrences": 2,

@@ -99,6 +99,19 @@ async def handle_goal_planning_inference(db: Database, job: Dict[str, Any]) -> N
 base.JOB_HANDLERS["goal_planning_inference"] = handle_goal_planning_inference
 
 
+async def handle_goal_plan_continuation(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.goal_planning import GoalPlanningService
+    plan_id = (job.get("payload") or {}).get("plan_id")
+    if not plan_id:
+        raise ValueError("goal_plan_continuation requires plan_id")
+    request_id = (job.get("payload") or {}).get("request_id") or job["job_id"]
+    await GoalPlanningService(db).run_continuation(UUID(str(plan_id)), request_id=UUID(str(request_id)))
+
+
+base.JOB_HANDLERS["goal_plan_continuation"] = handle_goal_plan_continuation
+
+
 async def handle_goal_formulation_inference(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
     from aios_app.agent.cognitive_operations import CognitiveOperationEngine
@@ -229,7 +242,7 @@ _original_resolve_partition_key = base._resolve_partition_key
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
-    if job_type in {"goal_planning_inference","agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference"} and payload.get("instance_id"):
+    if job_type in {"goal_plan_continuation", "goal_planning_inference","agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference"} and payload.get("instance_id"):
         return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])

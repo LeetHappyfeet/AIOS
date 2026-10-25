@@ -8,25 +8,26 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import hashlib
 import time
 from uuid import UUID
 
-from aios_app.entity_memory.retrieval import _SOURCE_SQL, _ATOM_SQL, owners_for, terms_for
+from aios_app.entity_memory.retrieval import _SOURCE_SQL, _ATOM_SQL, _LEGACY_ATOM_SQL, owners_for, terms_for
 
 
 async def query_plans(db, context, query: str, *, analyze: bool = False,
-                      timeout_seconds: float = 30.0) -> dict:
+                      timeout_seconds: float = 30.0, compare: bool = False) -> dict:
     """Bound the entire diagnostic and prohibit writes, even during ANALYZE."""
     timeout_seconds = max(.01, min(float(timeout_seconds), 120.0))
     terms = terms_for(query, context.character_id)
     report = {"instance_id": str(context.instance_id), "terms": terms,
-              "analyze": analyze, "timeout_seconds": timeout_seconds, "plans": {}}
+              "analyze": analyze, "compare": compare, "timeout_seconds": timeout_seconds, "plans": {}}
     args = (getattr(context, 'source_head_node_id', None),
             getattr(context, 'source_timeline_id', None), context.character_id,
             owners_for(context), [], terms)
     async def inspect():
         async with db.atomic():
-            await db.execute('SET TRANSACTION READ ONLY')
+            await db.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
             await db.fetchval("SELECT set_config('statement_timeout',$1,true)",
                               f'{int(timeout_seconds*1000)}ms')
             await db.fetchval("SELECT set_config('lock_timeout',$1,true)", '1000ms')
@@ -45,7 +46,10 @@ async def query_plans(db, context, query: str, *, analyze: bool = False,
                    ORDER BY relname""", ['entity_memory_projection','dag_edge',
                     'knowledge_acquisition_event','proposition'])]
             options = 'ANALYZE, BUFFERS, SETTINGS, FORMAT JSON' if analyze else 'FORMAT JSON'
-            for stage, sql in (('sources', _SOURCE_SQL), ('atoms', _ATOM_SQL)):
+            queries = [('sources', _SOURCE_SQL), ('atoms', _ATOM_SQL)]
+            if compare:
+                queries.append(('legacy_atoms', _LEGACY_ATOM_SQL))
+            for stage, sql in queries:
                 started = time.monotonic()
                 try:
                     # A failed EXPLAIN must not prevent the second query plan.
@@ -59,6 +63,22 @@ async def query_plans(db, context, query: str, *, analyze: bool = False,
                 except Exception as exc:
                     report['plans'][stage] = {'elapsed_ms': round((time.monotonic()-started)*1000,1),
                                              'error': type(exc).__name__, 'detail': str(exc)[:500]}
+            if compare:
+                # Explicit opt-in only: executing both SELECTs has extra cost.
+                # Hash all returned columns to compare provenance and qualifiers
+                # without copying source text into the diagnostic report.
+                signatures = {}
+                for name, sql in (("legacy", _LEGACY_ATOM_SQL), ("optimized", _ATOM_SQL)):
+                    phase = time.monotonic()
+                    async with db.atomic():
+                        rows = await db.fetch(sql, *args)
+                    signatures[name] = [{"proposition_id": str(row["proposition_id"]),
+                        "sha256": hashlib.sha256(json.dumps(dict(row), sort_keys=True, default=str).encode()).hexdigest()}
+                        for row in rows]
+                    report.setdefault("comparison", {})[name] = {
+                        "elapsed_ms": round((time.monotonic()-phase)*1000,1),
+                        "rows": len(rows), "coordinates": signatures[name]}
+                report["comparison"]["equivalent"] = signatures["legacy"] == signatures["optimized"]
     try:
         await asyncio.wait_for(inspect(), timeout_seconds)
     except asyncio.TimeoutError:
@@ -76,7 +96,7 @@ async def run(args):
         # Resolving coordinates is read-only and does not create an instance.
         context = await asyncio.wait_for(HUDContextResolver(db).resolve(args.instance_id), args.timeout)
         result = await query_plans(db, context, args.query,
-                                   analyze=args.analyze, timeout_seconds=args.timeout)
+                                   analyze=args.analyze, timeout_seconds=args.timeout, compare=args.compare)
         print(json.dumps(result, indent=2, default=str))
     finally:
         await db.close()
@@ -86,6 +106,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--instance-id', type=UUID, required=True)
     parser.add_argument('--query', required=True)
+    parser.add_argument('--compare', action='store_true', help='Compare legacy/optimized atom plans and execute both SELECTs in one read-only snapshot')
     parser.add_argument('--analyze', action='store_true', help='Execute the read-only SELECTs and include actual timings/buffers')
     parser.add_argument('--timeout', type=float, default=30.0, help='Overall query-plan budget in seconds (maximum 120)')
     args = parser.parse_args()

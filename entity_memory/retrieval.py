@@ -86,7 +86,7 @@ WHERE ep.owner_character_id=$3 AND ep.dataset='char'
           AND aios.semantic_acquisition_source_eligible(kae.acquisition_id)))
 ORDER BY ep.updated_at DESC,ep.section_id LIMIT 12
 """
-_ATOM_SQL = _ANCESTRY + """
+_LEGACY_ATOM_SQL = _ANCESTRY + """
 SELECT DISTINCT ON(p.proposition_id) p.proposition_id,p.atom_id,p.canonical_text,
  p.subject_norm,p.predicate_norm,p.object_norm,p.polarity,p.modality,
  kae.instance_id,kae.claim_id,kae.confidence,kae.epistemic_status,
@@ -110,6 +110,41 @@ WHERE $3::text IS NOT NULL AND kae.instance_id=ANY($4::uuid[]) AND 'reflection'=
  AND (cardinality($5::uuid[])>0 AND p.proposition_id=ANY($5::uuid[])
       OR cardinality($5::uuid[])=0 AND EXISTS(SELECT 1 FROM unnest($6::text[]) term
        WHERE lower(concat_ws(' ',p.subject_norm,p.predicate_norm,p.object_norm)) LIKE '%'||term||'%'))
+ORDER BY p.proposition_id,kae.created_at DESC LIMIT 12
+"""
+
+# Preserve the legacy query only for explicit diagnostic comparison.
+_ATOM_SQL = _ANCESTRY.rstrip() + """, atom_candidates AS MATERIALIZED (
+ SELECT kae.acquisition_id,kae.proposition_id
+ FROM aios.knowledge_acquisition_event kae
+ JOIN aios.proposition p ON p.proposition_id=kae.proposition_id
+ JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae.acquisition_id
+ JOIN aios.semantic_evidence_admission sea ON sea.acquisition_id=kae.acquisition_id
+ WHERE $3::text IS NOT NULL AND kae.instance_id=ANY($4::uuid[])
+   AND sea.status='active' AND 'reflection'=ANY(eaa.authorized_uses)
+   AND eaa.authority_state IN ('attested','corroborated','canonical','disputed')
+   AND (cardinality($5::uuid[])>0 AND p.proposition_id=ANY($5::uuid[])
+        OR cardinality($5::uuid[])=0 AND EXISTS(SELECT 1 FROM unnest($6::text[]) term
+         WHERE lower(concat_ws(' ',p.subject_norm,p.predicate_norm,p.object_norm)) LIKE '%'||term||'%'))
+)
+SELECT DISTINCT ON(p.proposition_id) p.proposition_id,p.atom_id,p.canonical_text,
+ p.subject_norm,p.predicate_norm,p.object_norm,p.polarity,p.modality,
+ kae.instance_id,kae.claim_id,kae.confidence,kae.epistemic_status,
+ eaa.authority_state,eaa.origin_kind,eaa.epistemic_mode,ccr.claim_kind,
+ ds.section_id,ds.content,cc.raw_text,n.node_id,n.timeline_id,n.speaker_id
+FROM atom_candidates candidate
+JOIN aios.knowledge_acquisition_event kae ON kae.acquisition_id=candidate.acquisition_id
+JOIN aios.proposition p ON p.proposition_id=candidate.proposition_id
+JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae.acquisition_id
+LEFT JOIN aios.claim_candidate cc ON cc.claim_id=kae.claim_id
+LEFT JOIN aios.claim_context_resolution ccr ON ccr.claim_id=kae.claim_id
+LEFT JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id
+LEFT JOIN aios.document_section ds ON ds.section_id=es.section_id
+LEFT JOIN aios.dag_node n ON n.node_id=COALESCE(ds.node_id,kae.dag_node_id)
+LEFT JOIN aios.ingest_event ie ON ie.event_id=n.event_id
+WHERE aios.semantic_acquisition_source_eligible(candidate.acquisition_id)
+ AND (ie.event_id IS NULL OR ie.superseded_at IS NULL)
+ AND (n.timeline_id IS DISTINCT FROM $2 OR n.node_id IN (SELECT node_id FROM ancestry))
 ORDER BY p.proposition_id,kae.created_at DESC LIMIT 12
 """
 

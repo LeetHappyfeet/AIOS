@@ -11,8 +11,9 @@ Expected deadline expiry emits one concise warning with the instance, stage and
 elapsed time. Unexpected errors retain a traceback. Checks slower than 350 ms
 emit an informational timing summary. Planning continuation records also carry
 `revision_check`, including stage, budget, elapsed time and completed stage times.
-No database migration is needed for these additions; the previous continuation
-migration remains required.
+The timing fields themselves need no schema change. The current background
+worker requires migration `20261025_02_continuation_lookup_worker.sql` after the
+previous continuation migration; use the canonical migrator before starting it.
 
 ## Investigation findings
 
@@ -39,13 +40,17 @@ Code inspection shows:
   task's connection. The background revision reader now creates one timed task
   whose SQL calls reuse its transaction connection.
 
-The seven-second change deliberately preserves query predicates, result limits,
-fingerprint inputs, source authorization and timeline boundaries. It is a wider
-measurement window, not a claim that the underlying queries are optimized.
-Continuation still checks dependencies sequentially in the supervisor while
-holding the plan's goal/runtime locks; several slow dependencies can delay other
-work. Query plans are needed before deciding whether to move fingerprinting to
-smaller indexed coordinates or a separate background job.
+The seven-second deadline remains. The atom query now materializes owner,
+proposition/topic, active admission and authority candidates before invoking
+source eligibility. It has no preliminary candidate limit. All eligibility,
+supersession and branch checks, the final result limit and fingerprint inputs
+remain in force. Both discovery and reference validation use this query.
+
+Continuation discovery now runs as a leased BACKGROUND job on a dedicated LOOKUP
+worker rather than in the supervisor. Goal/runtime/plan row locks are released
+for discovery. Admission rechecks the lease token, active attempt and exact source
+head/timeline under short locks. See `goal_dependency_continuation.md` for the
+required worker migration and recovery behavior.
 
 ## Collect the actual plans
 
@@ -90,13 +95,34 @@ remaining candidates. This sample points to early eligibility work, not ancestry
 or a missing owner index, as the immediate cost concentration. It does not explain
 every seven-second timeout under concurrent startup load.
 
-The next query optimization to evaluate is to materialize the topic/owner/authority
-candidate set before invoking expensive source eligibility, while retaining every
-admission and branch predicate on the eventual results. Actual performance and
-identical authorization results need comparison before deploying that rewrite.
+This captured legacy plan motivated the materialized candidate stage now in the
+atom query. The comparison mode below measures its actual effect on your host;
+these legacy timings are not claims about the optimized query's production speed.
 
 The launch log also exposed a separate inquiry fallback defect: RDF failure or
 an empty result led to character knowledge retrieval with `scorer=None`, which
 then called `scorer.score()`. Inquiry now supplies a query-focused scorer, and
 the optional-scorer knowledge API initializes its default when omitted. This fixes
 the AttributeError without changing source-access SQL or the seven-second window.
+
+## Compare the optimization on the same database snapshot
+
+Add `--compare` to the diagnostic command:
+
+```bash
+python -m aios_app.entity_memory.diagnostics \
+  --instance-id 642c42ba-8378-4dfe-930a-8f67355729eb \
+  --query "What is the layout and nature of the workspace where the installation occurs?" \
+  --analyze --compare > rdf-plan.json 2> rdf-plan.err
+```
+
+This explicitly executes both legacy and optimized atom SELECTs, and requests
+both plans. It uses one read-only REPEATABLE READ snapshot and reports timings,
+coordinate hashes covering every returned column, and `comparison.equivalent`.
+No full source text is copied into the comparison report. The extra legacy work
+is diagnostic only; normal application queries do not execute both versions.
+Repeat on representative relevant and irrelevant questions before claiming a
+particular production speedup. Point-lookup equivalence is also covered by the
+SQL regression tests. Equal-time duplicate acquisitions can
+have unspecified tie ordering in the legacy query; review any reported difference
+rather than treating the comparison as authorization to expose extra evidence.

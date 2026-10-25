@@ -3,14 +3,28 @@
 Apply canonical migrations (`python -m aios_app.migrate`) before starting the
 updated workers/API. Migration `20261025_01_goal_dependency_continuation.sql`
 adds continuation diagnostics, a due index, catalog change tracking and contextual
-lookup traces. Existing waiting plans are eligible for a bounded continuation
+lookup traces. Migration `20261025_02_continuation_lookup_worker.sql` adds
+recoverable continuation leases and the dedicated LOOKUP resource class. Apply
+both through the canonical migrator before starting updated workers.
+Existing waiting plans are eligible for a bounded continuation
 check; closed attempts, paused runtimes and old source heads cannot dispatch work.
 The next normal planning poll can propose a current plan after chat advances.
 
 ## What changes
 
-An accepted advisory plan commits before optional lookup admission. Its background
-continuation poll runs even without a routable planning inference provider. Each
+An accepted advisory plan commits before optional lookup admission. The supervisor
+only enqueues continuation jobs, even without a routable planning inference
+provider. A dedicated LOOKUP worker (one by default, configurable with
+`AIOS_RUNNER_LOOKUP_WORKERS`) runs these BACKGROUND jobs independently of GLOBAL.
+It claims a 90-second fenced lease, persists requirements in a short transaction,
+releases all goal/runtime/plan row locks for discovery, then reacquires locks and
+revalidates lease, plan, attempt, source head and timeline before child admission.
+A single worker discovery phase is capped at 25 seconds; each revision check keeps
+its seven-second deadline. Pending child work skips redundant discovery.
+Expired leases can be reclaimed, and a late worker cannot commit after takeover.
+A durable request ID is recorded on completion so retrying the same queue request
+cannot admit another child operation even if its earlier child has already finished.
+Paused work backs off; closed attempts and outdated sources cannot admit work. Each
 of up to three questions gets a durable requirement before RDF revision discovery.
 Transient failure backs off 60 seconds and preserves the plan. New inference is
 not required to retry the lookup. A failed child enqueue rolls back child admission

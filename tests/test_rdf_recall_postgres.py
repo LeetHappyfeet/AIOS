@@ -268,3 +268,101 @@ async def test_query_plan_diagnostic_cannot_write(env, monkeypatch):
     report = await query_plans(e.db, e.ctx, 'blue mug', analyze=True)
     assert 'read-only' in report['plans']['atoms']['detail'].lower()
     assert await e.db.fetchval('SELECT count(*) FROM aios.entity_memory_projection') > 0
+
+
+@pytest.mark.asyncio
+async def test_topic_filter_precedes_expensive_source_eligibility(env):
+    from aios_app.entity_memory.retrieval import _ATOM_SQL, _LEGACY_ATOM_SQL, owners_for
+    e = env
+    await atom(e)
+    await e.db.pool.con.query('''
+      CREATE SEQUENCE aios.eligibility_calls;
+      CREATE OR REPLACE FUNCTION aios.semantic_acquisition_source_eligible(id uuid)
+      RETURNS boolean LANGUAGE plpgsql STABLE AS $$
+      BEGIN
+        PERFORM nextval('aios.eligibility_calls');
+        RETURN COALESCE((SELECT eligible FROM aios.knowledge_acquisition_event WHERE acquisition_id=id),false);
+      END $$;
+    ''', exec=True)
+    args = (e.ctx.source_head_node_id, e.ctx.source_timeline_id, e.ctx.character_id,
+            owners_for(e.ctx), [], ['unrelated'])
+    assert not await e.db.fetch(_ATOM_SQL, *args)
+    assert not await e.db.fetchval('SELECT is_called FROM aios.eligibility_calls')
+    relevant = (*args[:-1], ['couch'])
+    optimized = await e.db.fetch(_ATOM_SQL, *relevant)
+    assert len(optimized) == 1 and optimized[0]['polarity'] == -1
+    assert await e.db.fetchval('SELECT is_called FROM aios.eligibility_calls')
+    assert [dict(row) for row in optimized] == [dict(row) for row in await e.db.fetch(_LEGACY_ATOM_SQL, *relevant)]
+
+
+@pytest.mark.asyncio
+async def test_atom_queries_preserve_all_authorization_and_point_lookup_filters(env):
+    from aios_app.entity_memory.retrieval import _ATOM_SQL, _LEGACY_ATOM_SQL, owners_for
+    e = env
+    pid, _, acq = await atom(e)
+    async def compare(*, points=(), terms=('couch',)):
+        args = (e.ctx.source_head_node_id,e.ctx.source_timeline_id,e.ctx.character_id,
+                owners_for(e.ctx),list(points),list(terms))
+        old = [dict(row) for row in await e.db.fetch(_LEGACY_ATOM_SQL,*args)]
+        new = [dict(row) for row in await e.db.fetch(_ATOM_SQL,*args)]
+        assert old == new
+        return new
+    assert len(await compare()) == 1
+    assert len(await compare(points=[pid], terms=[])) == 1
+    for table, field, bad, good in (
+        ('knowledge_acquisition_event','eligible','false','true'),
+        ('semantic_evidence_admission','status',"'suppressed'","'active'"),
+        ('epistemic_authority_admission','authority_state',"'candidate'","'attested'"),
+        ('epistemic_authority_admission','authorized_uses',"'{}'::text[]","ARRAY['reflection']")):
+        await e.db.execute(f'UPDATE aios.{table} SET {field}={bad} WHERE acquisition_id=$1', acq)
+        assert not await compare()
+        await e.db.execute(f'UPDATE aios.{table} SET {field}={good} WHERE acquisition_id=$1', acq)
+    await e.db.execute('UPDATE aios.knowledge_acquisition_event SET instance_id=$2 WHERE acquisition_id=$1', acq, uuid4())
+    assert not await compare()
+    await e.db.execute('UPDATE aios.knowledge_acquisition_event SET instance_id=$2 WHERE acquisition_id=$1', acq, e.ctx.instance_id)
+    await e.db.execute('UPDATE aios.ingest_event SET superseded_at=now() WHERE event_id=1')
+    assert not await compare()
+    await e.db.execute('UPDATE aios.ingest_event SET superseded_at=NULL WHERE event_id=1')
+    previous=e.ctx.source_head_node_id
+    e.ctx.source_head_node_id=uuid4()
+    await e.db.execute('INSERT INTO aios.ingest_event VALUES(2,NULL)')
+    await e.db.execute("INSERT INTO aios.dag_node(node_id,timeline_id,event_id,kind) VALUES($1,$2,2,'chat_message')",e.ctx.source_head_node_id,e.ctx.source_timeline_id)
+    assert not await compare()  # Same timeline, disconnected sibling branch.
+    await e.db.execute('INSERT INTO aios.dag_edge VALUES($1,$2,$3)',e.ctx.source_timeline_id,previous,e.ctx.source_head_node_id)
+    assert len(await compare())==1
+
+
+@pytest.mark.asyncio
+async def test_comparison_diagnostic_uses_same_read_only_snapshot(env):
+    from aios_app.entity_memory.diagnostics import query_plans
+    from test_cognitive_episode_postgres import PGConnection, PGPool
+    e=env
+    await atom(e)
+    e.db.pool=PGPool(PGConnection(e.db.pool.con.process))
+    report=await query_plans(e.db,e.ctx,'couch',analyze=True,compare=True)
+    assert report['comparison']['equivalent']
+    assert report['comparison']['legacy']['rows']==1
+    assert 'legacy_atoms' in report['plans']
+
+
+@pytest.mark.asyncio
+async def test_no_preliminary_limit_can_hide_a_later_eligible_atom(env):
+    from aios_app.entity_memory.retrieval import _ATOM_SQL, _LEGACY_ATOM_SQL, owners_for
+    e=env
+    pid,_,_=await atom(e)
+    await e.db.execute('''INSERT INTO aios.proposition
+        SELECT ('00000000-0000-0000-0000-'||lpad(i::text,12,'0'))::uuid,
+            gen_random_uuid(),'couch report','Renamon','like','couch',1,'asserted'
+        FROM generate_series(1,20) i''')
+    await e.db.execute('''INSERT INTO aios.knowledge_acquisition_event(acquisition_id,instance_id,proposition_id,eligible)
+        SELECT gen_random_uuid(),$1,proposition_id,false FROM aios.proposition
+        WHERE proposition_id<>$2''', e.ctx.instance_id,pid)
+    await e.db.execute('''INSERT INTO aios.epistemic_authority_admission
+        SELECT acquisition_id,'attested','source','reported',ARRAY['reflection']
+        FROM aios.knowledge_acquisition_event WHERE NOT eligible''')
+    await e.db.execute('''INSERT INTO aios.semantic_evidence_admission
+        SELECT acquisition_id,'active' FROM aios.knowledge_acquisition_event WHERE NOT eligible''')
+    args=(e.ctx.source_head_node_id,e.ctx.source_timeline_id,e.ctx.character_id,owners_for(e.ctx),[],['couch'])
+    old=[dict(row) for row in await e.db.fetch(_LEGACY_ATOM_SQL,*args)]
+    new=[dict(row) for row in await e.db.fetch(_ATOM_SQL,*args)]
+    assert new==old and [row['proposition_id'] for row in new]==[pid]
