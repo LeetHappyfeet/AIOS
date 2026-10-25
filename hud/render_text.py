@@ -98,6 +98,16 @@ def _render_goal_plan(plan: Mapping[str, Any] | None) -> list[str]:
     for question in proposal.get("open_questions") or []:
         lines.append(f"Unknown ({question['kind']}): {question['question']}")
     lines.append("Next: " + str(proposal.get("next") or "wait").replace("_", " "))
+    continuation = plan.get("continuation") or {}
+    if continuation.get("status"):
+        lines.append("Lookup: " + str(continuation["status"]) + " — " + str(continuation.get("reason") or ""))
+    for dependency in continuation.get("dependencies") or []:
+        status = str(dependency.get("status") or "pending").replace("_", " ")
+        lines.append(f"Lookup ({status}): {dependency.get('question', '')}")
+        if dependency.get("status") == "awaiting_observation":
+            lines.append("Option: inspect or ask about this prerequisite; its answer is not established.")
+        elif dependency.get("status") == "unavailable":
+            lines.append("Lookup temporarily unavailable; background retry pending.")
     return lines
 
 
@@ -243,10 +253,17 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             speaker = provenance.get("speaker_id") or "source"
             lines.append(f"- [{speaker}; earlier report] {item.get('text', '')}")
 
+    corpus_diagnostics = (frame.get("hud") or {}).get("corpus_research") or {}
+    lookup = corpus_diagnostics.get("demand") or {}
+    if lookup.get("lookup_status") and lookup["lookup_status"] != "not_requested":
+        lines.append("\nREFERENCE LOOKUP: " + str(lookup["lookup_status"]).replace("_", " "))
+        if corpus_diagnostics.get("budget_excluded_count"):
+            lines.append("Some retrieved references were omitted by the HUD budget.")
     corpus_references = frame.get("corpus_references") or []
     if corpus_references:
         lines.append("\nCORPUS REFERENCES (LOOKED UP; NOT MEMORY OR BELIEF):")
         lines.append("External references describe their source setting; they do not establish personal experiences, relationships, possessions, or goal completion in this instance.")
+        lines.append("Option: review a relevant reference and check its requirements before attempting it.")
         for item in corpus_references:
             source_bits = [
                 str(value)

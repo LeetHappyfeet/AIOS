@@ -141,3 +141,26 @@ async def test_linked_lookup_limits_identifiers_and_preserves_knowledge_labels()
     rows,status=await GoalPlanningService(DB()).linked_knowledge(
         SimpleNamespace(instance_id=owner), [{'evidence_ids':['not-a-uuid']+[str(i) for i in ids]}])
     assert status=='linked_only' and rows[0]['epistemic_status']=='believed'
+
+
+def test_dependency_identity_reuses_wording_but_separates_kinds_and_questions():
+    attempt = uuid4()
+    question = {'kind': 'environment', 'question': 'Is there a cookbook in the cupboard?'}
+    key, _ = GoalPlanningService.dependency_identity(question, [], attempt)
+    existing = {'requirement_key': key, 'dependency_kind': 'environment', 'question': question['question']}
+    equivalent = {'kind': 'environment', 'question': 'Was there a cookbook in the cupboard?'}
+    assert GoalPlanningService.dependency_identity(equivalent, [existing], attempt) == (key, existing)
+    for changed in ({'kind': 'procedure', 'question': question['question']},
+                    {'kind': 'environment', 'question': 'Is there an internet connected device?'}):
+        assert GoalPlanningService.dependency_identity(changed, [existing], attempt)[0] != key
+
+
+def test_hud_exposes_unavailable_lookup_and_conditional_observation():
+    p = {'proposal': proposal(), 'continuation': {'dependencies': [
+        {'question': 'Where is the cookbook?', 'status': 'awaiting_observation'},
+        {'question': 'How do I prepare rice?', 'status': 'unavailable'}]}}
+    text = render_hud_text({'scene': {'working_state': {'immediate_goal': {'text': 'Learn to cook', 'plan': p}}},
+        'hud': {'corpus_research': {'demand': {'lookup_status': 'lookup_unavailable'}}}})
+    assert 'background retry pending' in text
+    assert 'inspect or ask' in text
+    assert 'REFERENCE LOOKUP: lookup unavailable' in text

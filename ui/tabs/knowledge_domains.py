@@ -212,7 +212,9 @@ async def _add_source_profile(domain_key: str, profile_key: str, url_or_host: st
     raw = str(url_or_host or "").strip()
     if not raw:
         raise ValueError("Dedicated source host is required")
-    host = (urlparse(raw if "://" in raw else f"https://{raw}").hostname or "").lower()
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    host = (parsed.hostname or "").lower()
+    path_prefix = parsed.path.rstrip("/") or None
     if not host:
         raise ValueError("Could not determine source hostname")
     key = str(profile_key or "").strip() or f"{_slug(domain['display_name'])}-{_slug(host)}"
@@ -221,7 +223,7 @@ async def _add_source_profile(domain_key: str, profile_key: str, url_or_host: st
     result = await CorpusCatalogService(db).ensure_profile(
         profile_key=key, collection_key=collection, scope_key=scope,
         display_name=f"{domain['display_name']} — {host}",
-        domain_pattern=host, knowledge_domain=domain_key,
+        domain_pattern=host, path_prefix=path_prefix, knowledge_domain=domain_key,
         access_class=str(access_class or "domain"),
         epistemic_namespace=domain["default_epistemic_namespace"] or "reference",
         identity_binding="external", priority=100,
@@ -289,7 +291,8 @@ scope, and namespace together."""
                         value="community_wiki", label="Source kind",
                     )
                     access_class = gr.Dropdown(choices=["domain", "public", "restricted"], value="domain", label="Access class")
-                    add_source = gr.Button("Add source profile")
+                    add_source = gr.Button("Add source profile and classify matching documents")
+                    preview_source = gr.Button("Preview existing profile classification")
                 source_status = gr.JSON(label="Result")
                 sources = gr.Dataframe(
                     headers=["profile", "host", "source_id", "collection", "scope", "access", "namespace", "binding"],
@@ -341,6 +344,14 @@ scope, and namespace together."""
             fn=identifier_click, inputs=[selector, identifier_type, identifier_value],
             outputs=[identifier_status, identifiers, summary],
         )
+        def preview_source_click(profile):
+            try:
+                return run_async(CorpusCatalogService(db).reclassify_profile(
+                    str(profile or "").strip(), dry_run=True))
+            except Exception as exc:
+                raise gr.Error(str(exc))
+
+        preview_source.click(fn=preview_source_click, inputs=source_profile_key, outputs=source_status)
         add_source.click(
             fn=source_click, inputs=[selector, source_profile_key, source_host, source_kind, access_class],
             outputs=[source_status, sources, summary],

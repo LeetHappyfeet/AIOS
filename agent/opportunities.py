@@ -144,16 +144,20 @@ class CognitiveOpportunityService:
         goal_subject_demands:dict[UUID,tuple[Any,dict[str,Any]]]={}
         active_goal_ids=[g.goal_id for g in goals if g.goal_id]
         goal_inquiry_rows = (await self.db.fetch(
-            """SELECT DISTINCT ON (goal_id) goal_id,status,result->>'reason' AS reason,
-                      updated_at
-               FROM aios.character_inquiry
-               WHERE instance_id=$1 AND goal_id=ANY($2::uuid[])
-                 AND evidence_scope='character_accessible'
-               ORDER BY goal_id,updated_at DESC,inquiry_id DESC""",
+            """SELECT DISTINCT ON (r.goal_id) r.goal_id,
+                      o.result->>'status' AS status,
+                      o.result->'result'->>'reason' AS reason,o.updated_at
+               FROM aios.character_goal_knowledge_requirement r
+               JOIN aios.character_cognitive_operation o ON o.instance_id=r.instance_id
+                 AND o.input->>'requirement_id'=r.requirement_id::text
+                 AND o.operation_type='inquiry.resolve' AND o.status='succeeded'
+               WHERE r.instance_id=$1 AND r.goal_id=ANY($2::uuid[])
+                 AND r.requirement_key='knowledge:primary'
+               ORDER BY r.goal_id,o.updated_at DESC,o.operation_id DESC""",
             instance_id,active_goal_ids,
         )) if active_goal_ids else []
         latest_goal_inquiry={
-            row["goal_id"]:(str(row["status"]),str(row["reason"] or ""),row["updated_at"])
+            row["goal_id"]:(row["status"],str(row["reason"] or ""),row["updated_at"])
             for row in goal_inquiry_rows}
         # A prior no_access remains terminal until new reference-index work
         # appears. One epoch lookup is shared by all active goal demands.
@@ -161,8 +165,6 @@ class CognitiveOpportunityService:
         corpus_epoch=(await ProgressiveResearchService(self.db).corpus_change_epoch(instance_id)
             if any(value[1]=="no_access" for value in latest_goal_inquiry.values())
             else None)
-        from .goal_planning import GoalPlanningService
-        planned_goals = await GoalPlanningService(self.db).for_goals(instance_id, active_goal_ids)
         for goal in goals:
             if not goal.goal_id:
                 continue
@@ -193,7 +195,13 @@ class CognitiveOpportunityService:
                 coverage_status=demand["coverage_status"],
                 retrieval_state=demand["retrieval_state"],
                 access_changed=access_changed)
-            if research_op and goal.goal_id not in planned_goals:
+            overlapping = await self.db.fetchval(
+                """SELECT 1 FROM aios.character_cognitive_operation
+                   WHERE instance_id=$1 AND input->>'requirement_id'=$2
+                     AND operation_type IN ('inquiry.resolve','research.advance','research.study')
+                     AND status IN ('queued','running','waiting_inference') LIMIT 1""",
+                instance_id, str(requirement["requirement_id"])) if research_op else False
+            if research_op and not overlapping:
                 gap=max(0.0,1.0-float(demand["internal_coverage"]))
                 needs_dossier=research_op=="research.advance"
                 proposals.append(self._p(

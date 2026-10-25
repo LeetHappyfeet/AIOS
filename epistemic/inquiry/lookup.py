@@ -66,7 +66,8 @@ class InquiryLookup:
                         "source_node_id": str(row.get("source_node_id") or ""),
                         "epistemic_status": str(row.get("epistemic_status") or "")},
                        True) for row in selected)
-            return InquiryEvidence("partial" if hits else "unresolved", hits, "personal_recall")
+            reason = "retrieval_unavailable" if recalled.status == "unavailable" and not hits else "personal_recall"
+            return InquiryEvidence("partial" if hits else "unresolved", hits, reason)
         if target == "world":
             from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
             from aios_app.epistemic.relevance import CognitiveRelevanceScorer

@@ -58,6 +58,7 @@ async def env(monkeypatch):
     await con.query(BOOTSTRAP, exec=True)
     await con.query((ROOT/'migrations/current/20261014_02_goal_planning.sql').read_text(), exec=True)
     await con.query((ROOT/'migrations/current/20261023_01_goal_review_repair.sql').read_text(), exec=True)
+    await con.query((ROOT/'migrations/current/20261025_01_goal_dependency_continuation.sql').read_text(), exec=True)
     instance, goal, attempt, timeline, node = [uuid4() for _ in range(5)]
     await db.execute('INSERT INTO aios.character_instance VALUES($1)', instance)
     await db.execute("INSERT INTO aios.character_agent_goal(goal_id,instance_id,goal_text) VALUES($1,$2,'Learn to cook')", goal, instance)
@@ -69,6 +70,8 @@ async def env(monkeypatch):
     await db.execute("INSERT INTO aios.dag_node VALUES($1,$2,1,'Mia','user','You need to learn independently.')", node, timeline)
     ctx = SimpleNamespace(source_timeline_id=timeline, source_head_node_id=node, state_version=1,
                           instance_id=instance, character_id='Renamon')
+    from aios_app.entity_memory.retrieval import RDFRecallService
+    real_revision = RDFRecallService.discovery_revision
     async def recall_revision(*args): return "relevant-evidence-revision"
     monkeypatch.setattr('aios_app.entity_memory.retrieval.RDFRecallService.discovery_revision', recall_revision)
     async def context(*args): return ctx
@@ -89,7 +92,7 @@ async def env(monkeypatch):
     monkeypatch.setattr('aios_app.inference.InferenceBroker.infer', infer)
     try:
         yield SimpleNamespace(db=db,service=GoalPlanningService(db),instance=instance,goal=goal,
-                              attempt=attempt,ctx=ctx,monkeypatch=monkeypatch)
+                              attempt=attempt,ctx=ctx,monkeypatch=monkeypatch,real_revision=real_revision)
     finally:
         process.stdin.close()
         await process.wait()
@@ -192,8 +195,6 @@ async def test_procedure_dispatches_only_one_host_owned_inquiry_and_no_access_st
     snap=await e.service.snapshot(e.instance,e.goal)
     await e.db.execute('''CREATE TABLE IF NOT EXISTS aios.character_inquiry(instance_id uuid,goal_id uuid,
         evidence_scope text,status text,result jsonb,updated_at timestamptz DEFAULT now())''')
-    requirement=AsyncMock(return_value={'requirement_id':uuid4()})
-    e.monkeypatch.setattr(GoalKnowledgeDependencyService,'reconcile',requirement)
     p=proposal(kind='procedure',next_step='research')
     await e.service.continue_once(op,p,snap)
     child=await e.db.fetchrow("SELECT * FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'")
@@ -201,11 +202,13 @@ async def test_procedure_dispatches_only_one_host_owned_inquiry_and_no_access_st
     payload=json.loads(child['input']) if isinstance(child['input'],str) else child['input']
     assert payload['planning_only'] is True
     assert payload['allow_model'] is False
+    snap=await e.service.snapshot(e.instance,e.goal)
     await e.service.continue_once(op,p,snap)
     assert await e.db.fetchval('SELECT count(*) FROM aios.character_cognitive_operation')==2
     await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded' WHERE operation_type='inquiry.resolve'")
-    await e.db.execute('''INSERT INTO aios.character_inquiry(instance_id,goal_id,evidence_scope,status,result)
-        VALUES($1,$2,'character_accessible','unresolved','{"reason":"no_access"}')''',e.instance,e.goal)
+    await e.db.execute('''UPDATE aios.character_cognitive_operation
+        SET result='{"status":"unresolved","result":{"reason":"no_access"}}'
+        WHERE operation_type='inquiry.resolve' ''')
     await e.service.continue_once(op,p,snap)
     assert await e.db.fetchval('SELECT count(*) FROM aios.character_cognitive_operation')==2
 
@@ -277,7 +280,7 @@ async def test_optional_evidence_timeout_does_not_trigger_more_retrieval(env):
     op=await running(e)
     result=await e.service.propose(op)
     assert result['knowledge_context_status']=='unavailable'
-    assert await e.db.fetchval('SELECT count(*) FROM aios.character_cognitive_operation')==1
+    assert await e.db.fetchval('SELECT count(*) FROM aios.character_cognitive_operation')==2
 
 
 @pytest.mark.asyncio
@@ -384,3 +387,157 @@ async def test_deferred_queue_lease_retains_identity_and_checks_owner(env):
     assert await e.db.fetchval('SELECT status FROM aios.character_cognitive_operation')=='running'
     assert await e.db.fetchval('SELECT status FROM aios.character_agent_goal')=='active'
     assert await e.db.fetchval('SELECT operation_id FROM aios.character_goal_plan')==op['operation_id']
+
+
+@pytest.mark.asyncio
+async def test_real_revision_sql_failure_persists_dependency_then_recovers_without_model(env, monkeypatch):
+    from aios_app.entity_memory.retrieval import RDFRecallService
+    e = env
+    # Run the production SQL against the fixture which deliberately lacks the
+    # projection tables: the old implementation silently lost this dependency.
+    original = RDFRecallService.discovery_revision
+    monkeypatch.setattr(RDFRecallService, 'discovery_revision', e.real_revision)
+    async def cookbook_plan(*args, **kwargs):
+        p = proposal()
+        p['open_questions'][0]['question'] = 'Is there a cookbook in the cupboard?'
+        return SimpleNamespace(request_id=uuid4(), response=SimpleNamespace(raw=p))
+    monkeypatch.setattr('aios_app.inference.InferenceBroker.infer', cookbook_plan)
+    op = await running(e)
+    result = await e.service.propose(op)
+    assert result['status'] == 'waiting_information'
+    assert await e.db.fetchval('SELECT count(*) FROM aios.character_goal_knowledge_requirement') == 1
+    plan = await e.service.current(e.instance, e.goal)
+    assert plan['continuation']['dependencies'][0]['reason'] == 'evidence_revision_unavailable'
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 0
+    monkeypatch.setattr(RDFRecallService, 'discovery_revision', original)
+    await e.db.execute("UPDATE aios.character_goal_plan SET continuation_check_at=now()-interval '1 second'")
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr('aios_app.inference.providers.InferenceProviderStore.routable', AsyncMock(return_value=[]))
+    assert await e.service.schedule_due() == 0
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 1
+    await e.service.continue_due()
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='planning.propose'") == 1
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 1
+
+
+@pytest.mark.asyncio
+async def test_independent_procedure_advances_while_environment_revision_is_unavailable(env, monkeypatch):
+    from aios_app.entity_memory.retrieval import RDFRecallService
+    from unittest.mock import AsyncMock
+    e = env
+    monkeypatch.setattr(RDFRecallService, 'discovery_revision', AsyncMock(return_value=None))
+    op = await running(e)
+    snap = await e.service.snapshot(e.instance, e.goal)
+    p = proposal()
+    p['open_questions'] = [
+        {'kind': 'environment', 'question': 'Is there a cookbook in the cupboard?'},
+        {'kind': 'procedure', 'question': 'What beginner rice recipes can I practice?'},
+        {'kind': 'environment', 'question': 'Is there an internet connected device?'}]
+    outcomes = await e.service.continue_once(op, p, snap)
+    assert [r['status'] for r in outcomes] == ['unavailable', 'queued', 'unavailable']
+    assert len({r['requirement_id'] for r in outcomes}) == 3
+    child = await e.db.fetchrow("SELECT input FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'")
+    payload = json.loads(child['input']) if isinstance(child['input'], str) else child['input']
+    assert not payload['internal_only'] and 'rice' in payload['query']
+    assert not payload['allow_model']
+
+
+@pytest.mark.asyncio
+async def test_scoped_receipts_do_not_block_another_dependency(env, monkeypatch):
+    from unittest.mock import AsyncMock
+    from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+    e = env
+    op = await running(e)
+    snap = await e.service.snapshot(e.instance, e.goal)
+    p = proposal(kind='procedure', next_step='research')
+    p['open_questions'] = [
+        {'kind': 'procedure', 'question': 'How do I measure water for white rice?'},
+        {'kind': 'procedure', 'question': 'How do I scramble eggs in a pan?'}]
+    outcomes = await e.service.continue_once(op, p, snap)
+    await e.db.execute("""UPDATE aios.character_cognitive_operation
+        SET status='succeeded',result='{"status":"unresolved","result":{"reason":"no_access"}}'
+        WHERE operation_type='inquiry.resolve' AND input->>'requirement_id'=$1""", outcomes[0]['requirement_id'])
+    await e.db.execute("""UPDATE aios.character_cognitive_operation
+        SET status='succeeded',result='{"status":"partial","result":{"reason":"personal_recall"}}'
+        WHERE operation_type='inquiry.resolve' AND input->>'requirement_id'=$1""", outcomes[1]['requirement_id'])
+    monkeypatch.setattr(ProgressiveResearchService, 'available', AsyncMock(return_value=True))
+    snap = await e.service.snapshot(e.instance, e.goal)
+    outcomes = await e.service.continue_once(op, p, snap)
+    assert outcomes[0]['status'] == 'denied_access'
+    assert outcomes[1]['reason'] == 'research.advance'
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='research.advance'") == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_child_admission_does_not_discard_accepted_plan(env, monkeypatch):
+    from unittest.mock import AsyncMock
+    e = env
+    op = await running(e)
+    monkeypatch.setattr('aios_app.agent.goal_planning.enqueue_job', AsyncMock(return_value=None))
+    result = await e.service.propose(op)
+    assert result['status'] == 'waiting_information'
+    plan = await e.service.current(e.instance, e.goal)
+    assert plan['proposal'] == proposal()
+    assert plan['continuation']['dependencies'][0]['reason'] == 'child_admission_failed'
+    assert await e.db.fetchval('SELECT count(*) FROM aios.character_goal_knowledge_requirement') == 1
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 0
+
+
+@pytest.mark.asyncio
+async def test_old_head_cannot_continue_a_plan(env):
+    e = env
+    op = await running(e)
+    await e.service.propose(op)
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded'")
+    e.ctx.source_head_node_id = uuid4()
+    await e.db.execute("UPDATE aios.character_goal_plan SET continuation_check_at=now()-interval '1 second'")
+    assert await e.service.continue_due() == 0
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 1
+    assert await e.db.fetchval("SELECT continuation_check_at FROM aios.character_goal_plan") is None
+
+
+@pytest.mark.asyncio
+async def test_pause_preserves_continuation_for_resume(env, monkeypatch):
+    from aios_app.entity_memory.retrieval import RDFRecallService
+    from unittest.mock import AsyncMock
+    e = env
+    original = RDFRecallService.discovery_revision
+    monkeypatch.setattr(RDFRecallService, 'discovery_revision', AsyncMock(return_value=None))
+    op = await running(e)
+    await e.service.propose(op)
+    await e.db.execute("UPDATE aios.character_agent_runtime SET state='paused'")
+    await e.db.execute("UPDATE aios.character_goal_plan SET continuation_check_at=now()-interval '1 second'")
+    await e.service.continue_due()
+    assert await e.db.fetchval('SELECT continuation_check_at IS NOT NULL FROM aios.character_goal_plan')
+    await e.db.execute("UPDATE aios.character_agent_runtime SET state='ready'")
+    await e.db.execute("UPDATE aios.character_goal_plan SET continuation_check_at=now()-interval '1 second'")
+    monkeypatch.setattr(RDFRecallService, 'discovery_revision', original)
+    await e.service.continue_due()
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_inquiry_retry_does_not_repeat_after_recovery(env):
+    from aios_app.agent.goal_dependencies import GoalKnowledgeDependencyService
+    e = env
+    op = await running(e)
+    snap = await e.service.snapshot(e.instance, e.goal)
+    p = proposal(next_step='internal_lookup')
+    await e.service.continue_once(op, p, snap)
+    await e.db.execute("""UPDATE aios.character_cognitive_operation SET status='succeeded',
+        result='{"status":"unresolved","result":{"reason":"retrieval_unavailable"}}'
+        WHERE operation_type='inquiry.resolve'""")
+    await e.service.continue_once(op, p, await e.service.snapshot(e.instance, e.goal))
+    child = await e.db.fetchrow("SELECT input FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve' AND input->>'recall_revision' LIKE '%retry%'")
+    payload = json.loads(child['input']) if isinstance(child['input'], str) else child['input']
+    assert payload['recall_revision'] != payload['discovery_revision']
+    await GoalKnowledgeDependencyService(e.db).record_inquiry(
+        instance_id=e.instance, goal_id=e.goal, requirement_id=UUID(payload['requirement_id']),
+        revision=payload['discovery_revision'],
+        receipt={'status':'unresolved', 'result':{'hits':[], 'reason':'personal_recall'}})
+    await e.db.execute("""UPDATE aios.character_cognitive_operation SET status='succeeded',
+        result='{"status":"unresolved","result":{"reason":"personal_recall"}}'
+        WHERE operation_type='inquiry.resolve'""")
+    outcomes = await e.service.continue_once(op, p, await e.service.snapshot(e.instance, e.goal))
+    assert outcomes[0]['status'] == 'awaiting_observation'
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 2

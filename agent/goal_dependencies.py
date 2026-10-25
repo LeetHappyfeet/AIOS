@@ -48,6 +48,7 @@ class GoalKnowledgeDependencyService:
             "topology_status": str(demand.get("topology_status") or ""),
             "topology_is_advisory": True,
             "not_goal_completion": True,
+            "dependency_kind": demand.get("dependency_kind"),
         }
         async with self.db.connection() as con:
             async with con.transaction():
@@ -112,7 +113,7 @@ class GoalKnowledgeDependencyService:
                  AND g.instance_id=r.instance_id
                WHERE r.instance_id=$1 AND r.goal_id=ANY($2::uuid[])
                  AND g.status='active'
-               ORDER BY r.goal_id,r.created_at""",
+               ORDER BY r.goal_id,r.created_at,r.requirement_key""",
             instance_id,goal_ids,
         )
         result: dict[UUID, list[dict[str, Any]]] = {}
@@ -131,6 +132,7 @@ class GoalKnowledgeDependencyService:
                 "evidence_ids": list(evidence.get("proposition_ids") or [])[:8],
                 "rdf_refs": list(evidence.get("rdf_refs") or [])[:3],
                 "recall_receipt": evidence.get("recall_receipt") or {},
+                "dependency_kind": evidence.get("dependency_kind"),
                 "dossier_ids": [str(d) for d in row["dossier_ids"]],
             })
         return result

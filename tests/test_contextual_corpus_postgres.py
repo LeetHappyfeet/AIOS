@@ -38,6 +38,9 @@ async def env(db):
       CREATE TABLE aios.corpus_document_facet(document_id uuid,facet_value text);
       CREATE TABLE aios.corpus_source_profile(profile_id uuid,scope_key text,knowledge_domain text,enabled boolean);
       CREATE TABLE aios.corpus_document_collection(document_id uuid,profile_id uuid);
+      CREATE TABLE aios.character_corpus_lookup_trace(instance_id uuid,source_node_key text,
+          query_hash text,diagnostics jsonb,updated_at timestamptz DEFAULT now(),
+          PRIMARY KEY(instance_id,source_node_key,query_hash));
       CREATE TABLE aios.character_research_event(research_id uuid DEFAULT gen_random_uuid(),
           instance_id uuid,character_id text,query_text text,query_terms text[],status text,result_count int);
       CREATE TABLE aios.character_corpus_exposure(research_id uuid,section_id uuid,rank int,score float,meta jsonb,
@@ -138,6 +141,7 @@ async def test_contextual_reference_reaches_render_without_acquisition_or_comple
     service.retrieval_policy=replace(service.retrieval_policy,corpus_timeout_seconds=.01)
     failed=await service.resolve_knowledge(ctx,SimpleNamespace(),focus)
     assert failed.corpus_references==[] and failed.corpus_demand['lookup_status']=='lookup_unavailable'
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_corpus_lookup_trace WHERE diagnostics->>'lookup_status'='lookup_unavailable'") == 1
 
 
 @pytest.mark.asyncio

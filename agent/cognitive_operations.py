@@ -167,7 +167,7 @@ class CognitiveOperationEngine:
                     await GoalKnowledgeDependencyService(self.db).record_inquiry(
                         instance_id=op["instance_id"],goal_id=UUID(str(payload["goal_id"])),
                         requirement_id=UUID(str(payload["requirement_id"])),receipt=receipt,
-                        revision=payload.get("recall_revision"))
+                        revision=payload.get("discovery_revision") or payload.get("recall_revision"))
                 if (receipt.get("plan_eligible") and
                         await service.claim_plan(UUID(receipt["inquiry_id"]))):
                     await self.db.execute(

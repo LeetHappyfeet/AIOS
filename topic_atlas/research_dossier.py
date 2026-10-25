@@ -148,6 +148,7 @@ class ProgressiveResearchService:
         """Bounded retry signal only; it grants no access and admits no facts."""
         return await self.db.fetchval(
             """SELECT greatest(
+                 (SELECT changed_at FROM aios.corpus_catalog_epoch WHERE singleton),
                  (SELECT max(indexed_at)
                   FROM aios.corpus_discovery_projection),
                  (SELECT max(acl.updated_at)

@@ -175,9 +175,14 @@ class RDFRecallService:
         if not terms:
             return hashlib.sha256(b"empty_focus").hexdigest()
         try:
-            sources=await self._rows(ctx,terms)
-            atoms=await self._rows(ctx,terms,sources=False)
-        except Exception:
+            # Preserve the caller transaction when a SQL failure is converted
+            # into temporary unavailability.
+            async with self.db.atomic():
+                sources=await self._rows(ctx,terms)
+                atoms=await self._rows(ctx,terms,sources=False)
+        except Exception as exc:
+            log.warning("RDF discovery revision unavailable instance=%s reason=%s",
+                        ctx.instance_id, type(exc).__name__, exc_info=True)
             return None
         coordinates=[sorted((str(r["section_id"]),r["revision"]) for r in sources),
             sorted((str(r["proposition_id"]),r["authority_state"],r["polarity"],r["modality"],

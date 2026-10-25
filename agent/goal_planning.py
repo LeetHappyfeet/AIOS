@@ -263,20 +263,14 @@ class GoalPlanningService:
                   "requirements": requirements,
                   "receipts": summaries,
                   "corpus_epoch": str(epoch) if any(r.get("reason")=="no_access" for r in summaries) else None}
-        # Only an already-requested internal lookup needs an RDF evidence epoch.
-        # This is bounded SQL over indexed coordinates, never a recall pipeline.
-        for requirement in requirements:
-            if requirement.get("recall_receipt",{}).get("revision"):
-                from aios_app.entity_memory.retrieval import RDFRecallService
-                revision = await RDFRecallService(self.db).discovery_revision(context,requirement["question"])
-                if revision is not None:
-                    inputs.setdefault("rdf_evidence_revisions",[]).append((requirement["requirement_id"],revision))
+        # Evidence epochs are checked by continuation, independently of plan inference.
         fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
         return {**dict(goal), "context": context, "requirements": requirements,
                 "receipts": summaries, "fingerprint": fingerprint, "input_context": inputs}
 
     async def schedule_due(self, limit: int = 8) -> int:
         # One primary active goal per instance, independently of chat batching.
+        await self.continue_due(limit=limit)
         if not await InferenceProviderStore(self.db).routable("planning"):
             return 0
         rows = await self.db.fetch(
@@ -395,8 +389,9 @@ class GoalPlanningService:
             await self.db.execute(
                 "UPDATE aios.character_goal_plan SET proposal=$2::jsonb,status=$3,updated_at=now() WHERE plan_id=$1",
                 plan_id, json.dumps(proposal), status)
-            if knowledge_status != "unavailable":
-                await self.continue_once(op, proposal, latest)
+        # Commit the advisory proposal before optional continuation IO. Failure
+        # admitting a child must not discard the accepted plan or its retry slot.
+        await self.continue_due(limit=8)
         return {"kind": "goal_plan", "status": status, "plan_id": str(plan_id),
                 "inference_request_id": str(result.request_id), "admission_effect": "none",
                 "knowledge_context_status": knowledge_status}
@@ -428,70 +423,188 @@ class GoalPlanningService:
         return {"kind":"goal_plan","status":"stale","reason":reason,"stage":stage,
                 "changed_inputs":changed,"inference_request_id":inference_request_id}
 
-    async def continue_once(self, op: dict, proposal: dict, snap: dict) -> None:
-        """One host-constructed lookup; no physical actions and no study/admission."""
-        if not proposal["open_questions"]:
-            return
-        question = proposal["open_questions"][0]
+    async def continue_due(self, limit: int = 8) -> int:
+        """Retry accepted plans without requiring a donated inference provider."""
+        rows = await self.db.fetch(
+            """SELECT plan_id FROM aios.character_goal_plan
+               WHERE status='waiting_information' AND continuation_check_at<=now()
+               ORDER BY continuation_check_at LIMIT $1""", max(1, min(limit, 32)))
+        count = 0
+        for row in rows:
+            try:
+                async with self.db.atomic():
+                    # Same lock order as propose(): goal, runtime, then plan.
+                    coordinate = await self.db.fetchrow(
+                        "SELECT instance_id,goal_id FROM aios.character_goal_plan WHERE plan_id=$1", row["plan_id"])
+                    if not coordinate:
+                        continue
+                    await self.db.fetchrow("SELECT goal_id FROM aios.character_agent_goal WHERE goal_id=$1 FOR UPDATE",
+                                           coordinate["goal_id"])
+                    await self.db.fetchrow("SELECT instance_id FROM aios.character_runtime_state WHERE instance_id=$1 FOR UPDATE",
+                                           coordinate["instance_id"])
+                    plan = await self.db.fetchrow(
+                        """SELECT * FROM aios.character_goal_plan WHERE plan_id=$1
+                           AND status='waiting_information' AND continuation_check_at<=now()
+                           FOR UPDATE SKIP LOCKED""", row["plan_id"])
+                    if not plan:
+                        continue
+                    snap = await self.snapshot(plan["instance_id"], plan["goal_id"])
+                    if snap is None:
+                        # A paused runtime can resume with unchanged planning
+                        # inputs; preserve its retry slot rather than stranding it.
+                        await self.db.execute(
+                            """UPDATE aios.character_goal_plan SET continuation_check_at=now()+interval '60 seconds'
+                               WHERE plan_id=$1""", plan["plan_id"])
+                        continue
+                    if (plan["attempt_id"] != snap["attempt_id"]
+                            or plan["source_timeline_id"] != snap["context"].source_timeline_id
+                            or plan["source_node_id"] != snap["context"].source_head_node_id):
+                        await self.db.execute("UPDATE aios.character_goal_plan SET continuation_check_at=NULL WHERE plan_id=$1",
+                                              plan["plan_id"])
+                        continue
+                    op = {"instance_id": plan["instance_id"], "operation_id": plan["operation_id"],
+                          "source_node_id": plan["source_node_id"], "input": {"plan_id": str(plan["plan_id"])}}
+                    await self.continue_once(op, mapping(plan["proposal"]), snap)
+                    count += 1
+            except Exception:
+                logger.exception("Goal continuation failed plan=%s", row["plan_id"])
+                # Back off even when admission rolled back, and expose the failure.
+                await self.db.execute(
+                    """UPDATE aios.character_goal_plan SET continuation=$2::jsonb,
+                       continuation_check_at=now()+interval '60 seconds',updated_at=now()
+                       WHERE plan_id=$1 AND status='waiting_information'""", row["plan_id"],
+                    json.dumps({"status": "unavailable", "reason": "continuation_failed"}))
+        return count
+
+    @staticmethod
+    def dependency_identity(question: dict, requirements: list[dict], attempt_id) -> tuple[str, dict | None]:
+        """Reuse close wording within a kind; distinct prerequisites get distinct IDs."""
+        from aios_app.entity_memory.retrieval import terms_for
+        terms = set(terms_for(question["question"]))
+        prefix = f"knowledge:plan:{attempt_id}:"
+        candidates = []
+        for existing in requirements:
+            key = existing.get("requirement_key", "")
+            if not key.startswith(prefix) or existing.get("dependency_kind") != question["kind"]:
+                continue
+            prior = set(terms_for(existing["question"]))
+            score = len(terms & prior) / max(1, len(terms | prior))
+            if score >= .7:
+                candidates.append((score, key, existing))
+        if candidates:
+            _, key, existing = max(candidates, key=lambda value: (value[0], value[1]))
+            return key, existing
+        normalized = question["kind"] + ":" + " ".join(sorted(terms))
+        if not terms:
+            normalized += question["question"].casefold()
+        key = prefix + hashlib.sha256(normalized.encode()).hexdigest()[:20]
+        return key, next((r for r in requirements if r.get("requirement_key") == key), None)
+
+    async def continue_once(self, op: dict, proposal: dict, snap: dict) -> list[dict]:
+        """Resolve up to three independent prerequisites; never execute or learn."""
+        plan_id = mapping(op.get("input")).get("plan_id")
+        if not proposal.get("open_questions") or proposal.get("next") == "wait":
+            if plan_id:
+                await self.db.execute(
+                    """UPDATE aios.character_goal_plan SET continuation=$2::jsonb,
+                       continuation_check_at=NULL,updated_at=now() WHERE plan_id=$1""",
+                    UUID(str(plan_id)), json.dumps({"status": "waiting", "reason": "plan_wait"}))
+            return []
+        outcomes = []
+        # A proposal-level request_information still permits independent procedural
+        # lookup. It never permits external research to establish local inventory.
+        from .goal_dependencies import GoalKnowledgeDependencyService
+        for question in proposal["open_questions"][:3]:
+            key, existing = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
+            if not existing:
+                requirement = await GoalKnowledgeDependencyService(self.db).reconcile(
+                    instance_id=op["instance_id"], goal_id=snap["goal_id"],
+                    question=question["question"], query_text=question["question"],
+                    requirement_key=key, source_node_id=op.get("source_node_id"),
+                    demand={"coverage_status": "missing", "retrieval_state": "available",
+                            "dependency_kind": question["kind"]})
+                snap["requirements"].append({**requirement, "requirement_key": key,
+                                             "dependency_kind": question["kind"]})
+            try:
+                # A child admission failure rolls back only this dependency's
+                # operation/job; its information need and other work survive.
+                async with self.db.atomic():
+                    outcomes.append(await self._continue_dependency(op, question, snap))
+            except Exception:
+                logger.exception("Goal dependency continuation unavailable requirement=%s", key)
+                _, requirement = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
+                outcomes.append({"requirement_id": str(requirement["requirement_id"]),
+                    "kind": question["kind"], "question": requirement["question"],
+                    "status": "unavailable", "reason": "child_admission_failed"})
+        if plan_id:
+            await self.db.execute(
+                """UPDATE aios.character_goal_plan SET continuation=$2::jsonb,
+                   continuation_check_at=now()+interval '60 seconds',updated_at=now()
+                   WHERE plan_id=$1 AND status='waiting_information'""", UUID(str(plan_id)),
+                json.dumps({"dependencies": outcomes}))
+        return outcomes
+
+    async def _continue_dependency(self, op: dict, question: dict, snap: dict) -> dict:
+        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+        from aios_app.entity_memory.retrieval import RDFRecallService
         environment = question["kind"] == "environment"
-        if proposal["next"] not in {"internal_lookup", "research"} and not (
-            environment and proposal["next"] == "request_information"
-        ):
-            return
-        revision = f"{snap['attempt_id']}:{snap['context'].source_head_node_id}"
-        if environment:
-            from aios_app.entity_memory.retrieval import RDFRecallService
-            existing_question = next((r["question"] for r in snap["requirements"]
-                if r.get("requirement_key")==f"knowledge:plan:{snap['attempt_id']}"),question["question"])
-            revision = await RDFRecallService(self.db).discovery_revision(snap["context"],existing_question)
-            if revision is None:
-                return  # Unavailable inspection is not evidence of an empty environment.
-            revision = f"{snap['attempt_id']}:{revision}"
-        if environment and any(r.get("recall_receipt",{}).get("revision")==revision
-                               for r in snap["requirements"]):
-            return
+        _, requirement = self.dependency_identity(question, snap["requirements"], snap["attempt_id"])
+        if requirement is None:
+            raise RuntimeError("dependency must be persisted before lookup admission")
+        query = requirement["question"]
+        requirement_id = str(requirement["requirement_id"])
+        outcome = {"requirement_id": requirement_id, "kind": question["kind"], "question": query}
+        def result(status, reason, **extra):
+            return {**outcome, "status": status, "reason": reason, **extra}
+        if requirement.get("coverage_status") == "sufficient":
+            return result("covered", "existing_knowledge")
+        prior = await self.db.fetchrow(
+            """SELECT operation_id,operation_type,status,input,result,updated_at
+               FROM aios.character_cognitive_operation
+               WHERE instance_id=$1 AND input->>'requirement_id'=$2
+                 AND operation_type IN ('inquiry.resolve','research.advance','research.study')
+               ORDER BY updated_at DESC,operation_id DESC LIMIT 1""", op["instance_id"], requirement_id)
         if await self.db.fetchval(
             """SELECT 1 FROM aios.character_cognitive_operation
-               WHERE instance_id=$1 AND input->>'goal_id'=$2 AND operation_id<>$3
+               WHERE instance_id=$1 AND input->>'requirement_id'=$2
                  AND operation_type IN ('inquiry.resolve','research.advance','research.study')
                  AND status IN ('queued','running','waiting_inference') LIMIT 1""",
-            op["instance_id"], str(snap["goal_id"]), op["operation_id"]):
-            return
-        from .opportunities import goal_research_operation
-        prior = await self.db.fetchrow(
-            """SELECT status,result->>'reason' AS reason,updated_at FROM aios.character_inquiry
-               WHERE instance_id=$1 AND goal_id=$2 AND evidence_scope='character_accessible'
-               ORDER BY updated_at DESC LIMIT 1""", op["instance_id"], snap["goal_id"])
-        from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
+            op["instance_id"], requirement_id):
+            return result("queued", "lookup_in_progress")
+        revision = f"{snap['attempt_id']}:{snap['context'].source_head_node_id}"
+        if environment or question["kind"] == "personal":
+            discovered = await RDFRecallService(self.db).discovery_revision(snap["context"], query)
+            if discovered is None:
+                return result("unavailable", "evidence_revision_unavailable")
+            revision = f"{snap['attempt_id']}:{discovered}"
+        receipt = requirement.get("recall_receipt", {})
+        prior_result = mapping(prior["result"]) if prior else {}
+        detail = mapping(prior_result.get("result"))
+        transient = prior and (prior["status"] in {"failed", "stale"}
+            or detail.get("reason") in {"unavailable", "retrieval_unavailable"}
+            or prior_result.get("status") == "unavailable")
+        if (environment or question["kind"] == "personal") and receipt.get("revision") == revision and not transient:
+            return result("awaiting_observation" if environment else "exhausted", "no_new_evidence")
         research = ProgressiveResearchService(self.db)
         epoch = await research.corpus_change_epoch(op["instance_id"])
-        changed = bool(prior and epoch and prior["updated_at"] < epoch)
-        kind = ("inquiry.resolve" if environment else goal_research_operation(
-            "memory", prior["status"] if prior else None,
-            (prior["reason"] or "") if prior else "", access_changed=changed))
-        if question["kind"] == "personal" and kind != "inquiry.resolve":
-            return
-        if kind is None:
-            return
-        requirement_key = f"knowledge:plan:{snap['attempt_id']}"
-        existing = next((r for r in snap["requirements"]
-                         if r.get("requirement_key") == requirement_key), None)
-        if existing and existing.get("coverage_status") == "sufficient":
-            return
-        # A single stable information target per attempt prevents model wording
-        # drift from opening a fresh dossier on every revision.
-        query = existing["question"] if existing else question["question"]
-        if kind == "research.advance" and not await research.available(instance_id=op["instance_id"], question=query):
-            return
-        # Reuse the goal's single plan requirement rather than create one per revision.
-        from .goal_dependencies import GoalKnowledgeDependencyService
-        requirement = await GoalKnowledgeDependencyService(self.db).reconcile(
-            instance_id=op["instance_id"], goal_id=snap["goal_id"], question=query, query_text=query,
-            requirement_key=requirement_key, source_node_id=op.get("source_node_id"),
-            demand={"coverage_status": "missing", "retrieval_state": "available"})
-        payload = {"goal_id": str(snap["goal_id"]), "requirement_id": str(requirement["requirement_id"]),
-                   "query": query, "allow_model": False, "planning_only": True, "attempt_id": str(snap["attempt_id"]),
-                   "internal_only": environment, "recall_revision": revision}
+        no_access = detail.get("reason") == "no_access" or prior_result.get("status") == "no_access"
+        if no_access and prior and not (epoch and prior["updated_at"] < epoch):
+            return result("denied_access", "no_access")
+        kind = "inquiry.resolve"
+        if question["kind"] == "procedure" and prior and prior["status"] == "succeeded" and not transient:
+            kind = "research.advance"
+            if not await research.available(instance_id=op["instance_id"], question=query):
+                return result("exhausted", "research_budget_or_sources_exhausted")
+        discovery_revision = revision
+        if transient:
+            # A failed/unavailable inquiry cache must not make a retry reuse that failure.
+            revision += ":retry:" + str(prior["operation_id"])
+        elif prior and no_access:
+            revision += ":access:" + str(epoch)
+        payload = {"goal_id": str(snap["goal_id"]), "requirement_id": requirement_id,
+                   "query": query, "allow_model": False, "planning_only": True,
+                   "attempt_id": str(snap["attempt_id"]), "internal_only": environment or question["kind"] == "personal",
+                   "recall_revision": revision, "discovery_revision": discovery_revision}
         context = snap["context"]
         operation = await self.db.fetchval(
             """INSERT INTO aios.character_cognitive_operation(instance_id,operation_type,input,
@@ -503,6 +616,7 @@ class GoalPlanningService:
                              payload={"instance_id": str(op["instance_id"]), "operation_id": str(operation)},
                              priority=150) is None:
             raise RuntimeError("could not enqueue plan inquiry")
+        return result("queued", kind, operation_id=str(operation))
 
     async def current(self, instance_id: UUID, goal_id: UUID) -> dict | None:
         return (await self.for_goals(instance_id, [goal_id])).get(goal_id)
@@ -524,6 +638,7 @@ class GoalPlanningService:
         return {r["goal_id"]: {"plan_id": str(r["plan_id"]), "status": r["status"],
                                "revision": r["revision"], "proposal": mapping(r["proposal"]),
                                "context_current": r["context_current"],
+                               "continuation": mapping(r["continuation"]),
                                "source_node_id": str(r["source_node_id"] or "")}
                 for r in rows}
 

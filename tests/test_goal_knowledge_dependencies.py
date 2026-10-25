@@ -178,3 +178,48 @@ def test_requirement_schema_never_equates_research_with_goal_completion():
     assert "FOREIGN KEY (goal_id,dossier_id)" in sql
     assert "character_goal_evidence" not in sql
     assert "semantic_integrity" not in sql
+
+
+def test_waiting_plan_keeps_primary_research_reachable_but_active_lookup_deduplicates():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from aios_app.agent.opportunities import CognitiveOpportunityService
+    from aios_app.epistemic.goals import CognitiveGoal
+    goal_id, instance, requirement_id, node = [uuid4() for _ in range(4)]
+    goal = CognitiveGoal(goal_id, 'Learn to cook')
+    class DB:
+        overlapping = False
+        async def fetchrow(self, sql, *args):
+            return {'instance_id':instance} if 'SELECT * FROM aios.character_runtime_state' in sql else None
+        async def fetch(self, sql, *args):
+            if 'FROM aios.character_goal_plan p' in sql:
+                return [{'goal_id':goal_id, 'plan_id':uuid4(), 'status':'waiting_information',
+                         'revision':1, 'proposal':{}, 'context_current':True, 'source_node_id':node}]
+            return []
+        async def fetchval(self, sql, *args):
+            return self.overlapping if "input->>'requirement_id'" in sql else None
+    async def scenario():
+        db = DB()
+        service = CognitiveOpportunityService(db)
+        service.contexts.resolve = AsyncMock(return_value=SimpleNamespace(
+            source_head_node_id=node, source_timeline_id=uuid4(), state_version=1))
+        service.cognition.resolve_attention_inputs = AsyncMock(return_value=SimpleNamespace(
+            focus_text='Learn cooking', goals=[goal], recent_newest=[]))
+        service.cognition.resolve_knowledge = AsyncMock(return_value=SimpleNamespace(
+            knowledge=[], recalled_memories=[], corpus_demand=None, topology_unavailable=False))
+        service.cognition.goals.cognitive_states = AsyncMock(return_value={})
+        service.subjects.build = AsyncMock(return_value=[])
+        service.goal_subjects.project = AsyncMock(return_value=SimpleNamespace(
+            subject_id=uuid4(), question='How can I learn cooking?', retrieval_text='cooking'))
+        service.goal_demand.resolve = AsyncMock(return_value={
+            'query':'beginner cooking', 'next_source':'memory', 'internal_coverage':0,
+            'coverage_status':'missing', 'coverage_source':'internal', 'retrieval_state':'available'})
+        service.goal_dependencies.reconcile = AsyncMock(return_value={'requirement_id':requirement_id})
+        service._persist_proposals = AsyncMock(side_effect=lambda instance, proposals: proposals)
+        with patch('aios_app.topic_atlas.research_dossier.ProgressiveResearchService.available', AsyncMock(return_value=True)):
+            proposals = await service.generate(instance_id=instance)
+            assert any(p['operation_type']=='inquiry.resolve' and p['operation_payload'].get('goal_id')==str(goal_id) for p in proposals)
+            db.overlapping = True
+            proposals = await service.generate(instance_id=instance)
+            assert not any(p['operation_type']=='inquiry.resolve' and p['operation_payload'].get('goal_id')==str(goal_id) for p in proposals)
+    asyncio.run(scenario())

@@ -948,6 +948,12 @@ class CognitiveContextService:
             "demand_reason": attention.demand_reason,
         }
 
+        from .corpus_lookup_trace import record_corpus_lookup
+        await self._corpus_flights.run(
+            ("trace", str(context.instance_id), str(context.source_head_node_id),
+             corpus_query, lookup_status),
+            lambda: record_corpus_lookup(self.db, context, corpus_demand_meta))
+
         anchored_knowledge_count = sum(1 for item in knowledge if item.get("anchor"))
         visible_world_context_count = sum(
             len(item.get("world_context") or [])
