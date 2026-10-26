@@ -178,7 +178,7 @@ class CognitiveLifecycleReconciler:
                                 evidence_ids=[str(operation["operation_id"])], attempt_id=attempt_id)
                         except LookupError:
                             pass
-            elif operation_type != "planning.review":
+            elif operation_type != "planning.review" and operation_type != "planning.propose" and not payload.get("planning_only"):
                 # Successful non-review work can be evidence of progress.
                 await self.record_goal_evidence(
                     instance_id=operation["instance_id"],goal_id=goal_id,

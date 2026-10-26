@@ -4,7 +4,8 @@ from aios_app.hud.worker_profile import WORKER_HUD_PROFILES, get_worker_hud_prof
 def test_worker_hud_profiles_are_micro_and_bounded():
     assert {"attention", "reflection", "recall", "inquiry", "planning", "executive"} <= set(WORKER_HUD_PROFILES)
     for profile in WORKER_HUD_PROFILES.values():
-        assert 180 <= profile.token_budget <= 700
+        # The dedicated query builder has its own sub-900-token contract.
+        assert 180 <= profile.token_budget <= (900 if profile.name == "inquiry_query" else 700)
         assert 0 <= profile.memory_items <= 3
         assert 0 <= profile.belief_items <= 3
         assert 0 <= profile.goal_items <= 2

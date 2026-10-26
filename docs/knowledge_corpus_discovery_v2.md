@@ -126,3 +126,50 @@ passages for intentional rematerialization while preserving acquisition policy.
 Not included in Stage 2: automatic publication of candidate topic links,
 multi-episode research dossiers, source section consumption decisions, and
 broad automatic learning. Those are Stage 3 responsibilities.
+
+## Contextual HUD references (2026-10-23)
+
+Ordinary source dialogue and explicit HUD focus can now retrieve references from
+all enabled character knowledge domains and explicitly granted corpus scopes.
+Assignment narrows the candidate pool; SQL still applies the existing access
+rules, including explicit deny vetoes. Unassigned public corpora remain available
+to deliberate research, but do not enter ordinary contextual retrieval. Fanwork
+scopes and fanwork namespaces are excluded from the automatic channel.
+
+Contextual retrieval uses topic terms from the actual attention focus, excluding
+character names and dialogue glue. Personal history/preferences stay on the
+character-memory route; a descriptive species question can use canon references.
+Direct research commands recognize the current character ID rather than a fixed
+Renamon prefix. A focus override is no longer authorized against an unrelated
+latest message's speaker.
+
+The contextual path runs SQL full-text search first, with semantic discovery only
+when that produces no matches. It has a three-second overall deadline, at most
+three returned references, section deduplication and document diversity. Concurrent
+identical lookups at the same source head/state share a single flight. Completed
+reference results are deliberately **not cached**: the corpus currently lacks a
+single reliable corpus/access revision, so each later lookup rechecks live SQL
+assignments, content and permissions. This avoids a stale authorization cache.
+
+Excerpts select query-dense passages anywhere in the section instead of taking
+its first 1,800 characters. Reference data carries the document and section IDs,
+source URI, epistemic namespace, identity binding and source character offsets.
+HUD budget clipping preserves those offsets. The rendered references explicitly
+remain external reports; they do not establish this instance's experiences,
+relationships, inventory or goal completion. Contextual lookup does not invoke
+acquisition or reinforcement. Existing explicit research/study behavior remains.
+
+Inspect `frame.hud.corpus_research`
+for retrieved/injected/budget-excluded counts and `demand.lookup_status`, query,
+lookup mode, candidate count and focus source. Status distinguishes no assignment,
+no access, no relevant matches, references found and unavailable/timeout lookups.
+No schema migration is needed for this repair; deploy the code and restart the
+HUD/application workers. The existing corpus/domain migrations must be installed.
+
+Regression coverage includes production SQL in isolated PostgreSQL, multiple
+assigned corpora, late-section content, explicit deny, assignment removal,
+semantic fallback, personal history, dynamic character names, focus mismatch,
+concurrent lookup coalescing, timeout handling, final text rendering and reference
+budget coordinates. Run `tests/test_corpus_research.py` and
+`tests/test_contextual_corpus_postgres.py`; the latter uses `AIOS_PGLITE_MODULE`
+configured by the cognitive episode recovery workflow.

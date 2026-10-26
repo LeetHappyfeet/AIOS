@@ -49,9 +49,17 @@ class InquiryLookup:
         if target == "source":
             return await self._source(ctx, demand, limit=limit)
         if target == "personal":
+            from aios_app.entity_memory.retrieval import RDFRecallService
+            recalled = await RDFRecallService(self.db).search(ctx, q, consumer="inquiry")
+            if recalled.hits:
+                hits = tuple(InquiryHit(h["source"], h["evidence_id"], h["text"],
+                    {**h["provenance"], "rdf_ref": ref, "rdf_trace_id": recalled.trace_id},
+                    h["durable_knowledge"]) for h,ref in zip(recalled.hits,recalled.refs))
+                return InquiryEvidence("partial", hits[:limit], "rdf_assisted_recall")
             from aios_app.epistemic.cognitive_context import CognitiveContextService
+            from aios_app.epistemic.relevance import CognitiveRelevanceScorer
             items = await CognitiveContextService(self.db).lookup_character_knowledge(
-                ctx, None, limit=30)
+                ctx, CognitiveRelevanceScorer(ctx, focus_text=q), limit=30)
             selected = _matching(items, q, limit)
             hits = tuple(InquiryHit("char", str(row.get("proposition_id") or ""),
                        str(row.get("text") or row.get("canonical_text") or "")[:650],
@@ -59,7 +67,8 @@ class InquiryLookup:
                         "source_node_id": str(row.get("source_node_id") or ""),
                         "epistemic_status": str(row.get("epistemic_status") or "")},
                        True) for row in selected)
-            return InquiryEvidence("partial" if hits else "unresolved", hits, "personal_recall")
+            reason = "retrieval_unavailable" if recalled.status == "unavailable" and not hits else "personal_recall"
+            return InquiryEvidence("partial" if hits else "unresolved", hits, reason)
         if target == "world":
             from aios_app.epistemic.world_retrieval import WorldPropositionRetriever
             from aios_app.epistemic.relevance import CognitiveRelevanceScorer

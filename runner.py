@@ -14,6 +14,7 @@ from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.pipeline.jobs import (
     enqueue_job,
+    JobDeferred,
     fetch_next_job,
     heartbeat_job,
     mark_done,
@@ -534,6 +535,10 @@ async def _execute_claimed_job(
                     "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
                     lock_key,
                 )
+    except JobDeferred as exc:
+        await defer_claimed_job(db,job_id,worker_id=worker_id,delay_seconds=exc.delay_seconds)
+        logger.info("Job deferred id=%s type=%s delay=%.1fs reason=%s",
+                    job_id,job_type,exc.delay_seconds,str(exc))
     except Exception as exc:
         logger.exception(
             "Job %s (%s) failed resource=%s partition=%s",
@@ -962,6 +967,7 @@ def _worker_limits() -> dict[ResourceClass, int]:
         ResourceClass.RDF: max(0, settings.runner_rdf_workers),
         ResourceClass.RECONCILIATION: max(0, settings.runner_reconciliation_workers),
         ResourceClass.GLOBAL: max(0, settings.runner_global_workers),
+        ResourceClass.LOOKUP: max(0, settings.runner_lookup_workers),
     }
 
 

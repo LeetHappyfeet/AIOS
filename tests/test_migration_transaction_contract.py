@@ -30,5 +30,6 @@ def test_partial_outer_transaction_fails_before_database_mutation(source):
 
 def test_canonical_receipts_are_required_and_baseline_is_not_rewritten():
     assert BASELINE_RECEIPT == "0001_aios_baseline"
+    assert "20261025_02_continuation_lookup_worker.sql" in REQUIRED_ACTIVE_MIGRATIONS
     assert "20261003_10_integrated_belief_policy_and_integrity.sql" in REQUIRED_ACTIVE_MIGRATIONS
     assert "20261003_14_participation_worker_heartbeat.sql" in REQUIRED_ACTIVE_MIGRATIONS

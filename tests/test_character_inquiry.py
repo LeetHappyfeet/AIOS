@@ -190,3 +190,92 @@ def test_goal_research_progression_does_not_spin_on_partial_or_access_denied():
                                    access_changed=True) == "research.advance"
     assert goal_research_operation("memory", "planning") is None
     assert goal_research_operation("none", "unresolved") is None
+
+
+@pytest.mark.asyncio
+async def test_internal_only_inquiry_never_uses_external_fallback_or_model():
+    from aios_app.epistemic.inquiry.service import CharacterInquiryService
+    class DB:
+        async def fetchrow(self, sql, *args):
+            if 'INSERT INTO' in sql:
+                assert args[2].endswith(':internal')
+                return dict(inquiry_id=NODE, status='queued', result={}, model_calls=0)
+            return dict(inquiry_id=NODE)
+    service = CharacterInquiryService(DB())
+    targets = []
+    async def search(demand, *, target):
+        targets.append(target)
+        return InquiryEvidence('unresolved', (), reason='no_internal_match')
+    service.lookup.search = search
+    receipt = await service.resolve(demand(), internal_only=True, allow_model=True)
+    assert targets == ['personal']
+    assert receipt['status'] == 'unresolved'
+    assert not receipt['plan_eligible']
+
+
+@pytest.mark.asyncio
+async def test_cached_rdf_inquiry_drops_revoked_references(monkeypatch):
+    from aios_app.epistemic.inquiry.service import CharacterInquiryService, HUDContextResolver
+    from aios_app.entity_memory.retrieval import RDFRecallService, RecallResult
+    class DB:
+        async def fetchrow(self, sql, *args):
+            return dict(inquiry_id=NODE, status='partial', model_calls=0,
+                result={'hits':[{'provenance':{'rdf_ref':{'kind':'atom','proposition_id':str(NODE)}}}]})
+    async def context(self, instance_id):
+        return SimpleNamespace(instance_id=instance_id)
+    async def validate(self, ctx, refs):
+        assert refs[0]['proposition_id'] == str(NODE)
+        return RecallResult()
+    monkeypatch.setattr(HUDContextResolver, 'resolve', context)
+    monkeypatch.setattr(RDFRecallService, 'validate_refs', validate)
+    receipt = await CharacterInquiryService(DB()).resolve(demand())
+    assert receipt['cached'] and receipt['status'] == 'unresolved'
+    assert receipt['result']['reason'] == 'stale_rdf_evidence'
+    assert receipt['result']['hits'] == []
+
+
+def fallback_context():
+    return SimpleNamespace(instance_id=INSTANCE, world_id=TIMELINE,
+        cognitive_instance_ids=(INSTANCE,), lineage_instance_ids=(INSTANCE,),
+        world_visible=lambda world: world == TIMELINE,
+        entity_is_active=lambda entity: False)
+
+
+class FallbackKnowledgeDB:
+    async def fetch(self, sql, owners):
+        assert owners == [INSTANCE]
+        assert 'FROM aios.character_proposition_knowledge' in sql
+        return [{'proposition_id': NODE, 'canonical_text':'Renamon knows how to measure rice.',
+                 'evidence_instance_id':INSTANCE, 'evidence_world_id':TIMELINE,
+                 'source_node_id':NODE, 'claim_kind':'BELIEF', 'epistemic_status':'known',
+                 'subject_norm':'Renamon', 'predicate_norm':'knows', 'object_norm':'rice',
+                 'confidence':.9}]
+
+
+@pytest.mark.asyncio
+async def test_character_knowledge_optional_scorer_handles_actual_rows():
+    from aios_app.epistemic.cognitive_context import CognitiveContextService
+    rows = await CognitiveContextService(FallbackKnowledgeDB()).lookup_character_knowledge(
+        fallback_context(), None)
+    assert len(rows) == 1
+    assert rows[0]['relevance']['total'] > 0
+    assert rows[0]['text'] == 'Renamon knows how to measure rice.'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('rdf_status', ['unavailable', 'empty'])
+async def test_rdf_failure_or_miss_uses_ranked_character_fallback(monkeypatch, rdf_status):
+    from unittest.mock import AsyncMock
+    from aios_app.entity_memory.retrieval import RDFRecallService, RecallResult
+    from aios_app.hud.context import HUDContextResolver
+    ctx = fallback_context()
+    monkeypatch.setattr(HUDContextResolver, 'resolve', AsyncMock(return_value=ctx))
+    monkeypatch.setattr(RDFRecallService, 'search', AsyncMock(return_value=RecallResult(status=rdf_status)))
+    receipt = await InquiryLookup(FallbackKnowledgeDB()).search(
+        demand(question='How do I measure rice?'), target='personal')
+    assert receipt.status == 'partial'
+    assert receipt.reason == 'personal_recall'
+    assert receipt.hits[0].source == 'char'
+    assert receipt.hits[0].evidence_id == str(NODE)
+    assert receipt.hits[0].provenance['instance_id'] == str(INSTANCE)
+    assert 'rice' in receipt.hits[0].text

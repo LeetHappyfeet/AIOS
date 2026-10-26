@@ -213,13 +213,22 @@ class CorpusCatalogService:
             json.dumps({"profile_key": route.profile_key, "matched_by": route.matched_by}),
         )
 
-    async def reclassify_profile(self, profile_key: str) -> dict:
+    async def reclassify_profile(self, profile_key: str, *, dry_run: bool = False,
+                                 document_ids: list[UUID] | None = None) -> dict:
+        # Apply classification writes atomically. An explicit subset
+        # narrows a trusted profile; it can never bypass its host/path checks.
+        async with self.db.atomic():
+            return await self._reclassify_profile(profile_key, dry_run=dry_run, document_ids=document_ids)
+
+    async def _reclassify_profile(self, profile_key: str, *, dry_run: bool,
+                                  document_ids: list[UUID] | None) -> dict:
         profile = await self.db.fetchrow(
             """
             SELECT profile_id, profile_key, source_id, domain_pattern, path_prefix, knowledge_domain,
                    collection_key, scope_key, epistemic_namespace, identity_binding
             FROM aios.corpus_source_profile
             WHERE profile_key=$1 AND enabled=TRUE
+            FOR SHARE
             """,
             profile_key,
         )
@@ -235,7 +244,10 @@ class CorpusCatalogService:
             profile["source_id"],
         )
         matched = []
+        selected = {UUID(str(value)) for value in document_ids} if document_ids is not None else None
         for row in rows:
+            if selected is not None and row["document_id"] not in selected:
+                continue
             if profile["source_id"] and row["source_id"] != profile["source_id"]:
                 continue
             if profile["domain_pattern"] and not _domain_matches(_host(row["source_uri"]), profile["domain_pattern"]):
@@ -244,6 +256,14 @@ class CorpusCatalogService:
                 continue
             matched.append(row["document_id"])
 
+        if dry_run:
+            return {"profile_key": profile_key, "dry_run": True,
+                    "matched_documents": len(matched),
+                    "document_ids": [str(value) for value in matched],
+                    "knowledge_domain": profile["knowledge_domain"],
+                    "scope_key": profile["scope_key"],
+                    "path_prefix": profile["path_prefix"],
+                    "unmatched_selected": len(selected - set(matched)) if selected is not None else None}
         route = CorpusRoute(
             collection_key=profile["collection_key"],
             scope_key=profile["scope_key"],

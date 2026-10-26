@@ -11,6 +11,14 @@ from ..db import Database
 from .job_registry import SchedulingLane, job_spec, scheduling_lane
 
 
+
+class JobDeferred(RuntimeError):
+    """Transient admission failure; retain the same durable queue owner."""
+
+    def __init__(self, reason: str, *, delay_seconds: float = 15.0):
+        super().__init__(reason)
+        self.delay_seconds = max(1.0, min(float(delay_seconds), 300.0))
+
 # ---------------------------------------------------------------------
 # Enqueue
 # ---------------------------------------------------------------------
@@ -95,7 +103,7 @@ async def _partition_key_for_enqueue(
         )
         return str(row["scope_key"]) if row else f"assertion:{assertion_id}"
 
-    if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "goal_formulation_inference", "message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference"} and payload.get("instance_id"):
+    if job_type in {"goal_plan_continuation", "goal_planning_inference", "agent_wake", "cognitive_operation", "internal_cognition_inference", "goal_formulation_inference", "message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference"} and payload.get("instance_id"):
         return f"instance:{payload['instance_id']}"
 
     for key in ("world_id", "character_id", "section_id", "node_id"):

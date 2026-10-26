@@ -17,6 +17,8 @@ class TransactionScheduler:
     async def run_pending(self, limit:int=8) -> int:
         from .cognition_recovery import CognitionRecovery
         await CognitionRecovery(self.db).recover()
+        from .goal_planning import GoalPlanningService
+        await GoalPlanningService(self.db).schedule_due(limit=limit)
         rows=await self.db.fetch(
             """SELECT transaction_id FROM aios.internal_cognition_transaction
                WHERE status='pending' AND expires_at>now()

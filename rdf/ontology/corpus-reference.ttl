@@ -1,0 +1,32 @@
+@prefix corpus: <urn:aios:corpus#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# This local vocabulary requires no network resolution or ontology download.
+# Named graphs qualify these descriptions; types do not establish world truth.
+corpus:Domain a rdfs:Class ; rdfs:comment "Registered reference domain, not a simulated world." .
+corpus:ReferenceDocument a rdfs:Class .
+corpus:ReferenceSection a rdfs:Class .
+corpus:ReferenceEntity a rdfs:Class ; rdfs:comment "Provisional referent within a source document and namespace." .
+corpus:SourceMention a rdfs:Class .
+corpus:SourceContext a rdfs:Class ; rdfs:comment "Source layout role and exact section-relative offsets." .
+corpus:RelationEvidence a rdfs:Class ; rdfs:comment "An attributed relationship mention, not a direct relationship assertion." .
+corpus:SourceSense a rdfs:Class ; rdfs:comment "A source-specific term sense explicitly supplied through section metadata." .
+
+corpus:domain a rdf:Property .
+corpus:parentDomain a rdf:Property .
+corpus:hasSection a rdf:Property .
+corpus:document a rdf:Property .
+corpus:namespace a rdf:Property .
+corpus:scope a rdf:Property ; rdfs:comment "Corpus scope label; not an authorization grant." .
+corpus:hasEntity a rdf:Property .
+corpus:hasMention a rdf:Property .
+corpus:refersTo a rdf:Property .
+corpus:hasRelationEvidence a rdf:Property .
+corpus:describesSense a rdf:Property .
+corpus:context a rdf:Property .
+corpus:content_role a rdf:Property .
+corpus:authority a rdf:Property ; rdfs:comment "reference_only, illustrative_only, reference_report_only, or source_definition_only." .
+corpus:payloadHash a rdf:Property .
+corpus:source_sha256 a rdf:Property .
+corpus:kind a rdf:Property ; rdfs:comment "Provisional broad extractor category, not a canonical taxonomy assignment." .

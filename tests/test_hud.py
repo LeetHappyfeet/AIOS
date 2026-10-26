@@ -128,12 +128,7 @@ def test_text_renderer_uses_canonical_hud_sections():
     assert "KNOWLEDGE / BELIEFS:" in text
     assert "conflicts with: The door is open." in text
     assert "AVAILABLE ACTIONS: speak, inspect" in text
-    assert "AIOS TOOLKIT:" in text
-    assert "For missing context or another relevant thread, request one narrow operation." in text
-    assert "MEMORY LOOKUP — one subject/question; a few memories" in text
-    assert "WORLD LOOKUP — one subject/question; a few facts" in text
-    assert "RESEARCH — one focused question; brief findings" in text
-    assert "ACTION — one concrete action; necessary details only" in text
+    assert "AIOS TOOLKIT:" not in text
     assert "Stay inside this HUD's epistemic and branch boundaries." in text
 
 
@@ -216,3 +211,12 @@ def test_canonical_event_collapse_leaves_unconsolidated_event_available():
     }
 
     assert TopologyRetriever._collapse_canonical_events([item], {}) == [item]
+
+
+def test_rdf_source_report_is_attributed_and_separate_from_beliefs():
+    text=render_hud_text({'rdf_evidence':[{'text':'Mia said there was a cookbook.',
+        'provenance':{'speaker_id':'Mia'}}]})
+    assert 'RECALLED SOURCE REPORTS' in text
+    assert 'NOT VERIFIED CURRENT WORLD STATE' in text
+    assert '[Mia; earlier report]' in text
+    assert 'KNOWLEDGE / BELIEFS:' not in text

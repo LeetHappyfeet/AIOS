@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.hud.internal_frame import InternalHUDAssembler
+from aios_app.hud.internal_frame import InternalHUDAssembler, InternalHUD
 from aios_app.inference.broker import InferenceBroker, InferenceRequest
 
 
@@ -51,12 +51,22 @@ class InternalCognitionTransactions:
         focus_text: str | None = None,
         subject: str | None = None,
         episode_id: UUID | None = None, transaction_kind: str = "route",
+        review_context: Mapping[str, Any] | None = None,
     ) -> UUID:
         choices = [dict(x) for x in candidates][:5]
-        hud = await self.huds.build(
-            instance_id, clues=clues, candidates=choices,
-            worker_profile=worker_profile, focus_text=focus_text, subject=subject,
-        )
+        if review_context is not None:
+            from .goal_review import review_prompt
+            context = await self.huds.contexts.resolve(instance_id)
+            prompt = review_prompt(review_context, choices)
+            hud = InternalHUD(prompt=prompt, state_version=context.state_version,
+                source_timeline_id=context.source_timeline_id,
+                source_node_id=context.source_head_node_id,
+                fingerprint=hashlib.sha256(prompt.encode()).hexdigest())
+        else:
+            hud = await self.huds.build(
+                instance_id, clues=clues, candidates=choices,
+                worker_profile=worker_profile, focus_text=focus_text, subject=subject,
+            )
         row = await self.db.execute_returning_row(
             """INSERT INTO aios.internal_cognition_transaction(
                  instance_id,source_task_id,priority,source_state_version,

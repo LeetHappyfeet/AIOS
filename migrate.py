@@ -17,6 +17,13 @@ BASELINE_RECEIPT = "0001_aios_baseline"
 # One canonical ordered chain. Do not squash or edit released SQL/checksums.
 # Fresh installs and existing canonical-baseline installs use identical files.
 REQUIRED_ACTIVE_MIGRATIONS = frozenset({
+    "20261025_02_continuation_lookup_worker.sql",
+    "20261025_01_goal_dependency_continuation.sql",
+    "20261024_01_corpus_reference_rdf.sql",
+    "20261023_01_rdf_assisted_recall.sql",
+    "20261020_01_entity_memory.sql",
+    "20261014_03_cognitive_job_identity.sql",
+    "20261014_02_goal_planning.sql",
     "20261014_01_cognitive_episode_recovery.sql",
     "20260913_baseline_reference_data.sql",
     "20260913_hud_default_profile.sql",
