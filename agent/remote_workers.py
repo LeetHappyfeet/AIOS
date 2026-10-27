@@ -56,7 +56,7 @@ class RemoteWorkerStore:
             """UPDATE aios.character_action
                SET status='queued', assigned_worker_id=NULL, lease_expires_at=NULL,
                    updated_at=now()
-               WHERE execution_mode='worker' AND status='running'
+               WHERE execution_mode='worker' AND action_type<>'workspace.run' AND status='running'
                  AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()"""
         )
         row = await self.db.execute_returning_row(
@@ -74,7 +74,7 @@ class RemoteWorkerStore:
                ), candidate AS (
                    SELECT a.action_id
                    FROM aios.character_action a, capacity w
-                   WHERE a.status='queued' AND a.execution_mode='worker'
+                   WHERE a.status='queued' AND a.execution_mode='worker' AND a.action_type<>'workspace.run'
                      AND a.action_type = ANY(w.capabilities)
                    ORDER BY a.created_at, a.action_id
                    FOR UPDATE OF a SKIP LOCKED

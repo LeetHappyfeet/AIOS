@@ -530,3 +530,9 @@ async def semantic_clusters(limit: int = 50, offset: int = 0) -> dict[str, Any]:
     import json
     return {"clusters": [dict(row, meta=json.loads(row["meta"]) if isinstance(row["meta"],str) else row["meta"])
                          for row in rows], "limit": limit, "offset": offset}
+
+
+# Versioned, authenticated client integration; separate from legacy worker claims.
+from aios_app.agent.workspaces import install_workspace_routes
+from aios_app.main_legacy import get_instance_hud
+install_workspace_routes(app, db, get_instance_hud)
