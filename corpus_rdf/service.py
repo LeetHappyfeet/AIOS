@@ -248,6 +248,9 @@ def rdf_update(section_id, payload):
             prop(source, "describesSense", node, True)
             prop(node, "term", entry["term"])
             prop(node, "authority", "source_definition_only")
+    if payload:
+        from aios_app.entity_memory.catalog import reference_triples
+        triples.extend(reference_triples(payload, corpus=True))
     return (
         f"DELETE WHERE {{ GRAPH <{graph}> {{ ?s ?p ?o }} }};\nINSERT DATA {{ GRAPH <{graph}> {{\n"
         + "\n".join(triples)

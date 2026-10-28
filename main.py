@@ -536,3 +536,6 @@ async def semantic_clusters(limit: int = 50, offset: int = 0) -> dict[str, Any]:
 from aios_app.agent.workspaces import install_workspace_routes
 from aios_app.main_legacy import get_instance_hud
 install_workspace_routes(app, db, get_instance_hud)
+# Read-only operator views of branch-scoped places and character references.
+from aios_app.entity_memory.catalog_api import catalog_router
+app.include_router(catalog_router(db))

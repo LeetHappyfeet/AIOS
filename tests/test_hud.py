@@ -127,7 +127,7 @@ def test_text_renderer_uses_canonical_hud_sections():
     assert "Related character memory found, but the requested preference is not established." in text
     assert "KNOWLEDGE / BELIEFS:" in text
     assert "conflicts with: The door is open." in text
-    assert "AVAILABLE ACTIONS: speak, inspect" in text
+    assert "AVAILABLE ACTIONS" not in text
     assert "AIOS TOOLKIT:" not in text
     assert "Stay inside this HUD's epistemic and branch boundaries." in text
 

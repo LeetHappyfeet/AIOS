@@ -457,19 +457,7 @@ class HUDAssembler:
             "rdf_retrieval": rdf_retrieval,
             "plugins": plugin_snapshot.get("plugins") or {},
             "plugin_sections": plugin_snapshot.get("sections") or [],
-            "actions": [
-                "speak",
-                "move",
-                "inspect",
-                "use_item",
-                "wait",
-                "custom",
-                *[
-                    str(action.get("key"))
-                    for action in (plugin_snapshot.get("actions") or [])
-                    if action.get("key")
-                ],
-            ],
+            # Capabilities stay in their registered worker interfaces.
             # Public, compact affordances for the HUD consumer. These describe
             # requests a human or host LLM may make of AIOS; worker-only tools
             # and their schemas remain private to the agent capability layer.

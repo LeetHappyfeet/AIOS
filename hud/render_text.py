@@ -346,9 +346,6 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
                     lines.append(f"- [{stream}|{role}:{speaker}] {rendered_text}")
             else:
                 lines.append(f"- {rendered_text}")
-    actions = frame.get("actions") or []
-    if actions:
-        lines.append("\nAVAILABLE ACTIONS: " + ", ".join(str(action) for action in actions))
     lines.append("\nStay inside this HUD's epistemic and branch boundaries.")
     tasks = frame.get("remote_tasks") or []
     if tasks:

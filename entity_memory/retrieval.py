@@ -63,7 +63,7 @@ _ANCESTRY = """WITH RECURSIVE ancestry(node_id,depth) AS (
 ) """
 # Raw source recall is limited to the actual active chat branch. Historical
 # continuity requires a source-eligible acquisition in the explicit cognitive scope.
-_SOURCE_SQL = _ANCESTRY + """
+_SOURCE_SELECT = """
 SELECT ep.section_id,ep.payload,ep.revision,ep.built_revision,ep.rdf_revision,ep.dataset,
        ds.content,n.node_id,n.timeline_id,n.speaker_id,n.speaker_role::text speaker_role
 FROM aios.entity_memory_projection ep
@@ -72,9 +72,8 @@ JOIN aios.dag_node n ON n.node_id=ds.node_id
 JOIN aios.ingest_event ie ON ie.event_id=n.event_id
 WHERE ep.owner_character_id=$3 AND ep.dataset='char'
  AND ie.superseded_at IS NULL AND ep.built_revision=ep.revision AND ep.rdf_revision=ep.revision
- AND (cardinality($5::uuid[])>0 AND ep.section_id=ANY($5::uuid[])
-      OR cardinality($5::uuid[])=0 AND ep.search_terms && $6::text[])
- AND (n.timeline_id IS DISTINCT FROM $2 OR n.node_id IN (SELECT node_id FROM ancestry))
+"""
+_SOURCE_ACCESS = """ AND (n.timeline_id IS DISTINCT FROM $2 OR n.node_id IN (SELECT node_id FROM ancestry))
  AND ((n.timeline_id=$2 AND n.node_id IN (SELECT node_id FROM ancestry) AND n.kind::text='chat_message')
       OR EXISTS(SELECT 1 FROM aios.knowledge_acquisition_event kae
         JOIN aios.epistemic_authority_admission eaa ON eaa.acquisition_id=kae.acquisition_id
@@ -84,8 +83,10 @@ WHERE ep.owner_character_id=$3 AND ep.dataset='char'
         WHERE es.section_id=ds.section_id AND kae.instance_id=ANY($4::uuid[])
           AND 'reflection'=ANY(eaa.authorized_uses)
           AND aios.semantic_acquisition_source_eligible(kae.acquisition_id)))
-ORDER BY ep.updated_at DESC,ep.section_id LIMIT 12
 """
+_SOURCE_SQL = _ANCESTRY + _SOURCE_SELECT + """ AND (cardinality($5::uuid[])>0 AND ep.section_id=ANY($5::uuid[])
+      OR cardinality($5::uuid[])=0 AND ep.search_terms && $6::text[])
+""" + _SOURCE_ACCESS + "ORDER BY ep.updated_at DESC,ep.section_id LIMIT 12\n"
 _LEGACY_ATOM_SQL = _ANCESTRY + """
 SELECT DISTINCT ON(p.proposition_id) p.proposition_id,p.atom_id,p.canonical_text,
  p.subject_norm,p.predicate_norm,p.object_norm,p.polarity,p.modality,
