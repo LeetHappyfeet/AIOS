@@ -232,6 +232,14 @@ def default_action_registry(db: Database) -> ActionRegistry:
     from .adapters import register_external_actions, register_interagent_actions
     from .cognitive_actions import register_cognitive_actions
     from .capabilities import register_agent_capabilities
+    registry.register(ActionSpec(
+        name="workspace.run", schema={"type":"object","required":["binding_id","objective"],
+            "properties":{"binding_id":{"type":"string"},"objective":{"type":"string"}},
+            "additionalProperties":False}, side_effect_class="external_sensitive",
+        allowed_worker_classes=frozenset({"executive"}), handler=None,
+        execution_mode="worker", result_mode="asynchronous", capability_class="workspace",
+        description="Execute an operator assignment in an explicitly bound workspace.",
+    ))
     register_cognitive_actions(db, registry)
     register_agent_capabilities(db, registry)
     register_external_actions(db, registry)
