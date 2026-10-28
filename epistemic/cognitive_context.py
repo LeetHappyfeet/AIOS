@@ -428,6 +428,7 @@ class CognitiveContextService:
         return (
             str(context.instance_id),
             str(context.character_id),
+            getattr(context, "cognitive_revision", ""),
             str(context.source_head_node_id or ""),
             int(context.state_version or 0),
             tuple(str(value) for value in (context.cognitive_instance_ids or context.lineage_instance_ids)),

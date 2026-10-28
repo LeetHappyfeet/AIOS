@@ -26,6 +26,7 @@ class HUDContext:
     lineage_world_ids: tuple[UUID, ...]
     lineage_instance_ids: tuple[UUID, ...]
     scene_entity_ids: frozenset[UUID]
+    cognitive_revision: str = ""
     cognitive_instance_ids: tuple[UUID, ...] = ()
     cognitive_world_ids: tuple[UUID, ...] = ()
 
@@ -59,6 +60,7 @@ class HUDContextResolver:
             """
             SELECT
                 rs.instance_id,
+                aios.cognitive_context_revision(rs.instance_id) AS cognitive_revision,
                 rs.world_id,
                 rs.timeline_id,
                 rs.head_node_id,
@@ -188,6 +190,7 @@ class HUDContextResolver:
             location_entity_id=state["location_entity_id"],
             lineage_world_ids=lineage_world_ids,
             lineage_instance_ids=lineage_instance_ids,
+            cognitive_revision=state.get("cognitive_revision") or "",
             cognitive_instance_ids=cognitive_instance_ids,
             cognitive_world_ids=cognitive_world_ids,
             scene_entity_ids=frozenset(scene_ids),

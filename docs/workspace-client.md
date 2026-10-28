@@ -139,3 +139,114 @@ Identical review retries are idempotent; a different second decision returns 409
 Rejection records the reason and leaves the goal active for explicit reassignment or
 other lifecycle decisions. There is no automatic retry, reward, or failure appraisal
 from worker prose. Review is currently an API operation, not a new AIOS UI.
+
+## Concurrent character environments (first pass, protocol v3 capabilities)
+
+Apply additive migration `20261028_02_character_environments.sql` after the v2
+migrations and restart all AIOS processes. Existing v2 bindings and assignments
+continue to work. `/protocol` retains `version: 2` for existing clients and adds
+`supported_versions: [2, 3]`, `environment_protocol: 3`, and named v3 capabilities.
+A worker must send `protocol_version: 3` in its ordinary claim request to receive
+new delegated runs. A v2 claim can never take a v3 run. The assignment schema and
+hash algorithm remain v2-compatible; delegation coordinates live on the run.
+
+Prepare **two already active instances**, with the same `character_id` and runtime
+human user, distinct source timelines, and independent runtime worlds. Keep the
+workspace's existing session/user/scope binding. Merely changing `payload.source`
+does not create a separate source timeline. Do not activate the second environment
+in the chat's world: activation can reuse the same character/world/user instance.
+This first pass validates existing instances; it does not automatically provision
+or select one, reset source cursors, or merge worlds.
+
+Link management, delegation, cancellation and review require the distinct
+`AIOS_WORKSPACE_REVIEW_KEY`. Workers retain only `AIOS_WORKSPACE_API_KEY`.
+Paths below are relative to `/workspace-client`:
+
+| Method and path | Credential | Body / purpose |
+|---|---|---|
+| POST `/v3/{binding_id}/links` | Operator | `origin_instance_id`, `share_memory` (default false) |
+| POST `/v3/{binding_id}/links/{link_id}/revoke` | Operator | Revoke sharing and request cancellation of outstanding linked runs |
+| POST `/v3/{binding_id}/links/{link_id}/submit` | Operator | Ordinary assignment fields and request ID, plus the exact current origin `source_node_id` |
+| POST `/v3/{binding_id}/runs/{run_id}/cancel` | Operator | Cancel queued work or request cooperative stopping of running work |
+| POST `/v3/{binding_id}/runs/{run_id}/context` | Worker | `worker_key`, `claim_token`; task-focused execution HUD |
+| POST `/v3/{binding_id}/runs/{run_id}/recall` | Worker | `worker_key`, `claim_token`, `query` (up to 600 characters) |
+| POST `/v3/{binding_id}/runs/{run_id}/progress` | Worker | Lease identity, UUID `event_key`, `kind` (`progress` or `blocked`), bounded `summary` |
+| GET `/v3/{binding_id}/runs/{run_id}/events?after=0` | Worker | Up to 100 ordered events, with `next_cursor` for reconnect/paging |
+
+Keep the normal `/renew`, `/observe`, `/finish` and `/review` paths. `/renew`
+now also returns `cancel_requested`. New clients must check this before each next
+tool/model step and stop owned commands when requested. Revocation immediately
+blocks recall, context and observations; a live lease can still renew to receive
+the stop request and report its cancelled finish. A finish racing with a cancellation
+is recorded as cancelled, never accepted as goal completion. Commands already
+started may have effects; cancellation does not roll back files. Unknown or expired
+execution is never replayed automatically.
+
+### Cognitive continuity
+
+`share_memory: true` adds only the directly linked peer to
+`aios.cognitive_evidence_instances`. A-B plus B-C does not grant A access to C.
+Character identity, runtime user and existing `isolated` policy remain enforced.
+An isolated policy must be changed explicitly before sharing. Revoked links cannot
+be silently re-enabled; this pass requires a newly prepared binding/explicit
+reconciliation rather than reusing a revoked association.
+
+The same scope is used by HUD retrieval and the existing character-accessible
+Inquiry lookup. Acquisitions, semantic admission, authorized uses, source
+supersession and attribution checks still apply. No memories are copied and no
+raw alternate transcript becomes globally readable. Work observations retain the
+`aios-client` source and their original tool role. A recall hit includes provenance
+and its durable-knowledge flag; a reference hit is not acquired knowledge.
+`unavailable` and scope changes are distinct from finding no matches.
+
+The execution context uses the named `workspace_execution` HUD profile and the
+immutable assignment objective as retrieval focus. The client still supplies the
+full assignment/constraints separately. Add an AIOS recall tool to its model tool
+registry so the model can ask what it tried previously **during** execution;
+fetching a startup HUD alone does not provide this behavior. The server derives
+recall identity from the binding/run, not a model-provided character or instance ID.
+Knowledge/admission revisions and scope membership invalidate prepared retrieval
+and HUD snapshots without advancing the chat source. Explicitly profiled HUDs
+are rebuilt to avoid reusing another environment's presentation.
+
+### Delegation, task delivery and goals
+
+A run persists origin instance/timeline/node and optional origin goal/attempt,
+while its action executes on the workspace instance. The original goal is never
+cloned onto the executor. Ordinary later chat turns do not invalidate its lease.
+A changed origin timeline or a source node no longer on the active DAG ancestry
+stops further work. Identical submission retries resolve the existing run even
+after later chat turns. Changed assignment/link/source with the same request ID
+returns 409. To amend work in this pass, cancel and submit a new assignment with a
+new request ID; there is no in-place change to immutable criteria.
+
+Queued, claimed, progress/blocked, terminal, cancellation and review events are
+stored transactionally with the lifecycle change. Event keys are idempotent and
+changed-content retries are rejected. Progress summaries are worker reports, not
+verification. Completion wakes both executor and origin, with a shared evidence
+reference. Review still requires passing evidence and the original live attempt;
+late evidence cannot close a newer attempt. Revocation blocks acceptance.
+
+The authoritative `/instance/{instance_id}/hud` response adds `frame.remote_tasks`
+and `frame.hud.task_event_watermark`. The renderer includes a bounded REMOTE WORK
+section for the linked originating instance and source timeline, even when the
+underlying cognitive HUD was cached. It does not insert tool reports as chat
+messages or wait for semantic enrichment. The overlay is read at request time;
+SillyTavern must request a new HUD or poll run events to display later updates.
+An already-running model generation retains the context it received. There is no
+server push transport or automatic generation interruption in this pass.
+
+The existing AIOS_Client v2 runner has not been modified here. Its companion
+update needs protocol negotiation, v3 claims/context, a recall tool, structured
+progress, cancellation handling, and persisted event cursors. SillyTavern can
+consume the rendered section on its next normal HUD request; immediate status UI
+requires integration-side polling. Automatic model-generated delegation is not
+introduced: new submissions remain explicit operator actions, subject to action
+policy. Link/goal access is never inferred from character names.
+
+Focused validation: `tests/test_character_environments.py`,
+`tests/test_environment_hud_context.py`, and `tests/test_workspace_client.py`.
+The workspace fixtures support PostgreSQL or isolated `AIOS_PGLITE_MODULE`, reuse
+the real migration and lifecycle SQL, and stub the independent scene projector.
+Recall tests verify identity/lease/revocation boundaries using a stub retrieval
+backend; they do not claim live model or production recall validation.

@@ -350,4 +350,12 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     if actions:
         lines.append("\nAVAILABLE ACTIONS: " + ", ".join(str(action) for action in actions))
     lines.append("\nStay inside this HUD's epistemic and branch boundaries.")
+    tasks = frame.get("remote_tasks") or []
+    if tasks:
+        lines.append("REMOTE WORK (reported task state; not character speech)")
+        for task in tasks:
+            summary = " ".join(str(task.get("summary") or "").split())[:320]
+            lines.append(f"- {task['run_id']}: {task['status']} — {summary}")
+            if task.get("verification_status"):
+                lines.append(f"  Checks: {task['verification_status']}; goal review: {task.get('goal_review') or 'not linked'}")
     return "\n".join(lines)

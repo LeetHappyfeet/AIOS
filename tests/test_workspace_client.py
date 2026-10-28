@@ -134,11 +134,59 @@ CREATE TABLE aios.character_wake_event(wake_id uuid DEFAULT gen_random_uuid(),in
 """
 
 
+
+# Minimal cognition tables exercise the real environment migration and revision triggers.
+BASE += """
+ALTER TABLE aios.character_instance ADD COLUMN world_id uuid DEFAULT gen_random_uuid(),
+ ADD COLUMN current_world_id uuid, ADD COLUMN parent_instance_id uuid,
+ ADD COLUMN meta jsonb DEFAULT '{"runtime_user_name":"human"}',
+ ADD COLUMN created_at timestamptz DEFAULT now();
+CREATE TABLE aios.character_epistemic_profile(character_id text PRIMARY KEY,memory_continuity text DEFAULT 'character');
+CREATE TABLE aios.world_relation(world_id uuid,source_world_id uuid,enabled boolean,relation text,domains text[],meta jsonb);
+CREATE TABLE aios.proposition(proposition_id uuid PRIMARY KEY,atom_id uuid);
+CREATE TABLE aios.character_belief_state(instance_id uuid,atom_id uuid);
+CREATE TABLE aios.knowledge_acquisition_event(acquisition_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),instance_id uuid,proposition_id uuid);
+CREATE TABLE aios.character_proposition_knowledge(instance_id uuid,proposition_id uuid);
+CREATE TABLE aios.epistemic_authority_admission(acquisition_id uuid,authority_state text);
+CREATE TABLE aios.semantic_evidence_admission(acquisition_id uuid,status text);
+CREATE TABLE aios.dag_node(node_id uuid PRIMARY KEY,timeline_id uuid,event_id bigint);
+CREATE TABLE aios.dag_edge(timeline_id uuid,child_node_id uuid,parent_node_id uuid);
+"""
+_schema = (Path(__file__).parents[1] / "aios_baseline.sql").read_text()
+_profile = _schema[_schema.index("CREATE TABLE aios.hud_profile ("):]
+BASE += _profile[:_profile.index("\n);")+3]
+BASE += "ALTER TABLE aios.hud_profile ADD UNIQUE(profile_name);"
+
+
+async def environment_migration(db, url):
+    sql = (Path(__file__).parents[1] / "migrations/current/20261028_02_character_environments.sql").read_text()
+    if url:
+        await db.raw(sql, exec=True)
+    else:
+        await db.execute(sql)
+
 @pytest_asyncio.fixture
 async def db():
     url = os.environ.get("AIOS_WORKSPACE_PGLITE_URL")
     dsn = os.environ.get("AIOS_WORKSPACE_TEST_DSN")
-    if url:
+    if os.getenv("AIOS_PGLITE_MODULE"):
+        import asyncio
+        from aios_app.db import Database
+        from test_cognitive_episode_postgres import PGConnection, PGPool
+        process = await asyncio.create_subprocess_exec("node", str(Path(__file__).parent / "cognition_pglite_bridge.mjs"),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+        con = PGConnection(process)
+        database = Database("isolated-workspace-pglite")
+        database.pool = PGPool(con)
+        try:
+            await con.query(BASE, exec=True)
+            for filename in ("20261027_01_workspace_client.sql", "20261028_01_workspace_verification.sql", "20261028_02_character_environments.sql"):
+                await con.query((Path(__file__).parents[1] / "migrations/current" / filename).read_text(), exec=True)
+            yield database
+        finally:
+            process.stdin.close()
+            await process.wait()
+    elif url:
         db = PGliteDB(url)
         await db.raw(BASE, exec=True)
         await db.raw(
@@ -156,6 +204,7 @@ async def db():
             await db.raw(migration, exec=True)
         else:
             await db.execute(migration)
+        await environment_migration(db, url)
         yield db
         await db.client.aclose()
     elif dsn:
@@ -180,6 +229,7 @@ async def db():
             await db.raw(migration, exec=True)
         else:
             await db.execute(migration)
+        await environment_migration(db, url)
         yield db
         await db.close()
     else:
@@ -192,7 +242,7 @@ async def binding(db):
     ]
     await db.execute("INSERT INTO aios.session VALUES($1)", session)
     await db.execute(
-        "INSERT INTO aios.character_instance VALUES($1,$2)", instance, "Cortana"
+        "INSERT INTO aios.character_instance(instance_id,character_id) VALUES($1,$2)", instance, "Cortana"
     )
     # Runtime and source timelines intentionally differ, as they do in live AIOS.
     for timeline in (runtime_timeline, source_timeline):

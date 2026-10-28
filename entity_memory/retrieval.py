@@ -49,7 +49,7 @@ def owners_for(ctx):
 def scope_key(ctx):
     return hashlib.sha256(json.dumps([POLICY,str(ctx.instance_id),ctx.character_id,
         str(getattr(ctx,"source_timeline_id",None)),str(getattr(ctx,"source_head_node_id",None)),
-        str(getattr(ctx,"world_id",None)),sorted(map(str,owners_for(ctx)))],sort_keys=True).encode()).hexdigest()
+        str(getattr(ctx,"world_id",None)),sorted(map(str,owners_for(ctx))),getattr(ctx,"cognitive_revision","")],sort_keys=True).encode()).hexdigest()
 
 
 def query_hash(query, ctx):

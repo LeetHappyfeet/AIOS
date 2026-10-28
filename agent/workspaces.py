@@ -16,6 +16,13 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from .environment_links import (
+    EnvironmentStore,
+    LinkIn,
+    ProgressIn,
+    RecallIn,
+    append_event,
+)
 from .workspace_contract import Assignment, verification_status
 
 
@@ -26,7 +33,7 @@ def decode(value):
 def public(row):
     return {
         k: decode(v)
-        if k in {"result", "assignment", "decision"}
+        if k in {"result", "assignment", "decision", "payload"}
         else str(v)
         if isinstance(v, UUID)
         else v
@@ -50,11 +57,21 @@ class AssignmentIn(Assignment):
     request_id: UUID
 
     def spec(self):
-        return Assignment.model_validate(self.model_dump(exclude={"request_id"}))
+        return Assignment.model_validate(
+            {k: getattr(self, k) for k in Assignment.model_fields}
+        )
+
+
+class DelegationIn(AssignmentIn):
+    source_node_id: UUID
 
 
 class ClaimIn(BaseModel):
     worker_key: str
+
+
+class ClaimRequest(ClaimIn):
+    protocol_version: Literal[2, 3] = 2
 
 
 class LeaseIn(ClaimIn):
@@ -188,7 +205,7 @@ class WorkspaceStore:
             )
             return public(new)
 
-    async def submit(self, binding_id, req):
+    async def submit(self, binding_id, req, *, environment=None):
         from .actions import ActionDispatcher, default_action_registry
         from .lifecycle import CharacterAgencyStore
         from .policy import ActionPolicyService
@@ -202,14 +219,23 @@ class WorkspaceStore:
                 req.request_id,
             )
             if old:
-                if old["assignment_hash"] != req.spec().digest():
+                if (
+                    old["environment_link_id"] is not None
+                    or old["assignment_hash"] != req.spec().digest()
+                ):
                     raise HTTPException(
                         409, "Request ID reused with different assignment"
                     )
                 return public(old)
             spec = req.spec()
+            goal_owner = b
+            if environment:
+                goal_owner = {
+                    "instance_id": environment["origin_instance_id"],
+                    "timeline_id": environment["origin_source_timeline_id"],
+                }
             if spec.goal_id:
-                await self.open_goal(b, spec)
+                await self.open_goal(goal_owner, spec)
             action = await CharacterAgencyStore(self.db).create_action(
                 instance_id=b["instance_id"],
                 action_type="workspace.run",
@@ -245,19 +271,40 @@ class WorkspaceStore:
                 json.dumps(spec.model_dump(mode="json")),
                 spec.digest(),
             )
+            if environment:
+                row = await self.db.execute_returning_row(
+                    """UPDATE aios.workspace_run SET environment_link_id=$2,origin_instance_id=$3,
+                       origin_source_timeline_id=$4,origin_source_node_id=$5,required_protocol_version=3
+                       WHERE run_id=$1 RETURNING *""",
+                    row["run_id"],
+                    environment["link_id"],
+                    environment["origin_instance_id"],
+                    environment["origin_source_timeline_id"],
+                    req.source_node_id,
+                )
+            await append_event(
+                self.db, row["run_id"], "host:queued", "queued", "Assignment queued"
+            )
             return public(row)
 
-    async def claim(self, binding_id, worker_key):
+    async def claim(self, binding_id, worker_key, protocol_version=2):
         async with self.db.atomic():
             await self.binding(binding_id, worker_key, lock=True)
             # Never replay an abandoned coding run: shell side effects may have happened.
             expired = await self.db.fetch(
                 """UPDATE aios.workspace_run SET status='interrupted',updated_at=now(),
                 result='{"reason":"lease expired; inspect before resubmitting"}'::jsonb
-                WHERE binding_id=$1 AND status='running' AND lease_expires_at<=now() RETURNING action_id""",
+                WHERE binding_id=$1 AND status='running' AND lease_expires_at<=now() RETURNING action_id,run_id""",
                 binding_id,
             )
             for old in expired:
+                await append_event(
+                    self.db,
+                    old["run_id"],
+                    "host:expired",
+                    "interrupted",
+                    "Worker lease expired; execution outcome unknown",
+                )
                 await self.db.execute(
                     "UPDATE aios.character_action SET status='timed_out',completed_at=now(),updated_at=now() WHERE action_id=$1 AND status='running'",
                     old["action_id"],
@@ -272,18 +319,29 @@ class WorkspaceStore:
                 lease_expires_at=now()+interval '120 seconds',updated_at=now()
                 WHERE run_id=(SELECT r.run_id FROM aios.workspace_run r JOIN aios.character_action a USING(action_id)
                     WHERE r.binding_id=$1 AND r.status='queued' AND a.status='queued'
+                    AND r.required_protocol_version<=$3 AND NOT r.cancel_requested
+                    AND (r.environment_link_id IS NULL OR EXISTS(
+                      SELECT 1 FROM aios.character_environment_link l WHERE l.link_id=r.environment_link_id AND l.enabled))
                     ORDER BY r.created_at,r.run_id LIMIT 1 FOR UPDATE OF r SKIP LOCKED) RETURNING *""",
                 binding_id,
                 uuid4(),
+                protocol_version,
             )
             if row:
                 await self.db.execute(
                     "UPDATE aios.character_action SET status='running',started_at=COALESCE(started_at,now()),updated_at=now() WHERE action_id=$1 AND status='queued'",
                     row["action_id"],
                 )
+                await append_event(
+                    self.db,
+                    row["run_id"],
+                    "host:started",
+                    "started",
+                    "Worker claimed assignment",
+                )
             return public(row) if row else None
 
-    async def owned(self, binding_id, run_id, req, terminal=False):
+    async def owned(self, binding_id, run_id, req, terminal=False, stopping=False):
         b = await self.binding(binding_id, req.worker_key, lock=True)
         row = await self.db.fetchrow(
             "SELECT *, lease_expires_at>now() AS lease_live FROM aios.workspace_run WHERE run_id=$1 AND binding_id=$2 FOR UPDATE",
@@ -304,17 +362,30 @@ class WorkspaceStore:
         )
         if action_status != "running":
             raise HTTPException(409, "The underlying action was stopped or changed")
+        if row["cancel_requested"] and not terminal and not stopping:
+            raise HTTPException(409, "Cancellation requested")
+        if row["environment_link_id"] is not None and not terminal:
+            link = await EnvironmentStore(self.db).link(
+                binding_id, row["environment_link_id"], enabled=False
+            )
+            # Renewal delivers a stop request after revocation; no new work is authorized.
+            if link["enabled"]:
+                await EnvironmentStore(self.db).origin(
+                    link, ancestor_node_id=row["origin_source_node_id"]
+                )
+            elif not row["cancel_requested"]:
+                raise HTTPException(409, "Environment link revoked")
         return b, row
 
     async def renew(self, binding_id, run_id, req):
         async with self.db.atomic():
-            b, _ = await self.owned(binding_id, run_id, req)
+            b, run = await self.owned(binding_id, run_id, req, stopping=True)
             await self.current(b)
             await self.db.execute(
                 "UPDATE aios.workspace_run SET lease_expires_at=now()+interval '120 seconds',updated_at=now() WHERE run_id=$1",
                 run_id,
             )
-            return {"ok": True}
+            return {"ok": True, "cancel_requested": run["cancel_requested"]}
 
     async def observe(self, binding_id, run_id, req):
         from aios_app.ingest_api import ingest_message
@@ -329,6 +400,11 @@ class WorkspaceStore:
         ).hexdigest()
         async with self.db.atomic():
             b, run = await self.owned(binding_id, run_id, req)
+            if run["cancel_requested"]:
+                raise HTTPException(
+                    409,
+                    "Cancellation requested; finish the run without new observations",
+                )
             old = await self.db.fetchrow(
                 "SELECT * FROM aios.workspace_receipt WHERE run_id=$1 AND event_key=$2",
                 run_id,
@@ -419,6 +495,8 @@ class WorkspaceStore:
             }
             # Finishing execution is never an assertion of goal completion.
             status = "finished" if req.status == "succeeded" else req.status
+            if row["cancel_requested"]:
+                status = "cancelled"
             if result["verification_status"] == "failed" and status == "finished":
                 status = "failed"
             if row["status"] != "running":
@@ -461,6 +539,34 @@ class WorkspaceStore:
                 },
                 dedupe_key=f"workspace-finish:{run_id}",
             )
+            if row["origin_instance_id"] is not None:
+                await AgentRuntimeStore(self.db).wake(
+                    instance_id=row["origin_instance_id"],
+                    event_type="WORKSPACE_RUN_FINISHED",
+                    source_type="workspace",
+                    source_id=str(run_id),
+                    payload={
+                        "run_id": str(run_id),
+                        "status": status,
+                        "verification_status": result["verification_status"],
+                        "evidence_ref": f"workspace:{run_id}",
+                        "goal_completion": "requires_review",
+                    },
+                    dedupe_key=f"workspace-finish:{run_id}",
+                )
+            await append_event(
+                self.db,
+                run_id,
+                "host:finished",
+                status,
+                str(result.get("report") or result.get("error") or "Execution ended")[
+                    :1000
+                ],
+                {
+                    "verification_status": result["verification_status"],
+                    "goal_review": result["goal_review"],
+                },
+            )
             return public(row)
 
     async def review(self, binding_id, run_id, req):
@@ -487,7 +593,23 @@ class WorkspaceStore:
             spec = Assignment.model_validate(decode(row["assignment"]))
             if req.accept:
                 await self.current(b)
-                await self.open_goal(b, spec)
+                goal_owner = b
+                if row["environment_link_id"] is not None:
+                    link = await EnvironmentStore(self.db).link(
+                        binding_id, row["environment_link_id"]
+                    )
+                    await EnvironmentStore(self.db).origin(
+                        link, ancestor_node_id=row["origin_source_node_id"]
+                    )
+                    goal_owner = {
+                        "instance_id": row["origin_instance_id"],
+                        "timeline_id": row["origin_source_timeline_id"],
+                    }
+                if row["cancel_requested"]:
+                    raise HTTPException(
+                        409, "Cancelled assignment cannot complete a goal"
+                    )
+                await self.open_goal(goal_owner, spec)
                 result = decode(row["result"])
                 if (
                     row["status"] != "finished"
@@ -497,25 +619,32 @@ class WorkspaceStore:
                         409, "Cannot accept incomplete, stale, or failed checks"
                     )
                 await CharacterGoalService(self.db).finish(
-                    instance_id=b["instance_id"],
+                    instance_id=goal_owner["instance_id"],
                     goal_id=spec.goal_id,
                     attempt_id=spec.attempt_id,
                     status="completed",
                     verification="reviewed",
                     resolution_kind="workspace_operator_review",
-                    source_node_id=b["last_node_id"],
+                    source_node_id=row["origin_source_node_id"] or b["last_node_id"],
                     evidence_ids=[f"workspace:{run_id}"],
                     refresh_scene=False,
                 )
-            return public(
-                await self.db.execute_returning_row(
-                    """UPDATE aios.workspace_review SET status=$2,decision=$3::jsonb,reviewed_at=now()
+            reviewed = await self.db.execute_returning_row(
+                """UPDATE aios.workspace_review SET status=$2,decision=$3::jsonb,reviewed_at=now()
                    WHERE run_id=$1 RETURNING *""",
-                    run_id,
-                    "accepted" if req.accept else "rejected",
-                    json.dumps(decision),
-                )
+                run_id,
+                "accepted" if req.accept else "rejected",
+                json.dumps(decision),
             )
+            await append_event(
+                self.db,
+                run_id,
+                "operator:review",
+                "reviewed",
+                "Goal evidence accepted" if req.accept else "Goal evidence rejected",
+                {"decision": "accepted" if req.accept else "rejected"},
+            )
+            return public(reviewed)
 
 
 def install_workspace_routes(app, db, hud_handler):
@@ -535,6 +664,8 @@ def install_workspace_routes(app, db, hud_handler):
     async def protocol():
         return {
             "version": 2,
+            "supported_versions": [2, 3],
+            "environment_protocol": 3,
             "capabilities": [
                 "workspace.run",
                 "observations",
@@ -542,6 +673,10 @@ def install_workspace_routes(app, db, hud_handler):
                 "assignments",
                 "verification",
                 "goal-review",
+                "environment-links-v3",
+                "delegated-runs-v3",
+                "character-recall-v3",
+                "task-events-v3",
             ],
             "single_writer": True,
         }
@@ -578,8 +713,10 @@ def install_workspace_routes(app, db, hud_handler):
         return await store.submit(binding_id, req)
 
     @router.post("/{binding_id}/claim")
-    async def claim(binding_id: UUID, req: ClaimIn):
-        return {"run": await store.claim(binding_id, req.worker_key)}
+    async def claim(binding_id: UUID, req: ClaimRequest):
+        return {
+            "run": await store.claim(binding_id, req.worker_key, req.protocol_version)
+        }
 
     @router.get("/{binding_id}/runs/{run_id}")
     async def status(binding_id: UUID, run_id: UUID):
@@ -605,6 +742,54 @@ def install_workspace_routes(app, db, hud_handler):
     async def finish(binding_id: UUID, run_id: UUID, req: FinishIn):
         return await store.finish(binding_id, run_id, req)
 
+    # New work is explicitly capability/version gated; v2 clients never claim it.
+    @router.post("/v3/{binding_id}/runs/{run_id}/context")
+    async def execution_context(binding_id: UUID, run_id: UUID, req: LeaseIn):
+        async with db.atomic():
+            b, run = await store.owned(binding_id, run_id, req)
+            await store.current(b)
+            if run["cancel_requested"]:
+                raise HTTPException(409, "Cancellation requested")
+            if b["last_node_id"] is None:
+                raise HTTPException(409, "Workspace needs an initial observation")
+        return await hud_handler(
+            instance_id=b["instance_id"],
+            through_node_id=b["last_node_id"],
+            recent_limit=4,
+            token_budget=2500,
+            wait_ms=2500,
+            profile_name="workspace_execution",
+            focus_text=run["objective"],
+        )
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/recall")
+    async def recall(binding_id: UUID, run_id: UUID, req: RecallIn):
+        return await EnvironmentStore(db).recall(binding_id, run_id, req)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/progress")
+    async def progress(binding_id: UUID, run_id: UUID, req: ProgressIn):
+        return await EnvironmentStore(db).progress(binding_id, run_id, req)
+
+    @router.get("/v3/{binding_id}/runs/{run_id}/events")
+    async def events(binding_id: UUID, run_id: UUID, after: int = 0):
+        await store.binding(binding_id)
+        run = await db.fetchrow(
+            "SELECT run_id FROM aios.workspace_run WHERE binding_id=$1 AND run_id=$2",
+            binding_id,
+            run_id,
+        )
+        if not run:
+            raise HTTPException(404, "Unknown run")
+        rows = await db.fetch(
+            "SELECT * FROM aios.workspace_run_event WHERE run_id=$1 AND sequence>$2 ORDER BY sequence LIMIT 100",
+            run_id,
+            max(0, after),
+        )
+        return {
+            "events": [public(r) for r in rows],
+            "next_cursor": int(rows[-1]["sequence"]) if rows else max(0, after),
+        }
+
     async def authorize_review(authorization: str = Header(default="")):
         key = os.environ.get("AIOS_WORKSPACE_REVIEW_KEY", "")
         if not key or key == os.environ.get("AIOS_WORKSPACE_API_KEY"):
@@ -617,6 +802,22 @@ def install_workspace_routes(app, db, hud_handler):
     reviews = APIRouter(
         prefix="/workspace-client", dependencies=[Depends(authorize_review)]
     )
+
+    @reviews.post("/v3/{binding_id}/links")
+    async def link_environment(binding_id: UUID, req: LinkIn):
+        return await EnvironmentStore(db).create(binding_id, req)
+
+    @reviews.post("/v3/{binding_id}/links/{link_id}/revoke")
+    async def revoke_environment(binding_id: UUID, link_id: UUID):
+        return await EnvironmentStore(db).revoke(binding_id, link_id)
+
+    @reviews.post("/v3/{binding_id}/links/{link_id}/submit")
+    async def delegate(binding_id: UUID, link_id: UUID, req: DelegationIn):
+        return await EnvironmentStore(db).delegate(binding_id, link_id, req)
+
+    @reviews.post("/v3/{binding_id}/runs/{run_id}/cancel")
+    async def cancel(binding_id: UUID, run_id: UUID):
+        return await EnvironmentStore(db).cancel(binding_id, run_id)
 
     @reviews.get("/{binding_id}/runs/{run_id}/review")
     async def review_bundle(binding_id: UUID, run_id: UUID):

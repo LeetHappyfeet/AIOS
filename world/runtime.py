@@ -145,7 +145,7 @@ class WorldRuntimeService:
         self.causal = CausalIntegrityKernel(db)
         self.hud = HUDAssembler(db)
         self._hud_builds: AsyncSingleFlight[
-            tuple[UUID, Optional[UUID], int, Optional[int], Optional[int]],
+            tuple[Any, ...],
             Dict[str, Any],
         ] = AsyncSingleFlight()
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -399,7 +399,10 @@ class WorldRuntimeService:
         row = await self.db.fetchrow(
             """
             SELECT
-                rs.*, ci.character_id, we.entity_id, we.entity_type,
+                rs.*, aios.cognitive_context_revision(rs.instance_id) AS cognitive_revision,
+                concat((SELECT max(updated_at)::text FROM aios.hud_profile), ':',
+                       (SELECT profile_id::text FROM aios.character_hud_profile WHERE character_id=ci.character_id)) AS profile_revision,
+                ci.character_id, we.entity_id, we.entity_type,
                 we.display_name, w.world_key,
                 loc.object_entity_id AS objective_location_entity_id
             FROM aios.character_runtime_state rs
@@ -436,12 +439,26 @@ class WorldRuntimeService:
         recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
         wait_ms: int = 1200,
+        profile_name: Optional[str] = None,
+        focus_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         request_started = time.perf_counter()
         await ensure_readiness_row(self.db, instance_id=instance_id, live=True)
         state = await self.get_state(instance_id)
         target_node_id = through_node_id or state.get("source_head_node_id")
         ready = await readiness_state(self.db, instance_id=instance_id)
+        request_shape = [recent_limit, token_budget, profile_name, focus_text]
+        cached_frame = _json_object(ready.get("hud_json"))
+        cached_hud = cached_frame.get("hud") or {}
+        request_matches = cached_hud.get("request_shape") == request_shape
+        # Legacy snapshots have no revision/shape and must be rebuilt once.
+        context_matches = (
+            cached_hud.get("cognitive_revision") == state.get("cognitive_revision")
+            and cached_hud.get("profile_revision") == state.get("profile_revision")
+            and "cognitive_revision" in cached_hud
+            and request_matches
+            and profile_name is None
+        )
 
         replay_cached = (
             through_node_id is not None
@@ -450,6 +467,7 @@ class WorldRuntimeService:
             and ready.get("prepared_state_version") == state.get("state_version")
             and ready.get("hud_json") is not None
             and _prepared_hud_version(ready) == HUD_VERSION
+            and context_matches
         )
         if replay_cached:
             frame = _sanitize_hud_frame(_json_object(ready["hud_json"]))
@@ -492,6 +510,7 @@ class WorldRuntimeService:
             and ready.get("prepared_state_version") == state.get("state_version")
             and ready.get("hud_json") is not None
             and _prepared_hud_version(ready) == HUD_VERSION
+            and context_matches
         )
         if exact_cached:
             frame = _sanitize_hud_frame(_json_object(ready["hud_json"]))
@@ -534,6 +553,8 @@ class WorldRuntimeService:
             coordinates_stable = (
                 after.get("state_version") == state.get("state_version")
                 and after.get("source_head_node_id") == state.get("source_head_node_id")
+                and after.get("cognitive_revision") == state.get("cognitive_revision")
+                and after.get("profile_revision") == state.get("profile_revision")
             )
             await self.db.execute(
                 """
@@ -599,6 +620,10 @@ class WorldRuntimeService:
             int(state.get("state_version") or 0),
             recent_limit,
             token_budget,
+            profile_name,
+            focus_text,
+            state.get("cognitive_revision"),
+            state.get("profile_revision"),
         )
         frame = await self._hud_builds.run(
             build_key,
@@ -608,6 +633,8 @@ class WorldRuntimeService:
                 target_node_id=target_node_id,
                 recent_limit=recent_limit,
                 token_budget=token_budget,
+                profile_name=profile_name,
+                focus_text=focus_text,
             ),
         )
         logger.debug(
@@ -628,6 +655,8 @@ class WorldRuntimeService:
         target_node_id: Optional[UUID],
         recent_limit: Optional[int],
         token_budget: Optional[int],
+        profile_name: Optional[str] = None,
+        focus_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         started = time.perf_counter()
         timings: dict[str, float] = {}
@@ -675,6 +704,8 @@ class WorldRuntimeService:
                 instance_id,
                 recent_limit=recent_limit,
                 token_budget=token_budget,
+                profile_name=profile_name,
+                focus_text=focus_text,
             )
             frame = _sanitize_hud_frame(frame)
         except LookupError as exc:
@@ -695,6 +726,8 @@ class WorldRuntimeService:
         coordinates_stable = (
             after.get("state_version") == state.get("state_version")
             and after.get("source_head_node_id") == state.get("source_head_node_id")
+            and after.get("cognitive_revision") == state.get("cognitive_revision")
+            and after.get("profile_revision") == state.get("profile_revision")
         )
         generation_ready = bool(
             semantic_current
@@ -707,8 +740,12 @@ class WorldRuntimeService:
             or readiness_after.get("enrichment_ready_node_id") == target_node_id
         )
         frame.setdefault("hud", {})
+        frame["hud"]["request_shape"] = [recent_limit, token_budget, profile_name, focus_text]
+        frame["hud"]["cognitive_revision"] = state.get("cognitive_revision")
+        frame["hud"]["profile_revision"] = state.get("profile_revision")
         frame["hud"]["generation_ready"] = generation_ready
         frame["hud"]["freshness"] = {
+            "source_timeline_id": str(after["source_timeline_id"]) if after.get("source_timeline_id") else None,
             "runtime_state_version": after.get("state_version"),
             "source_head_node_id": str(after["source_head_node_id"])
                 if after.get("source_head_node_id") else None,
@@ -800,14 +837,6 @@ class WorldRuntimeService:
             token_budget=token_budget,
             wait_ms=wait_ms,
         )
-        ready = await readiness_state(self.db, instance_id=instance_id)
-        if (
-            frame.get("hud", {}).get("generation_ready")
-            and ready.get("hud_text")
-            and ready.get("prepared_state_version") == frame.get("presence", {}).get("state_version")
-            and _prepared_hud_version(ready) == HUD_VERSION
-        ):
-            return ready["hud_text"]
         return render_hud_text(frame)
 
     async def apply_action(
