@@ -40,7 +40,7 @@ def test_workspace_protocol_requires_separate_key(monkeypatch):
                 "/workspace-client/protocol",
                 headers={"Authorization": "Bearer private"},
             ).json()["version"]
-            == 1
+            == 2
         )
 
 
@@ -127,6 +127,8 @@ CREATE TABLE aios.character_action_policy(instance_id uuid,action_type text,disp
 CREATE TABLE aios.character_action_approval(approval_id uuid DEFAULT gen_random_uuid(),action_id uuid UNIQUE,
  status text DEFAULT 'pending',decided_at timestamptz,decided_by text,reason text);
 CREATE TABLE aios.character_agent_runtime(instance_id uuid PRIMARY KEY,state text DEFAULT 'ready',last_wake_at timestamptz,updated_at timestamptz);
+CREATE TABLE aios.character_agent_goal(goal_id uuid PRIMARY KEY,instance_id uuid,status text,goal_text text,priority float DEFAULT 1,meta jsonb DEFAULT '{}',completed_at timestamptz,updated_at timestamptz);
+CREATE TABLE aios.character_goal_attempt(attempt_id uuid PRIMARY KEY,goal_id uuid REFERENCES aios.character_agent_goal,instance_id uuid,source_timeline_id uuid,closed_at timestamptz);
 CREATE TABLE aios.character_wake_event(wake_id uuid DEFAULT gen_random_uuid(),instance_id uuid,event_type text,
  source_type text,source_id text,payload jsonb,priority integer,dedupe_key text,UNIQUE(instance_id,dedupe_key));
 """
@@ -146,6 +148,14 @@ async def db():
             ).read_text(),
             exec=True,
         )
+        migration = (
+            Path(__file__).parents[1]
+            / "migrations/current/20261028_01_workspace_verification.sql"
+        ).read_text()
+        if url:
+            await db.raw(migration, exec=True)
+        else:
+            await db.execute(migration)
         yield db
         await db.client.aclose()
     elif dsn:
@@ -162,6 +172,14 @@ async def db():
                 / "migrations/current/20261027_01_workspace_client.sql"
             ).read_text()
         )
+        migration = (
+            Path(__file__).parents[1]
+            / "migrations/current/20261028_01_workspace_verification.sql"
+        ).read_text()
+        if url:
+            await db.raw(migration, exec=True)
+        else:
+            await db.execute(migration)
         yield db
         await db.close()
     else:
@@ -392,3 +410,222 @@ async def test_session_discovery_returns_only_requested_character(db):
     assert rows[0]["instance_id"] == str(req.instance_id)
     assert rows[0]["session_id"] == str(req.session_id)
     assert await store.instances("Renamon") == []
+
+
+def valid_evidence(spec):
+    return {
+        "assignment_hash": spec.digest(),
+        "snapshot_complete": True,
+        "snapshot_hash": "a" * 64,
+        "final_hash": "a" * 64,
+        "outputs": [],
+        "violations": [],
+        "stale": False,
+        "checks": [
+            {
+                **c.model_dump(),
+                "snapshot_hash": "a" * 64,
+                "output_complete": True,
+                "log_sha256": "b" * 64,
+                "exit_code": 0,
+                "timed_out": False,
+                "cancelled": False,
+            }
+            for c in spec.required_checks
+        ],
+    }
+
+
+async def goal_assignment(db, store, req, bid, monkeypatch):
+    from aios_app.agent.lifecycle import CharacterAgencyStore
+
+    async def refresh(*a):
+        pass
+
+    monkeypatch.setattr(CharacterAgencyStore, "_refresh_scene", refresh)
+    gid, aid = uuid4(), uuid4()
+    b = await store.binding(bid)
+    await db.execute(
+        "INSERT INTO aios.character_agent_goal(goal_id,instance_id,status,goal_text) VALUES($1,$2,'active','Fix bug')",
+        gid,
+        req.instance_id,
+    )
+    await db.execute(
+        "INSERT INTO aios.character_goal_attempt VALUES($1,$2,$3,$4,NULL)",
+        aid,
+        gid,
+        req.instance_id,
+        b["timeline_id"],
+    )
+    task = AssignmentIn(
+        request_id=uuid4(),
+        objective="Fix bug",
+        goal_id=gid,
+        attempt_id=aid,
+        required_checks=[{"id": "tests", "command": "python -m unittest"}],
+    )
+    r = await store.submit(bid, task)
+    return task, UUID(r["run_id"])
+
+
+@pytest.mark.asyncio
+async def test_criteria_immutable_retry_and_worker_report_not_goal_completion(
+    db, monkeypatch
+):
+    from aios_app.agent.workspaces import ReviewIn
+
+    store, req, bid = await binding(db)
+    task, rid = await goal_assignment(db, store, req, bid, monkeypatch)
+    assert (await store.submit(bid, task))["assignment_hash"] == task.spec().digest()
+    with pytest.raises(HTTPException):
+        await store.submit(bid, task.model_copy(update={"required_checks": []}))
+    with pytest.raises(Exception, match="immutable"):
+        async with db.atomic():
+            await db.execute(
+                "UPDATE aios.workspace_run SET assignment='{}' WHERE run_id=$1", rid
+            )
+    claim = await store.claim(bid, "worker")
+    finish = FinishIn(
+        worker_key="worker",
+        claim_token=claim["claim_token"],
+        status="succeeded",
+        result={"evidence": valid_evidence(task.spec()), "report": "done"},
+    )
+    first = await store.finish(bid, rid, finish)
+    assert first["status"] == "finished"
+    assert first["result"]["verification_status"] == "passed"
+    assert (
+        await db.fetchval(
+            "SELECT status FROM aios.character_agent_goal WHERE goal_id=$1",
+            task.goal_id,
+        )
+        == "active"
+    )
+    assert (
+        await db.fetchval(
+            "SELECT status FROM aios.workspace_review WHERE run_id=$1", rid
+        )
+        == "pending"
+    )
+    assert await store.finish(bid, rid, finish) == first
+    review = ReviewIn(
+        accept=True, reviewer="human", reason="Reviewed changes and check logs"
+    )
+    assert (await store.review(bid, rid, review))["status"] == "accepted"
+    assert (await store.review(bid, rid, review))["status"] == "accepted"
+    meta = await db.fetchval(
+        "SELECT meta FROM aios.character_agent_goal WHERE goal_id=$1", task.goal_id
+    )
+    import json
+
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    assert meta["outcome_decision"]["verification"] == "reviewed"
+
+
+@pytest.mark.asyncio
+async def test_spoofed_pass_cannot_be_accepted_and_closed_attempt_cannot_finish_goal(
+    db, monkeypatch
+):
+    from aios_app.agent.workspaces import ReviewIn
+
+    store, req, bid = await binding(db)
+    task, rid = await goal_assignment(db, store, req, bid, monkeypatch)
+    claim = await store.claim(bid, "worker")
+    finish = FinishIn(
+        worker_key="worker",
+        claim_token=claim["claim_token"],
+        status="finished",
+        result={"evidence": {"status": "passed"}, "verification_status": "passed"},
+    )
+    row = await store.finish(bid, rid, finish)
+    assert row["result"]["verification_status"] == "incomplete"
+    with pytest.raises(HTTPException):
+        await store.review(
+            bid, rid, ReviewIn(accept=True, reviewer="human", reason="try")
+        )
+    await db.execute(
+        "UPDATE aios.character_goal_attempt SET closed_at=now() WHERE attempt_id=$1",
+        task.attempt_id,
+    )
+    with pytest.raises(HTTPException):
+        await store.submit(bid, task.model_copy(update={"request_id": uuid4()}))
+    assert (
+        await store.review(
+            bid,
+            rid,
+            ReviewIn(accept=False, reviewer="human", reason="Incomplete evidence"),
+        )
+    )["status"] == "rejected"
+    assert (
+        await db.fetchval(
+            "SELECT status FROM aios.character_agent_goal WHERE goal_id=$1",
+            task.goal_id,
+        )
+        == "active"
+    )
+
+
+@pytest.mark.asyncio
+async def test_passed_old_attempt_and_foreign_goal_cannot_resolve_new_goal(
+    db, monkeypatch
+):
+    from aios_app.agent.workspaces import ReviewIn
+
+    store, req, bid = await binding(db)
+    task, rid = await goal_assignment(db, store, req, bid, monkeypatch)
+    foreign, foreign_req, foreign_bid = await binding(db)
+    with pytest.raises(HTTPException):
+        await store.submit(foreign_bid, task.model_copy(update={"request_id": uuid4()}))
+    claim = await store.claim(bid, "worker")
+    await store.finish(
+        bid,
+        rid,
+        FinishIn(
+            worker_key="worker",
+            claim_token=claim["claim_token"],
+            status="finished",
+            result={"evidence": valid_evidence(task.spec())},
+        ),
+    )
+    await db.execute(
+        "UPDATE aios.character_goal_attempt SET closed_at=now() WHERE attempt_id=$1",
+        task.attempt_id,
+    )
+    with pytest.raises(HTTPException):
+        await store.review(
+            bid, rid, ReviewIn(accept=True, reviewer="human", reason="Too late")
+        )
+    assert (
+        await db.fetchval(
+            "SELECT status FROM aios.character_agent_goal WHERE goal_id=$1",
+            task.goal_id,
+        )
+        == "active"
+    )
+
+
+def test_review_requires_distinct_credential(monkeypatch):
+    app = FastAPI()
+    install_workspace_routes(app, object(), None)
+    monkeypatch.setenv("AIOS_WORKSPACE_API_KEY", "worker")
+    monkeypatch.setenv("AIOS_WORKSPACE_REVIEW_KEY", "review")
+    with TestClient(app) as c:
+        path = f"/workspace-client/{uuid4()}/runs/{uuid4()}/review"
+        assert (
+            c.post(
+                path,
+                headers={"Authorization": "Bearer worker"},
+                json={"accept": True, "reviewer": "fake", "reason": "x"},
+            ).status_code
+            == 401
+        )
+        monkeypatch.setenv("AIOS_WORKSPACE_REVIEW_KEY", "worker")
+        assert (
+            c.post(
+                path,
+                headers={"Authorization": "Bearer worker"},
+                json={"accept": True, "reviewer": "fake", "reason": "x"},
+            ).status_code
+            == 503
+        )
