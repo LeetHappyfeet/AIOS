@@ -249,11 +249,13 @@ class EntityCatalogService:
 
         return await self._read(read)
 
-    async def character(self, instance_id):
+    async def character(self, instance_id, *, context=None):
         async def read():
             from aios_app.hud.context import HUDContextResolver
 
-            ctx = await HUDContextResolver(self.db).resolve(instance_id)
+            ctx = context or await HUDContextResolver(self.db).resolve(instance_id)
+            if ctx.instance_id != instance_id:
+                raise ValueError("catalog context must match the observer instance")
             graph = f"urn:aios:catalog:instance:{instance_id}:scope:{scope_key(ctx)}"
             catalog = _empty(
                 "character",

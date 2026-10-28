@@ -11,6 +11,7 @@ from aios_app.char.identity_kernel import IdentityKernelStore
 from aios_app.epistemic.cognitive_context import CognitiveContextService
 from aios_app.epistemic.weights import get_profile
 from aios_app.hud.context import HUDContext, HUDContextResolver
+from aios_app.hud.entity_catalog import hud_catalog
 from aios_app.hud.profile import get_profile as get_hud_profile, get_profile_by_name
 from aios_app.epistemic.relevance import CognitiveRelevanceScorer
 from aios_app.epistemic.scene_state import CharacterSceneStateStore
@@ -18,7 +19,7 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
-HUD_VERSION = "hud-v4"
+HUD_VERSION = "hud-v5"
 
 
 @dataclass(frozen=True)
@@ -168,7 +169,7 @@ class HUDAssembler:
             None,
             attention,
         )
-        # Presentation-only scene/entity ranking still uses the cognition-owned
+        # Presentation-only relationship/inventory ranking uses the cognition-owned
         # scorer; durable memory selection has already completed above.
         scorer = CognitiveRelevanceScorer(
             context,
@@ -200,17 +201,16 @@ class HUDAssembler:
         if token_budget is not None and token_budget > 0:
             scale = token_budget / max(1, hud_profile.token_budget)
             section_caps = {
-                key: max(32, int(value * scale))
+                key: max(32, int(value * scale)) if value else 0
                 for key, value in section_caps.items()
             }
             resolved_total = token_budget
 
         identity = await self._identity(context)
-        scene = await self._scene(
-            context,
-            scorer,
-            token_cap=section_caps["scene"],
-            entity_hops=hud_profile.entity_hops,
+        scene = await self._scene(context)
+        entity_catalog = await hud_catalog(
+            self.db, context, token_cap=section_caps["scene"],
+            focus_text=attention.retrieval_focus_text,
         )
         relationships = (
             await self._relationships(context, scorer)
@@ -420,6 +420,7 @@ class HUDAssembler:
                 "location_entity_id": context.location_entity_id,
             },
             "scene": scene,
+            "entity_catalog": entity_catalog,
             "research_activity": research_activity,
             "retrieval_evidence": cognitive_snapshot.retrieval_evidence,
             "state": {
@@ -546,107 +547,18 @@ class HUDAssembler:
         )
         return identity
 
-    async def _scene(
-        self,
-        context: HUDContext,
-        scorer: HUDRelevanceScorer,
-        *,
-        token_cap: int,
-        entity_hops: int,
-    ) -> dict[str, Any]:
-        seed_ids = list(context.scene_entity_ids)
-        rows = await self.db.fetch(
-            """
-            WITH RECURSIVE expanded(entity_id, depth) AS (
-                SELECT unnest($3::uuid[]), 0
-                UNION
-                SELECT
-                    CASE
-                        WHEN r.subject_entity_id=x.entity_id THEN r.object_entity_id
-                        ELSE r.subject_entity_id
-                    END,
-                    x.depth + 1
-                FROM expanded x
-                JOIN aios.world_entity_relation r
-                  ON r.world_id=$1
-                 AND r.valid_to_node_id IS NULL
-                 AND (
-                     r.subject_entity_id=x.entity_id
-                     OR r.object_entity_id=x.entity_id
-                 )
-                WHERE x.depth < $4
-            )
-            SELECT DISTINCT
-                e.entity_id, e.entity_type, e.display_name, e.entity_key, e.meta,
-                e.created_at,
-                MIN(x.depth) OVER (PARTITION BY e.entity_id) AS graph_depth
-            FROM aios.world_entity e
-            JOIN expanded x ON x.entity_id=e.entity_id
-            WHERE e.world_id=$1
-              AND e.entity_id IS DISTINCT FROM $2
-            ORDER BY graph_depth, e.created_at
-            LIMIT 200
-            """,
-            context.world_id,
-            context.entity_id,
-            seed_ids,
-            max(0, min(int(entity_hops), 4)),
-        )
-        entities: list[dict[str, Any]] = []
+    async def _scene(self, context: HUDContext) -> dict[str, Any]:
+        # A graph neighbor is not a present actor/object. Only retain the runtime
+        # location label here; qualified entity evidence is presented separately.
         location = None
-        for rank, row in enumerate(rows):
-            item = dict(row)
-            item["tier"] = (
-                0
-                if context.entity_is_active(item["entity_id"])
-                else min(2, int(item.get("graph_depth") or 0) + 1)
+        if context.location_entity_id:
+            row = await self.db.fetchrow(
+                """SELECT entity_id,entity_type,display_name,entity_key
+                   FROM aios.world_entity WHERE world_id=$1 AND entity_id=$2""",
+                context.world_id, context.location_entity_id,
             )
-            score = scorer.score(
-                item,
-                rank=rank,
-                candidate_text=f"{item.get('display_name','')} {item.get('entity_key','')} {item.get('meta','')}",
-                candidate_world_id=context.world_id,
-                candidate_entity_id=item["entity_id"],
-            )
-            item["relevance"] = score.as_dict()
-            entities.append(item)
-            if item["entity_id"] == context.location_entity_id:
-                location = item
-
-        entities.sort(
-            key=lambda item: (item.get("tier", 9), -item["relevance"]["total"])
-        )
-        entities = _trim_to_budget(
-            entities,
-            token_cap,
-            lambda x: f"{x.get('display_name','')} {x.get('entity_type','')} {x.get('meta','')}",
-        )
-        selected_ids = [context.entity_id] + [item["entity_id"] for item in entities]
-        relations = await self.db.fetch(
-            """
-            SELECT relation_type, subject_entity_id, object_entity_id, meta
-            FROM aios.world_entity_relation
-            WHERE world_id=$1
-              AND valid_to_node_id IS NULL
-              AND subject_entity_id = ANY($2::uuid[])
-              AND object_entity_id = ANY($2::uuid[])
-            """,
-            context.world_id,
-            selected_ids,
-        )
-        actors = [
-            item
-            for item in entities
-            if str(item.get("entity_type", "")).lower()
-            in {"character", "person", "agent", "user"}
-        ]
-        objects = [item for item in entities if item not in actors and item is not location]
-        return {
-            "location": location,
-            "actors": actors,
-            "objects": objects,
-            "relations": [dict(row) for row in relations],
-        }
+            location = dict(row) if row else None
+        return {"location": location, "actors": [], "objects": [], "relations": []}
 
     async def _relationships(
         self, context: HUDContext, scorer: HUDRelevanceScorer

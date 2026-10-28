@@ -1,9 +1,9 @@
 name: Entity memory RDF
 on:
   push:
-    paths: ['corpus_catalog.py', 'ui/tabs/knowledge_domains.py', 'topic_atlas/research_dossier.py', 'tests/test_corpus_reclassification_postgres.py', 'tests/test_contextual_corpus_postgres.py', 'tests/test_goal_knowledge_dependencies.py', 'entity_memory/**', 'tests/test_entity_catalog.py', 'rdf/ontology/place-catalog.ttl', 'main.py', 'corpus_rdf/**', 'tests/test_corpus_reference_rdf.py', 'epistemic/**', 'agent/**', 'hud/**', 'tests/test_rdf_recall*', 'tests/test_rdf_revision*', 'tests/test_goal_planning*', 'tests/test_retrieval_prewarm.py', 'tests/test_hud.py', 'tests/test_character_inquiry.py', 'semantic_index/cli.py', 'migrations/current/**', 'tests/test_entity_memory*', '.github/workflows/entity-memory.yml']
+    paths: ['corpus_catalog.py', 'ui/tabs/knowledge_domains.py', 'topic_atlas/research_dossier.py', 'tests/test_corpus_reclassification_postgres.py', 'tests/test_contextual_corpus_postgres.py', 'tests/test_goal_knowledge_dependencies.py', 'entity_memory/**', 'tests/test_entity_catalog.py', 'rdf/ontology/place-catalog.ttl', 'main.py', 'corpus_rdf/**', 'tests/test_corpus_reference_rdf.py', 'epistemic/**', 'agent/**', 'hud/**', 'tests/test_rdf_recall*', 'tests/test_rdf_revision*', 'tests/test_goal_planning*', 'tests/test_retrieval_prewarm.py', 'tests/test_hud.py', 'tests/test_hud_entity_catalog.py', 'tests/test_character_inquiry.py', 'semantic_index/cli.py', 'migrations/current/**', 'tests/test_entity_memory*', '.github/workflows/entity-memory.yml']
   pull_request:
-    paths: ['corpus_catalog.py', 'ui/tabs/knowledge_domains.py', 'topic_atlas/research_dossier.py', 'tests/test_corpus_reclassification_postgres.py', 'tests/test_contextual_corpus_postgres.py', 'tests/test_goal_knowledge_dependencies.py', 'entity_memory/**', 'tests/test_entity_catalog.py', 'rdf/ontology/place-catalog.ttl', 'main.py', 'corpus_rdf/**', 'tests/test_corpus_reference_rdf.py', 'epistemic/**', 'agent/**', 'hud/**', 'tests/test_rdf_recall*', 'tests/test_rdf_revision*', 'tests/test_goal_planning*', 'tests/test_retrieval_prewarm.py', 'tests/test_hud.py', 'tests/test_character_inquiry.py', 'semantic_index/cli.py', 'migrations/current/**', 'tests/test_entity_memory*', '.github/workflows/entity-memory.yml']
+    paths: ['corpus_catalog.py', 'ui/tabs/knowledge_domains.py', 'topic_atlas/research_dossier.py', 'tests/test_corpus_reclassification_postgres.py', 'tests/test_contextual_corpus_postgres.py', 'tests/test_goal_knowledge_dependencies.py', 'entity_memory/**', 'tests/test_entity_catalog.py', 'rdf/ontology/place-catalog.ttl', 'main.py', 'corpus_rdf/**', 'tests/test_corpus_reference_rdf.py', 'epistemic/**', 'agent/**', 'hud/**', 'tests/test_rdf_recall*', 'tests/test_rdf_revision*', 'tests/test_goal_planning*', 'tests/test_retrieval_prewarm.py', 'tests/test_hud.py', 'tests/test_hud_entity_catalog.py', 'tests/test_character_inquiry.py', 'semantic_index/cli.py', 'migrations/current/**', 'tests/test_entity_memory*', '.github/workflows/entity-memory.yml']
 jobs:
   entity-memory:
     runs-on: ubuntu-latest
@@ -33,4 +33,4 @@ jobs:
             tests/test_rdf_recall_postgres.py tests/test_rdf_revision_timeout.py \
             tests/test_goal_planning.py \
             tests/test_goal_planning_postgres.py tests/test_retrieval_prewarm.py \
-            tests/test_hud.py tests/test_character_inquiry.py
+            tests/test_hud.py tests/test_hud_entity_catalog.py tests/test_character_inquiry.py

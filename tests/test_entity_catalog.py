@@ -225,6 +225,25 @@ async def test_character_catalog_uses_accessible_sources_without_writes_or_fusek
 
 
 @pytest.mark.asyncio
+async def test_hud_catalog_uses_authorized_sql_view_and_withdraws_edited_source(env):
+    from aios_app.hud.entity_catalog import hud_catalog
+    from aios_app.hud.render_text import render_hud_text
+
+    env.ctx.location_entity_id = None
+    result = await hud_catalog(env.db, env.ctx, token_cap=400, focus_text="blue mug")
+    assert result["status"] == "ready"
+    text = render_hud_text({"entity_catalog": result})
+    assert "blue mug" in text and "reported" in text
+    assert env.graphs.reads == 0
+    await env.db.execute(
+        "UPDATE aios.document_section SET content='edited' WHERE section_id=$1",
+        env.section,
+    )
+    after = await hud_catalog(env.db, env.ctx, token_cap=400)
+    assert after["status"] == "ready" and not after["entries"]
+
+
+@pytest.mark.asyncio
 async def test_character_catalog_graph_tracks_cognitive_scope_revision(env):
     env.ctx.cognitive_revision = "before"
     before = await env.catalog.character(env.ctx.instance_id)

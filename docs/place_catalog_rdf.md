@@ -101,9 +101,39 @@ cognitive scope revision, so changed environment links produce a distinct view.
 The per-source navigation triples above
 are persisted by the existing background RDF writers. Future consumers must
 continue to validate source access and revision; raw RDF is not an ACL or state
-commit authority. No new retrieval or catalog work is added to HUD generation.
+commit authority.
 The generic AVAILABLE ACTIONS footer has been removed; registered backend action
 capabilities are unchanged.
+
+## HUD presentation
+
+HUD v5 reads the character catalog during frame assembly, reusing the resolved
+instance context. It replaces the old world-neighbor traversal: graph adjacency
+no longer labels people or objects as present. The runtime location label remains
+separate. The HUD never reads the unrestricted world catalog for character knowledge.
+
+The prompt includes `KNOWN PLACES & ENTITIES (EVIDENCE; NOT A LIVE MAP)`:
+
+```text
+Place Kitchen @…: blue mug @… — in [reported; mentioned; @source…]
+Person Bob @… [mentioned; @source…; current location unverified]
+Person Obama @… [corpus exposure; @source…; current location unverified]
+```
+
+References are stable opaque hashes of existing IDs, not merged names. Full IDs,
+source coordinates and membership evidence remain in `frame.entity_catalog`.
+Denied, conditional/qualified and illustrative links retain their status and a
+bounded source excerpt. Corpus exposure and acquisition remain distinct from
+encounter records. These lines do not establish possession, present location,
+availability, or successful actions.
+
+Selection uses the former scene entity budget (approximately four characters per
+token), includes at most eight complete rows, and prioritizes exact known current
+location IDs and focus terms before source order. It does not resolve a reported
+place to a runtime place by name. A profile with zero scene budget skips the read.
+Catalog access has a 500 ms deadline and performs no LLM or Fuseki request. A
+failed read is shown as unavailable, while an empty selection explicitly does
+not establish absence. The HUD version change invalidates older prepared frames.
 
 ## Deployment
 

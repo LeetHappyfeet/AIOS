@@ -147,8 +147,20 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"\n{title.upper()}:")
             for field in fields:
                 lines.append("- " + _render_plugin_field(field))
-    actors = scene.get("actors") or []
-    objects = scene.get("objects") or []
+    catalog = frame.get("entity_catalog")
+    if catalog is not None:
+        from aios_app.hud.entity_catalog import TITLE, NOTICE
+
+        lines.append("\n" + TITLE)
+        if catalog.get("status") != "ready":
+            lines.append("- Catalog unavailable; locations and entities remain unknown.")
+        elif catalog.get("entries"):
+            lines.append(NOTICE)
+            lines.extend("- " + entry["text"] for entry in catalog["entries"])
+        else:
+            lines.append("- No references selected within this view/budget; this does not establish absence.")
+    actors = [] if catalog is not None else scene.get("actors") or []
+    objects = [] if catalog is not None else scene.get("objects") or []
     if actors:
         lines.append("\nPRESENT PEOPLE:")
         for actor in actors:
