@@ -1,9 +1,9 @@
 name: workspace-client
 on:
   push:
-    branches: [AIOS-development, client-workspace-support]
+    branches: [AIOS-development, client-workspace-support, workspace-verification]
   pull_request:
-    branches: [AIOS-development]
+    branches: [AIOS-development, client-workspace-support]
 jobs:
   contract:
     runs-on: ubuntu-latest

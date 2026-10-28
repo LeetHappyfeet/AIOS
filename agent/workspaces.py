@@ -16,6 +16,8 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from .workspace_contract import Assignment, verification_status
+
 
 def decode(value):
     return json.loads(value) if isinstance(value, str) else value
@@ -23,8 +25,13 @@ def decode(value):
 
 def public(row):
     return {
-        k: decode(v) if k == "result" else str(v) if isinstance(v, UUID) else v
+        k: decode(v)
+        if k in {"result", "assignment", "decision"}
+        else str(v)
+        if isinstance(v, UUID)
+        else v
         for k, v in dict(row).items()
+        if k != "lease_live"
     }
 
 
@@ -39,9 +46,11 @@ class BindingIn(BaseModel):
     root_hint: str = Field(min_length=1, max_length=1000)
 
 
-class AssignmentIn(BaseModel):
+class AssignmentIn(Assignment):
     request_id: UUID
-    objective: str = Field(min_length=1, max_length=16000)
+
+    def spec(self):
+        return Assignment.model_validate(self.model_dump(exclude={"request_id"}))
 
 
 class ClaimIn(BaseModel):
@@ -59,8 +68,14 @@ class ObservationIn(LeaseIn):
 
 
 class FinishIn(LeaseIn):
-    status: Literal["succeeded", "failed", "cancelled", "interrupted"]
+    status: Literal["finished", "succeeded", "failed", "cancelled", "interrupted"]
     result: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewIn(BaseModel):
+    accept: bool
+    reviewer: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class WorkspaceStore:
@@ -187,11 +202,14 @@ class WorkspaceStore:
                 req.request_id,
             )
             if old:
-                if old["objective"] != req.objective:
+                if old["assignment_hash"] != req.spec().digest():
                     raise HTTPException(
-                        409, "Request ID reused with different objective"
+                        409, "Request ID reused with different assignment"
                     )
                 return public(old)
+            spec = req.spec()
+            if spec.goal_id:
+                await self.open_goal(b, spec)
             action = await CharacterAgencyStore(self.db).create_action(
                 instance_id=b["instance_id"],
                 action_type="workspace.run",
@@ -218,12 +236,14 @@ class WorkspaceStore:
                     409, f"Workspace action was not admitted: {action.status}"
                 )
             row = await self.db.execute_returning_row(
-                """INSERT INTO aios.workspace_run(binding_id,action_id,request_id,objective)
-                VALUES($1,$2,$3,$4) RETURNING *""",
+                """INSERT INTO aios.workspace_run(binding_id,action_id,request_id,objective,assignment,assignment_hash)
+                VALUES($1,$2,$3,$4,$5::jsonb,$6) RETURNING *""",
                 binding_id,
                 action.action_id,
                 req.request_id,
                 req.objective,
+                json.dumps(spec.model_dump(mode="json")),
+                spec.digest(),
             )
             return public(row)
 
@@ -359,6 +379,25 @@ class WorkspaceStore:
             )
             return response
 
+    async def open_goal(self, binding, spec):
+        row = await self.db.fetchrow(
+            """SELECT a.attempt_id FROM aios.character_goal_attempt a
+            JOIN aios.character_agent_goal g ON g.goal_id=a.goal_id
+            WHERE a.attempt_id=$1 AND a.goal_id=$2 AND a.instance_id=$3
+              AND a.source_timeline_id=$4 AND a.closed_at IS NULL
+              AND g.instance_id=$3 AND g.status IN ('active','scheduled','dormant')
+            FOR UPDATE OF a,g""",
+            spec.attempt_id,
+            spec.goal_id,
+            binding["instance_id"],
+            binding["timeline_id"],
+        )
+        if not row:
+            raise HTTPException(
+                409,
+                "Goal attempt is closed, foreign, or from a different source timeline",
+            )
+
     async def finish(self, binding_id, run_id, req):
         from .runtime import AgentRuntimeStore
 
@@ -366,23 +405,48 @@ class WorkspaceStore:
             raise HTTPException(422, "Result exceeds size limit")
         async with self.db.atomic():
             b, row = await self.owned(binding_id, run_id, req, terminal=True)
+            spec_data = decode(row["assignment"])
+            spec = Assignment.model_validate(
+                spec_data or {"objective": row["objective"]}
+            )
+            result = {
+                **req.result,
+                "verification": "worker_evidence",
+                "verification_status": verification_status(
+                    spec, req.result.get("evidence")
+                ),
+                "goal_review": "pending" if spec.goal_id else "not_linked",
+            }
+            # Finishing execution is never an assertion of goal completion.
+            status = "finished" if req.status == "succeeded" else req.status
+            if result["verification_status"] == "failed" and status == "finished":
+                status = "failed"
             if row["status"] != "running":
-                if row["status"] == req.status and decode(row["result"]) == req.result:
+                if row["status"] == status and decode(row["result"]) == result:
                     return public(row)
                 raise HTTPException(409, "Run already ended with a different result")
             row = await self.db.execute_returning_row(
                 "UPDATE aios.workspace_run SET status=$2,result=$3::jsonb,updated_at=now() WHERE run_id=$1 RETURNING *",
                 run_id,
-                req.status,
-                json.dumps(req.result),
+                status,
+                json.dumps(result),
             )
-            action_status = {"interrupted": "timed_out"}.get(req.status, req.status)
+            action_status = {"interrupted": "timed_out", "finished": "succeeded"}.get(
+                status, status
+            )
             await self.db.execute(
                 "UPDATE aios.character_action SET status=$2,result=$3::jsonb,completed_at=now(),updated_at=now() WHERE action_id=$1",
                 row["action_id"],
                 action_status,
-                json.dumps(req.result),
+                json.dumps(result),
             )
+            if spec.goal_id:
+                await self.db.execute(
+                    "INSERT INTO aios.workspace_review(run_id,goal_id,attempt_id) VALUES($1,$2,$3)",
+                    run_id,
+                    spec.goal_id,
+                    spec.attempt_id,
+                )
             await AgentRuntimeStore(self.db).wake(
                 instance_id=b["instance_id"],
                 event_type="WORKSPACE_RUN_FINISHED",
@@ -390,13 +454,68 @@ class WorkspaceStore:
                 source_id=str(run_id),
                 payload={
                     "run_id": str(run_id),
-                    "status": req.status,
-                    "result": req.result,
-                    "verification": "worker_report",
+                    "status": status,
+                    "result": result,
+                    "verification": "worker_evidence",
+                    "goal_completion": "requires_review",
                 },
                 dedupe_key=f"workspace-finish:{run_id}",
             )
             return public(row)
+
+    async def review(self, binding_id, run_id, req):
+        from aios_app.epistemic.goals import CharacterGoalService
+
+        async with self.db.atomic():
+            b = await self.binding(binding_id, lock=True)
+            row = await self.db.fetchrow(
+                "SELECT * FROM aios.workspace_run WHERE binding_id=$1 AND run_id=$2 FOR UPDATE",
+                binding_id,
+                run_id,
+            )
+            review = await self.db.fetchrow(
+                "SELECT * FROM aios.workspace_review WHERE run_id=$1 FOR UPDATE",
+                run_id,
+            )
+            if not row or not review:
+                raise HTTPException(404, "No goal-linked evidence to review")
+            decision = req.model_dump()
+            if review["status"] != "pending":
+                if decode(review["decision"]) == decision:
+                    return public(review)
+                raise HTTPException(409, "Evidence already reviewed")
+            spec = Assignment.model_validate(decode(row["assignment"]))
+            if req.accept:
+                await self.current(b)
+                await self.open_goal(b, spec)
+                result = decode(row["result"])
+                if (
+                    row["status"] != "finished"
+                    or verification_status(spec, result.get("evidence")) != "passed"
+                ):
+                    raise HTTPException(
+                        409, "Cannot accept incomplete, stale, or failed checks"
+                    )
+                await CharacterGoalService(self.db).finish(
+                    instance_id=b["instance_id"],
+                    goal_id=spec.goal_id,
+                    attempt_id=spec.attempt_id,
+                    status="completed",
+                    verification="reviewed",
+                    resolution_kind="workspace_operator_review",
+                    source_node_id=b["last_node_id"],
+                    evidence_ids=[f"workspace:{run_id}"],
+                    refresh_scene=False,
+                )
+            return public(
+                await self.db.execute_returning_row(
+                    """UPDATE aios.workspace_review SET status=$2,decision=$3::jsonb,reviewed_at=now()
+                   WHERE run_id=$1 RETURNING *""",
+                    run_id,
+                    "accepted" if req.accept else "rejected",
+                    json.dumps(decision),
+                )
+            )
 
 
 def install_workspace_routes(app, db, hud_handler):
@@ -415,8 +534,15 @@ def install_workspace_routes(app, db, hud_handler):
     @router.get("/protocol")
     async def protocol():
         return {
-            "version": 1,
-            "capabilities": ["workspace.run", "observations", "lease-renewal"],
+            "version": 2,
+            "capabilities": [
+                "workspace.run",
+                "observations",
+                "lease-renewal",
+                "assignments",
+                "verification",
+                "goal-review",
+            ],
             "single_writer": True,
         }
 
@@ -479,4 +605,37 @@ def install_workspace_routes(app, db, hud_handler):
     async def finish(binding_id: UUID, run_id: UUID, req: FinishIn):
         return await store.finish(binding_id, run_id, req)
 
+    async def authorize_review(authorization: str = Header(default="")):
+        key = os.environ.get("AIOS_WORKSPACE_REVIEW_KEY", "")
+        if not key or key == os.environ.get("AIOS_WORKSPACE_API_KEY"):
+            raise HTTPException(
+                503, "Set a distinct AIOS_WORKSPACE_REVIEW_KEY for human review"
+            )
+        if not hmac.compare_digest(authorization, "Bearer " + key):
+            raise HTTPException(401, "Invalid review API key")
+
+    reviews = APIRouter(
+        prefix="/workspace-client", dependencies=[Depends(authorize_review)]
+    )
+
+    @reviews.get("/{binding_id}/runs/{run_id}/review")
+    async def review_bundle(binding_id: UUID, run_id: UUID):
+        await store.binding(binding_id)
+        row = await db.fetchrow(
+            "SELECT * FROM aios.workspace_run WHERE binding_id=$1 AND run_id=$2",
+            binding_id,
+            run_id,
+        )
+        if not row:
+            raise HTTPException(404, "Unknown workspace run")
+        decision = await db.fetchrow(
+            "SELECT * FROM aios.workspace_review WHERE run_id=$1", run_id
+        )
+        return {"run": public(row), "review": public(decision) if decision else None}
+
+    @reviews.post("/{binding_id}/runs/{run_id}/review")
+    async def review(binding_id: UUID, run_id: UUID, req: ReviewIn):
+        return await store.review(binding_id, run_id, req)
+
+    app.include_router(reviews)
     app.include_router(router)
