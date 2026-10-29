@@ -636,6 +636,9 @@ async def _prepare_hud_response(
         state = await world_runtime.get_state(instance_id)
         timeline = state.get("source_timeline_id")
     timeline = UUID(str(timeline)) if timeline is not None else None
+    from aios_app.agent.work_admission import WorkAdmission
+    work = WorkAdmission(db)
+    frame["work"] = await work.overlay(instance_id, timeline)
     frame["remote_tasks"] = await task_overlay(db, instance_id, timeline)
     frame.setdefault("hud", {})["task_event_watermark"] = max(
         (task.get("sequence") or 0 for task in frame["remote_tasks"]), default=0)

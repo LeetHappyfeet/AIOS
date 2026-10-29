@@ -9,7 +9,7 @@ import json
 import re
 from typing import Any
 
-_ACTION = re.compile(r"<aios_action>(.{1,4000}?)</aios_action>",re.DOTALL|re.IGNORECASE)
+_ACTION = re.compile(r"<aios_action>(.{1,8000}?)</aios_action>",re.DOTALL|re.IGNORECASE)
 
 def extract_research_request(source_text: str) -> str | None:
     matches=_ACTION.findall(str(source_text or ""))

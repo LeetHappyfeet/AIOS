@@ -240,9 +240,10 @@ The existing AIOS_Client v2 runner has not been modified here. Its companion
 update needs protocol negotiation, v3 claims/context, a recall tool, structured
 progress, cancellation handling, and persisted event cursors. SillyTavern can
 consume the rendered section on its next normal HUD request; immediate status UI
-requires integration-side polling. Automatic model-generated delegation is not
-introduced: new submissions remain explicit operator actions, subject to action
-policy. Link/goal access is never inferred from character names.
+requires integration-side polling. Purpose-based character requests now enter AIOS work admission; see
+[work admission](work-admission.md) for profiles, policy, source markup and native
+request transport. Direct link submissions remain explicit operator actions.
+Link/goal access is never inferred from character names.
 
 Focused validation: `tests/test_character_environments.py`,
 `tests/test_environment_hud_context.py`, and `tests/test_workspace_client.py`.

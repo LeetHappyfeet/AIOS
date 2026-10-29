@@ -160,10 +160,13 @@ BASE += "ALTER TABLE aios.hud_profile ADD UNIQUE(profile_name);"
 
 async def environment_migration(db, url):
     sql = (Path(__file__).parents[1] / "migrations/current/20261028_02_character_environments.sql").read_text()
+    work_sql = (Path(__file__).parents[1] / "migrations/current/20261029_01_work_admission.sql").read_text()
     if url:
         await db.raw(sql, exec=True)
+        await db.raw(work_sql, exec=True)
     else:
         await db.execute(sql)
+        await db.execute(work_sql)
 
 @pytest_asyncio.fixture
 async def db():
@@ -180,7 +183,7 @@ async def db():
         database.pool = PGPool(con)
         try:
             await con.query(BASE, exec=True)
-            for filename in ("20261027_01_workspace_client.sql", "20261028_01_workspace_verification.sql", "20261028_02_character_environments.sql"):
+            for filename in ("20261027_01_workspace_client.sql", "20261028_01_workspace_verification.sql", "20261028_02_character_environments.sql", "20261029_01_work_admission.sql"):
                 await con.query((Path(__file__).parents[1] / "migrations/current" / filename).read_text(), exec=True)
             yield database
         finally:

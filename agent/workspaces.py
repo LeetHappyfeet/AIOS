@@ -24,6 +24,7 @@ from .environment_links import (
     append_event,
 )
 from .workspace_contract import Assignment, verification_status
+from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision
 
 
 def decode(value):
@@ -33,7 +34,16 @@ def decode(value):
 def public(row):
     return {
         k: decode(v)
-        if k in {"result", "assignment", "decision", "payload"}
+        if k
+        in {
+            "result",
+            "assignment",
+            "decision",
+            "payload",
+            "assignment_template",
+            "profile_snapshot",
+            "intent",
+        }
         else str(v)
         if isinstance(v, UUID)
         else v
@@ -205,7 +215,9 @@ class WorkspaceStore:
             )
             return public(new)
 
-    async def submit(self, binding_id, req, *, environment=None):
+    async def submit(
+        self, binding_id, req, *, environment=None, operator_assignment=True
+    ):
         from .actions import ActionDispatcher, default_action_registry
         from .lifecycle import CharacterAgencyStore
         from .policy import ActionPolicyService
@@ -242,18 +254,21 @@ class WorkspaceStore:
                 arguments={"binding_id": str(binding_id), "objective": req.objective},
                 side_effect_class="external_sensitive",
                 idempotency_key=f"workspace:{binding_id}:{req.request_id}",
-                proposed_by="workspace_operator",
+                proposed_by="workspace_operator"
+                if operator_assignment
+                else "aios_work_admission",
             )
-            # This authenticated endpoint is an explicit operator assignment;
-            # approve just this action, preserving deny policies and other actions.
+            # Explicit operator submissions can approve this one action. Model work
+            # uses policy admission without manufacturing an approval.
             policy = ActionPolicyService(self.db)
-            await policy.request_approval(action.action_id)
-            await policy.decide(
-                action.action_id,
-                True,
-                "workspace_operator",
-                "Explicit workspace assignment",
-            )
+            if operator_assignment:
+                await policy.request_approval(action.action_id)
+                await policy.decide(
+                    action.action_id,
+                    True,
+                    "workspace_operator",
+                    "Explicit workspace assignment",
+                )
             action = await ActionDispatcher(
                 self.db, default_action_registry(self.db)
             ).dispatch(action.action_id, worker_class="executive")
@@ -381,6 +396,11 @@ class WorkspaceStore:
         async with self.db.atomic():
             b, run = await self.owned(binding_id, run_id, req, stopping=True)
             await self.current(b)
+            if run["required_protocol_version"] >= 3:
+                await self.db.execute(
+                    "UPDATE aios.workspace_binding SET last_seen_at=now() WHERE binding_id=$1",
+                    binding_id,
+                )
             await self.db.execute(
                 "UPDATE aios.workspace_run SET lease_expires_at=now()+interval '120 seconds',updated_at=now() WHERE run_id=$1",
                 run_id,
@@ -674,6 +694,7 @@ def install_workspace_routes(app, db, hud_handler):
                 "verification",
                 "goal-review",
                 "environment-links-v3",
+                "work-admission-v1",
                 "delegated-runs-v3",
                 "character-recall-v3",
                 "task-events-v3",
@@ -714,6 +735,14 @@ def install_workspace_routes(app, db, hud_handler):
 
     @router.post("/{binding_id}/claim")
     async def claim(binding_id: UUID, req: ClaimRequest):
+        await store.binding(binding_id, req.worker_key)
+        if req.protocol_version == 3:
+            await db.execute(
+                "UPDATE aios.workspace_binding SET last_seen_at=now() WHERE binding_id=$1",
+                binding_id,
+            )
+
+            await WorkAdmission(db).reconsider(binding_id=binding_id)
         return {
             "run": await store.claim(binding_id, req.worker_key, req.protocol_version)
         }
@@ -802,6 +831,40 @@ def install_workspace_routes(app, db, hud_handler):
     reviews = APIRouter(
         prefix="/workspace-client", dependencies=[Depends(authorize_review)]
     )
+
+    @reviews.post("/v3/{binding_id}/links/{link_id}/work-profiles")
+    async def configure_work(binding_id: UUID, link_id: UUID, req: ProfileIn):
+        return await WorkAdmission(db).configure(binding_id, link_id, req)
+
+    @reviews.get("/work/{instance_id}/{request_id}")
+    async def inspect_work(instance_id: UUID, request_id: UUID):
+        return await WorkAdmission(db).inspect(instance_id, request_id)
+
+    @reviews.post("/work/{instance_id}/{request_id}/decision")
+    async def decide_work(instance_id: UUID, request_id: UUID, req: WorkDecision):
+        return await WorkAdmission(db).decide(instance_id, request_id, req)
+
+    async def authorize_request(authorization: str = Header(default="")):
+        key = os.environ.get("AIOS_WORK_REQUEST_API_KEY", "")
+        if not key or key in {
+            os.environ.get("AIOS_WORKSPACE_REVIEW_KEY"),
+            os.environ.get("AIOS_WORKSPACE_API_KEY"),
+        }:
+            raise HTTPException(
+                503, "Set a distinct AIOS_WORK_REQUEST_API_KEY for native work requests"
+            )
+        if not hmac.compare_digest(authorization, "Bearer " + key):
+            raise HTTPException(401, "Invalid work request API key")
+
+    requests = APIRouter(
+        prefix="/agent/instance", dependencies=[Depends(authorize_request)]
+    )
+
+    @requests.post("/{instance_id}/work/request")
+    async def request_work(instance_id: UUID, req: WorkRequestIn):
+        return await WorkAdmission(db).request(instance_id, req)
+
+    app.include_router(requests)
 
     @reviews.post("/v3/{binding_id}/links")
     async def link_environment(binding_id: UUID, req: LinkIn):

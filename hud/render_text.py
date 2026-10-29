@@ -359,6 +359,23 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             else:
                 lines.append(f"- {rendered_text}")
     lines.append("\nStay inside this HUD's epistemic and branch boundaries.")
+    work = frame.get("work") or {}
+    capabilities = work.get("capabilities") or []
+    if capabilities:
+        lines.append("WORK CAPABILITIES (request intent; AIOS decides authorization and routing)")
+        for capability in capabilities:
+            description = " ".join(str(capability["description"]).split())[:300]
+            lines.append(f"- {capability['capability']} / {capability['purpose']}: {description}; worker {'recently seen' if capability['online'] else 'not recently seen'}")
+        lines.append('To request work, use native request_work when registered. Otherwise emit exactly one structured block in your reply: <aios_action>{"op":"request_work","capability":"listed_capability","purpose":"listed_purpose","objective":"bounded objective","constraints":[]}</aios_action>. AIOS returns admission/status in a later HUD. Never claim execution from a request, or resubmit work already pending.')
+    if work.get("request_error"):
+        lines.append("WORK REQUEST NEEDS CLARIFICATION: " + str(work["request_error"]["reason"])[:300])
+    if work.get("requests"):
+        lines.append("WORK REQUESTS (admission/execution status; not goal completion)")
+        for request in work["requests"]:
+            reason = " ".join(str(request.get("reason") or "").split())[:240]
+            objective = " ".join(str(request.get("objective") or "").split())[:160]
+            lines.append(f"- {request['request_id']}: {request['status']} — {objective}")
+            lines.append(f"  {reason}")
     tasks = frame.get("remote_tasks") or []
     if tasks:
         lines.append("REMOTE WORK (reported task state; not character speech)")

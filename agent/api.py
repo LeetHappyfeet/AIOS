@@ -161,6 +161,13 @@ def install_external_agency_routes(app, db) -> None:
         except ValueError as exc:
             raise HTTPException(422,str(exc)) from exc
         if question is None:
+            # Older integrations relay every aios_action block here. AIOS owns
+            # work dispatch; return its existing admission receipt, without
+            # asking SillyTavern to understand workspace routing.
+            from .work_admission import WorkAdmission
+            receipt = await WorkAdmission(db).from_source(instance_id, req.source_node_id)
+            if receipt is not None:
+                return {"operation": "request_work", "source_node_id": str(req.source_node_id), **receipt}
             raise HTTPException(422,"source does not contain a research operation")
         digest=hashlib.sha256(question.encode("utf-8")).hexdigest()
         async with db.connection() as con:
