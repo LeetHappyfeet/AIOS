@@ -173,3 +173,31 @@ Regression tests also cover bounded evidence reaching the actual transaction pro
 source/attempt changes, duplicate review admission, unavailable providers, rate-limit
 cooldown, and state-only changes during inference. Run the cognitive-episode-recovery
 workflow, including its isolated PostgreSQL fixtures, before deployment.
+
+
+## Retrieval failure loop repair
+
+Planning fingerprints now normalize requirement evidence and coverage, excluding
+recall receipt IDs, retrieval transport state, and retry revision bookkeeping.
+Full receipts remain in the dependency store for continuation and diagnostics.
+Reordered evidence IDs alone do not cause inference; new evidence, coverage,
+questions, source context and meaningful receipt summaries still can.
+
+Unavailable, failed or stale inquiry operations impose a 60-second retry delay
+per requirement, measured from the latest operation's stored `updated_at` using
+the database clock. Replacing a plan or restarting a worker cannot reset it.
+This uses existing operation records and needs no new migration or memory reset.
+An existing plan fingerprint may change once after updating to the new format.
+
+Background inquiry RDF recall allows two seconds per SQL candidate or
+revalidation read; interactive recall retains its 350ms per-read deadline.
+Source candidates are materialized after owner, revision and search filtering,
+before source authorization joins. No candidate limit precedes authorization,
+and lineage, source eligibility, payload hashes and reference validation remain
+mandatory. Production query-plan improvements require measurement on the live DB.
+
+Unavailable recall traces now include `stage`, `failure`, `elapsed_ms`,
+`sql_budget_seconds` and bounded error `detail`. The stage distinguishes SQL
+source/atom selection, Fuseki source/atom queries and SQL revalidation. Fuseki
+HTTP/transport details are also included in the log. This exposes the underlying
+Fuseki failure without treating unavailable retrieval as an empty knowledge result.

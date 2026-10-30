@@ -23,6 +23,9 @@ SQL_BUDGET = 0.35
 # Background change detection gets one seven-second window for both reads,
 # including connection acquisition. Interactive recall keeps its short budget.
 REVISION_SQL_BUDGET = 7.0
+# Background inquiries routinely encounter ~1.6s source authorization reads.
+# Interactive consumers retain their 350ms bound, including trace writes.
+INQUIRY_SQL_BUDGET = 2.0
 TRANSPORT_BUDGET = 0.8
 _STOP = set("what where when which why how who whom have has had does did are was were been being there their this that these those with from about would could should will can any some into then than them they your you our and the for not remember recall know seen saw find available resources".split())
 
@@ -84,9 +87,15 @@ _SOURCE_ACCESS = """ AND (n.timeline_id IS DISTINCT FROM $2 OR n.node_id IN (SEL
           AND 'reflection'=ANY(eaa.authorized_uses)
           AND aios.semantic_acquisition_source_eligible(kae.acquisition_id)))
 """
-_SOURCE_SQL = _ANCESTRY + _SOURCE_SELECT + """ AND (cardinality($5::uuid[])>0 AND ep.section_id=ANY($5::uuid[])
-      OR cardinality($5::uuid[])=0 AND ep.search_terms && $6::text[])
-""" + _SOURCE_ACCESS + "ORDER BY ep.updated_at DESC,ep.section_id LIMIT 12\n"
+# Materialize indexed source coordinates before expensive authorization joins.
+# Do not limit candidates here: only fully authorized rows may consume the limit.
+_SOURCE_SQL = _ANCESTRY.rstrip() + """, source_candidates AS MATERIALIZED (
+ SELECT * FROM aios.entity_memory_projection ep
+ WHERE ep.owner_character_id=$3 AND ep.dataset='char'
+   AND ep.built_revision=ep.revision AND ep.rdf_revision=ep.revision
+   AND (cardinality($5::uuid[])>0 AND ep.section_id=ANY($5::uuid[])
+        OR cardinality($5::uuid[])=0 AND ep.search_terms && $6::text[])
+) """ + _SOURCE_SELECT.replace("aios.entity_memory_projection ep", "source_candidates ep") + _SOURCE_ACCESS + "ORDER BY ep.updated_at DESC,ep.section_id LIMIT 12\n"
 _LEGACY_ATOM_SQL = _ANCESTRY + """
 SELECT DISTINCT ON(p.proposition_id) p.proposition_id,p.atom_id,p.canonical_text,
  p.subject_norm,p.predicate_norm,p.object_norm,p.polarity,p.modality,
@@ -199,10 +208,10 @@ class RDFRecallService:
         self.fuseki=fuseki
         self.discovery_diagnostics = {}
 
-    async def _rows(self,ctx,terms,*,sections=(),propositions=(),sources=True):
+    async def _rows(self,ctx,terms,*,sections=(),propositions=(),sources=True,sql_budget=SQL_BUDGET):
         return await asyncio.wait_for(self.db.fetch(_SOURCE_SQL if sources else _ATOM_SQL,
             getattr(ctx,"source_head_node_id",None),getattr(ctx,"source_timeline_id",None),
-            ctx.character_id,owners_for(ctx),list(sections if sources else propositions),terms),SQL_BUDGET)
+            ctx.character_id,owners_for(ctx),list(sections if sources else propositions),terms),sql_budget)
 
     async def _query(self,query):
         from aios_app.config import settings
@@ -267,11 +276,16 @@ class RDFRecallService:
         result=RecallResult()
         terms=terms_for(query,ctx.character_id)
         if not terms: return result
+        sql_budget = INQUIRY_SQL_BUDGET if consumer == "inquiry" else SQL_BUDGET
+        stage = "sql_sources"
+        started = time.monotonic()
         try:
-            sources=await self._rows(ctx,terms)
-            atoms=await self._rows(ctx,terms,sources=False)
+            sources=await self._rows(ctx,terms,sql_budget=sql_budget)
+            stage = "sql_atoms"
+            atoms=await self._rows(ctx,terms,sources=False,sql_budget=sql_budget)
             refs=[]
             if sources:
+                stage = "fuseki_sources"
                 found=await self._query(entity_query(sources,terms))
                 allowed={graph_iri(r["section_id"]):r for r in sources}
                 for binding in found.get("results",{}).get("bindings",[])[:MAX_REFERENCES]:
@@ -289,6 +303,7 @@ class RDFRecallService:
                         "entity_id":value("entity").removeprefix("urn:aios:memory-entity:"),
                         "start":start,"end":end,"text":value("text"),"terms":terms})
             if atoms:
+                stage = "fuseki_atoms"
                 found=await self._query(atom_query(ctx,atoms))
                 allowed={}
                 for row in atoms:
@@ -301,12 +316,17 @@ class RDFRecallService:
             atom_refs=[r for r in refs if r["kind"]=="atom"]
             source_refs=[r for r in refs if r["kind"]=="source"]
             refs=(atom_refs[:12]+source_refs[:12]+atom_refs[12:]+source_refs[12:])[:MAX_REFERENCES]
-            result=await self.validate_refs(ctx,refs)
+            stage = "sql_revalidation"
+            result=await self.validate_refs(ctx,refs,sql_budget=sql_budget)
             result.diagnostics.update(candidate_sources=len(sources),candidate_atoms=len(atoms),rdf_references=len(refs))
         except Exception as exc:
-            log.info("RDF recall unavailable instance=%s reason=%s",ctx.instance_id,type(exc).__name__)
+            elapsed = round((time.monotonic()-started)*1000,1)
+            detail = str(exc)[:2000]
+            log.info("RDF recall unavailable instance=%s stage=%s reason=%s elapsed_ms=%s detail=%s",
+                     ctx.instance_id,stage,type(exc).__name__,elapsed,detail)
             result.status="unavailable"
-            result.diagnostics["failure"]=type(exc).__name__
+            result.diagnostics.update(failure=type(exc).__name__, stage=stage,
+                elapsed_ms=elapsed, sql_budget_seconds=sql_budget, detail=detail)
         if record:
             try:
                 result.trace_id=str(await asyncio.wait_for(self.db.fetchval("""INSERT INTO aios.entity_recall_trace
@@ -318,7 +338,7 @@ class RDFRecallService:
                 log.debug("RDF recall trace unavailable", exc_info=True)
         return result
 
-    async def validate_refs(self,ctx,refs):
+    async def validate_refs(self,ctx,refs,*,sql_budget=SQL_BUDGET):
         """Rehydrate linked references with current access, lineage and source checks."""
         refs=refs[:MAX_REFERENCES]
         sections=[]; propositions=[]
@@ -327,8 +347,8 @@ class RDFRecallService:
                 if ref.get("kind")=="source": sections.append(UUID(ref["section_id"]))
                 elif ref.get("kind")=="atom": propositions.append(UUID(ref["proposition_id"]))
             except (KeyError,ValueError,TypeError): continue
-        source_rows=await self._rows(ctx,[],sections=sections) if sections else []
-        atom_rows=await self._rows(ctx,[],propositions=propositions,sources=False) if propositions else []
+        source_rows=await self._rows(ctx,[],sections=sections,sql_budget=sql_budget) if sections else []
+        atom_rows=await self._rows(ctx,[],propositions=propositions,sources=False,sql_budget=sql_budget) if propositions else []
         sources={str(r["section_id"]):r for r in source_rows}
         atoms={str(r["proposition_id"]):r for r in atom_rows}
         result=RecallResult(); seen=set()

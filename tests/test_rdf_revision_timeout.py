@@ -85,3 +85,42 @@ async def test_revision_cancellation_propagates_and_releases_transaction():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert db.exited
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['sql_sources', 'sql_atoms', 'fuseki_sources', 'sql_revalidation'])
+async def test_recall_failure_retains_phase_and_detail(stage, monkeypatch, caplog):
+    import logging
+    from unittest.mock import AsyncMock
+    from aios_app.rdf.fuseki import FusekiError
+    service = retrieval.RDFRecallService(None)
+    sources = [{}] if stage == 'fuseki_sources' else []
+    rows = AsyncMock(side_effect=([RuntimeError('source failure')] if stage == 'sql_sources' else
+        [[], RuntimeError('atom failure')] if stage == 'sql_atoms' else [sources, []]))
+    monkeypatch.setattr(service, '_rows', rows)
+    monkeypatch.setattr(retrieval, 'entity_query', lambda *args: 'SELECT')
+    monkeypatch.setattr(service, '_query', AsyncMock(side_effect=FusekiError('HTTP 503 char/sparql unavailable')))
+    monkeypatch.setattr(service, 'validate_refs', AsyncMock(side_effect=TimeoutError()))
+    with caplog.at_level(logging.INFO):
+        result = await service.search(context(), 'kitchen sink', record=False)
+    assert result.status == 'unavailable'
+    assert result.diagnostics['stage'] == stage
+    assert result.diagnostics['sql_budget_seconds'] == retrieval.INQUIRY_SQL_BUDGET
+    assert result.diagnostics['elapsed_ms'] >= 0
+    assert f'stage={stage}' in caplog.text
+    if stage == 'fuseki_sources':
+        assert 'HTTP 503' in result.diagnostics['detail']
+        assert 'HTTP 503' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_background_recall_budget_does_not_extend_interactive_reads(monkeypatch):
+    from unittest.mock import AsyncMock
+    service = retrieval.RDFRecallService(None)
+    rows = AsyncMock(return_value=[])
+    monkeypatch.setattr(service, '_rows', rows)
+    await service.search(context(), 'kitchen sink', consumer='hud', record=False)
+    assert all(call.kwargs['sql_budget'] == retrieval.SQL_BUDGET for call in rows.await_args_list)
+    rows.reset_mock()
+    await service.search(context(), 'kitchen sink', consumer='inquiry', record=False)
+    assert all(call.kwargs['sql_budget'] == retrieval.INQUIRY_SQL_BUDGET for call in rows.await_args_list)

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 KINDS = {"personal", "procedure", "environment"}
 NEXT = {"internal_lookup", "research", "request_information", "wait"}
 LINKED_KNOWLEDGE_TIMEOUT = 0.75
+INQUIRY_RETRY_SECONDS = 60
 
 
 def mapping(value: Any) -> dict:
@@ -33,6 +34,24 @@ def mapping(value: Any) -> dict:
         except ValueError:
             pass
     return {}
+
+
+def planning_requirements(requirements: list[dict]) -> list[dict]:
+    """Evidence changes may replan; lookup identities and retry receipts may not.
+
+    Keep full receipts in the dependency store for continuation and diagnostics.
+    Their IDs, transport outcomes and revision bookkeeping are not new knowledge.
+    """
+    keys = ("requirement_id", "requirement_key", "question", "dependency_kind",
+            "coverage_status", "coverage_score", "evidence_ids", "rdf_refs", "dossier_ids")
+    result = []
+    for requirement in requirements:
+        item = {key: requirement[key] for key in keys if key in requirement}
+        for key in ("evidence_ids", "dossier_ids", "rdf_refs"):
+            if key in item:
+                item[key] = sorted(item[key], key=lambda value: json.dumps(value, sort_keys=True))
+        result.append(item)
+    return sorted(result, key=lambda item: str(item.get("requirement_id", "")))
 
 
 def clip_message(text: str, limit: int = 1200) -> str:
@@ -260,7 +279,7 @@ class GoalPlanningService:
         inputs = {"goal": str(goal["goal_id"]), "objective": goal["goal_text"],
                   "attempt": str(goal["attempt_id"]), "timeline": str(context.source_timeline_id),
                   "node": str(context.source_head_node_id),
-                  "requirements": requirements,
+                  "requirements": planning_requirements(requirements),
                   "receipts": summaries,
                   "corpus_epoch": str(epoch) if any(r.get("reason")=="no_access" for r in summaries) else None}
         # Evidence epochs are checked by continuation, independently of plan inference.
@@ -669,11 +688,13 @@ class GoalPlanningService:
         if requirement.get("coverage_status") == "sufficient":
             return result("covered", "existing_knowledge")
         prior = await self.db.fetchrow(
-            """SELECT operation_id,operation_type,status,input,result,updated_at
+            """SELECT operation_id,operation_type,status,input,result,updated_at,
+                      GREATEST(0, EXTRACT(EPOCH FROM
+                          (updated_at + $3::double precision * interval '1 second' - now()))) AS retry_after_seconds
                FROM aios.character_cognitive_operation
                WHERE instance_id=$1 AND input->>'requirement_id'=$2
                  AND operation_type IN ('inquiry.resolve','research.advance','research.study')
-               ORDER BY updated_at DESC,operation_id DESC LIMIT 1""", op["instance_id"], requirement_id)
+               ORDER BY updated_at DESC,operation_id DESC LIMIT 1""", op["instance_id"], requirement_id, INQUIRY_RETRY_SECONDS)
         if await self.db.fetchval(
             """SELECT 1 FROM aios.character_cognitive_operation
                WHERE instance_id=$1 AND input->>'requirement_id'=$2
@@ -701,6 +722,12 @@ class GoalPlanningService:
         transient = prior and (prior["status"] in {"failed", "stale"}
             or detail.get("reason") in {"unavailable", "retrieval_unavailable"}
             or prior_result.get("status") == "unavailable")
+        # This is owned by the durable requirement's latest operation, not by a
+        # plan. Replacing a plan or restarting a worker cannot reset the delay.
+        if transient and float(prior.get("retry_after_seconds", 0)) > 0:
+            return result("unavailable", "retrieval_retry_backoff",
+                          retry_after_seconds=min(INQUIRY_RETRY_SECONDS,
+                              float(prior["retry_after_seconds"])))
         if (environment or question["kind"] == "personal") and receipt.get("revision") == revision and not transient:
             return result("awaiting_observation" if environment else "exhausted", "no_new_evidence")
         research = ProgressiveResearchService(self.db)

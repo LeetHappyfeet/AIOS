@@ -103,3 +103,16 @@ async def test_runner_returns_deferred_lease_without_marking_job_done_or_failed(
     defer.assert_awaited_once_with(db,job['job_id'],worker_id='owner',delay_seconds=60)
     done.assert_not_awaited()
     failed.assert_not_awaited()
+
+
+def test_planning_requirements_ignore_retry_metadata_and_evidence_order():
+    from aios_app.agent.goal_planning import planning_requirements
+    requirement = {'requirement_id':'one','question':'Where is the sink?',
+                   'coverage_status':'missing','evidence_ids':['b','a'],
+                   'rdf_refs':[], 'recall_receipt':{'inquiry_id':'old','revision':'old'},
+                   'retrieval_state':'unassessed'}
+    retried = {**requirement,'evidence_ids':['a','b'],
+               'recall_receipt':{'inquiry_id':'new','revision':'new'},
+               'retrieval_state':'internal_recall'}
+    assert planning_requirements([requirement]) == planning_requirements([retried])
+    assert planning_requirements([requirement]) != planning_requirements([{**retried,'coverage_status':'sufficient'}])

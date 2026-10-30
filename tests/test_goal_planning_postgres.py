@@ -553,6 +553,18 @@ async def test_transient_inquiry_retry_does_not_repeat_after_recovery(env):
         result='{"status":"unresolved","result":{"reason":"retrieval_unavailable"}}'
         WHERE operation_type='inquiry.resolve'""")
     await e.service.continue_once(op, p, await e.service.snapshot(e.instance, e.goal))
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 1
+    # A different plan operation (including a newly constructed service after
+    # restart) must observe the same durable requirement backoff.
+    replacement_op = {**op, 'operation_id':uuid4()}
+    replacement = GoalPlanningService(e.db)
+    outcomes = await replacement.continue_once(replacement_op, p, await replacement.snapshot(e.instance, e.goal))
+    assert outcomes[0]['reason'] == 'retrieval_retry_backoff'
+    assert 0 < outcomes[0]['retry_after_seconds'] <= 60
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 1
+    # Retry age belongs to the stored inquiry, not the current plan.
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET updated_at=now()-interval '61 seconds' WHERE operation_type='inquiry.resolve'")
+    await e.service.continue_once(op, p, await e.service.snapshot(e.instance, e.goal))
     child = await e.db.fetchrow("SELECT input FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve' AND input->>'recall_revision' LIKE '%retry%'")
     payload = json.loads(child['input']) if isinstance(child['input'], str) else child['input']
     assert payload['recall_revision'] != payload['discovery_revision']
@@ -723,3 +735,29 @@ async def test_queue_constraint_and_resource_class_are_migrated(env):
     with pytest.raises(RuntimeError,match='check constraint'):
         async with e.db.atomic():
             await e.db.execute("INSERT INTO aios.pipeline_job(job_type,payload,resource_class) VALUES('test','{}','unknown')")
+
+
+@pytest.mark.asyncio
+async def test_failed_inquiry_ids_do_not_replan_but_new_evidence_does(env):
+    from aios_app.agent.goal_dependencies import GoalKnowledgeDependencyService
+    e = env
+    op = await running(e)
+    snap = await e.service.snapshot(e.instance, e.goal)
+    await e.service.continue_once(op, proposal(next_step='internal_lookup'), snap)
+    child = await e.db.fetchrow("SELECT input FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'")
+    payload = json.loads(child['input']) if isinstance(child['input'], str) else child['input']
+    store = GoalKnowledgeDependencyService(e.db)
+    async def record(inquiry_id, hits):
+        await store.record_inquiry(instance_id=e.instance, goal_id=e.goal,
+            requirement_id=UUID(payload['requirement_id']), revision='same-evidence',
+            receipt={'inquiry_id':inquiry_id,'status':'unresolved',
+                     'result':{'reason':'retrieval_unavailable','hits':hits}})
+    await record(str(uuid4()), [])
+    first = await e.service.snapshot(e.instance, e.goal)
+    await record(str(uuid4()), [])
+    second = await e.service.snapshot(e.instance, e.goal)
+    assert first['fingerprint'] == second['fingerprint']
+    # Preserve diagnostic receipts outside the fingerprint.
+    assert first['requirements'] != second['requirements']
+    await record(str(uuid4()), [{'source':'char','proposition_id':str(uuid4()),'evidence_id':'new'}])
+    assert first['fingerprint'] != (await e.service.snapshot(e.instance, e.goal))['fingerprint']
