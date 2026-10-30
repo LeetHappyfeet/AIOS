@@ -761,3 +761,114 @@ async def test_failed_inquiry_ids_do_not_replan_but_new_evidence_does(env):
     assert first['requirements'] != second['requirements']
     await record(str(uuid4()), [{'source':'char','proposition_id':str(uuid4()),'evidence_id':'new'}])
     assert first['fingerprint'] != (await e.service.snapshot(e.instance, e.goal))['fingerprint']
+
+
+@pytest.mark.asyncio
+async def test_text_correction_rewrites_once_and_records_requests(env):
+    e=env
+    op=await running(e)
+    calls=[]
+    async def infer(self, request):
+        calls.append(request)
+        return SimpleNamespace(request_id=uuid4(),response=SimpleNamespace(raw=(
+            {**proposal(), 'strategy':'x'*601} if len(calls)==1 else proposal())))
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',infer)
+    result=await e.service.propose(op)
+    assert result['status']=='waiting_information'
+    assert result['validation_corrections']==1
+    assert len(result['inference_request_ids'])==2
+    assert 'HOST VALIDATION FEEDBACK' in calls[1].prompt
+    assert 'maximum' in calls[1].prompt and '601' in calls[1].prompt
+    assert (await e.service.current(e.instance,e.goal))['proposal']==proposal()
+
+
+@pytest.mark.asyncio
+async def test_two_bad_outputs_preserve_previous_plan_and_do_not_truncate(env):
+    from aios_app.agent.goal_planning import PlanTextError
+    e=env
+    op=await running(e)
+    await e.service.propose(op)
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded' WHERE operation_type='planning.propose'")
+    await e.db.execute("UPDATE aios.character_agent_goal SET goal_text='Learn to cook safely' WHERE goal_id=$1",e.goal)
+    op=await running(e)
+    calls=[]
+    async def infer(self, request):
+        calls.append(request)
+        return SimpleNamespace(request_id=uuid4(),response=SimpleNamespace(raw={**proposal(),'steps':['x'*401]}))
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',infer)
+    with pytest.raises(PlanTextError) as error:
+        await e.service.propose(op)
+    assert len(calls)==2 and len(error.value.request_ids)==2
+    assert error.value.details['field']=='steps[0]'
+    assert (await e.service.current(e.instance,e.goal))['revision']==1
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_goal_plan WHERE status='superseded'")==0
+
+
+@pytest.mark.asyncio
+async def test_context_change_avoids_wasted_correction(env):
+    e=env
+    op=await running(e)
+    calls=[]
+    async def infer(self, request):
+        calls.append(request)
+        e.ctx.source_head_node_id=uuid4()
+        return SimpleNamespace(request_id=uuid4(),response=SimpleNamespace(raw={**proposal(),'strategy':'x'*601}))
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',infer)
+    result=await e.service.propose(op)
+    assert result['status']=='stale' and result['stage']=='before_correction'
+    assert len(calls)==1
+
+
+@pytest.mark.asyncio
+async def test_correction_revalidates_evidence_instead_of_bypassing_guard(env):
+    e=env
+    op=await running(e)
+    calls=[]
+    async def infer(self, request):
+        calls.append(request)
+        raw={**proposal(),'strategy':'x'*601} if len(calls)==1 else {**proposal(),'evidence_ids':[str(uuid4())]}
+        return SimpleNamespace(request_id=uuid4(),response=SimpleNamespace(raw=raw))
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',infer)
+    with pytest.raises(ValueError,match='inaccessible evidence'):
+        await e.service.propose(op)
+    assert len(calls)==2
+    assert await e.service.current(e.instance,e.goal) is not None  # queued, never accepted
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_goal_plan WHERE status IN ('ready','waiting_information')")==0
+
+
+@pytest.mark.asyncio
+async def test_unavailable_correction_does_not_defer_and_reset_allowance(env):
+    from aios_app.agent.goal_planning import PlanTextError
+    from aios_app.inference import InferenceUnavailable
+    e=env
+    op=await running(e)
+    calls=[]
+    async def infer(self, request):
+        calls.append(request)
+        if len(calls)==2:
+            raise InferenceUnavailable('provider busy')
+        return SimpleNamespace(request_id=uuid4(),response=SimpleNamespace(raw={**proposal(),'strategy':'x'*601}))
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer',infer)
+    with pytest.raises(PlanTextError) as error:
+        await e.service.propose(op)
+    assert len(calls)==2
+    assert error.value.details['correction']=='provider_unavailable'
+    assert len(error.value.request_ids)==1
+
+
+@pytest.mark.asyncio
+async def test_new_text_contract_allows_one_fresh_plan_after_old_failure(env):
+    import hashlib
+    from aios_app.agent.goal_planning import PLAN_CONTRACT_VERSION
+    e=env
+    op=await running(e)
+    snap=await e.service.snapshot(e.instance,e.goal)
+    assert snap['input_context']['plan_contract']==PLAN_CONTRACT_VERSION
+    old_inputs={key:value for key,value in snap['input_context'].items() if key!='plan_contract'}
+    old_fingerprint=hashlib.sha256(json.dumps(old_inputs,sort_keys=True,default=str).encode()).hexdigest()
+    await e.db.execute("UPDATE aios.character_goal_plan SET input_fingerprint=$1,status='failed'",old_fingerprint)
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='failed'")
+    assert await e.service.schedule(e.instance,e.goal)
+    await e.db.execute("UPDATE aios.character_goal_plan SET status='failed'")
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='failed'")
+    assert not await e.service.schedule(e.instance,e.goal)

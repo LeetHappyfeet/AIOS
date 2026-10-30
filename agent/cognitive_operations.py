@@ -244,12 +244,18 @@ class CognitiveOperationEngine:
             return
         op = dict(row)
         try:
-            from .goal_planning import GoalPlanningService
+            from .goal_planning import GoalPlanningService, PlanTextError
             result = await GoalPlanningService(self.db).propose(op)
             if result.get("status") == "stale":
                 await self._stale(op, str(result.get("reason") or "goal planning context advanced"), details=result)
             else:
                 await self._finish(op, result)
+        except PlanTextError as exc:
+            # Expected output rejection after one correction: persist an honest
+            # failed operation and reconcile its plan, without a worker traceback.
+            await self._fail(op, exc, details={"kind":"goal_plan",
+                "reason":"plan_text_validation_failed", "validation":exc.details,
+                "inference_request_ids":exc.request_ids})
         except InferenceUnavailable as exc:
             previous=self._mapping(op.get("result"))
             count=int(previous.get("deferral_count") or 0)+1
@@ -498,8 +504,8 @@ class CognitiveOperationEngine:
         if changed:
             await self.reconcile_terminal(op["operation_id"])
 
-    async def _fail(self, op: Mapping[str,Any], exc: Exception) -> None:
-        result={"error":str(exc)[:1000],"error_type":type(exc).__name__}
+    async def _fail(self, op: Mapping[str,Any], exc: Exception, *, details=None) -> None:
+        result={**dict(details or {}),"error":str(exc)[:1000],"error_type":type(exc).__name__}
         changed=await self.db.execute_returning_row(
             """UPDATE aios.character_cognitive_operation SET status='failed',
                result=$2::jsonb,completed_at=now(),updated_at=now()
