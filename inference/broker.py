@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -13,6 +14,7 @@ from uuid import UUID
 
 from aios_app.db import Database
 from .providers import InferenceProvider, InferenceProviderStore
+from .options import api_format, completion_options, reasoning_model
 from .protocol import (
     StructuredInferenceResponse,
     StructuredResponseError,
@@ -20,6 +22,26 @@ from .protocol import (
     extract_inference_payload,
     validate_structured_response,
 )
+
+logger = logging.getLogger(__name__)
+
+
+class InferenceCompletionError(StructuredResponseError):
+    """A reachable provider returned incomplete output, not a broken protocol."""
+
+    def __init__(self, message: str, content: str, metadata: dict):
+        super().__init__(message)
+        self.content = content
+        self.metadata = metadata
+
+
+class CompletionText(str):
+    """Keep compatibility with clients returning plain strings; retain diagnostics."""
+
+    def __new__(cls, content: str, metadata: dict):
+        result = super().__new__(cls, content)
+        result.metadata = metadata
+        return result
 
 
 class InferenceUnavailable(RuntimeError):
@@ -94,6 +116,7 @@ class InferenceResult:
     model: str
     response: StructuredInferenceResponse
     latency_ms: int
+    completion_metadata: Mapping[str, Any] | None = None
 
 
 class OpenAICompatibleClient:
@@ -147,41 +170,73 @@ class OpenAICompatibleClient:
                 {"role": "system", "content": instruction},
                 {"role": "user", "content": request.prompt},
             ],
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
         }
+        fields, token_parameter, budget, limit = completion_options(provider, request.max_tokens)
+        body.update(fields)
+        # Reasoning-only OpenAI models reject temperature. DeepSeek ignores it
+        # in thinking mode; omitting it also avoids misleading diagnostics.
+        if not (reasoning_model(provider.model) or
+                (api_format(provider) == "deepseek" and provider.capabilities.get("thinking") is not False)):
+            body["temperature"] = request.temperature
         # JSON mode is useful for semantic extraction, but must not be used for
         # bounded control choices. Choice syntax is owned and parsed by AIOS.
         if not request.choice_keys and provider.capabilities.get("json_mode", True):
             body["response_format"] = {"type": "json_object"}
-        thinking = provider.capabilities.get("thinking")
-        if thinking is not None:
-            enabled = bool(thinking)
-            body["enable_thinking"] = enabled
-            body["chat_template_kwargs"] = {"enable_thinking": enabled}
-        req = urllib.request.Request(
-            provider.base_url + "/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            headers=self._headers(provider),
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=provider.timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        choices = payload.get("choices") or []
-        if not choices:
-            raise RuntimeError("provider returned no choices")
-        choice = choices[0]
-        message = choice.get("message") or {}
-        content = message.get("content")
-        if not isinstance(content, str):
-            raise RuntimeError("provider returned no message content")
-        if not content.strip():
+        attempts = []
+        deadline = time.monotonic() + provider.timeout_seconds
+        for attempt in range(2):
+            body[token_parameter] = budget
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise InferenceCompletionError("completion deadline exhausted after truncation", "",
+                                               {"attempts": attempts})
+            req = urllib.request.Request(
+                provider.base_url + "/chat/completions",
+                data=json.dumps(body).encode("utf-8"),
+                headers=self._headers(provider), method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=remaining) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            choices = payload.get("choices") or []
+            if not choices:
+                raise RuntimeError("provider returned no choices")
+            choice = choices[0]
+            message = choice.get("message") or {}
+            content = message.get("content")
             finish_reason = choice.get("finish_reason")
             reasoning = message.get("reasoning_content")
-            if finish_reason == "length" and isinstance(reasoning, str) and reasoning.strip():
-                raise RuntimeError("provider exhausted completion budget during reasoning; no final content returned")
-            raise RuntimeError(f"provider returned empty message content (finish_reason={finish_reason!r})")
-        return content
+            usage = payload.get("usage") or {}
+            # Persist counts and finish reasons, never the private reasoning text.
+            detail = usage.get("completion_tokens_details") or {}
+            diagnostic = {"finish_reason": finish_reason, "token_parameter": token_parameter,
+                          "completion_budget": budget,
+                          "prompt_tokens": usage.get("prompt_tokens"),
+                          "completion_tokens": usage.get("completion_tokens"),
+                          "reasoning_tokens": detail.get("reasoning_tokens"),
+                          "has_reasoning": bool(reasoning),
+                          "content_chars": len(content) if isinstance(content, str) else 0}
+            attempts.append(diagnostic)
+            metadata = {"attempts": attempts}
+            if finish_reason == "length":
+                if (attempt == 0 and provider.capabilities.get("retry_truncated", True)
+                        and budget < limit and time.monotonic() < deadline):
+                    logger.info("Inference completion truncated model=%s budget=%s retry_budget=%s",
+                                provider.model, budget, min(budget * 2, limit))
+                    budget = min(budget * 2, limit)
+                    continue
+                raise InferenceCompletionError(
+                    f"provider completion truncated (finish_reason=length, budget={budget}, "
+                    f"attempts={len(attempts)}); increase the worker completion budget/limit",
+                    content if isinstance(content, str) else "", metadata)
+            if finish_reason in {"content_filter", "insufficient_system_resource", "aborted"}:
+                raise InferenceCompletionError(
+                    f"provider did not finish its answer (finish_reason={finish_reason!r})",
+                    content if isinstance(content, str) else "", metadata)
+            if not isinstance(content, str) or not content.strip():
+                raise InferenceCompletionError(
+                    f"provider returned no final content (finish_reason={finish_reason!r})",
+                    content if isinstance(content, str) else "", metadata)
+            return CompletionText(content, metadata)
 
 
 class InferenceBroker:
@@ -305,6 +360,9 @@ class InferenceBroker:
         try:
             try:
                 text = await self.client.complete(provider, request)
+            except InferenceCompletionError as exc:
+                text = CompletionText(exc.content, exc.metadata)
+                raise
             except Exception as exc:
                 raise provider_failure(exc,provider) from exc
             if request.choice_keys:
@@ -354,24 +412,27 @@ class InferenceBroker:
                     latency_ms=$4, completed_at=now(), updated_at=now()
                 WHERE request_id=$1
                 """,
-                request_id, text, json.dumps(structured.raw), latency_ms,
+                request_id, text, json.dumps({**structured.raw,
+                    **({"_aios_completion": text.metadata} if isinstance(text, CompletionText) else {})}), latency_ms,
             )
             await self.providers.record_health(provider.provider_id, ok=True)
             return InferenceResult(
                 request_id, provider.provider_id, provider.provider_key,
-                provider.model, structured, latency_ms
+                provider.model, structured, latency_ms, getattr(text, "metadata", None)
             )
         except StructuredResponseError as exc:
-            await self.providers.record_protocol_failure(provider.provider_id, str(exc))
+            if not isinstance(exc, InferenceCompletionError):
+                await self.providers.record_protocol_failure(provider.provider_id, str(exc))
             await self.db.execute(
                 """
                 UPDATE aios.inference_request SET status='invalid',
-                    response_text=$2, validation_error=$3, latency_ms=$4,
+                    response_text=$2, validation_error=$3, latency_ms=$4, response_json=$5::jsonb,
                     completed_at=now(), updated_at=now()
                 WHERE request_id=$1
                 """,
                 request_id, text if 'text' in locals() else None, str(exc)[:2000],
                 int((time.monotonic() - started) * 1000),
+                json.dumps({"_aios_completion": text.metadata}) if isinstance(locals().get("text"), CompletionText) else None,
             )
             raise
         except Exception as exc:

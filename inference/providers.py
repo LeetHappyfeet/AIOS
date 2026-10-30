@@ -6,6 +6,7 @@ from typing import Any, Mapping
 from uuid import UUID
 
 from aios_app.db import Database
+from .options import validate_options
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class InferenceProviderStore:
         strict_worker_classes: bool = False,
         capabilities: Mapping[str, Any] | None = None,
     ) -> InferenceProvider:
+        capabilities = validate_options(capabilities or {})
         normalized_url = base_url.rstrip("/")
         duplicate = await self.db.fetchrow(
             """SELECT provider_id, provider_key FROM aios.inference_provider

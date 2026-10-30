@@ -367,7 +367,7 @@ class GoalPlanningService:
         result = await InferenceBroker(self.db).infer(InferenceRequest(
             instance_id=op["instance_id"], worker_class="planning", source_node_id=op.get("source_node_id"),
             context_state_version=ctx.state_version, hud_profile_name="goal_plan", prompt=prompt,
-            allowed_actions={}, output_schema={"type": "object"}, temperature=0.0, max_tokens=380))
+            allowed_actions={}, output_schema={"type": "object"}, temperature=0.0, max_tokens=1200))
         proposal = validate_plan(result.response.raw, evidence)
         async with self.db.atomic():
             # Serialize goal closure, context advancement, and plan replacement.
