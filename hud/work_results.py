@@ -97,10 +97,28 @@ def result_view(result, assignment):
     artifacts = summary.get("artifacts", result.get("artifacts"))
     if artifacts is None:
         artifacts = evidence.get("outputs")
+    content = summary.get("requested_content")
+    content = content if isinstance(content, list) else []
+    sections = []
+    for section in content[:4]:
+        if not isinstance(section, Mapping) or not isinstance(section.get("text"), str):
+            continue
+        text = section["text"]
+        sections.append({"label": compact(section.get("label"), 160) or "Requested content",
+                         "text": text[:8000],
+                         "truncated": section.get("truncated") is True or len(text) > 8000})
     return {
+        "requested_content": sections,
+        "content_sections_omitted": max(0, len(content) - 4) + (
+            summary.get("content_sections_omitted", 0)
+            if type(summary.get("content_sections_omitted")) is int
+            and summary.get("content_sections_omitted", 0) > 0 else 0),
+        "transport_truncated": summary.get("transport_truncated") is True,
+        "report_body": result.get("report", "")[:6000] if isinstance(result.get("report"), str) else "",
+        "report_body_truncated": result.get("report_truncated") is True or (isinstance(result.get("report"), str) and len(result["report"]) > 6000),
         "worker_outcome": compact(summary.get("outcome") or result.get("outcome"), 80) or "not supplied",
-        "summary": compact(summary.get("summary") or summary.get("outcome_summary"), 240),
-        "findings": _items(summary.get("findings", result.get("findings"))),
+        "summary": compact(summary.get("summary") or summary.get("outcome_summary"), 1000),
+        "findings": _items(summary.get("findings", result.get("findings")), 6, 700),
         "limitations": _items(summary.get("limitations", result.get("limitations")), 4, 220),
         "artifacts": _items(artifacts),
         "worker_verification_scope": compact(summary.get("verification_scope") or result.get("verification_scope")),

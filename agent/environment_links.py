@@ -457,7 +457,7 @@ async def task_overlay(db, instance_id, timeline_id, *, run_ids=()):
                               ORDER BY sequence DESC LIMIT 1) e ON true
            WHERE r.origin_instance_id=$1 AND r.origin_source_timeline_id=$2
            ORDER BY (r.status IN ('queued','running')) DESC,
-                    (r.run_id=ANY($3::uuid[])) DESC,r.updated_at DESC,r.run_id LIMIT 8""",
+                    r.updated_at DESC,(r.run_id=ANY($3::uuid[])) DESC,r.run_id LIMIT 8""",
         instance_id,
         timeline_id,
         list(run_ids),

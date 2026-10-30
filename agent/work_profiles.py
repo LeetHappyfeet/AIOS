@@ -16,7 +16,10 @@ REPORT_PATH = 'aios-experiment-{request_id}.json'
 EXPERIMENT_GUIDANCE = (
     '\nExecution reporting requirement: write the expected JSON report file with '
     'objective (string), outcome (completed, partial, or blocked), evidence (list), '
-    'and limitations (list). Describe the actual result and concrete checks you ran. '
+    'and limitations (list). Include a substantive summary (string), artifacts (actual output paths), '
+    'and requested_content (list of objects with label and text) when the task asks for file text or other content. '
+    'Return these same fields in your final JSON response so the originating character receives the result. '
+    'Describe the actual result and concrete checks you ran. '
     'Do not claim success for untested behavior. The configured report check verifies '
     'report structure only, not whether the requested objective succeeded.'
 )

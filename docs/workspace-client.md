@@ -448,3 +448,31 @@ Delegation, with a reviewer and reason, to close an obsolete request. It is mark
 replaced in the HUD by a compact closed-history count. A later success never
 implicitly dismisses an earlier request. Dismissal preserves prior approvals,
 intent and pinned criteria; it cannot cancel an already admitted execution.
+
+## Content-first work receipts
+
+Updated clients submit a `result_summary` with worker-reported `outcome`,
+`summary`, `findings`, `limitations`, `artifacts`, and `requested_content` sections
+(`label`, `text`, `truncated`). AIOS projects these fields deterministically; no
+intermediate summarizing model is invoked. The client's existing final generation
+supplies requested content, including file text. A valid report/check is still
+not independent proof that its claims are true.
+
+The latest terminal run receives detailed findings and requested content in the
+HUD, with line breaks preserved and explicit budget omissions. Legacy clients'
+prose reports receive a larger bounded fallback instead of a 240-character
+prefix. Earlier runs become compact references, active runs retain progress, and
+configuration blockers share one explanation. Terminal runs are selected by
+recency before request preference. The run section retains its 12,000-character
+budget; the latest detailed entry reserves at most approximately 9,000 characters
+so older references remain visible.
+
+This policy does not acknowledge delivery or accept task completion. A HUD fetch
+may be a prefetch, retry, or cached conversation request, so merely reading it
+cannot safely mark a result as consumed. Durable branch-scoped acknowledgement
+and character-side pagination of retained results are not implemented in this
+pass. Full submitted results remain in operator request inspection; material
+omitted by client transport limits remains in worker source reports/journals.
+Do not repeat a task just because its content was omitted from the HUD. Updating
+AIOS improves existing retained prose, but cannot recover structured fields or
+file contents that an old client never submitted.

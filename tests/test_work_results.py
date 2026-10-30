@@ -37,7 +37,7 @@ def test_structured_limitations_survive_long_report_and_keep_association():
     assert 'Report structure only; task success is not established' in text
     assert 'Check experiment_report: exit 0' in text
     assert 'run-1; request: request-1' in text
-    assert '| Check |' not in text
+    assert '| Check | Command | Result |' in text  # Latest report preserves tables.
     assert 'WORK REQUESTS' not in text  # A single connected receipt, not duplicated entries.
     assert 'Everything done!' in text
 
@@ -52,7 +52,8 @@ def test_worker_scope_cannot_upgrade_authority_and_id_alone_is_not_scope():
 def test_legacy_report_has_excerpt_marker_without_fabricated_outcome():
     text = render_hud_text({'remote_tasks': [task({'report': 'legacy ' * 100})]})
     assert 'Worker-reported outcome: not supplied' in text
-    assert 'Worker report excerpt (unverified)' in text and '…' in text
+    assert 'Worker report excerpt (unverified)' in text
+    assert 'legacy ' * 100 in text  # No arbitrary 240-character prefix.
 
 
 def test_dangling_run_reference_is_explicit_not_false_pointer():
@@ -80,7 +81,7 @@ def test_untrusted_malformed_optional_fields_are_bounded():
     assert len(view['limitations']) == 5
     result['result_summary'].update(findings=['f' * 1000] * 10, artifacts=['a' * 1000] * 10)
     text = render_hud_text({'remote_tasks': [task(result) for _ in range(8)]})
-    assert len(text) < 13000 and 'omitted by HUD budget' in text
+    assert len(text) < 13000 and 'Earlier result:' in text
 
 
 @pytest.mark.asyncio
@@ -93,14 +94,16 @@ async def test_finish_retains_full_result_and_review_does_not_replace_it(db):
     spec = Assignment.model_validate(run['assignment'])
     raw = {'report': 'Original execution report ' + 'detail ' * 200,
            'result_summary': {'outcome': 'partial', 'limitations': ['Integration untested'],
-                              'findings': ['Addition repaired']},
+                              'findings': ['Addition repaired'],
+                              'requested_content': [{'label': 'README.md', 'text': '# Actual file\nContents from disk\n'}]},
            'evidence': workspace_tests.valid_evidence(spec)}
     await WorkspaceStore(db).finish(bid, rid, FinishIn(**lease.model_dump(), status='finished', result=raw))
     await append_event(db, rid, 'test:review', 'reviewed', 'Goal evidence accepted')
     timeline = await db.fetchval('SELECT source_timeline_id FROM aios.character_runtime_state WHERE instance_id=$1', origin.instance_id)
     tasks = await task_overlay(db, origin.instance_id, timeline, run_ids=[rid])
     text = render_hud_text({'work': await work.overlay(origin.instance_id, timeline), 'remote_tasks': tasks})
-    assert 'Original execution report' in text and 'Integration untested' in text
+    assert 'Integration untested' in text
+    assert '# Actual file\nContents from disk\n' in text
     assert 'Goal evidence accepted' not in text
     assert str(req.request_id) in text and str(rid) in text
     info = await work.inspect(origin.instance_id, req.request_id)
@@ -152,3 +155,38 @@ def test_dismissal_route_requires_operator_key(monkeypatch):
     with TestClient(app) as client:
         assert client.post(route, json=body).status_code == 401
         assert client.post(route, json=body, headers={'Authorization': 'Bearer worker-key'}).status_code == 401
+
+
+def test_requested_file_content_survives_and_older_receipts_are_compact():
+    latest = task({'result_summary': {'outcome': 'completed',
+        'summary': 'Files are under /home/aiosagent, outside the project.',
+        'requested_content': [{'label': 'README.md', 'text': '# Box\n\nActual file content\n'},
+                              {'label': 'INDEX.md', 'text': '| File | Purpose |\n| notes/ | Notes |'}]}})
+    old = task({'report': 'OLDER DETAIL ' * 200})
+    old['run_id'] = 'old-run'
+    running = task({'report': 'Working'})
+    running.update(run_id='active-run', status='running')
+    text = render_hud_text({'remote_tasks': [running, latest, old]})
+    assert '# Box\n\nActual file content\n' in text
+    assert '| File | Purpose |\n| notes/ | Notes |' in text
+    assert text.index('Actual file content') < text.index('old-run')
+    assert text.count('OLDER DETAIL') < 25
+    assert 'Execution: running' in text
+    assert 'not independent verification' in text
+
+
+def test_content_budget_is_explicit_and_never_discards_entire_latest_result():
+    result = {'result_summary': {'outcome': 'partial', 'summary': 'Found files.',
+        'requested_content': [{'label': 'file-' + str(i), 'text': 'Ω\n' * 8000} for i in range(10)]}}
+    text = render_hud_text({'remote_tasks': [task(result)]})
+    assert 'Found files.' in text and 'Ω\nΩ' in text
+    assert 'Content omitted/truncated by budget' in text
+    assert len(text) < 12500
+
+
+def test_repeated_configuration_blockers_share_one_explanation():
+    text = render_hud_text({'work': {'requests': [dict(request_id=str(i),
+        status='needs_configuration', objective='Old test', reason='Missing profile') for i in range(5)]}})
+    assert '5 request(s)' in text
+    assert text.count('Missing profile') == 1
+    assert '2 additional configuration blockers' in text
