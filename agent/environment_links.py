@@ -444,25 +444,31 @@ class EnvironmentStore:
             return {"link_id": str(link_id), "enabled": False}
 
 
-async def task_overlay(db, instance_id, timeline_id):
+async def task_overlay(db, instance_id, timeline_id, *, run_ids=()):
     """Cheap pull delivery: independent of source advancement and semantic jobs."""
     rows = await db.fetch(
-        """SELECT r.run_id,r.status,r.cancel_requested,r.objective,r.result,r.origin_source_node_id,rv.status AS review_status,e.sequence,e.kind,e.summary,e.created_at
+        """SELECT r.run_id,r.status,r.cancel_requested,r.objective,r.assignment,r.result,r.origin_source_node_id,rv.status AS review_status,e.sequence,e.kind,e.summary,e.created_at,
+                  wr.request_id
            FROM aios.workspace_run r
            JOIN aios.character_environment_link l ON l.link_id=r.environment_link_id AND l.enabled
            LEFT JOIN aios.workspace_review rv ON rv.run_id=r.run_id
+           LEFT JOIN aios.character_work_request wr ON wr.run_id=r.run_id
            LEFT JOIN LATERAL (SELECT * FROM aios.workspace_run_event ev WHERE ev.run_id=r.run_id
                               ORDER BY sequence DESC LIMIT 1) e ON true
            WHERE r.origin_instance_id=$1 AND r.origin_source_timeline_id=$2
-           ORDER BY (r.status IN ('queued','running')) DESC,r.updated_at DESC,r.run_id LIMIT 4""",
+           ORDER BY (r.status IN ('queued','running')) DESC,
+                    (r.run_id=ANY($3::uuid[])) DESC,r.updated_at DESC,r.run_id LIMIT 8""",
         instance_id,
         timeline_id,
+        list(run_ids),
     )
     from .workspaces import decode
+    from aios_app.hud.work_results import result_view
 
     return [
         {
             "run_id": str(r["run_id"]),
+            "request_id": str(r["request_id"]) if r["request_id"] else None,
             "source_node_id": str(r["origin_source_node_id"]),
             "status": r["status"],
             "cancel_requested": r["cancel_requested"],
@@ -470,6 +476,7 @@ async def task_overlay(db, instance_id, timeline_id):
             "sequence": r["sequence"],
             "kind": r["kind"],
             "summary": r["summary"],
+            "result_summary": result_view(decode(r["result"]), decode(r["assignment"])),
             "verification_status": (decode(r["result"]) or {}).get(
                 "verification_status"
             ),

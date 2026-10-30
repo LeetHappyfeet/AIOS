@@ -15,7 +15,7 @@ from aios_app.db import Database
 from aios_app.agent.workspace_setup import WorkspaceSetup, ExecutionIn
 from aios_app.agent.workspaces import WorkspaceStore
 from aios_app.agent.environment_links import EnvironmentStore, LinkIn, MemorySharingIn
-from aios_app.agent.work_admission import WorkAdmission, ProfileIn, WorkDecision
+from aios_app.agent.work_admission import WorkAdmission, ProfileIn, WorkDecision, WorkDismissal
 from aios_app.agent.work_profiles import experimental_profile
 from aios_app.agent.policy import ActionPolicyService
 from aios_app.ui.registry import register_tab
@@ -169,6 +169,10 @@ def decide(origin, request, accept, reviewer, reason):
     return run(WorkAdmission(db).decide(uid(origin), uid(request), WorkDecision(accept=accept, reviewer=reviewer, reason=reason)))
 
 
+def dismiss(origin, request, reviewer, reason):
+    return run(WorkAdmission(db).dismiss(uid(origin), uid(request), WorkDismissal(reviewer=reviewer, reason=reason)))
+
+
 def enable_experiments(binding, link_id):
     return run(WorkAdmission(db).configure(uid(binding), uid(link_id), experimental_profile()))
 
@@ -253,6 +257,9 @@ def render():
         reviewer = gr.Textbox(label="Reviewer", value="operator")
         reason = gr.Textbox(label="Decision reason")
         decision = gr.Button("Record request decision")
+        gr.Markdown("Dismiss obsolete requests that have not started, including old configuration failures. "
+                    "Dismissal preserves history and prevents later admission; admitted work uses run cancellation.")
+        dismiss_request = gr.Button("Dismiss selected unstarted request")
         refresh_characters.click(characters, outputs=character)
         character.change(discover, character, [origin, binding])
         refresh.click(discover, character, [origin, binding])
@@ -273,3 +280,4 @@ def render():
         refresh_pending.click(pending, origin, [request, requests])
         request.change(inspect, [origin, request], detail)
         decision.click(decide, [origin, request, accept, reviewer, reason], report)
+        dismiss_request.click(dismiss, [origin, request, reviewer, reason], report)

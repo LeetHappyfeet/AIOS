@@ -28,7 +28,7 @@ from .environment_links import (
 )
 from .workspace_setup import WorkspaceSetup, ExecutionIn
 from .workspace_contract import Assignment, verification_status
-from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision
+from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision, WorkDismissal
 
 
 def decode(value):
@@ -894,6 +894,10 @@ def install_workspace_routes(app, db, hud_handler):
     @reviews.post("/work/{instance_id}/{request_id}/decision")
     async def decide_work(instance_id: UUID, request_id: UUID, req: WorkDecision):
         return await WorkAdmission(db).decide(instance_id, request_id, req)
+
+    @reviews.post("/work/{instance_id}/{request_id}/dismiss")
+    async def dismiss_work(instance_id: UUID, request_id: UUID, req: WorkDismissal):
+        return await WorkAdmission(db).dismiss(instance_id, request_id, req)
 
     async def authorize_request(authorization: str = Header(default="")):
         key = os.environ.get("AIOS_WORK_REQUEST_API_KEY", "")

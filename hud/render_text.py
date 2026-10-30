@@ -378,19 +378,6 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("WORK UNAVAILABLE: " + str(work["unavailable_reason"])[:300])
     if work.get("request_error"):
         lines.append("WORK REQUEST NEEDS CLARIFICATION: " + str(work["request_error"]["reason"])[:300])
-    if work.get("requests"):
-        lines.append("WORK REQUESTS (admission/execution status; not goal completion)")
-        for request in work["requests"]:
-            reason = " ".join(str(request.get("reason") or "").split())[:240]
-            objective = " ".join(str(request.get("objective") or "").split())[:160]
-            lines.append(f"- {request['request_id']}: {request['status']} — {objective}")
-            lines.append(f"  {reason}")
-    tasks = frame.get("remote_tasks") or []
-    if tasks:
-        lines.append("REMOTE WORK (reported task state; not character speech)")
-        for task in tasks:
-            summary = " ".join(str(task.get("summary") or "").split())[:320]
-            lines.append(f"- {task['run_id']}: {task['status']} — {summary}")
-            if task.get("verification_status"):
-                lines.append(f"  Checks: {task['verification_status']}; goal review: {task.get('goal_review') or 'not linked'}")
+    from aios_app.hud.work import render_work_results
+    lines.extend(render_work_results(work, frame.get("remote_tasks") or []))
     return "\n".join(lines)

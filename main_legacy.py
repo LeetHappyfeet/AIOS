@@ -639,7 +639,10 @@ async def _prepare_hud_response(
     from aios_app.agent.work_admission import WorkAdmission
     work = WorkAdmission(db)
     frame["work"] = await work.overlay(instance_id, timeline)
-    frame["remote_tasks"] = await task_overlay(db, instance_id, timeline)
+    frame["remote_tasks"] = await task_overlay(
+        db, instance_id, timeline,
+        run_ids=[UUID(r["run_id"]) for r in frame["work"]["requests"] if r.get("run_id")],
+    )
     frame.setdefault("hud", {})["task_event_watermark"] = max(
         (task.get("sequence") or 0 for task in frame["remote_tasks"]), default=0)
     return {

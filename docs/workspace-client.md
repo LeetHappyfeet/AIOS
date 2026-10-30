@@ -384,8 +384,67 @@ review key to be copied into a browser/client.
 | `GET /workspace-client/work/{origin_instance}` | Review key. Recent requests including pending approvals and pinned criteria. |
 | `GET /workspace-client/work/{origin_instance}/{request}` | Review key. Inspect one request and destination. |
 | `POST /workspace-client/work/{origin_instance}/{request}/decision` | Review key. Body: `{"accept":true,"reviewer":"operator","reason":"Greeting-file smoke test"}`. |
+| `POST /workspace-client/work/{origin_instance}/{request}/dismiss` | Review key. Body: `{"reviewer":"operator","reason":"Obsolete experiment"}`. Closes an unadmitted request; use run cancellation for admitted work. |
 
 The client can populate selectors from discovery and check readiness after binding.
 Missing pairing is incomplete setup independently of connection and inference
 tests. A binding on the chat instance becomes suitable for chat delegation only
 after the operator explicitly attaches it; no rebinding or new instance is needed.
+
+### Work results in the conversational HUD
+
+AIOS retains the original finish `result` in SQL. The HUD displays a bounded,
+deterministic projection, not the first 320 characters of a completion event.
+Request and run IDs appear together. Execution status, worker-reported outcome,
+configured-check status/scope, and goal review remain distinct. Review events do
+not replace the execution result. Check results are worker-supplied evidence,
+even when AIOS's completeness validation passes.
+
+Clients may optionally include these fields in the existing finish `result`
+object (no protocol bump or migration):
+
+```json
+{
+  "report": "Full worker report retained for operator inspection",
+  "result_summary": {
+    "outcome": "partial",
+    "summary": "Environment survey report created",
+    "findings": ["Workspace writable", "rg unavailable"],
+    "limitations": ["Network isolation was not verified"],
+    "artifacts": ["survey.json"],
+    "verification_scope": "Worker's description of what was tested"
+  },
+  "context_budget": {
+    "limit": 10000,
+    "assignment": 3000,
+    "guidance": 5000,
+    "retained_state": 1000,
+    "tool_schemas": 4000
+  }
+}
+```
+
+`summary` as an object is also accepted for compatibility, as are top-level
+outcome/findings/limitations/artifacts/verification_scope and
+`context_budget_breakdown`. The worker's scope description cannot override the
+scope derived from pinned operator checks. AIOS recognizes the exact experimental
+report-check command, including host UUID expansion, as report-structure-only;
+other checks receive a conservative configured-checks-only label. An outcome of
+`blocked` can coexist with a passed report-format check. AIOS never infers task
+success from that check. The JSON report file itself is not fetched remotely by
+AIOS: clients must include its relevant fields in the finish payload.
+
+Legacy clients receive an explicitly unverified report excerpt. Omitted text and
+extra list entries are marked. Limitations and errors precede findings and prose.
+The projection selects at most eight runs, prioritizing active runs and requests
+visible in the HUD; rendered run detail has a 12,000-character budget. Omission
+does not authorize resubmission. Full submitted results and check evidence are
+available in the existing operator request inspector's `execution` field.
+
+Old `needs_configuration` entries remain pending until configured or explicitly
+dismissed. Use **Dismiss selected unstarted request** in Gradio Workspace
+Delegation, with a reviewer and reason, to close an obsolete request. It is marked
+`invalidated`, kept in operator history, excluded from reconsideration, and
+replaced in the HUD by a compact closed-history count. A later success never
+implicitly dismisses an earlier request. Dismissal preserves prior approvals,
+intent and pinned criteria; it cannot cancel an already admitted execution.

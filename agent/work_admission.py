@@ -89,6 +89,19 @@ class WorkDecision(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class WorkDismissal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reviewer: str = Field(min_length=1, max_length=160)
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("reviewer", "reason")
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("Reviewer and dismissal reason must not be blank")
+        return value.strip()
+
+
 def decode(value):
     return json.loads(value) if isinstance(value, str) else value
 
@@ -526,7 +539,13 @@ class WorkAdmission:
         )
         if not row:
             raise HTTPException(404, "Unknown work request")
-        return public(row)
+        result = public(row)
+        if row["run_id"]:
+            execution = await self.db.fetchrow(
+                """SELECT run_id,status,objective,assignment,result,cancel_requested,updated_at
+                   FROM aios.workspace_run WHERE run_id=$1""", row["run_id"])
+            result["execution"] = public(execution) if execution else None
+        return result
 
     async def decide(self, instance_id, request_id, req):
         async with self.db.atomic():
@@ -564,6 +583,25 @@ class WorkAdmission:
                 req.reviewer,
             )
             return await self.advance(row, approved=True)
+
+    async def dismiss(self, instance_id, request_id, req):
+        """Operator-only closure of unadmitted work; never cancels a run."""
+        async with self.db.atomic():
+            row = await self.db.fetchrow(
+                "SELECT * FROM aios.character_work_request WHERE instance_id=$1 AND request_id=$2 FOR UPDATE",
+                instance_id, request_id,
+            )
+            if not row:
+                raise HTTPException(404, "Unknown work request")
+            if row["run_id"]:
+                raise HTTPException(409, "Request already admitted; use run cancellation")
+            reason = f"Dismissed by {req.reviewer}: {req.reason}"
+            if row["status"] in {"denied", "invalidated"}:
+                if row["reason"] == reason:
+                    return self.receipt(row)
+                raise HTTPException(409, "Request already closed")
+            # Preserve original intent, pinned criteria and any prior approval.
+            return await self.state(row, "invalidated", reason)
 
     async def reconsider(self, *, instance_id=None, binding_id=None):
         async with self.db.atomic():
@@ -650,10 +688,18 @@ class WorkAdmission:
         rows = await self.db.fetch(
             """SELECT r.request_id,r.status,r.reason,r.intent,r.run_id,w.status AS execution_status
                FROM aios.character_work_request r LEFT JOIN aios.workspace_run w USING(run_id)
-               WHERE r.instance_id=$1 AND r.source_timeline_id=$2 ORDER BY r.created_at DESC LIMIT 8""",
+                   WHERE r.instance_id=$1 AND r.source_timeline_id=$2
+                   AND r.status NOT IN ('denied','invalidated')
+                   ORDER BY (COALESCE(w.status,r.status) IN
+                     ('requested','waiting_client','needs_configuration','awaiting_approval','queued','running')) DESC,
+                     r.created_at DESC LIMIT 8""",
             instance_id,
             timeline_id,
         )
+        history_count = await self.db.fetchval(
+            """SELECT count(*) FROM aios.character_work_request
+               WHERE instance_id=$1 AND source_timeline_id=$2
+                 AND status IN ('denied','invalidated')""", instance_id, timeline_id)
         error = await self.db.fetchval(
             """SELECT s.result FROM aios.work_source_receipt s JOIN aios.character_runtime_state rs ON rs.instance_id=s.instance_id
                WHERE s.instance_id=$1 AND s.source_node_id=rs.source_head_node_id
@@ -681,6 +727,7 @@ class WorkAdmission:
         return {
             "unavailable_reason": unavailable,
             "request_error": decode(error) if error else None,
+            "history_count": history_count,
             "capabilities": [dict(p) for p in profiles],
             "requests": [
                 {
