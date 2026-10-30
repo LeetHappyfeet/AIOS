@@ -21,6 +21,11 @@ class LinkIn(BaseModel):
     share_memory: bool = False
 
 
+class MemorySharingIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    share_memory: bool
+
+
 class ProgressIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     worker_key: str
@@ -70,6 +75,41 @@ class EnvironmentStore:
     def __init__(self, db):
         self.db = db
 
+    async def separate_worlds(self, origin_id, execution_id):
+        separate = await self.db.fetchval(
+            """SELECT COALESCE(o.current_world_id,o.world_id) <> COALESCE(e.current_world_id,e.world_id)
+               FROM aios.character_instance o CROSS JOIN aios.character_instance e
+               WHERE o.instance_id=$1 AND e.instance_id=$2""", origin_id, execution_id)
+        if not separate:
+            raise HTTPException(409, "Execution requires an independent world")
+
+    async def set_memory(self, binding_id, link_id, req):
+        from .workspaces import WorkspaceStore, public
+        from aios_app.epistemic.belief_reconciliation import reconcile_instance_beliefs, reconcile_character_belief_atom
+        async with self.db.atomic():
+            b = await WorkspaceStore(self.db).binding(binding_id, lock=True)
+            await WorkspaceStore(self.db).current(b)
+            link = await self.link(binding_id, link_id)
+            await self.origin(link)
+            if req.share_memory == link['share_memory']:
+                return public(link)
+            isolated = await self.db.fetchval(
+                "SELECT memory_continuity='isolated' FROM aios.character_epistemic_profile WHERE character_id=$1", b['character_id'])
+            if req.share_memory and isolated:
+                raise HTTPException(409, "Isolated memory policy must be changed explicitly before sharing")
+            updated = await self.db.execute_returning_row(
+                "UPDATE aios.character_environment_link SET share_memory=$2 WHERE link_id=$1 RETURNING *", link_id, req.share_memory)
+            if req.share_memory and not await self.db.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM aios.cognitive_evidence_instances($1) WHERE instance_id=$2)", b['instance_id'], link['origin_instance_id']):
+                raise HTTPException(409, "Runtime memory identities do not match; reconcile before sharing")
+            for instance in (link['origin_instance_id'], b['instance_id']):
+                await reconcile_instance_beliefs(self.db, instance_id=instance)
+                if not req.share_memory:
+                    old = await self.db.fetch("SELECT atom_id FROM aios.character_belief_state WHERE instance_id=$1", instance)
+                    for belief in old:
+                        await reconcile_character_belief_atom(self.db, instance_id=instance, atom_id=belief['atom_id'])
+            return public(updated)
+
     async def create(self, binding_id, req):
         from .workspaces import WorkspaceStore, public
 
@@ -106,6 +146,7 @@ class EnvironmentStore:
                     409,
                     "Link requires separate sources for the same character and runtime user",
                 )
+            await self.separate_worlds(origin["instance_id"], b["instance_id"])
             if req.share_memory and origin["memory_continuity"] == "isolated":
                 raise HTTPException(
                     409,
@@ -200,6 +241,7 @@ class EnvironmentStore:
             raise HTTPException(
                 409, "Origin conversation changed; reconcile explicitly"
             )
+        await self.separate_worlds(link["origin_instance_id"], b["instance_id"])
         if ancestor_node_id is not None:
             current = await self.db.fetchval(
                 """WITH RECURSIVE ancestry(node_id,depth) AS (

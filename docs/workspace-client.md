@@ -261,3 +261,89 @@ The workspace fixtures support PostgreSQL or isolated `AIOS_PGLITE_MODULE`, reus
 the real migration and lifecycle SQL, and stub the independent scene projector.
 Recall tests verify identity/lease/revocation boundaries using a stub retrieval
 backend; they do not claim live model or production recall validation.
+
+## Operator setup for chat delegation (Gradio)
+
+Use **Workspace Access** to save the connection key, then **Workspace Delegation**
+for pairing. Binding successfully and starting a listener establish connectivity;
+chat delegation additionally requires a valid environment link, an enabled work
+profile, compatible policies and a recently polling v3 worker.
+
+1. Discover characters and select the character. Select the **conversational
+   origin** used by your chat integration. Its session, human user and source
+   timeline are the authority for requests.
+2. Click **Create separate execution instance**. Copy the returned character,
+   instance, session, human user and scope into the client's agent profile. This
+   creates a new session, runtime world and source timeline for the same
+   character and human. A tool observation records the actual operator setup
+   event, giving the first context request an anchor without claiming task execution. Existing
+   execution instances can instead be selected through client discovery.
+3. Bind that client profile and start its v3 listener. Refresh instances/bindings
+   in Gradio, reselect the origin, and choose the execution binding. A binding
+   that points at the conversational instance must be replaced with a separate
+   profile; editing the character prompt cannot fix it. Existing binding keys
+   are immutable: use a new client workspace key for the new instance.
+4. Choose memory sharing and click **Link selected execution binding**. Copy the
+   resulting link UUID and conversational origin UUID to any corresponding
+   client pairing fields. Use **Load links and readiness** for existing links.
+   Sharing is optional, direct between the linked peers, and cannot override an
+   isolated memory policy. **Apply memory sharing setting** explicitly changes
+   an existing enabled link and reconciles beliefs; revocation cancels active work.
+5. Save the default `workspace_test / write_hello` profile. It expects
+   `aios-hello.txt` containing exactly `Hello from AIOS` (a trailing newline is
+   permitted), with a Python 3 host check, five model steps and 120 seconds.
+   The operator may edit checks, output requirements, preserved paths and
+   budgets before saving. Select a saved profile to inspect, disable or update
+   its description. Execution criteria are immutable: use a new purpose when
+   changing them. Disabling a profile prevents further admission.
+6. Check readiness and review the **saved** origin/execution policies in the
+   report. Keep `require_approval` for the first test. The policy dropdowns are
+   proposed values until **Save both execution policies** is clicked. A deny on
+   either instance blocks admission; allow on one does not override approval or
+   denial on the other. Policies apply to all workspace work on that instance.
+7. Fetch a new conversational HUD. It should advertise the capability and the
+   `request_work` instructions. Ask the character to use the test capability and
+   purpose to write the greeting file. Prose about computer access alone is not
+   an execution request.
+8. Refresh work requests, select and inspect the pending request's objective,
+   destination and pinned checks/budget. Supply a reviewer and reason, then
+   approve it. The v3 listener claims the admitted assignment, executes it,
+   runs host verification, and reports the result. Fetch the next conversational
+   HUD to see **WORK REQUESTS** and **REMOTE WORK**, including verification.
+   An admitted or verified run does not automatically establish goal completion;
+   goal review remains a separate operation.
+
+Readiness reports configuration separately from current worker availability.
+A ready report may still require human approval. Worker availability means a v3
+poll/renew was observed in the last 45 seconds; it does not test the VM's model
+provider or guarantee that a particular task will succeed. Offline capabilities
+remain advertised as **not recently seen**. If no capability is eligible, the HUD
+now includes a brief **WORK UNAVAILABLE** explanation.
+
+### Discovery and setup API
+
+All paths below are relative to the AIOS base URL. Discovery and readiness use
+`Authorization: Bearer <workspace key>`. Writes below use the distinct operator
+review key (`AIOS_WORKSPACE_REVIEW_KEY`), never the worker key. The trusted local
+Gradio control plane calls the same services directly and does not need the
+review key to be copied into a browser/client.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /workspace-client/characters` | Character IDs and display names. |
+| `GET /workspace-client/sessions?character_id=…` | Session-backed runtime coordinates: instance, world, session, human, scope, source timeline/head. |
+| `GET /workspace-client/instances?character_id=…` | Existing equivalent instance discovery. |
+| `GET /workspace-client/v3/bindings?character_id=…` | Saved execution bindings, worker identity and root hints. |
+| `GET /workspace-client/v3/readiness?origin_instance_id=…&binding_id=…` | Configuration, profiles, policies, worker presence and actionable blockers. Binding filter is optional. |
+| `POST /workspace-client/v3/execution-instances` | Review key. Body: `{"origin_instance_id":"…","label":"Execution workspace"}`. Returns new execution coordinates. |
+| `POST /workspace-client/v3/{binding}/links` | Review key. Body: `{"origin_instance_id":"…","share_memory":false}`. |
+| `POST /workspace-client/v3/{binding}/links/{link}/memory` | Review key. Body: `{"share_memory":true}`. Explicitly reconcile sharing on an existing link. |
+| `POST /workspace-client/v3/{binding}/links/{link}/work-profiles` | Review key. Validated capability, purpose, description, enabled flag and assignment template. |
+| `GET /workspace-client/work/{origin_instance}` | Review key. Recent requests including pending approvals and pinned criteria. |
+| `GET /workspace-client/work/{origin_instance}/{request}` | Review key. Inspect one request and destination. |
+| `POST /workspace-client/work/{origin_instance}/{request}/decision` | Review key. Body: `{"accept":true,"reviewer":"operator","reason":"Greeting-file smoke test"}`. |
+
+The client can populate selectors from character/session discovery and check
+readiness after binding. It should present missing pairing as incomplete setup,
+independently of connection and inference tests. It must preserve the separate
+execution coordinates; binding to a chat instance risks moving its source cursor.

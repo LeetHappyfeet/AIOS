@@ -620,7 +620,14 @@ class WorkAdmission:
                        bool_or(b.last_seen_at>now()-interval '45 seconds') AS online
                FROM aios.workspace_work_profile p JOIN aios.character_environment_link l USING(link_id)
                JOIN aios.workspace_binding b ON b.binding_id=l.execution_binding_id
+               JOIN aios.character_runtime_state es ON es.instance_id=b.instance_id
+               JOIN aios.character_instance ei ON ei.instance_id=b.instance_id
+               JOIN aios.character_instance oi ON oi.instance_id=l.origin_instance_id
                WHERE l.origin_instance_id=$1 AND l.origin_source_timeline_id=$2 AND l.enabled AND p.enabled
+                 AND b.instance_id<>l.origin_instance_id AND b.timeline_id<>l.origin_source_timeline_id
+                 AND COALESCE(ei.current_world_id,ei.world_id)<>COALESCE(oi.current_world_id,oi.world_id)
+                 AND es.source_timeline_id=b.timeline_id
+                 AND es.source_head_node_id IS NOT DISTINCT FROM b.last_node_id
                  AND NOT EXISTS(SELECT 1 FROM aios.character_action_policy ap
                       WHERE ap.instance_id IN (l.origin_instance_id,b.instance_id) AND ap.action_type='workspace.run' AND ap.disposition='deny')
                GROUP BY p.capability,p.purpose,p.description ORDER BY p.capability,p.purpose LIMIT 12""",
@@ -641,7 +648,25 @@ class WorkAdmission:
             instance_id,
             timeline_id,
         )
+        unavailable = None
+        if not profiles:
+            links = await self.db.fetch(
+                """SELECT l.enabled,l.origin_source_timeline_id,
+                          EXISTS(SELECT 1 FROM aios.workspace_work_profile p
+                                 WHERE p.link_id=l.link_id AND p.enabled) AS has_profile
+                   FROM aios.character_environment_link l WHERE l.origin_instance_id=$1""",
+                instance_id)
+            current = [l for l in links if l["enabled"] and l["origin_source_timeline_id"] == timeline_id]
+            if not links:
+                unavailable = "No execution environment is linked. Ask the operator to complete Workspace Delegation setup."
+            elif not current:
+                unavailable = "No enabled environment link matches this conversation source. Operator pairing needs reconciliation."
+            elif not any(l["has_profile"] for l in current):
+                unavailable = "No enabled work profile is configured for this conversation."
+            else:
+                unavailable = "No eligible capability: instance pairing or workspace.run policy blocks execution. Ask the operator to check delegation readiness."
         return {
+            "unavailable_reason": unavailable,
             "request_error": decode(error) if error else None,
             "capabilities": [dict(p) for p in profiles],
             "requests": [

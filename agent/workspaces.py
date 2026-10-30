@@ -21,10 +21,12 @@ from aios_app.launch_config import get_workspace_api_key
 from .environment_links import (
     EnvironmentStore,
     LinkIn,
+    MemorySharingIn,
     ProgressIn,
     RecallIn,
     append_event,
 )
+from .workspace_setup import WorkspaceSetup, ExecutionIn
 from .workspace_contract import Assignment, verification_status
 from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision
 
@@ -113,7 +115,7 @@ class WorkspaceStore:
 
     async def instances(self, character_id):
         rows = await self.db.fetch(
-            """SELECT ci.character_id, rs.instance_id, t.session_id, t.user_name, t.scope_key,
+            """SELECT ci.character_id, rs.instance_id, COALESCE(ci.current_world_id,ci.world_id) AS world_id, t.session_id, t.user_name, t.scope_key,
                       rs.source_head_node_id, rs.source_timeline_id
                FROM aios.character_runtime_state rs
                JOIN aios.character_instance ci USING(instance_id)
@@ -697,6 +699,8 @@ def install_workspace_routes(app, db, hud_handler):
                 "goal-review",
                 "environment-links-v3",
                 "work-admission-v1",
+                "delegation-readiness-v1",
+                "character-session-discovery-v1",
                 "delegated-runs-v3",
                 "character-recall-v3",
                 "task-events-v3",
@@ -707,6 +711,23 @@ def install_workspace_routes(app, db, hud_handler):
     @router.get("/instances")
     async def instances(character_id: str):
         return {"instances": await store.instances(character_id)}
+
+    @router.get("/characters")
+    async def characters():
+        return {"characters": await WorkspaceSetup(db).characters()}
+
+    @router.get("/sessions")
+    async def sessions(character_id: str):
+        # Exact runtime/session/user/scope coordinates, rather than session guesses.
+        return {"sessions": await store.instances(character_id)}
+
+    @router.get("/v3/readiness")
+    async def readiness(origin_instance_id: UUID, binding_id: UUID | None = None):
+        return await WorkspaceSetup(db).readiness(origin_instance_id, binding_id)
+
+    @router.get("/v3/bindings")
+    async def bindings(character_id: str):
+        return {"bindings": await WorkspaceSetup(db).bindings(character_id)}
 
     @router.post("/bind")
     async def bind(req: BindingIn):
@@ -834,6 +855,17 @@ def install_workspace_routes(app, db, hud_handler):
         prefix="/workspace-client", dependencies=[Depends(authorize_review)]
     )
 
+    @reviews.post("/v3/execution-instances")
+    async def create_execution(req: ExecutionIn):
+        return await WorkspaceSetup(db).create_execution(req)
+
+    @reviews.get("/work/{instance_id}")
+    async def pending_work(instance_id: UUID):
+        rows = await db.fetch(
+            "SELECT * FROM aios.character_work_request WHERE instance_id=$1 ORDER BY created_at DESC LIMIT 100",
+            instance_id)
+        return {"requests": [public(r) for r in rows]}
+
     @reviews.post("/v3/{binding_id}/links/{link_id}/work-profiles")
     async def configure_work(binding_id: UUID, link_id: UUID, req: ProfileIn):
         return await WorkAdmission(db).configure(binding_id, link_id, req)
@@ -871,6 +903,10 @@ def install_workspace_routes(app, db, hud_handler):
     @reviews.post("/v3/{binding_id}/links")
     async def link_environment(binding_id: UUID, req: LinkIn):
         return await EnvironmentStore(db).create(binding_id, req)
+
+    @reviews.post("/v3/{binding_id}/links/{link_id}/memory")
+    async def set_link_memory(binding_id: UUID, link_id: UUID, req: MemorySharingIn):
+        return await EnvironmentStore(db).set_memory(binding_id, link_id, req)
 
     @reviews.post("/v3/{binding_id}/links/{link_id}/revoke")
     async def revoke_environment(binding_id: UUID, link_id: UUID):

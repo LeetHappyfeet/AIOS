@@ -367,6 +367,8 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             description = " ".join(str(capability["description"]).split())[:300]
             lines.append(f"- {capability['capability']} / {capability['purpose']}: {description}; worker {'recently seen' if capability['online'] else 'not recently seen'}")
         lines.append('To request work, use native request_work when registered. Otherwise emit exactly one structured block in your reply: <aios_action>{"op":"request_work","capability":"listed_capability","purpose":"listed_purpose","objective":"bounded objective","constraints":[]}</aios_action>. AIOS returns admission/status in a later HUD. Never claim execution from a request, or resubmit work already pending.')
+    elif work.get("unavailable_reason"):
+        lines.append("WORK UNAVAILABLE: " + str(work["unavailable_reason"])[:300])
     if work.get("request_error"):
         lines.append("WORK REQUEST NEEDS CLARIFICATION: " + str(work["request_error"]["reason"])[:300])
     if work.get("requests"):
