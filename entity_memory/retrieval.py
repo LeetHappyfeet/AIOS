@@ -213,11 +213,14 @@ class RDFRecallService:
             getattr(ctx,"source_head_node_id",None),getattr(ctx,"source_timeline_id",None),
             ctx.character_id,owners_for(ctx),list(sections if sources else propositions),terms),sql_budget)
 
-    async def _query(self,query):
+    async def _query(self,query,*,timeout_seconds=None):
         from aios_app.config import settings
         from aios_app.rdf.fuseki import FusekiClient
-        client=self.fuseki or FusekiClient(settings.fuseki_base_url,timeout=TRANSPORT_BUDGET,retries=0)
-        return await asyncio.wait_for(asyncio.to_thread(client.query,"char",query),TRANSPORT_BUDGET+0.1)
+        budget = TRANSPORT_BUDGET if timeout_seconds is None else timeout_seconds
+        client=self.fuseki or FusekiClient(settings.fuseki_base_url,timeout=budget,retries=0)
+        # Both the HTTP read and its async wrapper use the consumer's budget.
+        # Extending only the socket timeout would still cancel after 0.9s.
+        return await asyncio.wait_for(asyncio.to_thread(client.query,"char",query),budget+0.1)
 
     async def discovery_revision(self,ctx,query):
         """Fingerprint eligible coordinates with one background SQL deadline."""
@@ -276,7 +279,9 @@ class RDFRecallService:
         result=RecallResult()
         terms=terms_for(query,ctx.character_id)
         if not terms: return result
+        from aios_app.config import settings
         sql_budget = INQUIRY_SQL_BUDGET if consumer == "inquiry" else SQL_BUDGET
+        transport_budget = settings.rdf_inquiry_timeout_seconds if consumer == "inquiry" else TRANSPORT_BUDGET
         stage = "sql_sources"
         started = time.monotonic()
         try:
@@ -286,7 +291,7 @@ class RDFRecallService:
             refs=[]
             if sources:
                 stage = "fuseki_sources"
-                found=await self._query(entity_query(sources,terms))
+                found=await self._query(entity_query(sources,terms),timeout_seconds=transport_budget)
                 allowed={graph_iri(r["section_id"]):r for r in sources}
                 for binding in found.get("results",{}).get("bindings",[])[:MAX_REFERENCES]:
                     value=lambda key: binding.get(key,{}).get("value","")
@@ -304,7 +309,7 @@ class RDFRecallService:
                         "start":start,"end":end,"text":value("text"),"terms":terms})
             if atoms:
                 stage = "fuseki_atoms"
-                found=await self._query(atom_query(ctx,atoms))
+                found=await self._query(atom_query(ctx,atoms),timeout_seconds=transport_budget)
                 allowed={}
                 for row in atoms:
                     allowed.setdefault("urn:aios:semantic-atom:"+str(row["atom_id"]),[]).append(row)
@@ -318,15 +323,17 @@ class RDFRecallService:
             refs=(atom_refs[:12]+source_refs[:12]+atom_refs[12:]+source_refs[12:])[:MAX_REFERENCES]
             stage = "sql_revalidation"
             result=await self.validate_refs(ctx,refs,sql_budget=sql_budget)
-            result.diagnostics.update(candidate_sources=len(sources),candidate_atoms=len(atoms),rdf_references=len(refs))
+            result.diagnostics.update(candidate_sources=len(sources),candidate_atoms=len(atoms),rdf_references=len(refs),
+                sql_budget_seconds=sql_budget,transport_budget_seconds=transport_budget)
         except Exception as exc:
             elapsed = round((time.monotonic()-started)*1000,1)
             detail = str(exc)[:2000]
-            log.info("RDF recall unavailable instance=%s stage=%s reason=%s elapsed_ms=%s detail=%s",
-                     ctx.instance_id,stage,type(exc).__name__,elapsed,detail)
+            log.info("RDF recall unavailable instance=%s stage=%s reason=%s elapsed_ms=%s transport_budget_seconds=%s detail=%s",
+                     ctx.instance_id,stage,type(exc).__name__,elapsed,transport_budget,detail)
             result.status="unavailable"
             result.diagnostics.update(failure=type(exc).__name__, stage=stage,
-                elapsed_ms=elapsed, sql_budget_seconds=sql_budget, detail=detail)
+                elapsed_ms=elapsed, sql_budget_seconds=sql_budget,
+                transport_budget_seconds=transport_budget, detail=detail)
         if record:
             try:
                 result.trace_id=str(await asyncio.wait_for(self.db.fetchval("""INSERT INTO aios.entity_recall_trace

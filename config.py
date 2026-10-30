@@ -40,6 +40,10 @@ class Settings(BaseModel):
         "http://127.0.0.1:3030",
     )
 
+    # Background character recall has a separate bounded read deadline;
+    # interactive HUD recall keeps its subsecond transport budget.
+    rdf_inquiry_timeout_seconds: float = max(0.1, min(30.0,
+        float(os.getenv("AIOS_RDF_INQUIRY_TIMEOUT_SECONDS", "5.0"))))
     fuseki_timeout: float = float(os.getenv("AIOS_FUSEKI_TIMEOUT", "15.0"))
     fuseki_retries: int = int(os.getenv("AIOS_FUSEKI_RETRIES", "2"))
 

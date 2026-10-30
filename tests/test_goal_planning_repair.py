@@ -164,3 +164,14 @@ async def test_exhausted_text_correction_is_recorded_without_worker_exception(mo
     assert "status='failed'" in db.execute_returning_row.await_args.args[0]
     reconcile.assert_awaited_once_with(op['operation_id'])
     finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovered_pipeline_job_does_not_repeat_succeeded_plan(monkeypatch):
+    op={'instance_id':uuid4(),'operation_id':uuid4(),'status':'succeeded',
+        'operation_type':'planning.propose'}
+    engine=CognitiveOperationEngine(SimpleNamespace(fetchrow=AsyncMock(return_value=op)))
+    propose=AsyncMock()
+    monkeypatch.setattr(GoalPlanningService,'propose',propose)
+    await engine.propose_plan(op['operation_id'])
+    propose.assert_not_awaited()

@@ -126,3 +126,26 @@ isolated installation before relying on a backup procedure.
 
 The installation guide identifies destructive volume removal. A production
 recovery attempt should not begin with deleting volumes or resetting databases.
+
+
+### Background RDF recall deadlines
+
+`AIOS_RDF_INQUIRY_TIMEOUT_SECONDS` defaults to **5 seconds per Fuseki query**,
+clamped to 0.1–30 seconds. Set it in the installation's `.env` and restart AIOS
+to change it, for example `AIOS_RDF_INQUIRY_TIMEOUT_SECONDS=10`.
+Background character inquiries use this timeout for both source and atom reads;
+interactive HUD recall retains its 0.8-second transport limit. Each HTTP call
+has zero retries and an async deadline of the selected timeout plus 0.1 seconds.
+A recall can run both source and atom queries, each with its own deadline.
+The SQL budgets are separate and unchanged. Traces/logs report the selected
+transport budget, so a SQL timeout is distinguishable from an HTTP read timeout.
+`AIOS_FUSEKI_TIMEOUT` does not override this dedicated recall budget.
+
+An expired pipeline lease after shutdown is recovered at runner startup; while
+running, the recovery loop checks at most every 60 seconds with default settings.
+Recovery requeues the pipeline job. A goal-planning handler whose cognitive
+operation already succeeded returns without another inference, allowing the
+pipeline job to finish. No manual status edits are needed for that case.
+A job that remains expired while the runner is active requires investigating
+runner liveness and lease-recovery errors; an expired row alone cannot establish
+that recovery failed if the runner was stopped.
