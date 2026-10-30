@@ -4,8 +4,18 @@ The separately installed AIOS_Client application hosts model inference and works
 operations. This API binds one source-writing workspace to an existing character
 instance. It does not create characters, change continuity, manage SSH, or mount files.
 
-Install this revision through the normal AIOS upgrade/migration procedure. Export
-`AIOS_WORKSPACE_API_KEY` before starting AIOS. Workspace routes require
+Install this revision through the normal AIOS upgrade/migration procedure. Open Gradio → **Workspace Access**, generate or enter a key, and click
+**Save workspace key**. Use **Reveal active key for copying** to copy it into the
+AIOS Client AIOS connection settings. This is separate from the model provider key.
+AIOS saves it in `launch-config.json` beside `launch.py`, with owner-only Unix
+permissions and atomic replacement. It survives restarts and applies to the API
+without restarting. The key is plaintext; keep this file private and Gradio limited
+to trusted operators, who can reveal or replace it.
+
+For a different location, set `AIOS_LAUNCH_CONFIG` to an absolute file path in an
+existing writable directory before launching AIOS. An explicitly set
+`AIOS_WORKSPACE_API_KEY` (including an empty value) takes precedence over the saved
+key; remove that setting and restart to use the Gradio-managed key. Workspace routes require
 `Authorization: Bearer <key>`; they return 503 until that key is configured. This is a
 shared operator credential, not per-character authentication. Use a private connection
 or HTTPS. Existing AIOS endpoints retain their existing authentication behavior.

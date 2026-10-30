@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 from aios_app.config import settings
+from aios_app.launch_config import get_workspace_api_key, read_launch_config
 
 
 PYTHON = sys.executable
@@ -599,11 +600,13 @@ def main() -> None:
     runtimes: List[ServiceRuntime] = []
     output_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
 
+    read_launch_config()  # Fail before starting services if persisted settings are invalid.
     print("🚀 AIOS startup")
     print(f"   API: http://{settings.api_host}:{settings.api_port}")
     print(f"   PostgreSQL: {settings.db_dsn}")
     print(f"   Fuseki: {settings.fuseki_base_url}")
     print(f"   Console mode: {LOG_MODE}")
+    print(f"   Workspace access: {'configured' if get_workspace_api_key() else 'disabled (configure in Gradio Workspace Access)'}")
     print()
 
     try:

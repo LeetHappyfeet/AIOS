@@ -32,6 +32,11 @@ Do not run another launcher over the same active installation.
 
 ## Configuration
 
+Workspace client credentials can be saved in Gradio → **Workspace Access**.
+The installation-local `launch-config.json` persists the key across launches;
+see [workspace setup](workspace-client.md) for copying, environment precedence,
+and the optional `AIOS_LAUNCH_CONFIG` path override.
+
 [.env.example](../.env.example) lists infrastructure settings. Python settings
 are defined in [config.py](../config.py); launcher-specific controls are in
 [launch.py](../launch.py). Keep database credentials and service URLs consistent

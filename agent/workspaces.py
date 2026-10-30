@@ -16,6 +16,8 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from aios_app.launch_config import get_workspace_api_key
+
 from .environment_links import (
     EnvironmentStore,
     LinkIn,
@@ -669,10 +671,10 @@ class WorkspaceStore:
 
 def install_workspace_routes(app, db, hud_handler):
     async def authorize(authorization: str = Header(default="")):
-        key = os.environ.get("AIOS_WORKSPACE_API_KEY", "")
+        key = get_workspace_api_key()
         if not key:
             raise HTTPException(
-                503, "Set AIOS_WORKSPACE_API_KEY to enable workspace clients"
+                503, "Save a workspace key in Gradio Workspace Access or set AIOS_WORKSPACE_API_KEY"
             )
         if not hmac.compare_digest(authorization, "Bearer " + key):
             raise HTTPException(401, "Invalid workspace API key")
@@ -821,7 +823,7 @@ def install_workspace_routes(app, db, hud_handler):
 
     async def authorize_review(authorization: str = Header(default="")):
         key = os.environ.get("AIOS_WORKSPACE_REVIEW_KEY", "")
-        if not key or key == os.environ.get("AIOS_WORKSPACE_API_KEY"):
+        if not key or key == get_workspace_api_key():
             raise HTTPException(
                 503, "Set a distinct AIOS_WORKSPACE_REVIEW_KEY for human review"
             )
@@ -848,7 +850,7 @@ def install_workspace_routes(app, db, hud_handler):
         key = os.environ.get("AIOS_WORK_REQUEST_API_KEY", "")
         if not key or key in {
             os.environ.get("AIOS_WORKSPACE_REVIEW_KEY"),
-            os.environ.get("AIOS_WORKSPACE_API_KEY"),
+            get_workspace_api_key(),
         }:
             raise HTTPException(
                 503, "Set a distinct AIOS_WORK_REQUEST_API_KEY for native work requests"
