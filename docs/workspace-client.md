@@ -281,16 +281,18 @@ establish delegation readiness.
    but rejects changed timelines/routing and active older workspace runs.
    Stop/finish those runs before converting. Revoke any separate environment
    links on the binding before attaching it.
-4. Save the default `workspace_test / write_hello` capability profile. It writes
-   `aios-hello.txt` containing `Hello from AIOS`, with a Python 3 host check,
-   five model steps and 120 seconds. Criteria are immutable after creation;
-   use a new purpose for different checks or budgets.
+4. Click **Enable general experimental tasks on selected link**. This creates
+   `workspace / experimental_task`, a reusable profile for inspection, coding,
+   and other bounded workspace objectives: 60 model steps, 30 minutes, 100,000
+   context characters. Each task writes a request-specific JSON report, whose
+   structure the host checks. The advanced fields allow other operator profiles.
 5. Keep the conversation `workspace.run` policy at `require_approval` for the
    first test, and check readiness. The separate-environment policy control is
    ignored for an attached workspace. Start the existing v3 listener if needed.
    Copy the returned link ID into client pairing fields if that client uses them.
-6. Fetch a new chat HUD and ask the character to use `workspace_test / write_hello`
-   to write the greeting file. The HUD advertises the capability and structured
+6. Fetch a new chat HUD and ask the character to use `workspace / experimental_task`
+   for a concrete objective, such as inspecting the available runtime or creating
+   and testing a small workspace script. The HUD advertises the capability and structured
    `request_work` instructions. Prose alone does not submit work.
 7. Refresh work requests in Gradio, inspect the pending objective and pinned
    checks/budget, and approve it. The worker claims the assignment, executes it,
@@ -313,6 +315,37 @@ still blocks further worker operations and requires explicit reconciliation.
 Revoking a link cancels its work and does not restore source-writing behavior.
 The existing v3 client wire protocol is unchanged; observation acknowledgements
 identify `source: "workspace-run"` with `source_current: false` in attachment mode.
+
+### General experiments and context budgets
+
+A capability/purpose pair selects an operator-approved work profile, not a single
+hard-coded objective. `workspace / experimental_task` can run different bounded
+objectives without creating a profile per task. The character must copy those
+identifiers exactly and put the requested work and desired result in `objective`.
+The HUD now supplies an example using an actually available pair. A mismatch
+reports the enabled pairs rather than leaving the character to guess.
+
+```xml
+<aios_action>{"op":"request_work","capability":"workspace","purpose":"experimental_task","objective":"Inspect the available Python runtime and workspace files, and report what is available and any limitations.","constraints":["No sudo","No network access"]}</aios_action>
+```
+
+The preset requires `aios-experiment-{request_id}.json`, with string `objective`,
+`outcome` (`completed`, `partial`, or `blocked`), an `evidence` list, and a
+`limitations` list. AIOS substitutes only its UUID into operator template strings
+when constructing the pinned assignment. Prior runs' reports cannot satisfy the
+new request's check. Character-provided objectives never become check commands.
+A structurally valid report can describe a blocked experiment: passing that check
+is evidence of reporting, not proof of arbitrary task success. Include real test
+results in the report and inspect the outcome before accepting goal completion.
+
+The original greeting test's 10,000-character context cap can fail before model
+execution when pinned instructions/HUD/working state exceed it. The experimental
+preset uses 100,000 **characters**, not tokens. This bounds retained messages; the
+provider's actual context window is a separate limit. Large instructions or a long
+run may still require a narrower task or an operator-created profile with a larger
+budget. Existing profiles/failed runs are not silently changed or replayed: use the
+new profile and a fresh request. No client protocol change or new migration is
+needed for this preset. Approval policies and local client permissions still apply.
 
 ### Optional separate execution environment
 

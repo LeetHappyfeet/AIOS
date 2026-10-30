@@ -16,6 +16,7 @@ from aios_app.agent.workspace_setup import WorkspaceSetup, ExecutionIn
 from aios_app.agent.workspaces import WorkspaceStore
 from aios_app.agent.environment_links import EnvironmentStore, LinkIn, MemorySharingIn
 from aios_app.agent.work_admission import WorkAdmission, ProfileIn, WorkDecision
+from aios_app.agent.work_profiles import experimental_profile
 from aios_app.agent.policy import ActionPolicyService
 from aios_app.ui.registry import register_tab
 
@@ -168,7 +169,14 @@ def decide(origin, request, accept, reviewer, reason):
     return run(WorkAdmission(db).decide(uid(origin), uid(request), WorkDecision(accept=accept, reviewer=reviewer, reason=reason)))
 
 
-CHECKS = json.dumps([{"id": "hello_contents", "command": "python3 -c \"from pathlib import Path; assert Path('aios-hello.txt').read_text().strip() == 'Hello from AIOS'\"", "cwd": ".", "timeout_seconds": 10}], indent=2)
+def enable_experiments(binding, link_id):
+    return run(WorkAdmission(db).configure(uid(binding), uid(link_id), experimental_profile()))
+
+
+EXPERIMENT = experimental_profile()
+EXPERIMENT_TEMPLATE = EXPERIMENT.assignment_template
+
+CHECKS = json.dumps(EXPERIMENT_TEMPLATE['required_checks'], indent=2)
 
 
 @register_tab
@@ -201,24 +209,31 @@ def render():
         check = gr.Button("Check delegation readiness")
         save_memory = gr.Button("Apply memory sharing setting to selected link")
         revoke = gr.Button("Revoke selected link and cancel its active work")
-        gr.Markdown("### Capability profile\nDefault values define a harmless first test. Ask the character to use "
-                    "`workspace_test / write_hello` to write `aios-hello.txt` containing `Hello from AIOS`. "
-                    "The host checks the file after execution. Profile criteria are immutable after creation; use a new purpose for different criteria. "
-                    "Descriptions and enabled status can be edited.")
+        gr.Markdown("### General experimental tasks\nEnable `workspace / experimental_task` once on the selected link. "
+                    "The character can then request different bounded tasks by changing objective, including inspection, coding and workspace changes. "
+                    "The preset allows 60 model steps, 30 minutes and 100,000 context characters. "
+                    "Existing execution policies and the client's local permissions still apply. "
+                    "Each request writes its own JSON report of outcome, evidence and limitations. "
+                    "The host check validates that report's structure; task success still requires task-specific evidence. "
+                    "Failed runs are not automatically replayed.")
+        enable_general = gr.Button("Enable general experimental tasks on selected link")
+        gr.Markdown("### Advanced capability profile\nThe fields below start with experimental-task defaults. "
+                    "Profile criteria are immutable after creation; use a new purpose for different criteria. "
+                    "Descriptions and enabled status can be edited. `{request_id}` expands to the host request UUID in paths and checks.")
         refresh_profiles = gr.Button("Load profiles on selected link")
         profile = gr.Dropdown(label="Existing profile", choices=[])
         profile_list = gr.JSON(label="Saved profiles")
-        capability = gr.Textbox(label="Capability", value="workspace_test")
-        purpose = gr.Textbox(label="Purpose", value="write_hello")
-        description = gr.Textbox(label="Description", value="Write and verify a harmless greeting file in the authorized workspace")
+        capability = gr.Textbox(label="Capability", value=EXPERIMENT.capability)
+        purpose = gr.Textbox(label="Purpose", value=EXPERIMENT.purpose)
+        description = gr.Textbox(label="Description", value=EXPERIMENT.description)
         enabled = gr.Checkbox(label="Profile enabled", value=True)
         checks = gr.Textbox(label="Required host checks (JSON array)", value=CHECKS, lines=6)
-        outputs = gr.Textbox(label="Expected outputs (JSON array)", value='[{"path":"aios-hello.txt","kind":"file"}]')
+        outputs = gr.Textbox(label="Expected outputs (JSON array)", value=json.dumps(EXPERIMENT_TEMPLATE['expected_outputs']))
         preserve = gr.Textbox(label="Paths to preserve (JSON array)", value="[]")
         with gr.Row():
-            steps = gr.Number(label="Maximum model steps", value=5, precision=0)
-            seconds = gr.Number(label="Wall time seconds", value=120, precision=0)
-            context = gr.Number(label="Context characters", value=10000, precision=0)
+            steps = gr.Number(label="Maximum model steps", value=60, precision=0)
+            seconds = gr.Number(label="Wall time seconds", value=1800, precision=0)
+            context = gr.Number(label="Context characters", value=100000, precision=0)
         save = gr.Button("Save capability profile")
         gr.Markdown("### Execution policies\nPolicies apply to all workspace work on each selected instance. "
                     "The most restrictive policy wins. An attached workspace uses only the conversation policy. "
@@ -253,6 +268,7 @@ def render():
         fields = [capability, purpose, description, enabled, checks, outputs, preserve, steps, seconds, context]
         profile.change(load_profile, profile, fields)
         save.click(save_profile, [binding, link_id] + fields, report)
+        enable_general.click(enable_experiments, [binding, link_id], report)
         save_policy.click(policies, [origin, binding, op, ep], report)
         refresh_pending.click(pending, origin, [request, requests])
         request.change(inspect, [origin, request], detail)

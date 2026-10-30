@@ -22,6 +22,17 @@ separate from the chat cursor. Independent environments still require matching
 character/user and separate source timelines/worlds.
 No instance, machine, environment link, or permission is inferred from a name.
 
+For open-ended experiments, Gradio's **Enable general experimental tasks on
+selected link** creates `workspace / experimental_task`. Change `objective` for
+each task; no per-task purpose name is needed. Its 100,000-character context cap
+replaces the overly small greeting-test budget for new work. It verifies a
+request-specific outcome/evidence report; it does not universally verify task
+success. Existing approval and execution policies remain in force.
+
+Operator template strings may contain `{request_id}`. Only AIOS's UUID is
+substituted when creating the immutable assignment; objectives never supply shell
+check text. Pending/approved profile snapshots keep the original operator template.
+
 From the operator environment, configure a capability profile on the link:
 
 ```bash

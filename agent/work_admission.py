@@ -363,10 +363,19 @@ class WorkAdmission:
         if row["profile_id"]:
             profiles = [p for p in profiles if p["profile_id"] == row["profile_id"]]
         if not profiles:
+            available = await self.db.fetch(
+                """SELECT DISTINCT p.capability,p.purpose
+                   FROM aios.workspace_work_profile p JOIN aios.character_environment_link l USING(link_id)
+                   WHERE l.origin_instance_id=$1 AND l.origin_source_timeline_id=$2 AND l.enabled AND p.enabled
+                   ORDER BY p.capability,p.purpose LIMIT 12""",
+                row['instance_id'], row['source_timeline_id'])
+            names = ', '.join(f"{p['capability']} / {p['purpose']}" for p in available)
             return await self.state(
                 row,
                 "needs_configuration",
-                "No enabled authorized capability profile matches this purpose",
+                "No enabled authorized capability profile matches this purpose. "
+                + (f"Available pairs: {names}. Copy both identifiers exactly; put the task in objective."
+                   if names else "Ask the operator to enable a work profile."),
             )
         selected = None
         for profile in profiles:
@@ -470,12 +479,15 @@ class WorkAdmission:
             objective += "\nAdditional requested constraints:\n" + "\n".join(
                 "- " + c for c in intent.constraints
             )
+        from .work_profiles import expand_request_template, EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE, EXPERIMENT_GUIDANCE
+        if (p['capability'], p['purpose']) == (EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE):
+            objective += EXPERIMENT_GUIDANCE
         try:
             spec = DelegationIn(
                 request_id=row["request_id"],
                 source_node_id=row["source_node_id"],
                 objective=objective,
-                **template,
+                **expand_request_template(template, row['request_id']),
                 **goal,
             )
         except ValueError:

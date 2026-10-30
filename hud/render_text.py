@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping
 
 from aios_app.hud.recent_events import normalized_text, project_recent_events
@@ -366,7 +367,13 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         for capability in capabilities:
             description = " ".join(str(capability["description"]).split())[:300]
             lines.append(f"- {capability['capability']} / {capability['purpose']}: {description}; worker {'recently seen' if capability['online'] else 'not recently seen'}")
-        lines.append('To request work, use native request_work when registered. Otherwise emit exactly one structured block in your reply: <aios_action>{"op":"request_work","capability":"listed_capability","purpose":"listed_purpose","objective":"bounded objective","constraints":[]}</aios_action>. AIOS returns admission/status in a later HUD. Never claim execution from a request, or resubmit work already pending.')
+        example = next((p for p in capabilities if (p['capability'], p['purpose']) == ('workspace', 'experimental_task')), capabilities[0])
+        action = {"op": "request_work", "capability": example['capability'], "purpose": example['purpose'],
+                  "objective": "Describe the concrete task and desired result here", "constraints": []}
+        lines.append('Copy capability and purpose exactly from the list; do not invent names. Put the concrete task in objective. Budgets, authority and host checks are configured by the operator.')
+        if (example['capability'], example['purpose']) == ('workspace', 'experimental_task'):
+            lines.append('Different experimental tasks reuse workspace / experimental_task; no new capability or purpose is needed for each objective.')
+        lines.append('To request work, use native request_work when registered. Otherwise emit exactly one complete structured block in your reply, outside Markdown code fences. Example with an available pair: <aios_action>' + json.dumps(action, separators=(',', ':')) + '</aios_action>. Replace objective with the actual bounded task. AIOS returns admission/status in a later HUD. Never claim execution from a request, or resubmit work already pending.')
     elif work.get("unavailable_reason"):
         lines.append("WORK UNAVAILABLE: " + str(work["unavailable_reason"])[:300])
     if work.get("request_error"):
