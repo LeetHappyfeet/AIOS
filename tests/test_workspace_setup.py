@@ -46,7 +46,7 @@ async def test_missing_link_and_same_instance_explain_incomplete_setup(db):
     store, origin, bid = await workspace_tests.binding(db)
     report = await WorkspaceSetup(db).readiness(origin.instance_id, bid)
     assert not report['configured'] and not report['ready']
-    assert any('conversational instance' in p for p in report['problems'])
+    assert any('Attach/link' in p for p in report['problems'])
     from aios_app.agent.work_admission import WorkAdmission
     timeline = await db.fetchval('SELECT source_timeline_id FROM aios.character_runtime_state WHERE instance_id=$1', origin.instance_id)
     overlay = await WorkAdmission(db).overlay(origin.instance_id, timeline)

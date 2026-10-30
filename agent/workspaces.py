@@ -1,4 +1,4 @@
-"""Versioned workspace client boundary; one source-writing binding per instance.
+"""Versioned workspace client boundary; explicit writer or read-only attachment.
 
 This does not grant filesystem access: the client owns its local execution boundary.
 All routes require the operator's separate AIOS_WORKSPACE_API_KEY.
@@ -144,7 +144,7 @@ class WorkspaceStore:
         if (
             not row
             or row["source_timeline_id"] != binding["timeline_id"]
-            or row["source_head_node_id"] != binding["last_node_id"]
+            or (not binding['attached'] and row["source_head_node_id"] != binding["last_node_id"])
         ):
             raise HTTPException(
                 409,
@@ -229,6 +229,8 @@ class WorkspaceStore:
         async with self.db.atomic():
             b = await self.binding(binding_id, lock=True)
             await self.current(b)
+            if b['attached'] and environment is None:
+                raise HTTPException(409, "Attached workspace requires operator-linked v3 work admission")
             old = await self.db.fetchrow(
                 "SELECT * FROM aios.workspace_run WHERE binding_id=$1 AND request_id=$2",
                 binding_id,
@@ -439,6 +441,19 @@ class WorkspaceStore:
                     raise HTTPException(409, "Event ID reused with different content")
                 return decode(old["response"])
             await self.current(b)
+            if b['attached']:
+                if run['environment_link_id'] is None or run['origin_instance_id'] != b['instance_id']:
+                    raise HTTPException(409, "Attached observation requires a linked run")
+                sequence = await append_event(
+                    self.db, run_id, f"observation:{req.event_key}", "observation", req.text,
+                    {"source": "aios-client", "workspace_binding_id": str(binding_id),
+                     "workspace_run_id": str(run_id), "text": req.text, "payload": req.payload})
+                response = {"ok": True, "source": "workspace-run", "run_id": str(run_id),
+                            "sequence": sequence, "source_current": False}
+                await self.db.execute(
+                    "INSERT INTO aios.workspace_receipt VALUES($1,$2,$3,$4::jsonb)",
+                    run_id, req.event_key, digest, json.dumps(response))
+                return response
             result = await ingest_message(
                 self.db,
                 IngestIn(
@@ -563,7 +578,7 @@ class WorkspaceStore:
                 },
                 dedupe_key=f"workspace-finish:{run_id}",
             )
-            if row["origin_instance_id"] is not None:
+            if row["origin_instance_id"] is not None and row["origin_instance_id"] != b['instance_id']:
                 await AgentRuntimeStore(self.db).wake(
                     instance_id=row["origin_instance_id"],
                     event_type="WORKSPACE_RUN_FINISHED",
@@ -700,6 +715,7 @@ def install_workspace_routes(app, db, hud_handler):
                 "environment-links-v3",
                 "work-admission-v1",
                 "delegation-readiness-v1",
+                "workspace-attachment-v1",
                 "character-session-discovery-v1",
                 "delegated-runs-v3",
                 "character-recall-v3",
@@ -737,8 +753,8 @@ def install_workspace_routes(app, db, hud_handler):
     async def context(binding_id: UUID):
         async with db.atomic():
             b = await store.binding(binding_id, lock=True)
-            await store.current(b)
-            node = b["last_node_id"]
+            current = await store.current(b)
+            node = current['source_head_node_id'] if b['attached'] else b["last_node_id"]
             instance = b["instance_id"]
         if node is None:
             raise HTTPException(
@@ -799,14 +815,15 @@ def install_workspace_routes(app, db, hud_handler):
     async def execution_context(binding_id: UUID, run_id: UUID, req: LeaseIn):
         async with db.atomic():
             b, run = await store.owned(binding_id, run_id, req)
-            await store.current(b)
+            current = await store.current(b)
+            node = current['source_head_node_id'] if b['attached'] else b['last_node_id']
             if run["cancel_requested"]:
                 raise HTTPException(409, "Cancellation requested")
-            if b["last_node_id"] is None:
+            if node is None:
                 raise HTTPException(409, "Workspace needs an initial observation")
         return await hud_handler(
             instance_id=b["instance_id"],
-            through_node_id=b["last_node_id"],
+            through_node_id=node,
             recent_limit=4,
             token_budget=2500,
             wait_ms=2500,

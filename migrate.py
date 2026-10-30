@@ -17,6 +17,7 @@ BASELINE_RECEIPT = "0001_aios_baseline"
 # One canonical ordered chain. Do not squash or edit released SQL/checksums.
 # Fresh installs and existing canonical-baseline installs use identical files.
 REQUIRED_ACTIVE_MIGRATIONS = frozenset({
+    "20261030_02_workspace_attachment.sql",
     "20261030_01_normalization_blocked_revisions.sql",
     "20261028_02_character_environments.sql",
     "20261029_01_work_admission.sql",

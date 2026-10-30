@@ -94,12 +94,12 @@ class WorkspaceSetup:
                     store = WorkspaceStore(self.db)
                     b = await store.binding(link['execution_binding_id'], lock=True)
                     await store.current(b)
-                    if b['last_node_id'] is None:
+                    if not b['attached'] and b['last_node_id'] is None:
                         problems.append("Execution source needs an initial setup observation before the worker can fetch context")
                     await EnvironmentStore(self.db).link(b['binding_id'], link['link_id'])
                     await EnvironmentStore(self.db).origin(link)
                     execution = await self.origin(b['instance_id'])
-                    if (b['instance_id'] == instance_id
+                    if not b['attached'] and (b['instance_id'] == instance_id
                         or execution['world_id'] == origin['world_id']
                         or b['timeline_id'] == origin['source_timeline_id']):
                         raise HTTPException(409, "Execution must have a separate instance, world and source")
@@ -118,7 +118,8 @@ class WorkspaceSetup:
                 problems.append("Worker has not polled in the last 45 seconds; start the v3 listener")
             environments.append({"link_id": str(link['link_id']),
                 "binding_id": str(link['execution_binding_id']), "enabled": link['enabled'],
-                "share_memory": link['share_memory'], "worker_online": bool(link['online']),
+                "share_memory": link['share_memory'], "attached": link['origin_instance_id'] == link['execution_instance_id'],
+                "worker_online": bool(link['online']),
                 "configured": configured, "ready": not problems,
                 "approval_required": 'require_approval' in policies.values(),
                 "policies": policies, "profiles": [public(p) for p in profiles], "problems": problems})
@@ -130,7 +131,7 @@ class WorkspaceSetup:
             if binding_id:
                 b = await WorkspaceStore(self.db).binding(binding_id)
                 if b['instance_id'] == instance_id:
-                    problems.append("Client is bound to the conversational instance; create a separate execution instance")
+                    problems.append("Client uses this conversational instance; click Attach/link selected workspace to enable delegation")
                 if b['character_id'] != origin['character_id'] or b['user_name'] != origin['user_name']:
                     problems.append("Execution binding must use the same character and human user")
         return {"origin": public(origin), "ready": not problems and any(e['ready'] for e in environments),

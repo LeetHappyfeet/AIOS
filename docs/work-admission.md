@@ -14,9 +14,12 @@ protocol. Standalone v2 clients cannot claim delegated v3 runs.
 
 ## Configure work AIOS may route
 
-Prepare the two existing, independent chat/execution instances and their explicit
-environment link as described in [workspace-client.md](workspace-client.md).
-The instances must match character/user, with separate source timelines/worlds.
+Attach the existing client binding to its conversational instance using Gradio
+**Workspace Delegation**, or use an independent execution environment, as described
+in [workspace-client.md](workspace-client.md#operator-setup-for-chat-delegation-gradio).
+Attachment requires `20261030_02_workspace_attachment.sql` and keeps run evidence
+separate from the chat cursor. Independent environments still require matching
+character/user and separate source timelines/worlds.
 No instance, machine, environment link, or permission is inferred from a name.
 
 From the operator environment, configure a capability profile on the link:

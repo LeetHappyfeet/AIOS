@@ -624,10 +624,11 @@ class WorkAdmission:
                JOIN aios.character_instance ei ON ei.instance_id=b.instance_id
                JOIN aios.character_instance oi ON oi.instance_id=l.origin_instance_id
                WHERE l.origin_instance_id=$1 AND l.origin_source_timeline_id=$2 AND l.enabled AND p.enabled
-                 AND b.instance_id<>l.origin_instance_id AND b.timeline_id<>l.origin_source_timeline_id
-                 AND COALESCE(ei.current_world_id,ei.world_id)<>COALESCE(oi.current_world_id,oi.world_id)
+                 AND ((b.attached AND b.instance_id=l.origin_instance_id AND b.timeline_id=l.origin_source_timeline_id)
+                      OR (NOT b.attached AND b.instance_id<>l.origin_instance_id AND b.timeline_id<>l.origin_source_timeline_id
+                          AND COALESCE(ei.current_world_id,ei.world_id)<>COALESCE(oi.current_world_id,oi.world_id)))
                  AND es.source_timeline_id=b.timeline_id
-                 AND es.source_head_node_id IS NOT DISTINCT FROM b.last_node_id
+                 AND (b.attached OR es.source_head_node_id IS NOT DISTINCT FROM b.last_node_id)
                  AND NOT EXISTS(SELECT 1 FROM aios.character_action_policy ap
                       WHERE ap.instance_id IN (l.origin_instance_id,b.instance_id) AND ap.action_type='workspace.run' AND ap.disposition='deny')
                GROUP BY p.capability,p.purpose,p.description ORDER BY p.capability,p.purpose LIMIT 12""",

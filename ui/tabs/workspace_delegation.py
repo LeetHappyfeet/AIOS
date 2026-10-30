@@ -138,9 +138,12 @@ def policies(origin, binding, origin_policy, execution_policy):
         async with db.atomic():
             b = await WorkspaceStore(db).binding(uid(binding), lock=True)
             o = await WorkspaceSetup(db).origin(uid(origin))
-            if b['character_id'] != o['character_id'] or b['user_name'] != o['user_name'] or b['instance_id'] == uid(origin):
-                raise ValueError("Select a separate binding for the same character and human user")
-            for instance, disposition in ((uid(origin), origin_policy), (b['instance_id'], execution_policy)):
+            if b['character_id'] != o['character_id'] or b['user_name'] != o['user_name']:
+                raise ValueError("Select a binding for the same character and human user")
+            selected = {uid(origin): origin_policy}
+            if b['instance_id'] != uid(origin):
+                selected[b['instance_id']] = execution_policy
+            for instance, disposition in selected.items():
                 await ActionPolicyService(db).set_policy(instance, 'workspace.run', disposition)
         return await WorkspaceSetup(db).readiness(uid(origin), uid(binding))
     return run(save())
@@ -171,23 +174,27 @@ CHECKS = json.dumps([{"id": "hello_contents", "command": "python3 -c \"from path
 @register_tab
 def render():
     with gr.Tab("Workspace Delegation"):
-        gr.Markdown("### Pair a conversation with an execution environment\n"
-                    "Connection success is separate from chat delegation readiness. This trusted operator panel changes execution authority. "
-                    "Select a conversational origin, create a separate execution instance, and copy its coordinates into the client's agent profile. "
-                    "Bind the client, refresh discovery, then select its binding here. Existing bindings and links are also selectable.")
+        gr.Markdown("### Attach a workspace to a conversation\n"
+                    "Select the existing conversation and its client binding, then click Attach/link selected workspace. "
+                    "A client already bound to that conversation can be used directly. No additional character instance is needed. "
+                    "Work evidence is stored separately from the chat source; ordinary chat turns do not interrupt the listener. "
+                    "Connection success is separate from delegation readiness: configure a profile and check readiness below.")
         refresh_characters = gr.Button("Discover characters")
         character = gr.Dropdown(label="Character", choices=[])
         refresh = gr.Button("Refresh instances and client bindings")
         origin = gr.Dropdown(label="Conversational origin (human / scope / session / instance)", choices=[])
         binding = gr.Dropdown(label="Execution binding (workspace / worker / human / root)", choices=[])
-        execution = gr.Dropdown(label="Existing separate execution instance for this human (optional)", choices=[])
-        label = gr.Textbox(label="New execution session label", value="Execution workspace")
-        create = gr.Button("Create separate execution instance")
-        coordinates = gr.JSON(label="Execution coordinates for client profile")
-        gr.Markdown("Creation preserves character, human and scope, and creates a new session, world and source timeline. "
-                    "Start the client v3 listener after binding. Memory sharing is opt-in and respects the character's isolation policy.")
+        with gr.Accordion("Optional: use a separate execution environment", open=False):
+            execution = gr.Dropdown(label="Existing separate execution instance for this human", choices=[])
+            label = gr.Textbox(label="New execution session label", value="Execution workspace")
+            create = gr.Button("Create separate execution instance")
+            coordinates = gr.JSON(label="Execution coordinates for client profile")
+            gr.Markdown("For an independent environment, create or select an instance and bind a separate client profile to it. "
+                        "The ordinary attachment flow above uses your existing conversation and binding.")
+        gr.Markdown("For an attached workspace, leave memory sharing unchecked: it already reads this instance's memory. "
+                    "Memory sharing below applies only between separate environments.")
         share = gr.Checkbox(label="Share eligible character memory between these environments", value=False)
-        make_link = gr.Button("Link selected execution binding to conversation")
+        make_link = gr.Button("Attach/link selected workspace")
         refresh_links = gr.Button("Load links and readiness")
         link_id = gr.Dropdown(label="Environment link", choices=[])
         report = gr.JSON(label="Readiness / operation result")
@@ -214,11 +221,12 @@ def render():
             context = gr.Number(label="Context characters", value=10000, precision=0)
         save = gr.Button("Save capability profile")
         gr.Markdown("### Execution policies\nPolicies apply to all workspace work on each selected instance. "
-                    "The most restrictive policy wins. Readiness displays the saved policies; changing a dropdown takes effect only when saved.")
+                    "The most restrictive policy wins. An attached workspace uses only the conversation policy. "
+                    "Readiness displays the saved policies; changing a dropdown takes effect only when saved.")
         choices = ['require_approval', 'deny', 'allow']
-        op = gr.Dropdown(label="Origin workspace.run policy to save", choices=choices, value='require_approval')
-        ep = gr.Dropdown(label="Execution workspace.run policy to save", choices=choices, value='require_approval')
-        save_policy = gr.Button("Save both execution policies")
+        op = gr.Dropdown(label="Conversation workspace.run policy to save", choices=choices, value='require_approval')
+        ep = gr.Dropdown(label="Separate environment policy (ignored for attached workspace)", choices=choices, value='require_approval')
+        save_policy = gr.Button("Save execution policy")
         gr.Markdown("### Admission and pending approvals\nRefresh after the character emits a work request. Inspect its objective and pinned "
                     "profile/checks before deciding. Approval authorizes that request; it does not mark work complete. "
                     "After the listener executes and verifies, the next conversational HUD reports the run status and verification result.")

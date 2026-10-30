@@ -91,6 +91,8 @@ class EnvironmentStore:
             await WorkspaceStore(self.db).current(b)
             link = await self.link(binding_id, link_id)
             await self.origin(link)
+            if link['origin_instance_id'] == b['instance_id'] and req.share_memory:
+                raise HTTPException(409, "Attached workspace already uses this instance's memory; cross-environment sharing does not apply")
             if req.share_memory == link['share_memory']:
                 return public(link)
             isolated = await self.db.fetchval(
@@ -115,7 +117,8 @@ class EnvironmentStore:
 
         async with self.db.atomic():
             b = await WorkspaceStore(self.db).binding(binding_id, lock=True)
-            await WorkspaceStore(self.db).current(b)
+            # A stale pre-attachment cursor is expected after ordinary chat turns.
+            # Validate routing below before explicitly converting it to read-only attachment.
             origin = await self.db.fetchrow(
                 """SELECT ci.character_id,rs.instance_id,rs.source_timeline_id,
                           rt.session_id,rt.user_name,rt.scope_key,
@@ -132,11 +135,9 @@ class EnvironmentStore:
             )
             if (
                 not origin
-                or origin["instance_id"] == b["instance_id"]
                 or origin["character_id"] != b["character_id"]
                 or origin["user_name"] != b["user_name"]
                 or origin["session_id"] is None
-                or origin["source_timeline_id"] == b["timeline_id"]
                 or any(
                     origin["source_" + k] != origin[k]
                     for k in ("session_id", "user_name", "character_id", "scope_key")
@@ -144,9 +145,27 @@ class EnvironmentStore:
             ):
                 raise HTTPException(
                     409,
-                    "Link requires separate sources for the same character and runtime user",
+                    "Link requires valid sources for the same character and runtime user",
                 )
-            await self.separate_worlds(origin["instance_id"], b["instance_id"])
+            attached = origin["instance_id"] == b["instance_id"]
+            if attached:
+                if origin['session_id'] != b['session_id'] or origin['scope_key'] != b['scope_key'] or origin['source_timeline_id'] != b['timeline_id']:
+                    raise HTTPException(409, "Binding coordinates changed; reconcile explicitly before attachment")
+                if req.share_memory:
+                    raise HTTPException(409, "Attached workspace already uses this instance's memory; leave memory sharing unchecked")
+                if await self.db.fetchval("SELECT EXISTS(SELECT 1 FROM aios.character_environment_link WHERE execution_binding_id=$1 AND origin_instance_id<>$2 AND enabled)", binding_id, b['instance_id']):
+                    raise HTTPException(409, "Revoke separate environment links before attaching this binding")
+                if not b['attached']:
+                    if await self.db.fetchval("SELECT EXISTS(SELECT 1 FROM aios.workspace_run WHERE binding_id=$1 AND status IN ('queued','running'))", binding_id):
+                        raise HTTPException(409, "Stop existing workspace runs before attaching this binding")
+                    await self.db.execute("UPDATE aios.workspace_binding SET attached=true WHERE binding_id=$1", binding_id)
+            else:
+                if b['attached']:
+                    raise HTTPException(409, "Attached binding cannot execute for another instance")
+                await WorkspaceStore(self.db).current(b)
+                if origin['source_timeline_id'] == b['timeline_id']:
+                    raise HTTPException(409, "Separate environments require separate sources")
+                await self.separate_worlds(origin["instance_id"], b["instance_id"])
             if req.share_memory and origin["memory_continuity"] == "isolated":
                 raise HTTPException(
                     409,
@@ -241,7 +260,13 @@ class EnvironmentStore:
             raise HTTPException(
                 409, "Origin conversation changed; reconcile explicitly"
             )
-        await self.separate_worlds(link["origin_instance_id"], b["instance_id"])
+        if link["origin_instance_id"] == b["instance_id"]:
+            if not b['attached'] or row['source_timeline_id'] != b['timeline_id']:
+                raise HTTPException(409, "Workspace attachment is invalid")
+        else:
+            if b['attached']:
+                raise HTTPException(409, "Attached binding cannot execute for another instance")
+            await self.separate_worlds(link["origin_instance_id"], b["instance_id"])
         if ancestor_node_id is not None:
             current = await self.db.fetchval(
                 """WITH RECURSIVE ancestry(node_id,depth) AS (
@@ -310,7 +335,8 @@ class EnvironmentStore:
         store = WorkspaceStore(self.db)
         async with self.db.atomic():
             b, _ = await store.owned(binding_id, run_id, req)
-            await store.current(b)
+            current = await store.current(b)
+            node = current['source_head_node_id'] if b['attached'] else b['last_node_id']
             revision = await self.db.fetchval(
                 "SELECT aios.cognitive_context_revision($1)", b["instance_id"]
             )
@@ -320,7 +346,7 @@ class EnvironmentStore:
             uncertainty_kind="episodic_gap",
             question=req.query,
             evidence_revision=revision,
-            source_node_id=b["last_node_id"],
+            source_node_id=node,
         )
         try:
             evidence = await asyncio.wait_for(
