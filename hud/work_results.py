@@ -107,7 +107,18 @@ def result_view(result, assignment):
         sections.append({"label": compact(section.get("label"), 160) or "Requested content",
                          "text": text[:8000],
                          "truncated": section.get("truncated") is True or len(text) > 8000})
+    diagnostics = result.get("model_diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    usage = diagnostics.get("usage")
+    usage = usage if isinstance(usage, Mapping) else {}
+    response_details = []
+    if isinstance(diagnostics.get("finish_reason"), str):
+        response_details.append("finish_reason=" + compact(diagnostics["finish_reason"], 60))
+    for key, value in (("completion_tokens", usage.get("completion_tokens")), ("max_tokens", diagnostics.get("max_tokens"))):
+        if type(value) is int:
+            response_details.append(f"{key}={value}")
     return {
+        "model_response": "; ".join(response_details),
         "requested_content": sections,
         "content_sections_omitted": max(0, len(content) - 4) + (
             summary.get("content_sections_omitted", 0)

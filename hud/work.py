@@ -46,10 +46,17 @@ def render_work_results(work, tasks):
         title = compact(task.get("objective") or request.get("objective"), 180)
         view = task.get("result_summary")
         if not isinstance(view, dict):
-            view = result_view({"report": task.get("summary")}, {})
+            view = result_view({("error" if task["status"] in {"failed", "interrupted", "cancelled"} else "report"): task.get("summary")}, {})
         entry = [f"- {title or 'Workspace task'}",
                  f"  Run: {task['run_id']}" + (f"; request: {request_id}" if request_id else ""),
                  f"  Execution: {task['status']}; goal review: {task.get('goal_review') or 'not linked'}"]
+        # Failure reason has priority over optional content and partial findings.
+        if view["error"]:
+            entry.append("  Error: " + view["error"])
+        elif task["status"] in {"failed", "interrupted", "cancelled"}:
+            entry.append("  Failure/stop reason unavailable in submitted result; inspect worker logs. No final answer is established.")
+        if view.get("model_response"):
+            entry.append("  Model response (worker report): " + view["model_response"])
         if task is not latest:
             if task["status"] in ACTIVE:
                 entry.append("  Progress (worker report): " + compact(task.get("summary"), 240))
@@ -58,8 +65,6 @@ def render_work_results(work, tasks):
             else:
                 entry.append("  Earlier result: " + compact(view.get("summary") or "; ".join(view.get("findings") or []) or view.get("report_excerpt"), 220))
                 entry.append("  Outcome (worker report): " + view["worker_outcome"] + "; configured checks: " + str(task.get("verification_status") or "not reported") + ". Retained history; do not repeat merely because details are omitted.")
-            if view["error"]:
-                entry.append("  Error: " + view["error"])
         else:
             entry.append("  Worker-reported outcome: " + view["worker_outcome"])
             # Answer first. A greeting at the start of a prose report must not
@@ -76,8 +81,6 @@ def render_work_results(work, tasks):
             else:
                 for finding in findings:
                     entry.append("  Worker-reported finding: " + finding)
-            if view["error"]:
-                entry.append("  Error: " + view["error"])
             for limitation in view["limitations"]:
                 entry.append("  Worker-reported limitation: " + limitation)
             for violation in view["violations"]:

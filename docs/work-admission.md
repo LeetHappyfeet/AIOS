@@ -173,3 +173,22 @@ Tests exercise real workspace lifecycle SQL with minimal independent cognition
 fixtures, plus native-route credential separation and HUD rendering. Native
 PostgreSQL CI additionally checks concurrent duplicate submissions. Local PGlite
 checks do not establish live model or production SillyTavern reliability.
+## Read-only experimental inspections
+
+Explicit read-only/no-file constraints in a request now select direct JSON
+reporting for the standard `workspace / experimental_task` preset. Admission
+removes only the exact built-in experiment-report output/check pair before sealing
+the assignment, and keeps budgets, policy, approval and routing rules intact.
+Already read-only profiles with no outputs/checks are also supported. A custom
+output/check conflict returns `needs_configuration`; the character cannot bypass
+custom operator checks. Existing queued assignments are immutable and must be
+replaced with a fresh request if they contain the old contradictory file-report
+requirement.
+
+Use the updated AIOS-Client for enforced inspection mode and `inspect_environment`.
+Recognized wording is a conservative restriction convention, not a general policy
+language or an OS sandbox. Inspection mode denies arbitrary shell/code execution,
+stdin, writes, Git subprocesses and HTTP tools; host audit logging continues.
+The HUD prioritizes submitted failure/stop reasons and bounded provider finish
+metadata before partial findings. Missing failure details are stated explicitly;
+partial worker observations never establish task success.

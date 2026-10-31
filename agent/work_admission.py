@@ -15,7 +15,7 @@ from uuid import UUID, uuid5, NAMESPACE_URL
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .workspace_contract import Assignment
+from .workspace_contract import Assignment, requires_read_only
 
 
 class WorkIntent(BaseModel):
@@ -494,9 +494,13 @@ class WorkAdmission:
             objective += "\nAdditional requested constraints:\n" + "\n".join(
                 "- " + c for c in intent.constraints
             )
-        from .work_profiles import expand_request_template, EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE, EXPERIMENT_GUIDANCE
+        from .work_profiles import expand_request_template, EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE, reporting_template
         if (p['capability'], p['purpose']) == (EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE):
-            objective += EXPERIMENT_GUIDANCE
+            try:
+                template, guidance = reporting_template(template, read_only=requires_read_only(objective))
+            except ValueError as exc:
+                return await self.state(row, "needs_configuration", str(exc), **pinned)
+            objective += guidance
         try:
             spec = DelegationIn(
                 request_id=row["request_id"],
