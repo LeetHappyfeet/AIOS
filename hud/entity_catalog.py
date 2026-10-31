@@ -148,6 +148,9 @@ async def hud_catalog(db, context, *, token_cap, focus_text=""):
             focus_text=focus_text,
             location_id=context.location_entity_id,
         )
+    except asyncio.TimeoutError:
+        log.info("HUD entity catalog deadline exceeded; continuing without optional catalog")
+        return {"status": "unavailable", "reason": "timeout", "complete": False, "entries": []}
     except Exception:
         # Optional evidence must not prevent a HUD; absence never means empty scene.
         log.warning("HUD entity catalog unavailable", exc_info=True)

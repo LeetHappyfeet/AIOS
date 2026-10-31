@@ -177,6 +177,20 @@ def enable_experiments(binding, link_id):
     return run(WorkAdmission(db).configure(uid(binding), uid(link_id), experimental_profile()))
 
 
+def registered_workspaces():
+    from aios_app.agent.workspace_registrations import RegistrationStore
+    rows = run(RegistrationStore(db).listing())
+    return gr.Dropdown(choices=[(
+        f"{r['character_id']} / {r['user_name']} / {r['worker_key']} / {r['root_hint']} / "
+        f"{'authorized' if r['enabled'] else 'needs authorization'} / "
+        f"{'online' if r['worker_online'] else 'offline'}", r['registration_id']) for r in rows], value=None), rows
+
+
+def authorize_workspace(registration, enabled, disposition):
+    from aios_app.agent.workspace_registrations import RegistrationStore, AuthorizationIn
+    return run(RegistrationStore(db).authorize(uid(registration), AuthorizationIn(enabled=enabled, disposition=disposition)))
+
+
 EXPERIMENT = experimental_profile()
 EXPERIMENT_TEMPLATE = EXPERIMENT.assignment_template
 
@@ -186,6 +200,23 @@ CHECKS = json.dumps(EXPERIMENT_TEMPLATE['required_checks'], indent=2)
 @register_tab
 def render():
     with gr.Tab("Workspace Delegation"):
+        gr.Markdown("### Persistent character workspace (recommended)\n"
+                    "In the client, choose Automatic chat routing, save the character, human routing key and workspace, "
+                    "then Register / validate workspace and start listening. Authorize it here once. "
+                    "Future chats for this character, human and scope attach automatically; no instance/link copying. "
+                    "The experimental-task capability is installed automatically. Chat memories are not merged. "
+                    "Only one workspace may be authorized per character/human/scope. "
+                    "Existing manual bindings are preserved; matching worker/path bindings can be adopted. "
+                    "Conflicting or revoked bindings require explicit reconciliation. Disabling cancels linked work.")
+        registered_refresh = gr.Button("Refresh registered workspaces")
+        registration = gr.Dropdown(label="Registered workspace", choices=[])
+        registered_report = gr.JSON(label="Registration / authorization status")
+        authorize_future = gr.Checkbox(label="Authorize this workspace for current and future chats", value=False)
+        registered_policy = gr.Dropdown(label="Standing workspace policy", choices=['require_approval','allow','deny'], value='require_approval')
+        authorize_save = gr.Button("Save workspace authorization")
+        registered_refresh.click(registered_workspaces, outputs=[registration, registered_report])
+        authorize_save.click(authorize_workspace, [registration, authorize_future, registered_policy], registered_report)
+        gr.Markdown("### Advanced: manual instance bindings\nExisting bindings and separate execution environments remain supported below.")
         gr.Markdown("### Attach a workspace to a conversation\n"
                     "Select the existing conversation and its client binding, then click Attach/link selected workspace. "
                     "A client already bound to that conversation can be used directly. No additional character instance is needed. "

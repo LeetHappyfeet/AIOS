@@ -27,6 +27,7 @@ from .environment_links import (
     append_event,
 )
 from .workspace_setup import WorkspaceSetup, ExecutionIn
+from .workspace_registrations import RegistrationStore, RegistrationIn, AuthorizationIn
 from .workspace_contract import Assignment, verification_status
 from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision, WorkDismissal
 
@@ -199,7 +200,8 @@ class WorkspaceStore:
                     if old[k] != getattr(req, k):
                         raise HTTPException(
                             409,
-                            "Workspace binding already belongs to a different profile",
+                            f"Workspace binding {old['binding_id']} already belongs to a different profile; "
+                            f"mismatched field: {k}. Restore its saved identity or use persistent registration.",
                         )
                 return public(old)
             new = await self.db.execute_returning_row(
@@ -716,6 +718,7 @@ def install_workspace_routes(app, db, hud_handler):
                 "work-admission-v1",
                 "delegation-readiness-v1",
                 "workspace-attachment-v1",
+                "persistent-workspaces-v1",
                 "character-session-discovery-v1",
                 "delegated-runs-v3",
                 "character-recall-v3",
@@ -744,6 +747,16 @@ def install_workspace_routes(app, db, hud_handler):
     @router.get("/v3/bindings")
     async def bindings(character_id: str):
         return {"bindings": await WorkspaceSetup(db).bindings(character_id)}
+
+    registrations = RegistrationStore(db)
+
+    @router.post("/registrations")
+    async def register_workspace(req: RegistrationIn):
+        return await registrations.register(req)
+
+    @router.post("/registrations/{registration_id}/claim")
+    async def claim_registered_workspace(registration_id: UUID, req: ClaimIn):
+        return await registrations.claim(registration_id, req.worker_key)
 
     @router.post("/bind")
     async def bind(req: BindingIn):
@@ -774,7 +787,9 @@ def install_workspace_routes(app, db, hud_handler):
 
     @router.post("/{binding_id}/claim")
     async def claim(binding_id: UUID, req: ClaimRequest):
-        await store.binding(binding_id, req.worker_key)
+        b = await store.binding(binding_id, req.worker_key)
+        if b['registration_id']:
+            raise HTTPException(409, 'This workspace uses automatic chat routing; listen through its registration')
         if req.protocol_version == 3:
             await db.execute(
                 "UPDATE aios.workspace_binding SET last_seen_at=now() WHERE binding_id=$1",
@@ -871,6 +886,14 @@ def install_workspace_routes(app, db, hud_handler):
     reviews = APIRouter(
         prefix="/workspace-client", dependencies=[Depends(authorize_review)]
     )
+
+    @reviews.get("/registrations")
+    async def list_registrations():
+        return {"registrations": await registrations.listing()}
+
+    @reviews.post("/registrations/{registration_id}/authorization")
+    async def authorize_registration(registration_id: UUID, req: AuthorizationIn):
+        return await registrations.authorize(registration_id, req)
 
     @reviews.post("/v3/execution-instances")
     async def create_execution(req: ExecutionIn):

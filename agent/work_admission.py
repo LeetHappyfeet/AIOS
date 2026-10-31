@@ -282,6 +282,8 @@ class WorkAdmission:
             source = await self.source(
                 instance_id, req.source_node_id, character=character_source
             )
+            from .workspace_registrations import RegistrationStore
+            await RegistrationStore(self.db).ensure_available(instance_id)
             duplicate = await self.db.fetchrow(
                 """SELECT r.* FROM aios.character_work_request r LEFT JOIN aios.workspace_run w USING(run_id)
                    WHERE r.instance_id=$1 AND r.source_timeline_id=$2 AND r.intent_hash=$3
@@ -665,6 +667,8 @@ class WorkAdmission:
             return result
 
     async def overlay(self, instance_id, timeline_id):
+        from .workspace_registrations import RegistrationStore
+        routing_problem = await RegistrationStore(self.db).ensure_available(instance_id)
         profiles = await self.db.fetch(
             """SELECT p.capability,p.purpose,p.description,
                        bool_or(b.last_seen_at>now()-interval '45 seconds') AS online
@@ -677,6 +681,8 @@ class WorkAdmission:
                  AND ((b.attached AND b.instance_id=l.origin_instance_id AND b.timeline_id=l.origin_source_timeline_id)
                       OR (NOT b.attached AND b.instance_id<>l.origin_instance_id AND b.timeline_id<>l.origin_source_timeline_id
                           AND COALESCE(ei.current_world_id,ei.world_id)<>COALESCE(oi.current_world_id,oi.world_id)))
+                 AND NOT EXISTS(SELECT 1 FROM aios.workspace_registration reg
+                      WHERE reg.registration_id=b.registration_id AND (NOT reg.enabled OR reg.disposition='deny'))
                  AND es.source_timeline_id=b.timeline_id
                  AND (b.attached OR es.source_head_node_id IS NOT DISTINCT FROM b.last_node_id)
                  AND NOT EXISTS(SELECT 1 FROM aios.character_action_policy ap
@@ -725,7 +731,7 @@ class WorkAdmission:
             else:
                 unavailable = "No eligible capability: instance pairing or workspace.run policy blocks execution. Ask the operator to check delegation readiness."
         return {
-            "unavailable_reason": unavailable,
+            "unavailable_reason": routing_problem or unavailable,
             "request_error": decode(error) if error else None,
             "history_count": history_count,
             "capabilities": [dict(p) for p in profiles],

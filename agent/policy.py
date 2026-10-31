@@ -26,9 +26,17 @@ class ActionPolicyService:
                WHERE instance_id=$1 AND action_type=$2""",
             instance_id, action_type,
         )
-        if row:
-            return str(row["disposition"])
-        return SAFE_DEFAULT.get(side_effect_class, "require_approval")
+        explicit = str(row["disposition"]) if row else None
+        if action_type == 'workspace.run':
+            registration = await self.db.fetchrow(
+                """SELECT r.enabled,r.disposition FROM aios.workspace_binding b
+                   JOIN aios.workspace_registration r USING(registration_id) WHERE b.instance_id=$1""",
+                instance_id)
+            if registration:
+                standing = registration['disposition'] if registration['enabled'] else 'deny'
+                rank = {'allow': 0, 'require_approval': 1, 'deny': 2}
+                return max((standing, explicit), key=rank.get) if explicit else standing
+        return explicit or SAFE_DEFAULT.get(side_effect_class, "require_approval")
 
     async def set_policy(
         self, instance_id: UUID, action_type: str, disposition: str, actor: str = "operator"

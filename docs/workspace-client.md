@@ -262,6 +262,71 @@ the real migration and lifecycle SQL, and stub the independent scene projector.
 Recall tests verify identity/lease/revocation boundaries using a stub retrieval
 backend; they do not claim live model or production recall validation.
 
+## Persistent workspaces and automatic chat routing (recommended)
+
+Update **both** AIOS and AIOS_Client, run `python -m aios_app.migrate`, and restart
+AIOS. Migration `20261031_01_workspace_registrations.sql` is additive: no existing
+bindings, links, runs, receipts or review history are removed or reassigned.
+
+1. In the client, select **Automatic chat routing**, enter the exact character ID,
+   human routing key and scope (normally `conversation`), saved AIOS/model
+   connections, worker label and workspace directory. Save the profile.
+2. Click **Register / validate workspace**, then **Listen for AIOS work**. A
+   registration needs no session, instance or link UUID. Registration alone grants
+   no execution authority; the listener reports `needs_authorization` until enabled.
+3. In AIOS Gradio **Workspace Delegation**, click **Refresh registered workspaces**,
+   select the worker/path, check **Authorize this workspace for current and future
+   chats**, choose its standing policy, and **Save workspace authorization**. This
+   is the one-time operator authorization. `require_approval` still requires each
+   task's decision; `allow` admits bounded requests under the configured profile.
+4. Fetch a fresh HUD in the chat. AIOS matches character + human + scope and creates
+   a branch-scoped attachment and experimental-task preset automatically. Subsequent
+   matching chats use the same registered worker without copying coordinates.
+
+Automatic routing uses a persistent registration, with a separate child binding for
+each chat. The existing v3 run/context/recall/lease/evidence protocol remains in use.
+The listener receives the actual binding ID with each claim and polls all of its
+registered chat bindings. One leased run at a time is admitted to that registration's
+physical workspace. Each run retains its original conversation, source timeline and
+branch ancestry; workspace events never become chat-source writes. Automatic routing
+never enables cross-chat memory sharing or substitutes the most recent chat.
+
+Existing profiles retain **Manual instance binding** until explicitly switched to
+Automatic. To migrate, stop the old listener, retain its worker label, human, scope
+and workspace path, switch routing mode, save, register, authorize once, then listen.
+Matching legacy bindings can be adopted without changing their workspace keys or
+historical run IDs. Bindings with a different worker/path, changed source coordinates,
+active old writers, or revoked links are not moved or revived; the HUD reports the
+conflict. Restore the saved identity or use a new chat after stopping the old worker.
+Do not run both old/manual and automatic listeners for the same workspace.
+
+One enabled registration is allowed per character/human/scope. Registering another
+host cannot silently replace the authorized one. Disable the previous registration
+explicitly before authorizing its replacement. Disabling cancels queued work,
+requests cancellation of running work and revokes its links; re-enabling does not
+resurrect revoked links. Existing instance policies remain additional restrictions:
+a standing `allow` never overrides an explicit chat `deny` or `require_approval`.
+This first pass installs the existing experimental-task preset on new attachments;
+advanced per-link profiles remain available in the manual controls.
+
+Worker-key routes:
+
+| Method / path | Purpose |
+| --- | --- |
+| `POST /workspace-client/registrations` | Idempotently register stable worker/path identity; no authority is granted. |
+| `POST /workspace-client/registrations/{id}/claim` | Heartbeat and claim across chat bindings; returns `binding_id`, `run`, and listener status. |
+
+Operator review-key routes: `GET /workspace-client/registrations` lists registered
+workspaces, and `POST /workspace-client/registrations/{id}/authorization` accepts
+`{"enabled":true,"disposition":"require_approval"}`. Trusted Gradio uses the same
+services directly. The worker key cannot authorize itself. The existing shared
+workspace key remains an operator credential, not per-character authentication.
+The protocol advertises `persistent-workspaces-v1`; old clients remain supported.
+
+An optional entity-catalog timeout produces a concise informational diagnostic and
+an unavailable catalog; it does not block work overlays or indicate binding failure.
+This change does not fix an underlying slow catalog query.
+
 ## Operator setup for chat delegation (Gradio)
 
 An existing conversation can use its already-bound client directly. A separate
