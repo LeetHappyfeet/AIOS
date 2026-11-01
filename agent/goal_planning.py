@@ -6,6 +6,7 @@ Only host-created inquiry/research operations may follow a validated proposal.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import json
 import logging
@@ -22,6 +23,8 @@ KINDS = {"personal", "procedure", "environment"}
 NEXT = {"internal_lookup", "research", "request_information", "wait"}
 LINKED_KNOWLEDGE_TIMEOUT = 0.75
 INQUIRY_RETRY_SECONDS = 60
+CONTINUATION_SECONDS = 45.0
+CONTINUATION_CLEANUP_SECONDS = 5.0
 PLAN_CONTRACT_VERSION = "goal-plan-text-v3-work-evidence"
 PLAN_STRATEGY_CHARACTERS = 600
 PLAN_STEP_CHARACTERS = 400
@@ -646,6 +649,33 @@ class GoalPlanningService:
                                          "dependency_kind": question["kind"]})
 
     async def run_continuation(self, plan_id: UUID, *, request_id: UUID | None = None) -> bool:
+        try:
+            return await asyncio.wait_for(
+                self._run_continuation(plan_id, request_id=request_id), CONTINUATION_SECONDS)
+        except asyncio.TimeoutError as exc:
+            from aios_app.pipeline.jobs import JobDeferred
+            logger.warning("Goal continuation deadline elapsed plan=%s budget_seconds=%s", plan_id, CONTINUATION_SECONDS)
+            raise JobDeferred("goal continuation deadline elapsed", delay_seconds=60) from exc
+
+    @asynccontextmanager
+    async def _continuation_transaction(self):
+        # The task owning this scope also owns all nested reads/writes. Never
+        # wrap an individual query in wait_for while retaining parent row locks.
+        async with self.db.atomic():
+            await self.db.execute(
+                "SELECT set_config('statement_timeout','3000',true), set_config('lock_timeout','750',true)")
+            yield
+
+    async def _clear_continuation(self, plan_id, token):
+        async with self._continuation_transaction():
+            await self.db.execute(
+                """UPDATE aios.character_goal_plan SET continuation=$3::jsonb,
+                   continuation_token=NULL,continuation_lease_until=NULL,
+                   continuation_check_at=now()+interval '60 seconds',updated_at=now()
+                   WHERE plan_id=$1 AND continuation_token=$2 AND status='waiting_information'""",
+                plan_id, token, json.dumps({"status": "unavailable", "reason": "continuation_interrupted"}))
+
+    async def _run_continuation(self, plan_id: UUID, *, request_id: UUID | None = None) -> bool:
         """Lease, release locks for discovery, then fence/revalidate admission."""
         from .goal_activity import eligible
         instance_id = await self.db.fetchval(
@@ -655,7 +685,7 @@ class GoalPlanningService:
             return False
         token = uuid4()
         request_id = request_id or uuid4()
-        async with self.db.atomic():
+        async with self._continuation_transaction():
             plan = await self.db.fetchrow(
                 """UPDATE aios.character_goal_plan SET continuation_token=$2,
                    continuation_lease_until=now()+interval '90 seconds'
@@ -672,14 +702,14 @@ class GoalPlanningService:
                     from aios_app.pipeline.jobs import JobDeferred
                     raise JobDeferred("plan continuation lease is held", delay_seconds=15)
                 return False
-        await self.db.execute(
-            "UPDATE aios.instance_goal_activity SET last_continuation_started_at=now() WHERE instance_id=$1",
-            plan["instance_id"])
         op = {"instance_id": plan["instance_id"], "operation_id": plan["operation_id"],
               "source_node_id": plan["source_node_id"], "input": {"plan_id": str(plan_id)}}
         proposal = mapping(plan["proposal"])
         try:
-            async with self.db.atomic():
+            await self.db.execute(
+                "UPDATE aios.instance_goal_activity SET last_continuation_started_at=now() WHERE instance_id=$1",
+                plan["instance_id"])
+            async with self._continuation_transaction():
                 snap = await self._locked_continuation(plan, token, request_id)
                 if snap is None:
                     return False
@@ -711,7 +741,7 @@ class GoalPlanningService:
                 await asyncio.wait_for(discover(), timeout=25.0)
             except asyncio.TimeoutError:
                 logger.warning("Goal continuation discovery window elapsed plan=%s", plan_id)
-            async with self.db.atomic():
+            async with self._continuation_transaction():
                 latest = await self._locked_continuation(plan, token, request_id)
                 if latest is None:
                     return False
@@ -737,13 +767,13 @@ class GoalPlanningService:
                        continuation_completed_request_id=$3
                        WHERE plan_id=$1 AND continuation_token=$2""", plan_id, token, request_id)
             return True
-        except Exception:
-            await self.db.execute(
-                """UPDATE aios.character_goal_plan SET continuation=$3::jsonb,
-                   continuation_token=NULL,continuation_lease_until=NULL,
-                   continuation_check_at=now()+interval '60 seconds',updated_at=now()
-                   WHERE plan_id=$1 AND continuation_token=$2 AND status='waiting_information'""",
-                plan_id, token, json.dumps({"status": "unavailable", "reason": "continuation_failed"}))
+        except BaseException:
+            # Timeout and lost-lease cancellation must release the plan token
+            # after transaction rollback, without an unbounded cleanup query.
+            try:
+                await asyncio.wait_for(self._clear_continuation(plan_id, token), CONTINUATION_CLEANUP_SECONDS)
+            except Exception:
+                logger.warning("Goal continuation cleanup deferred to lease expiry plan=%s", plan_id, exc_info=True)
             raise
 
     @staticmethod

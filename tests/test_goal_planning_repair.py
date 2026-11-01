@@ -83,7 +83,7 @@ async def test_runner_returns_deferred_lease_without_marking_job_done_or_failed(
     from aios_app import runner
     @asynccontextmanager
     async def connection():
-        yield SimpleNamespace(execute=AsyncMock())
+        yield SimpleNamespace(execute=AsyncMock(), fetchval=AsyncMock(return_value=True))
     db=SimpleNamespace(connection=connection,execute=AsyncMock())
     async def handler(*args): raise JobDeferred('provider cooling down',delay_seconds=60)
     async def heartbeat(*args,**kwargs): await asyncio.Event().wait()

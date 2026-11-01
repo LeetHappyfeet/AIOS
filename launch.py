@@ -444,7 +444,8 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
         f"LIVE {live_state} {live_queued}q/{live_running}r lag {live_lag} "
         f"in {live_in} out {live_out} | "
         f"GLOBAL {pipeline_state} {queued}q/{running}r lag {lag} "
-        f"in {in_rate} out {done_rate} | "
+        f"in {in_rate} out {done_rate} "
+        f"parked {int(pipeline.get('parked') or 0)} delayed {int(pipeline.get('delayed') or 0)} waiting {int(pipeline.get('waiting') or 0)} | "
         f"semantic {semantic_state} {semantic_detail} index {index_rate} | "
         f"topology {topology_state} {topology_stage} | "
         f"API {api_text}",
@@ -467,6 +468,7 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
                 f"{_stage_text(row.get('job_type'))}: "
                 f"{int(row.get('queued') or 0)}q/{int(row.get('running') or 0)}r "
                 f"oldest {_format_age(row.get('oldest_s'))} "
+                f"parked {int(row.get('parked') or 0)} delayed {int(row.get('delayed') or 0)} waiting {int(row.get('waiting') or 0)} "
                 f"[{row.get('resource')}/{row.get('lane')}]",
                 flush=True,
             )

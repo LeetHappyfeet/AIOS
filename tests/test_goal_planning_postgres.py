@@ -754,7 +754,8 @@ async def test_expired_lease_takeover_fences_late_worker(env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_worker_cancellation_is_recoverable_after_lease_expiry(env, monkeypatch):
+@pytest.mark.parametrize('cleanup_fails', [False, True])
+async def test_worker_cancellation_releases_token_or_recovers_after_expiry(env, monkeypatch, cleanup_fails):
     from aios_app.entity_memory.retrieval import RDFRecallService
     from unittest.mock import AsyncMock
     e=env
@@ -768,14 +769,39 @@ async def test_worker_cancellation_is_recoverable_after_lease_expiry(env, monkey
     plan_id=await e.db.fetchval('SELECT plan_id FROM aios.character_goal_plan')
     task=asyncio.create_task(e.service.run_continuation(plan_id))
     await asyncio.wait_for(entered.wait(),5)
+    if cleanup_fails:
+        monkeypatch.setattr(e.service, '_clear_continuation', AsyncMock(side_effect=RuntimeError('database unavailable')))
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert await e.db.fetchval('SELECT continuation_token IS NOT NULL FROM aios.character_goal_plan')
-    await e.db.execute("UPDATE aios.character_goal_plan SET continuation_lease_until=now()-interval '1 second'")
+    assert await e.db.fetchval('SELECT continuation_token IS NOT NULL FROM aios.character_goal_plan') == cleanup_fails
+    if cleanup_fails:
+        await e.db.execute("UPDATE aios.character_goal_plan SET continuation_lease_until=now()-interval '1 second'")
     monkeypatch.setattr(RDFRecallService,'discovery_revision',AsyncMock(return_value='recovered'))
     assert await e.service.run_continuation(plan_id)
     assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'")==1
+
+
+@pytest.mark.asyncio
+async def test_continuation_deadline_rolls_back_and_releases_token(env, monkeypatch):
+    from aios_app.entity_memory.retrieval import RDFRecallService
+    from aios_app.pipeline.jobs import JobDeferred
+    e = env
+    op = await running(e)
+    await e.service.propose(op)
+    plan_id = await e.db.fetchval('SELECT plan_id FROM aios.character_goal_plan')
+    entered = asyncio.Event()
+    async def blocked(*args):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(RDFRecallService, 'discovery_revision', blocked)
+    monkeypatch.setattr('aios_app.agent.goal_planning.CONTINUATION_SECONDS', 0.5)
+    with pytest.raises(JobDeferred, match='deadline'):
+        await e.service.run_continuation(plan_id)
+    assert entered.is_set()
+    assert await e.db.fetchval('SELECT continuation_token FROM aios.character_goal_plan') is None
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 0
+    assert await e.db.fetchval("SELECT current_setting('lock_timeout')") == '0'
 
 
 @pytest.mark.asyncio

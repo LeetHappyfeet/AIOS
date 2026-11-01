@@ -520,6 +520,7 @@ async def heartbeat_job(
         WHERE job_id=$1
           AND status='running'
           AND worker_id=$2
+          AND lease_expires_at > clock_timestamp()
         RETURNING job_id
         """,
         job_id,

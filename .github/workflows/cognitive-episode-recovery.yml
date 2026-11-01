@@ -29,6 +29,8 @@ jobs:
             tests/test_goal_review_source_contract.py \
             tests/test_goal_planning.py \
             tests/test_goal_planning_postgres.py \
+            tests/test_pipeline_liveness.py \
+            tests/test_pipeline_telemetry_postgres.py \
             tests/test_cognitive_job_identity.py \
             tests/test_cognitive_episode_postgres.py \
             tests/test_cognition_atomic_boundaries.py \
