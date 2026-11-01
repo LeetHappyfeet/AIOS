@@ -45,6 +45,9 @@ class AgentRuntimeStore:
             json.dumps(dict(payload or {}), default=str), int(priority), dedupe_key,
         )
         if row:
+            if source_type == "temporal_trigger":
+                from .goal_activity import grant_scheduled_window
+                await grant_scheduled_window(self.db, instance_id)
             wake_id = row["wake_id"]
         else:
             existing = await self.db.fetchrow(

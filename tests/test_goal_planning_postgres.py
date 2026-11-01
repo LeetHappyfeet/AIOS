@@ -18,6 +18,7 @@ pytestmark = pytest.mark.skipif(not os.getenv("AIOS_PGLITE_MODULE"), reason="PGl
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = '''
 CREATE SCHEMA aios;
+CREATE TABLE aios.pipeline_foreground_lineage(instance_id uuid,updated_at timestamptz);
 CREATE TABLE aios.character_instance(instance_id uuid PRIMARY KEY);
 CREATE TABLE aios.dag_node(node_id uuid PRIMARY KEY,timeline_id uuid,event_id bigint,
  speaker_id text,speaker_role text,message_text text);
@@ -60,12 +61,15 @@ async def env(monkeypatch):
     await con.query((ROOT/'migrations/current/20261023_01_goal_review_repair.sql').read_text(), exec=True)
     await con.query((ROOT/'migrations/current/20261025_01_goal_dependency_continuation.sql').read_text(), exec=True)
     await con.query((ROOT/'migrations/current/20261025_02_continuation_lookup_worker.sql').read_text(), exec=True)
+    await con.query((ROOT/'migrations/current/20261101_01_goal_activity_scheduling.sql').read_text(), exec=True)
     instance, goal, attempt, timeline, node = [uuid4() for _ in range(5)]
     await db.execute('INSERT INTO aios.character_instance VALUES($1)', instance)
     await db.execute("INSERT INTO aios.character_agent_goal(goal_id,instance_id,goal_text) VALUES($1,$2,'Learn to cook')", goal, instance)
     await db.execute('INSERT INTO aios.character_goal_attempt(attempt_id,goal_id,instance_id) VALUES($1,$2,$3)', attempt, goal, instance)
     await db.execute('INSERT INTO aios.character_runtime_state(instance_id,source_timeline_id,source_head_node_id) VALUES($1,$2,$3)', instance, timeline, node)
     await db.execute('INSERT INTO aios.character_agent_runtime(instance_id) VALUES($1)', instance)
+    from aios_app.agent.goal_activity import observe_interaction
+    await observe_interaction(db, instance)
     await db.execute("INSERT INTO aios.character_hud_readiness(instance_id,status) VALUES($1,'ready')", instance)
     await db.execute("INSERT INTO aios.ingest_event VALUES(1,NULL)")
     await db.execute("INSERT INTO aios.dag_node VALUES($1,$2,1,'Mia','user','You need to learn independently.')", node, timeline)
@@ -115,6 +119,8 @@ async def proposed(e, op):
 
 
 async def continue_background(e):
+    # Simulate the instance admission cooldown elapsing along with the plan deadline.
+    await e.db.execute("UPDATE aios.instance_goal_activity SET last_continuation_admitted_at=NULL")
     await e.service.continue_due()
     await drain_continuations(e)
 
@@ -434,6 +440,7 @@ async def test_real_revision_sql_failure_persists_dependency_then_recovers_witho
     await e.db.execute("UPDATE aios.character_goal_plan SET continuation_check_at=now()-interval '1 second'")
     from unittest.mock import AsyncMock
     monkeypatch.setattr('aios_app.inference.providers.InferenceProviderStore.routable', AsyncMock(return_value=[]))
+    await e.db.execute("UPDATE aios.instance_goal_activity SET last_continuation_admitted_at=NULL")
     assert await e.service.schedule_due() == 0
     await drain_continuations(e)
     assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 1

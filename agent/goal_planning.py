@@ -327,14 +327,23 @@ class GoalPlanningService:
                  WHERE g.status='active' AND ar.state<>'paused'
                  ORDER BY g.instance_id,g.priority,g.created_at
                ) primary_goal
+               JOIN aios.instance_goal_scheduling activity ON activity.instance_id=primary_goal.instance_id
                LEFT JOIN aios.character_goal_plan_poll poll ON poll.instance_id=primary_goal.instance_id
-               ORDER BY poll.checked_at NULLS FIRST,primary_goal.priority LIMIT $1""", max(1, min(limit, 32)))
+               WHERE activity.eligible AND (
+                   activity.last_planning_admitted_at IS NULL
+                   OR activity.last_planning_admitted_at < now()-make_interval(secs=>activity.poll_seconds)
+                   OR activity.last_interaction_at > activity.last_planning_admitted_at)
+               ORDER BY activity.activity_band,activity.last_planning_admitted_at NULLS FIRST,
+                        primary_goal.priority,primary_goal.instance_id LIMIT $1""", max(1, min(limit, 32)))
         count = 0
         for row in rows:
             try:
                 await self.db.execute(
                     """INSERT INTO aios.character_goal_plan_poll(instance_id) VALUES($1)
                        ON CONFLICT(instance_id) DO UPDATE SET checked_at=now()""", row["instance_id"])
+                await self.db.execute(
+                    "UPDATE aios.instance_goal_activity SET last_planning_admitted_at=now() WHERE instance_id=$1",
+                    row["instance_id"])
                 count += int(await self.schedule(row["instance_id"], row["goal_id"]))
             except Exception:
                 logger.exception("Goal planning admission failed goal=%s", row["goal_id"])
@@ -381,6 +390,10 @@ class GoalPlanningService:
             return True
 
     async def propose(self, op: dict) -> dict:
+        from .goal_activity import eligible
+        if not await eligible(self.db, op["instance_id"]):
+            from aios_app.pipeline.jobs import JobDeferred
+            raise JobDeferred("goal planning parked: inactive or paused instance", delay_seconds=300)
         payload = mapping(op["input"])
         plan_id, goal_id = UUID(payload["plan_id"]), UUID(payload["goal_id"])
         plan = await self.db.fetchrow("SELECT * FROM aios.character_goal_plan WHERE plan_id=$1 AND instance_id=$2",
@@ -514,10 +527,20 @@ class GoalPlanningService:
     async def continue_due(self, limit: int = 8) -> int:
         """Supervisor admission only: enqueue bounded, leased LOOKUP work."""
         rows = await self.db.fetch(
-            """SELECT plan_id FROM aios.character_goal_plan
-               WHERE status='waiting_information' AND continuation_check_at<=now()
-                 AND (continuation_lease_until IS NULL OR continuation_lease_until<=now())
-               ORDER BY continuation_check_at LIMIT $1""", max(1, min(limit, 32)))
+            """WITH candidates AS (
+                 SELECT DISTINCT ON (p.instance_id) p.plan_id,p.instance_id,p.continuation_check_at
+                 FROM aios.character_goal_plan p
+                 JOIN aios.instance_goal_scheduling a ON a.instance_id=p.instance_id
+                 WHERE p.status='waiting_information' AND p.continuation_check_at<=now()
+                   AND (p.continuation_lease_until IS NULL OR p.continuation_lease_until<=now())
+                   AND a.eligible AND (a.last_continuation_admitted_at IS NULL
+                     OR a.last_continuation_admitted_at < now()-make_interval(secs=>a.poll_seconds)
+                     OR a.last_interaction_at > a.last_continuation_admitted_at)
+                 ORDER BY p.instance_id,p.continuation_check_at,p.plan_id
+               ) SELECT c.plan_id FROM candidates c
+               JOIN aios.instance_goal_scheduling a USING(instance_id)
+               ORDER BY a.activity_band,a.last_continuation_admitted_at NULLS FIRST,
+                        c.continuation_check_at,c.plan_id LIMIT $1""", max(1, min(limit, 32)))
         count = 0
         for row in rows:
             try:
@@ -544,6 +567,9 @@ class GoalPlanningService:
                         priority=170)
                     if job is None:
                         raise RuntimeError("could not enqueue plan continuation")
+                    await self.db.execute(
+                        "UPDATE aios.instance_goal_activity SET last_continuation_admitted_at=now() WHERE instance_id=$1",
+                        plan["instance_id"])
                     await self.db.execute(
                         """UPDATE aios.character_goal_plan SET continuation_check_at=now()+interval '60 seconds'
                            WHERE plan_id=$1""", plan["plan_id"])
@@ -609,6 +635,12 @@ class GoalPlanningService:
 
     async def run_continuation(self, plan_id: UUID, *, request_id: UUID | None = None) -> bool:
         """Lease, release locks for discovery, then fence/revalidate admission."""
+        from .goal_activity import eligible
+        instance_id = await self.db.fetchval(
+            "SELECT instance_id FROM aios.character_goal_plan WHERE plan_id=$1", plan_id)
+        if not instance_id or not await eligible(self.db, instance_id):
+            logger.info("Goal continuation parked plan=%s reason=inactive_or_paused", plan_id)
+            return False
         token = uuid4()
         request_id = request_id or uuid4()
         async with self.db.atomic():
@@ -628,6 +660,9 @@ class GoalPlanningService:
                     from aios_app.pipeline.jobs import JobDeferred
                     raise JobDeferred("plan continuation lease is held", delay_seconds=15)
                 return False
+        await self.db.execute(
+            "UPDATE aios.instance_goal_activity SET last_continuation_started_at=now() WHERE instance_id=$1",
+            plan["instance_id"])
         op = {"instance_id": plan["instance_id"], "operation_id": plan["operation_id"],
               "source_node_id": plan["source_node_id"], "input": {"plan_id": str(plan_id)}}
         proposal = mapping(plan["proposal"])
@@ -669,6 +704,22 @@ class GoalPlanningService:
                 if latest is None:
                     return False
                 await self.continue_once(op, proposal, latest, discoveries=discoveries)
+                from .goal_activity import continuation_retry
+                signature, unchanged, delay = continuation_retry(
+                    plan.get("continuation_signature"), plan.get("continuation_unchanged_checks", 0),
+                    source=latest["context"].source_head_node_id,
+                    requirements=planning_requirements(latest["requirements"]), discoveries=discoveries)
+                # Fence against new interaction resetting retry state while discovery ran.
+                await self.db.execute(
+                    """UPDATE aios.character_goal_plan p
+                       SET continuation_signature=$3,continuation_unchanged_checks=$4,
+                           continuation_check_at=now()+make_interval(secs=>$5)
+                       FROM aios.instance_goal_activity a
+                       WHERE p.plan_id=$1 AND p.continuation_token=$2
+                         AND p.continuation_check_at IS NOT NULL
+                         AND a.instance_id=p.instance_id
+                         AND (a.last_interaction_at IS NULL OR a.last_interaction_at<=a.last_continuation_started_at)""",
+                    plan_id, token, signature, unchanged, delay)
                 await self.db.execute(
                     """UPDATE aios.character_goal_plan SET continuation_token=NULL,continuation_lease_until=NULL,
                        continuation_completed_request_id=$3

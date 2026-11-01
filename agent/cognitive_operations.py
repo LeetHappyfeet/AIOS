@@ -266,6 +266,9 @@ class CognitiveOperationEngine:
                 json.dumps({"kind":"provider_deferred","reason":str(exc)[:1000],
                             "deferral_count":count,"retry_delay_seconds":delay}))
             raise JobDeferred(str(exc), delay_seconds=delay) from exc
+        except JobDeferred:
+            # Activity parking preserves the operation and plan for resumption.
+            raise
         except Exception as exc:
             await self._fail(op, exc)
             raise

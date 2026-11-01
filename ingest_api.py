@@ -376,8 +376,11 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
         if disposition is IngestEventDisposition.NEW and affected_instance_ids:
             from aios_app.agent.admission import AutonomyAdmissionService
 
+            from aios_app.agent.goal_activity import observe_interaction
             admission = AutonomyAdmissionService(db)
             for instance_id in affected_instance_ids:
+                if req.speaker_type in {"user", "character"} and req.kind == "chat_message":
+                    await observe_interaction(db, instance_id)
                 await admission.observe_host_experience(
                     instance_id=instance_id,
                     source_node_id=node_id,
