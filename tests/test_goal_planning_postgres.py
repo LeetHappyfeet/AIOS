@@ -23,6 +23,11 @@ CREATE TABLE aios.character_instance(instance_id uuid PRIMARY KEY);
 CREATE TABLE aios.dag_node(node_id uuid PRIMARY KEY,timeline_id uuid,event_id bigint,
  speaker_id text,speaker_role text,message_text text);
 CREATE TABLE aios.ingest_event(event_id bigint PRIMARY KEY,superseded_at timestamptz);
+CREATE TABLE aios.dag_edge(timeline_id uuid,child_node_id uuid,parent_node_id uuid);
+CREATE TABLE aios.character_work_request(request_id uuid PRIMARY KEY,instance_id uuid,
+ source_timeline_id uuid,source_node_id uuid,goal_id uuid,attempt_id uuid,run_id uuid,
+ status text DEFAULT 'queued',created_at timestamptz DEFAULT now());
+CREATE TABLE aios.workspace_run(run_id uuid PRIMARY KEY,origin_instance_id uuid,status text,result jsonb);
 CREATE TABLE aios.character_agent_goal(goal_id uuid PRIMARY KEY,instance_id uuid,goal_text text,
  status text DEFAULT 'active',priority integer DEFAULT 100,created_at timestamptz DEFAULT now());
 CREATE TABLE aios.character_goal_attempt(attempt_id uuid PRIMARY KEY,goal_id uuid,instance_id uuid,
@@ -128,6 +133,70 @@ async def continue_background(e):
 async def running(e):
     assert await e.service.schedule(e.instance,e.goal)
     return dict(await e.db.fetchrow("UPDATE aios.character_cognitive_operation SET status='running' WHERE status='queued' RETURNING *"))
+
+
+@pytest.mark.asyncio
+async def test_worker_receipt_refreshes_plan_without_a_chat_turn(env):
+    from aios_app.agent.goal_planning import build_plan_prompt
+    e = env
+    op = await running(e)
+    await proposed(e, op)
+    before = await e.service.snapshot(e.instance, e.goal)
+    assert (await e.service.current(e.instance, e.goal))["context_current"]
+    run, request = uuid4(), uuid4()
+    result = {"result_summary": {"outcome": "partial", "summary": "Docker installed; no container exists",
+              "findings": ["Workspace writable", "Docker daemon running"],
+              "limitations": ["Container creation failed"]}}
+    await e.db.execute("INSERT INTO aios.workspace_run VALUES($1,$2,'finished',$3::jsonb)", run, e.instance, json.dumps(result))
+    await e.db.execute("""INSERT INTO aios.character_work_request(request_id,instance_id,source_timeline_id,
+                       source_node_id,goal_id,attempt_id,run_id) VALUES($1,$2,$3,$4,$5,$6,$7)""",
+                       request, e.instance, e.ctx.source_timeline_id, e.ctx.source_head_node_id, e.goal, e.attempt, run)
+    after = await e.service.snapshot(e.instance, e.goal)
+    assert before["fingerprint"] != after["fingerprint"]
+    assert after["work_receipts"][0]["outcome"] == "partial"
+    assert not (await e.service.current(e.instance, e.goal))["context_current"]
+    prompt, refs = build_plan_prompt("Build sandbox", [], [], [], {}, [], work_receipts=after["work_receipts"])
+    assert "Docker installed; no container exists" in prompt and "workspace:" + str(run) in refs
+    assert after["work_receipts"][0]["not_goal_completion"] is True
+    # Operational timestamp churn cannot force another inference.
+    assert (await e.service.snapshot(e.instance, e.goal))["fingerprint"] == after["fingerprint"]
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded'")
+    assert await e.service.schedule(e.instance, e.goal)
+
+
+@pytest.mark.asyncio
+async def test_planner_excludes_foreign_goal_attempt_and_superseded_work(env):
+    e = env
+    run, request = uuid4(), uuid4()
+    await e.db.execute("INSERT INTO aios.workspace_run VALUES($1,$2,'finished',$3::jsonb)", run, e.instance,
+                       json.dumps({"result_summary": {"summary": "Private to other goal"}}))
+    await e.db.execute("""INSERT INTO aios.character_work_request(request_id,instance_id,source_timeline_id,
+                       source_node_id,goal_id,attempt_id,run_id) VALUES($1,$2,$3,$4,$5,$6,$7)""",
+                       request, e.instance, e.ctx.source_timeline_id, e.ctx.source_head_node_id, uuid4(), uuid4(), run)
+    assert not (await e.service.snapshot(e.instance, e.goal))["work_receipts"]
+    await e.db.execute("UPDATE aios.character_work_request SET goal_id=$1,attempt_id=$2", e.goal, uuid4())
+    assert not (await e.service.snapshot(e.instance, e.goal))["work_receipts"]
+    await e.db.execute("UPDATE aios.character_work_request SET goal_id=NULL,attempt_id=NULL")
+    assert (await e.service.snapshot(e.instance, e.goal))["work_receipts"][0]["goal_linked"] is False
+    await e.db.execute("UPDATE aios.ingest_event SET superseded_at=now()")
+    assert not (await e.service.snapshot(e.instance, e.goal))["work_receipts"]
+
+
+@pytest.mark.asyncio
+async def test_worker_result_arriving_during_inference_invalidates_proposal(env):
+    e = env
+    op = await running(e)
+    async def infer(*args, **kwargs):
+        run, request = uuid4(), uuid4()
+        await e.db.execute("INSERT INTO aios.workspace_run VALUES($1,$2,'finished',$3::jsonb)", run, e.instance,
+                           json.dumps({"result_summary": {"summary": "Workspace now exists"}}))
+        await e.db.execute("""INSERT INTO aios.character_work_request(request_id,instance_id,source_timeline_id,
+                           source_node_id,goal_id,attempt_id,run_id) VALUES($1,$2,$3,$4,$5,$6,$7)""",
+                           request, e.instance, e.ctx.source_timeline_id, e.ctx.source_head_node_id, e.goal, e.attempt, run)
+        return SimpleNamespace(request_id=uuid4(), response=SimpleNamespace(raw=proposal()))
+    e.monkeypatch.setattr('aios_app.inference.InferenceBroker.infer', infer)
+    result = await e.service.propose(op)
+    assert result["status"] == "stale" and result["reason"] == "planning_inputs_changed"
 
 
 @pytest.mark.asyncio

@@ -457,6 +457,7 @@ class CharacterGoalService:
             "intent_type": intent_type,
             "horizon": horizon,
             "objective": objective,
+            "goal_admission_version": ADMISSION_VERSION if source_text is not None else None,
         }
         if polarity < 0:
             if active:

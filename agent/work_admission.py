@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .workspace_contract import Assignment, requires_read_only
+from .work_evidence import WorkEvidence, WorkResultQuery, result_tool_schema
 
 
 class WorkIntent(BaseModel):
@@ -24,6 +25,8 @@ class WorkIntent(BaseModel):
     purpose: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     objective: str = Field(min_length=3, max_length=4000)
     constraints: list[str] = Field(default_factory=list, max_length=10)
+    # Select an existing managed goal; AIOS resolves and validates its attempt.
+    goal_ref: UUID | None = Field(default=None, strict=False)
 
     @field_validator("objective")
     @classmethod
@@ -129,6 +132,13 @@ _ACTION = re.compile(r"<aios_action>(.*?)</aios_action>", re.I | re.S)
 
 
 def extract_work_intent(text):
+    raw = extract_work_action(text)
+    if raw is None or raw.get("op") != "request_work":
+        return None
+    return WorkIntent.model_validate({k: v for k, v in raw.items() if k != "op"})
+
+
+def extract_work_action(text):
     source = str(text or "")
     matches = []
     for match in _ACTION.finditer(source):
@@ -154,9 +164,9 @@ def extract_work_intent(text):
             "Use exactly one bounded structured action per character reply"
         )
     raw = json.loads(matches[0])
-    if not isinstance(raw, dict) or raw.get("op") != "request_work":
+    if not isinstance(raw, dict):
         return None
-    return WorkIntent.model_validate({k: v for k, v in raw.items() if k != "op"})
+    return raw
 
 
 class WorkAdmission:
@@ -231,7 +241,7 @@ class WorkAdmission:
             )
 
     async def request(self, instance_id, req, *, character_source=False):
-        intent = req.intent().model_dump()
+        intent = req.intent().model_dump(mode="json", exclude_none=True)
         digest = fingerprint(intent)
         async with self.db.atomic():
             # Resolve retries first; later chat turns must not duplicate an admitted job.
@@ -300,10 +310,14 @@ class WorkAdmission:
             goals = await self.db.fetch(
                 """SELECT g.goal_id,a.attempt_id FROM aios.character_agent_goal g JOIN aios.character_goal_attempt a USING(goal_id)
                    WHERE g.instance_id=$1 AND a.instance_id=$1 AND g.status='active'
-                     AND a.closed_at IS NULL AND a.source_timeline_id=$2 LIMIT 2""",
+                     AND a.closed_at IS NULL AND a.source_timeline_id=$2
+                     AND ($3::uuid IS NULL OR g.goal_id=$3) LIMIT 2 FOR SHARE OF g,a""",
                 instance_id,
                 source["source_timeline_id"],
+                req.goal_ref,
             )
+            if req.goal_ref is not None and len(goals) != 1:
+                raise HTTPException(409, "goal_ref must identify an active goal with an open attempt in this conversation")
             goal = dict(goals[0]) if len(goals) == 1 else {}
             row = await self.db.execute_returning_row(
                 """INSERT INTO aios.character_work_request(request_id,instance_id,source_timeline_id,source_node_id,intent,intent_hash,goal_id,attempt_id)
@@ -336,6 +350,8 @@ class WorkAdmission:
             "reason": row["reason"],
             "run_id": str(row["run_id"]) if row["run_id"] else None,
             "completed": False,
+            "goal_ref": str(row["goal_id"]) if row.get("goal_id") else None,
+            "goal_association": "linked" if row.get("goal_id") else "unlinked; select goal_ref when multiple goals are active",
         }
 
     async def state(self, row, status, reason, **extra):
@@ -635,6 +651,11 @@ class WorkAdmission:
             )
             if old:
                 saved = decode(old)
+                if saved.get("status") == "work_result":
+                    prior = saved["result"]
+                    visible = await WorkEvidence(self.db).rows(instance_id, run_id=UUID(prior["run_id"]))
+                    if not visible or WorkEvidence.projection(visible[0])[2] != prior["revision"]:
+                        return {"status": "needs_clarification", "reason": "Retained result changed or is no longer visible; issue a new read request.", "completed": False}
                 if saved.get("request_id"):
                     row = await self.db.fetchrow(
                         "SELECT * FROM aios.character_work_request WHERE request_id=$1",
@@ -643,24 +664,41 @@ class WorkAdmission:
                     return self.receipt(row)
                 return saved
             try:
-                intent = extract_work_intent(source["message_text"])
+                action = extract_work_action(source["message_text"])
+                if action and action.get("op") == "read_work_result":
+                    query = WorkResultQuery.model_validate({k: v for k, v in action.items() if k != "op"})
+                    result = await WorkEvidence(self.db).read(instance_id, query)
+                    # Store no request_id at the top level: it would be mistaken
+                    # for an execution admission on source replay.
+                    result = {"status": "work_result", "result": result}
+                    await self.db.execute(
+                        "INSERT INTO aios.work_source_receipt VALUES($1,$2,$3::jsonb) ON CONFLICT DO NOTHING",
+                        instance_id, node_id, json.dumps(result))
+                    return result
+                intent = (WorkIntent.model_validate({k: v for k, v in action.items() if k != "op"})
+                          if action and action.get("op") == "request_work" else None)
+            except HTTPException as exc:
+                result = {"status": "needs_clarification", "reason": str(exc.detail), "completed": False}
             except ValueError:
                 result = {
                     "status": "needs_clarification",
-                    "reason": "Invalid structured work request. Use one request_work action with capability, purpose, objective and optional constraints only.",
+                    "reason": "Invalid structured work action. Use one request_work or read_work_result action with its supported fields.",
                     "completed": False,
                 }
             else:
                 if intent is None:
                     return None
                 key = uuid5(NAMESPACE_URL, f"aios:work:{instance_id}:{node_id}")
-                result = await self.request(
-                    instance_id,
-                    WorkRequestIn(
-                        request_id=key, source_node_id=node_id, **intent.model_dump()
-                    ),
-                    character_source=True,
-                )
+                try:
+                    result = await self.request(
+                        instance_id,
+                        WorkRequestIn(
+                            request_id=key, source_node_id=node_id, **intent.model_dump()
+                        ),
+                        character_source=True,
+                    )
+                except HTTPException as exc:
+                    result = {"status": "needs_clarification", "reason": str(exc.detail), "completed": False}
             # Store source transport admission, not a transcript or model-generated fact.
             await self.db.execute(
                 "INSERT INTO aios.work_source_receipt VALUES($1,$2,$3::jsonb) ON CONFLICT DO NOTHING",
@@ -696,7 +734,7 @@ class WorkAdmission:
             timeline_id,
         )
         rows = await self.db.fetch(
-            """SELECT r.request_id,r.status,r.reason,r.intent,r.run_id,w.status AS execution_status
+            """SELECT r.request_id,r.status,r.reason,r.intent,r.goal_id,r.run_id,w.status AS execution_status
                FROM aios.character_work_request r LEFT JOIN aios.workspace_run w USING(run_id)
                    WHERE r.instance_id=$1 AND r.source_timeline_id=$2
                    AND r.status NOT IN ('denied','invalidated')
@@ -717,6 +755,28 @@ class WorkAdmission:
             instance_id,
             timeline_id,
         )
+        read_receipt = await self.db.fetchval(
+            """WITH RECURSIVE visible(node_id,depth) AS (
+                 SELECT source_head_node_id,0 FROM aios.character_runtime_state WHERE instance_id=$1
+                 UNION SELECT e.parent_node_id,v.depth+1 FROM visible v
+                   JOIN aios.dag_edge e ON e.child_node_id=v.node_id AND e.timeline_id=$2
+                   WHERE v.depth<512
+               )
+               SELECT s.result FROM aios.work_source_receipt s
+               JOIN aios.dag_node src ON src.node_id=s.source_node_id
+               JOIN aios.character_runtime_state rs ON rs.instance_id=s.instance_id
+               JOIN aios.dag_node head ON head.node_id=rs.source_head_node_id
+               JOIN aios.ingest_event ie ON ie.event_id=src.event_id AND ie.superseded_at IS NULL
+               WHERE s.instance_id=$1 AND rs.source_timeline_id=$2 AND src.timeline_id=$2
+                 AND head.timeline_id=$2 AND src.event_id<=head.event_id
+                 AND EXISTS(SELECT 1 FROM visible WHERE node_id=s.source_node_id)
+                 AND s.result->>'status'='work_result'
+               ORDER BY src.event_id DESC LIMIT 1""", instance_id, timeline_id)
+        retrieved_result = decode(read_receipt).get("result") if read_receipt else None
+        if retrieved_result:
+            visible = await WorkEvidence(self.db).rows(instance_id, run_id=UUID(retrieved_result["run_id"]))
+            if not visible or WorkEvidence.projection(visible[0])[2] != retrieved_result["revision"]:
+                retrieved_result = None
         unavailable = None
         if not profiles:
             links = await self.db.fetch(
@@ -737,6 +797,8 @@ class WorkAdmission:
         return {
             "unavailable_reason": routing_problem or unavailable,
             "request_error": decode(error) if error else None,
+            "retrieved_result": retrieved_result,
+            "result_tool": result_tool_schema(),
             "history_count": history_count,
             "capabilities": [dict(p) for p in profiles],
             "requests": [
@@ -790,7 +852,7 @@ def register_work_action(db, registry):
             WorkRequestIn(
                 request_id=uuid5(
                     NAMESPACE_URL,
-                    f"aios:work-action:{instance_id}:{source}:{fingerprint(intent.model_dump())}",
+                    f"aios:work-action:{instance_id}:{source}:{fingerprint(intent.model_dump(mode='json', exclude_none=True))}",
                 ),
                 source_node_id=source,
                 **intent.model_dump(),
@@ -809,3 +871,13 @@ def register_work_action(db, registry):
             description="Propose purpose-based work to AIOS admission. A receipt is not execution or goal completion.",
         )
     )
+    async def read_result(instance_id, arguments):
+        return await WorkEvidence(db).read(instance_id, WorkResultQuery.model_validate(
+            {k: v for k, v in arguments.items() if not k.startswith("_")}))
+
+    registry.register(ActionSpec(
+        name="work.result", schema=result_tool_schema()["function"]["parameters"],
+        side_effect_class="read_only", allowed_worker_classes=frozenset({"executive", "planning"}),
+        handler=read_result, result_mode="final", capability_class="workspace",
+        description="Read retained worker evidence; never executes work or grants authority.",
+    ))

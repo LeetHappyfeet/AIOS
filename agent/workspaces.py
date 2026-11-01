@@ -30,6 +30,7 @@ from .workspace_setup import WorkspaceSetup, ExecutionIn
 from .workspace_registrations import RegistrationStore, RegistrationIn, AuthorizationIn
 from .workspace_contract import Assignment, verification_status
 from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision, WorkDismissal
+from .work_evidence import WorkEvidence, WorkResultQuery
 
 
 def decode(value):
@@ -941,6 +942,10 @@ def install_workspace_routes(app, db, hud_handler):
     @requests.post("/{instance_id}/work/request")
     async def request_work(instance_id: UUID, req: WorkRequestIn):
         return await WorkAdmission(db).request(instance_id, req)
+
+    @requests.post("/{instance_id}/work/result")
+    async def read_work_result(instance_id: UUID, req: WorkResultQuery):
+        return await WorkEvidence(db).read(instance_id, req)
 
     app.include_router(requests)
 

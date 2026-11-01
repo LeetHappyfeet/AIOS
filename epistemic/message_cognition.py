@@ -11,7 +11,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v11-source-goal-admission"
+INTERPRETER_VERSION = "message-cognition-v12-source-goal-admission"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")

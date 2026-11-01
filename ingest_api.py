@@ -458,7 +458,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
     # Run after source adoption; a work-admission failure must not corrupt ingestion.
     if (disposition is IngestEventDisposition.NEW and req.speaker_type == "character"
             and req.speaker_id == req.character_id and "<aios_action>" in message_text.lower()
-            and 'request_work' in message_text):
+            and any(op in message_text for op in ('request_work', 'read_work_result'))):
         from aios_app.agent.work_admission import ingest_work_request
         await ingest_work_request(db, affected_instance_ids, node_id)
     return _ingest_out(

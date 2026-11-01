@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-ADMISSION_VERSION = "goal-source-admission-v1"
+ADMISSION_VERSION = "goal-source-admission-v2"
 
 # Narrator interpretations containing an embedded first-person construction
 # are not assertions made by that grammatical first person.
@@ -60,6 +60,18 @@ _EXTENDED_TIME = re.compile(
     r"(?:nights?|days?|weeks?|months?|years?))\b", re.I,
 )
 
+# These constructions describe the delivery of the current utterance, rather
+# than an objective that should survive it. A future communication task such as
+# "tell Mia the results tomorrow" is deliberately not excluded.
+_DISCOURSE_ACTION = re.compile(
+    r"^(?:to\s+)?(?:say|tell|mention|repeat|ask)\b.*\b(?:once|again|this|that)\b|"
+    r"^(?:to\s+)?(?:have\s+to|get\s+to)\s+(?:watch|listen|hear|say)\b|"
+    r"^(?:to\s+)?(?:be\s+)?on\s+the\s+record\b", re.I,
+)
+_INCOMPLETE_OBJECTIVE = re.compile(
+    r"^(?:to\s+)?(?:was|were|is|are)\b|^(?:to\s+)?(?:a|an|the)\s*$", re.I,
+)
+
 
 @dataclass(frozen=True)
 class GoalAdmission:
@@ -99,6 +111,10 @@ def review_goal_source(
         return GoalAdmission("insufficient_commitment", "hypothetical_intention", "source")
     if not action.strip():
         return GoalAdmission("insufficient_commitment", "empty_objective", "unknown")
+    if _INCOMPLETE_OBJECTIVE.search(action):
+        return GoalAdmission("insufficient_commitment", "incomplete_objective", "source")
+    if _DISCOURSE_ACTION.search(action) and not _EXTENDED_TIME.search(source):
+        return GoalAdmission("scene_only", "current_utterance_or_reaction", "source")
     if _BARE_REFERENCE.search(action):
         return GoalAdmission("unresolved_reference",
                              "objective_contains_unresolved_reference", "source")
