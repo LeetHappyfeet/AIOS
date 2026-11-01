@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-ADMISSION_VERSION = "goal-source-admission-v2"
+ADMISSION_VERSION = "goal-source-admission-v3"
 
 # Narrator interpretations containing an embedded first-person construction
 # are not assertions made by that grammatical first person.
@@ -34,7 +34,7 @@ _HYPOTHETICAL_LEAD = re.compile(
     re.I | re.S,
 )
 _BARE_REFERENCE = re.compile(
-    r"\b(?:it|them|this|that|these|those|one|ones)\b"
+    r"\b(?:it|them)\b|\b(?:this|that|these|those|one|ones)\b"
     r"(?=\s*(?:$|[,.!?;:]|\b(?:in|on|over|under|down|up|away|out|back)\b))",
     re.I,
 )
@@ -69,7 +69,19 @@ _DISCOURSE_ACTION = re.compile(
     r"^(?:to\s+)?(?:be\s+)?on\s+the\s+record\b", re.I,
 )
 _INCOMPLETE_OBJECTIVE = re.compile(
-    r"^(?:to\s+)?(?:was|were|is|are)\b|^(?:to\s+)?(?:a|an|the)\s*$", re.I,
+    r"^(?:to\s+)?(?:was|were|is|are)\b|^(?:to\s+)?(?:a|an|the)\s*$|"
+    r"\b(?:how|what|where|whether)\s*$", re.I,
+)
+
+# These are candidate desires/positions, not sufficiently specified executive
+# objectives. Preserve them in source/audit rather than inventing a task.
+_INDEFINITE_OUTCOME = re.compile(r"\b(?:somewhere|something|anything|whatever)\b", re.I)
+_ABSTRACT_STATE = re.compile(r"^(?:to\s+)?(?:be|feel)\s+(?!able\s+to\b)", re.I)
+_FIGURATIVE_OBJECTIVE = re.compile(r"\bdie\s+on\s+(?:(?:this|that|the|a|my)\s+)?hill\b", re.I)
+_COMMUNICATION = re.compile(r"^(?:to\s+)?(?:say|tell|mention|repeat|ask)\b", re.I)
+_EMBEDDED_TOPIC = re.compile(
+    r"\b(?:whatever|what\s+(?:I|you|we|they)(?:'d|\s+would)?\s+"
+    r"(?:really\s+)?(?:like|want|need))\b", re.I,
 )
 
 
@@ -96,7 +108,8 @@ def review_goal_source(
     preceding narrator language available to the attribution review.
     """
     source = str(source_text or "").replace("’", "'")
-    action = " ".join(str(objective or "").split())
+    # Markdown emphasis is presentation, not an escape from source review.
+    action = " ".join(re.sub(r"[*_`]+", "", str(objective or "")).split())
     if not source.strip():
         return GoalAdmission("attribution_unresolved", "missing_source_text", "unknown")
     prefix = source[:match_span[0]] if match_span is not None else source
@@ -113,6 +126,10 @@ def review_goal_source(
         return GoalAdmission("insufficient_commitment", "empty_objective", "unknown")
     if _INCOMPLETE_OBJECTIVE.search(action):
         return GoalAdmission("insufficient_commitment", "incomplete_objective", "source")
+    if _FIGURATIVE_OBJECTIVE.search(action):
+        return GoalAdmission("nonliteral_statement", "figurative_objective", "source")
+    if _COMMUNICATION.search(action) and _EMBEDDED_TOPIC.search(action):
+        return GoalAdmission("insufficient_commitment", "unresolved_communication_topic", "source")
     if _DISCOURSE_ACTION.search(action) and not _EXTENDED_TIME.search(source):
         return GoalAdmission("scene_only", "current_utterance_or_reaction", "source")
     if _BARE_REFERENCE.search(action):
@@ -124,4 +141,11 @@ def review_goal_source(
          or _LOCATIVE_ACTION.search(action))
             and (_NEAR_TIME.search(source) or not _EXTENDED_TIME.search(source))):
         return GoalAdmission("scene_only", "transient_scene_action", "source")
+    if _INDEFINITE_OUTCOME.search(action) or _ABSTRACT_STATE.search(action):
+        return GoalAdmission("insufficient_commitment", "unspecified_desired_outcome", "desire")
+    # An objective must at least name an action and its complement. Bare
+    # intention words are candidates for later review, not executive authority.
+    words = re.findall(r"[A-Za-z]+", re.sub(r"^to\s+", "", action, flags=re.I))
+    if len(words) < 2:
+        return GoalAdmission("insufficient_commitment", "incomplete_objective", "source")
     return GoalAdmission("admit", "source_grounded_managed_intention", "source")

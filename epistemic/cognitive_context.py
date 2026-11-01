@@ -677,7 +677,7 @@ class CognitiveContextService:
                 "proposition_id": f"cognitive:{row['unit_id']}",
                 "topic_key": row.get("topic_key"),
                 "text": text,
-                "subject_norm": semantic_owner or "",
+                "subject_norm": "" if meta.get("text_representation") == "source_statement" else semantic_owner or "",
                 "predicate_norm": parsed_predicate or "",
                 "object_norm": parsed_object or "",
                 "polarity": row.get("polarity") or 1,
@@ -703,6 +703,8 @@ class CognitiveContextService:
                 "cognitive_persistence": meta.get("persistence"),
                 "character_owned": bool(meta.get("character_owned")),
                 "parse_reason": meta.get("parse_reason"),
+                "source_text": meta.get("source_text"),
+                "text_representation": meta.get("text_representation"),
                 "tier": 0 if kind in {"GOAL", "RULE"} else 1,
                 # High enough to remain immediately available when enrichment
                 # is late, but no longer an authority score. Recall selection

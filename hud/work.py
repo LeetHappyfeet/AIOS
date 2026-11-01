@@ -6,7 +6,7 @@ from aios_app.hud.work_results import compact, result_view
 ACTIVE = {"queued", "running"}
 
 
-def render_work_results(work, tasks):
+def render_work_results(work, tasks, *, compact_mode=False):
     lines = []
     requests = work.get("requests") or []
     by_run = {r["run_id"]: r for r in requests if r.get("run_id")}
@@ -47,6 +47,29 @@ def render_work_results(work, tasks):
         view = task.get("result_summary")
         if not isinstance(view, dict):
             view = result_view({("error" if task["status"] in {"failed", "interrupted", "cancelled"} else "report"): task.get("summary")}, {})
+        if compact_mode:
+            # The final HUD has a shared budget. Offer complete short records
+            # instead of one giant report entry that cannot fit at all. Keep
+            # failure/limitations ahead of optional findings and raw logs.
+            lines.append(f"- Run {task['run_id']}: {task['status']}; goal review: {task.get('goal_review') or 'not linked'} — {compact(title, 100)}")
+            if request_id:
+                lines.append(f"  Request: {request_id}")
+            if view["error"]:
+                lines.append("  Worker-reported error: " + compact(view["error"], 180))
+            elif task["status"] in {"failed", "interrupted", "cancelled"}:
+                lines.append("  Failure/stop reason unavailable; no final answer is established.")
+            if task["status"] in ACTIVE:
+                lines.append("  Progress (worker report): " + compact(task.get("summary"), 180))
+                if task.get("cancel_requested"):
+                    lines.append("  Cancellation requested; termination not yet reported.")
+            lines.append("  Worker summary: " + compact(view["summary"] or view.get("report_excerpt"), 200))
+            for limitation in view["limitations"][:2]:
+                lines.append("  Worker-reported limitation: " + compact(limitation, 140))
+            lines.append("  Checks: " + compact(view["verification_scope"], 120))
+            for finding in view["findings"][:2]:
+                lines.append("  Worker-reported finding: " + compact(finding, 180))
+            lines.append("  Full report/content retained; use read_work_result when available. Do not repeat work for omitted details.")
+            continue
         entry = [f"- {title or 'Workspace task'}",
                  f"  Run: {task['run_id']}" + (f"; request: {request_id}" if request_id else ""),
                  f"  Execution: {task['status']}; goal review: {task.get('goal_review') or 'not linked'}"]

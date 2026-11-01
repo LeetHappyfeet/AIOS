@@ -19,7 +19,7 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
-HUD_VERSION = "hud-v5"
+HUD_VERSION = "hud-v6"
 
 
 @dataclass(frozen=True)
@@ -71,9 +71,13 @@ def _trim_to_budget(
         if selected and used + cost > token_cap:
             continue
         if not selected and cost > token_cap:
+            if token_cap <= 0:
+                break
+            from aios_app.hud.text_budget import excerpt
             clipped = dict(item)
             text = text_fn(item)
-            clipped["text"] = text[: max(64, token_cap * 4)]
+            clipped["text"] = excerpt(text, token_cap * 4)
+            clipped["hud_excerpt"] = True
             selected.append(clipped)
             break
         selected.append(item)
@@ -335,11 +339,9 @@ class HUDAssembler:
             section_caps["rules"],
             lambda x: x.get("text") or x.get("rule_key") or "",
         )
-        event_items = _trim_to_budget(
-            event_items,
-            section_caps["recent_events"],
-            lambda x: x.get("message_text") or x.get("text") or "",
-        )
+        # Budget event projections in the renderer, where speaker labels and
+        # the newest user turn can be counted/reserved together. Do not clip a
+        # raw message before choosing which source turn matters.
 
         corpus_references = _budget_corpus_references(
             cognitive_snapshot.corpus_references,

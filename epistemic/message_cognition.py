@@ -11,13 +11,13 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v12-source-goal-admission"
+INTERPRETER_VERSION = "message-cognition-v13-source-preserving"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+", re.I)
 _NEGATION_RE = re.compile(
-    r"\b(?:not|never|no|no\s+longer|cannot|can't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|don't|doesn't|didn't|won't)\b",
+    r"\b(?:not|never|no|nobody|nothing|nowhere|none|neither|nor|no\s+longer|cannot|can't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|don't|doesn't|didn't|won't)\b",
     re.I,
 )
 _QUESTION_RE = re.compile(r"\?\s*$")
@@ -313,6 +313,14 @@ def _bounded_goal_candidate(candidate: ParsedCandidate) -> ParsedCandidate:
     """Do not combine a negated desire with a subsequent independent clause."""
     objective = re.split(r"[,;]\s*(?:but|and)\b", candidate.object_text,
                          maxsplit=1, flags=re.I)[0].strip()
+    # Closing dialogue attribution is not part of the objective. Otherwise
+    # 'I'll learn how," Renamon said' looks complete only because of the name
+    # and reporting verb, bypassing the incomplete-objective check.
+    objective = re.split(
+        r'[,!?]?["”]\s*,?\s*(?:[A-Za-z][A-Za-z0-9_-]*)\s+'
+        r'(?:said|asked|replied|added|murmured|whispered)\b',
+        objective, maxsplit=1, flags=re.I,
+    )[0].strip(" ,")
     return ParsedCandidate(candidate.kind, candidate.subject_text, candidate.predicate,
                            objective, candidate.confidence, candidate.reason,
                            candidate.match_span)
@@ -534,12 +542,28 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
         if candidate.kind in {"MEMORY", "BELIEF", "GOAL", "RULE"} and not character_owned:
             reject(index, "character_ownership_unresolved", sentence)
             continue
+        # A sentence-wide negative token does not establish the polarity of
+        # an extracted clause ("No one ... if you aren't ...", "I believe
+        # she isn't ..."). Keep the whole assertion until structural cognition
+        # can resolve its scope. Its truth is the truth of the source statement,
+        # not the negation of a lossy affirmative SPO rewrite.
+        simple_negative_state = (
+            candidate.kind == "STATE" and candidate.predicate.lower() in _NEGATED_VERBS
+            and not _NEGATION_RE.search(candidate.object_text)
+            and not re.search(r"\b(?:if|unless|because|but|and|or)\b", candidate.object_text, re.I)
+            and _STATE_RE.fullmatch(sentence.rstrip(".!?")) is not None
+        )
+        source_statement = (candidate.kind != "GOAL" and not simple_negative_state
+                            and bool(_NEGATION_RE.search(sentence)))
+        if source_statement:
+            candidate = replace(candidate, predicate="source_statement", object_text=sentence)
         polarity = (
+            1 if source_statement else
             1 if candidate.reason == "expressed_scene_refusal"
             else _goal_polarity(sentence, candidate) if candidate.kind == "GOAL"
             else (-1 if _NEGATION_RE.search(sentence) else 1)
         )
-        canonical = _canonical_text(candidate, owner=owner)
+        canonical = sentence if source_statement else _canonical_text(candidate, owner=owner)
         objective = _clean_object(candidate.object_text) if candidate.kind == "GOAL" else None
         topic_key = cognition_topic_key(
             canonical, character_id=character_id, owner=owner, kind=candidate.kind,
@@ -567,8 +591,10 @@ def interpret_message(text: str, *, character_id: str, speaker_id: str | None, s
                 "message_scope": True, "speaker_id": speaker_id, "speaker_role": speaker_role,
                 "viewpoint_id": viewpoint_id, "perspective_id": perspective_id,
                 "semantic_owner": owner, "character_owned": character_owned,
-                "sentence_index": index, "source_text": sentence[:500],
-                "predicate": candidate.predicate.lower(), "object": _clean_object(candidate.object_text),
+                "sentence_index": index, "source_text": sentence,
+                "text_representation": "source_statement" if source_statement else "canonical",
+                "predicate": candidate.predicate.lower(),
+                "object": sentence if source_statement else _clean_object(candidate.object_text),
                 "parse_reason": candidate.reason,
                 "source_span": list(candidate.match_span) if candidate.match_span else None,
                 "goal_admission_version": ADMISSION_VERSION if candidate.kind == "GOAL" else None,
