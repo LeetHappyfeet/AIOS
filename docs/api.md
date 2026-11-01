@@ -113,6 +113,64 @@ operation. `source_head_node_id` can be null. `source_current` tells you whether
 this result is at the active head. Successful ingestion does not promise that
 claims, beliefs, topology, or goals have completed processing.
 
+Exact durable replays now use indexed SELECTs before the ingest upsert. A missing,
+errored, pending-participant, or superseded event still enters recovery/reselection.
+For default SillyTavern identities, v2 dedupe keys include message provenance and
+kind so same-text swipe/speaker corrections are not discarded. Matching legacy
+keys remain reusable. Explicit caller-supplied dedupe keys retain their contract.
+Apply `20261101_01_ingest_sync_replay.sql` with the normal migration workflow to
+index event-to-DAG lookups.
+
+## POST /instance/{instance_id}/sync
+
+`ingest-sync-v1` is a bounded, read-only receipt check. It does not ingest message
+bodies, advance cursors, invalidate HUDs, create sessions, or dispatch work.
+
+```json
+{
+  "session_id": "11111111-1111-4111-8111-111111111111",
+  "character_id": "Alex",
+  "user_name": "Mia",
+  "scope_key": "conversation",
+  "source_head_node_id": "22222222-2222-4222-8222-222222222222",
+  "receipts": [{
+    "message_id": 0,
+    "event_id": 42,
+    "node_id": "22222222-2222-4222-8222-222222222222",
+    "speaker_type": "character",
+    "speaker_id": "Alex",
+    "text_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "message_uuid": "saved-client-message-uuid",
+    "swipe_id": 0
+  }]
+}
+```
+
+`text_hash` is lowercase SHA-256 of the exact UTF-8 message text. Send the stored
+UUID/swipe values, including null for legacy messages without those fields.
+At most 256 unique message slots are accepted per page. Validate the complete
+local manifest page by page against the same head; never infer whole-transcript
+validity from an empty page or a sampled subset. Extra fields are rejected.
+
+The response includes current source coordinates, `head_matches`, `replay_required`,
+`checked_count`, and `receipts: [{message_id, valid, reason}]`. A receipt is valid
+only if its event/node, session/perspective, speaker, hash, UUID, swipe, active
+status, and current source-branch membership match. Deletions and reordered slots
+still require explicit client-side protection/retraction; the endpoint does not
+repair them. `complete_transcript_verified` is always false because the server
+cannot know whether a client omitted messages.
+
+Unknown instances return 404; mismatched session/character/user/scope returns
+409; malformed/oversized/duplicate-slot pages return 422; SQL timeout returns 503.
+The query uses one database snapshot, a two-second SQL budget, and a window of at
+most 4097 distinct branch nodes. `branch_window_exhausted` means older receipts
+may be unvalidated; never treat them as verified or infer that they were deleted.
+These are point-in-time checks: concurrent writers still need reconciliation.
+
+Existing MemoryVaultIngest builds remain compatible. The new manifest endpoint
+must be called by a client to obtain full receipt validation; its existing
+head-only checkpoint check does not automatically gain that behavior.
+
 ## POST /instance/{instance_id}/hud
 
 | Query parameter | Default | Meaning |
@@ -127,7 +185,18 @@ also take time. Set the client timeout separately.
 
 The response contains `instance_id`, `generation_ready`, `freshness`, `frame`,
 and `text`. `frame` is structured state; `text` is the canonical rendered HUD.
-Both come from the same preparation request.
+Both come from the same preparation request. Fresh work/task overlays are loaded
+even when the cognitive frame is cached. Delivery then rechecks source, runtime,
+cognitive, and profile revisions; a change during overlay loading makes
+`generation_ready=false` with `freshness.delivery_reason` set.
+
+`hud_revision` is returned at the top level and in `freshness`, alongside
+`task_event_watermark`; `freshness` also exposes cognitive/profile revisions.
+The revision hashes the delivered text, work capabilities/requests, task results,
+and source/runtime metadata. Task sequences are per run: their maximum is a
+diagnostic watermark, not a complete cache validator. A matching chat head is
+also insufficient to reuse a client-cached HUD. Refresh through `/hud`; this
+version does not implement conditional HTTP/304 requests.
 
 Check `generation_ready` before generation. An HTTP 200 may still contain false.
 Inspect `freshness.requested_source_node_id`, `source_head_node_id`,

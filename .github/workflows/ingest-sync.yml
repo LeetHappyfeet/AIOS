@@ -1,0 +1,29 @@
+name: Ingest synchronization and HUD delivery
+on:
+  push:
+    paths: ['ingest_api.py', 'ingest_sync.py', 'ingest_identity.py', 'main.py', 'main_legacy.py', 'hud/delivery.py', 'migrations/current/20261101_01_ingest_sync_replay.sql', 'tests/test_ingest*', 'tests/test_hud_delivery.py', '.github/workflows/ingest-sync.yml']
+  pull_request:
+    paths: ['ingest_api.py', 'ingest_sync.py', 'ingest_identity.py', 'main.py', 'main_legacy.py', 'hud/delivery.py', 'migrations/current/20261101_01_ingest_sync_replay.sql', 'tests/test_ingest*', 'tests/test_hud_delivery.py', '.github/workflows/ingest-sync.yml']
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install pytest pytest-asyncio fastapi==0.115.6 asyncpg pydantic python-dotenv requests qdrant-client beautifulsoup4 httpx
+      - run: npm install --prefix "$RUNNER_TEMP/ingest-test-deps" @electric-sql/pglite
+      - name: Test bounded sync, replay identity, and HUD delivery
+        run: |
+          mkdir -p "$RUNNER_TEMP/aios-pythonpath"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" \
+          AIOS_PGLITE_MODULE="$RUNNER_TEMP/ingest-test-deps/node_modules/@electric-sql/pglite/dist/index.js" \
+          python -m pytest -q tests/test_ingest_sync.py tests/test_ingest_sync_postgres.py \
+            tests/test_ingest_replay_pipeline.py tests/test_ingest_replay_short_circuit.py \
+            tests/test_ingest_route_boundary.py tests/test_ingest_identity.py \
+            tests/test_hud_delivery.py tests/test_hud_singleflight.py tests/test_work_results.py

@@ -645,13 +645,12 @@ async def _prepare_hud_response(
     )
     frame.setdefault("hud", {})["task_event_watermark"] = max(
         (task.get("sequence") or 0 for task in frame["remote_tasks"]), default=0)
-    return {
-        "instance_id": instance_id,
-        "generation_ready": bool(frame.get("hud", {}).get("generation_ready")),
-        "freshness": frame.get("hud", {}).get("freshness", {}),
-        "frame": frame,
-        "text": render_hud_text(frame),
-    }
+    # Cursor/cognition can change while fresh work overlays are being read.
+    # Never label an earlier cached boundary generation-ready in that case.
+    from aios_app.hud.delivery import delivery_response
+    after = await world_runtime.get_state(instance_id)
+    # Render after readiness is finalized so console text agrees with JSON.
+    return delivery_response(instance_id, frame, after, render_hud_text)
 
 
 @app.post("/instance/{instance_id}/hud")
