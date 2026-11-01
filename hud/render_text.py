@@ -5,6 +5,8 @@ from typing import Any, Mapping
 
 from aios_app.hud.recent_events import normalized_text, project_recent_events
 from aios_app.hud.text_budget import RenderedBudget, result_page
+from aios_app.agent.references import short_reference
+from aios_app.hud.identity import project_identity
 
 
 def _name(value: Mapping[str, Any]) -> str:
@@ -101,10 +103,15 @@ def _scene_text(value: Any) -> str:
 def _render_goal_plan(plan: Mapping[str, Any] | None) -> list[str]:
     if not plan:
         return []
+    if not plan.get("context_current", True):
+        # Stale strategies/questions must not look like the next current task.
+        continuation = plan.get("continuation") or {}
+        reason = str(continuation.get("reason") or "context changed").replace("_", " ")
+        return ["Earlier advisory plan withheld: " + reason + ". Planning review needed."]
     proposal = plan.get("proposal") or {}
     if not proposal:
         return ["Planning pending."]
-    lines = ([] if plan.get("context_current", True) else ["Earlier advisory plan; context has changed."])
+    lines = []
     lines += ["Tentative approach (not evidence of progress): " + str(proposal.get("strategy") or "")]
     for step in proposal.get("steps") or []:
         lines.append("Proposed step: " + str(step))
@@ -133,6 +140,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     metadata = frame.get("hud") or {}
     total = metadata.get("token_budget")
     caps = metadata.get("section_token_budgets") or {}
+    recent_rows = list(frame.get("recent_events") or [])
+    latest_user = next((event for event in recent_rows
+                        if event.get("message_text") and event.get("speaker_role") == "user"), None)
     lines = RenderedBudget(total)
 
     def section(name, priority=10, share=0.12, *, excerpts=False, atomic=False):
@@ -164,7 +174,10 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     section("identity", 8, 0.18, excerpts=True)
     identity_kernel = identity.get("identity_kernel")
     if identity_kernel:
-        lines.append("\n" + str(identity_kernel))
+        lines.append("\n" + project_identity(identity,
+            user_name=latest_user.get("speaker_id") if latest_user else None,
+            idle_duration=metadata.get("idle_duration"),
+            max_chars=None if total is None else max(0, int(total * 4 * 0.18) - 1)))
     for plugin_section in frame.get("plugin_sections") or []:
         section("plugin")
         title = str(plugin_section.get("title") or plugin_section.get("key") or "PLUGIN")
@@ -203,7 +216,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     pending_work = working_scene.get("pending_work") or working_scene.get("pending_action")
     last_change = working_scene.get("last_significant_change")
     if _scene_text(immediate_goal):
-        reference = (" [goal_ref: " + str(immediate_goal["goal_id"]) + "]"
+        reference = (" [goal_ref: " + short_reference(immediate_goal["goal_id"], "g") + "]"
                      if isinstance(immediate_goal, Mapping) and immediate_goal.get("goal_id") else "")
         scene_lines.append(f"Immediate managed goal: {_scene_text(immediate_goal)[:180]}{reference}")
         if isinstance(immediate_goal, Mapping):
@@ -211,8 +224,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             for requirement in (immediate_goal.get("knowledge_requirements") or [])[:2]:
                 status=str(requirement.get("coverage_status") or "unassessed")
                 count=len(requirement.get("dossier_ids") or [])
+                question = str(requirement.get("question") or requirement.get("query_text") or "Unspecified requirement")
                 scene_lines.append(
-                    f"Goal knowledge: {status}; linked research dossiers: {count}")
+                    f"Goal knowledge ({question}): {status}; linked research dossiers: {count}")
     if _scene_text(pending_work):
         scene_lines.append(f"Pending work: {_scene_text(pending_work)}")
     # A pre-patch scene can still contain a copied DAG turn. Suppress it.
@@ -290,6 +304,10 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             status = _content_status(item)
             confidence = item.get("effective_confidence")
             suffix = f" confidence={confidence:.2f}" if isinstance(confidence, (float, int)) else ""
+            if item.get("cognitive_provisional") and isinstance(confidence, (float, int)):
+                suffix = f" claim confidence={confidence:.2f}"
+                if isinstance(item.get("parse_confidence"), (float, int)):
+                    suffix += f"; extraction confidence={item['parse_confidence']:.2f}"
             lines.append(f"- [{status}{suffix}]{_epistemic_label(item)}{_knowledge_annotation(item)} {_claim_text(item)}")
             for conflict in (item.get("conflicts") or [])[:3]:
                 lines.append(f"  ! conflicts with: {_claim_text(conflict)}")
@@ -352,7 +370,8 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
             requirements=(goal.get("knowledge_requirements") or []) if isinstance(goal, Mapping) else []
             demand=f" [knowledge: {requirements[0].get('coverage_status', 'unassessed')}]" if requirements else ""
-            reference = f" [goal_ref: {goal_id}]" if isinstance(goal, Mapping) and (goal_id := goal.get("goal_id")) else ""
+            reference = (f" [goal_ref: {short_reference(goal_id, 'g')}]"
+                         if isinstance(goal, Mapping) and (goal_id := goal.get("goal_id")) else "")
             lines.append(f"-{annotation} {text}{demand}{reference}")
             if isinstance(goal, Mapping):
                 lines.extend("  " + entry for entry in _render_goal_plan(goal.get("plan")))
@@ -380,9 +399,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     # semantic events into narrative form, collapse exact duplicates, and prefer
     # a bounded semantic projection over the raw source turn when both point at
     # the same source node.
-    events = list(frame.get("recent_events") or [])
-    latest_user = next((event for event in events
-                        if event.get("message_text") and event.get("speaker_role") == "user"), None)
+    events = recent_rows
     if total is not None and latest_user is not None:
         section("latest_user", 1, 0.24, excerpts=True)
         speaker = latest_user.get("speaker_id") or "unknown"

@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -141,6 +142,20 @@ def _json_value(value: Any, default: Any) -> Any:
     return value
 
 
+def message_confidences(row: Mapping[str, Any], meta: Mapping[str, Any]) -> tuple[float, float]:
+    """Extraction accuracy and confidence in content are different quantities."""
+    def bounded(value, default):
+        try:
+            number = float(value)
+        except (ValueError, TypeError):
+            return default
+        return max(0.0, min(1.0, number)) if math.isfinite(number) else default
+    parse = bounded(row.get("confidence"), 0.5)
+    default = 0.72 if meta.get("character_owned") else 0.58
+    claim = min(parse, bounded(meta.get("epistemic_confidence"), default))
+    return parse, claim
+
+
 def cognitive_rejection_reason(
     item: Mapping[str, Any],
     *,
@@ -148,16 +163,13 @@ def cognitive_rejection_reason(
 ) -> str | None:
     """Reject immature archaeology hypotheses before HUD presentation.
 
-    Message-level cognitive commits are already bounded/admitted by the fast
-    interpreter and intentionally bypass the current-source duplicate guard.
+    Message-level cognitive commits bypass only the current-source duplicate guard.
     They represent cognition derived from the source event, not a second copy of
     the raw event.
     """
-    if item.get("cognitive_commit"):
-        return None
-
     source_node_id = item.get("source_node_id")
-    if source_node_id is not None and str(source_node_id) in visible_source_node_ids:
+    if (not item.get("cognitive_commit") and source_node_id is not None
+            and str(source_node_id) in visible_source_node_ids):
         return "current_source_duplicate"
 
     text = str(item.get("text") or "").strip()
@@ -168,7 +180,7 @@ def cognitive_rejection_reason(
 
     subject = str(item.get("subject_norm") or "").strip().lower()
     predicate = str(item.get("predicate_norm") or "").strip().lower()
-    if subject in {"", "_", "*"}:
+    if subject in {"", "_", "*"} and item.get("text_representation") != "source_statement":
         return "missing_subject"
     if predicate in {"", "_", "*"}:
         return "missing_predicate"
@@ -662,8 +674,8 @@ class CognitiveContextService:
             text = str(row.get("text") or "").strip()
             if not text:
                 continue
-            confidence = float(row.get("confidence") or 0.5)
             meta = _json_value(row.get("meta"), {})
+            parse_confidence, confidence = message_confidences(row, meta)
             if kind in {"MEMORY", "EVENT"} and not character_authored_head:
                 continue
             semantic_owner = meta.get("semantic_owner")
@@ -687,6 +699,7 @@ class CognitiveContextService:
                 "epistemic_status": "observed",
                 "confidence": confidence,
                 "effective_confidence": confidence,
+                "parse_confidence": parse_confidence,
                 "salience_weight": float(row.get("salience") or 0.5),
                 "source_node_id": row.get("node_id"),
                 "acquisition_mode": "message_cognitive_commit",

@@ -27,7 +27,7 @@ CREATE TABLE aios.dag_edge(timeline_id uuid,child_node_id uuid,parent_node_id uu
 CREATE TABLE aios.character_work_request(request_id uuid PRIMARY KEY,instance_id uuid,
  source_timeline_id uuid,source_node_id uuid,goal_id uuid,attempt_id uuid,run_id uuid,
  status text DEFAULT 'queued',created_at timestamptz DEFAULT now());
-CREATE TABLE aios.workspace_run(run_id uuid PRIMARY KEY,origin_instance_id uuid,status text,result jsonb);
+CREATE TABLE aios.workspace_run(run_id uuid PRIMARY KEY,origin_instance_id uuid,status text,result jsonb,updated_at timestamptz DEFAULT now());
 CREATE TABLE aios.character_agent_goal(goal_id uuid PRIMARY KEY,instance_id uuid,goal_text text,
  status text DEFAULT 'active',priority integer DEFAULT 100,created_at timestamptz DEFAULT now());
 CREATE TABLE aios.character_goal_attempt(attempt_id uuid PRIMARY KEY,goal_id uuid,instance_id uuid,
@@ -154,12 +154,32 @@ async def test_worker_receipt_refreshes_plan_without_a_chat_turn(env):
     after = await e.service.snapshot(e.instance, e.goal)
     assert before["fingerprint"] != after["fingerprint"]
     assert after["work_receipts"][0]["outcome"] == "partial"
+    assert after["work_receipts"][0]["reported_at"]
     assert not (await e.service.current(e.instance, e.goal))["context_current"]
     prompt, refs = build_plan_prompt("Build sandbox", [], [], [], {}, [], work_receipts=after["work_receipts"])
     assert "Docker installed; no container exists" in prompt and "workspace:" + str(run) in refs
     assert after["work_receipts"][0]["not_goal_completion"] is True
     # Operational timestamp churn cannot force another inference.
     assert (await e.service.snapshot(e.instance, e.goal))["fingerprint"] == after["fingerprint"]
+    await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded'")
+    assert await e.service.schedule(e.instance, e.goal)
+
+
+@pytest.mark.asyncio
+async def test_old_planning_contract_is_withheld_and_cannot_continue(env):
+    e = env
+    op = await running(e)
+    await e.service.propose(op)
+    plan_id = await e.db.fetchval('SELECT plan_id FROM aios.character_goal_plan')
+    await e.db.execute("""UPDATE aios.character_goal_plan
+        SET input_context=jsonb_set(input_context,'{plan_contract}','\"old-contract\"'::jsonb),
+            input_fingerprint='old-contract-fingerprint'""")
+    assert not (await e.service.current(e.instance, e.goal))["context_current"]
+    await e.service.run_continuation(plan_id)
+    continuation = await e.db.fetchval('SELECT continuation FROM aios.character_goal_plan')
+    continuation = json.loads(continuation) if isinstance(continuation, str) else continuation
+    assert continuation["reason"] == "planning_contract_changed"
+    assert await e.db.fetchval("SELECT count(*) FROM aios.character_cognitive_operation WHERE operation_type='inquiry.resolve'") == 0
     await e.db.execute("UPDATE aios.character_cognitive_operation SET status='succeeded'")
     assert await e.service.schedule(e.instance, e.goal)
 

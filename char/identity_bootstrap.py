@@ -58,7 +58,7 @@ def _facet_candidates(card: dict[str, Any]) -> list[dict[str, Any]]:
     """Route authored card fields into identity without inventing new facts."""
     candidates: list[dict[str, Any]] = []
     mappings = (
-        ("description", "appearance", "description", "constitutional"),
+        ("description", "description", "description", "constitutional"),
         ("personality", "personality", "description", "core"),
         ("mes_example", "expression", "example_dialogue", "core"),
     )

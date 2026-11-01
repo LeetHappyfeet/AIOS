@@ -19,7 +19,7 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
-HUD_VERSION = "hud-v6"
+HUD_VERSION = "hud-v7"
 
 
 @dataclass(frozen=True)
@@ -264,6 +264,7 @@ class HUDAssembler:
                     "confidence",
                     "base_confidence",
                     "effective_confidence",
+                    "parse_confidence",
                     "attention_weight",
                     "trust_weight",
                     "compatibility_weight",

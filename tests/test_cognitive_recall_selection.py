@@ -28,10 +28,11 @@ def test_recall_competition_filters_low_information_unrelated_belief():
     assert suppressed["below_recall_floor"] == 1
 
 
-def test_current_message_cognition_fills_gap_when_pipeline_is_late():
+def test_current_message_cognition_must_meet_recall_floor():
     current = _item("c1", "Mia just arrived", 0.1, kind="EVENT", cognitive_commit=True)
-    selected, _ = select_recalled_cognition([current], focus_text="")
-    assert selected == [current]
+    selected, suppressed = select_recalled_cognition([current], focus_text="")
+    assert selected == []
+    assert suppressed["below_recall_floor"] == 1
 
 
 def test_established_cognition_replaces_equivalent_fast_interpretation():

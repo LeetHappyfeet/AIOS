@@ -10,19 +10,25 @@ import json
 from uuid import UUID
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
+from .references import expand_reference
 
 from aios_app.hud.work_results import result_view
 
 
 class WorkResultQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    request_id: UUID | None = None
-    run_id: UUID | None = None
+    request_id: UUID | None = Field(default=None, description="Request UUID or exact q_ HUD reference.")
+    run_id: UUID | None = Field(default=None, description="Run UUID or exact r_ HUD reference.")
     section: str = Field(default="summary", pattern=r"^(summary|findings|limitations|requested_content|report|checks)$")
     cursor: int = Field(default=0, ge=0, le=100000)
     limit: int = Field(default=3000, ge=100, le=4000)
     revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("request_id", "run_id", mode="before", json_schema_input_type=str | None)
+    @classmethod
+    def result_reference(cls, value, info):
+        return expand_reference(value, "q" if info.field_name == "request_id" else "r")
 
     @model_validator(mode="after")
     def one_reference(self):
@@ -46,7 +52,7 @@ class WorkEvidence:
                    JOIN aios.character_runtime_state rs ON rs.instance_id=$1 AND e.timeline_id=rs.source_timeline_id
                    WHERE v.depth<512
                )
-               SELECT r.request_id,r.goal_id,r.attempt_id,w.run_id,w.status,w.result
+               SELECT r.request_id,r.goal_id,r.attempt_id,w.run_id,w.status,w.result,w.updated_at AS reported_at
                FROM aios.character_work_request r
                JOIN aios.character_runtime_state rs ON rs.instance_id=r.instance_id
                  AND rs.source_timeline_id=r.source_timeline_id
@@ -92,6 +98,7 @@ class WorkEvidence:
             receipts.append({
                 "id": "workspace:" + str(row["run_id"]),
                 "request_id": str(row["request_id"]), "revision": revision,
+                "reported_at": str(row["reported_at"]) if row.get("reported_at") else None,
                 "execution_status": row["status"], "outcome": view["worker_outcome"],
                 "goal_linked": row["goal_id"] == goal_id,
                 "summary": view["summary"] or view["report_excerpt"],

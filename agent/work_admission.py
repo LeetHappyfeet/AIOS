@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .workspace_contract import Assignment, requires_read_only
 from .work_evidence import WorkEvidence, WorkResultQuery, result_tool_schema
+from .references import expand_reference
 
 
 class WorkIntent(BaseModel):
@@ -26,7 +27,13 @@ class WorkIntent(BaseModel):
     objective: str = Field(min_length=3, max_length=4000)
     constraints: list[str] = Field(default_factory=list, max_length=10)
     # Select an existing managed goal; AIOS resolves and validates its attempt.
-    goal_ref: UUID | None = Field(default=None, strict=False)
+    goal_ref: UUID | None = Field(default=None, strict=False,
+        description="Managed goal UUID or exact g_ reference copied from the HUD.")
+
+    @field_validator("goal_ref", mode="before", json_schema_input_type=str | None)
+    @classmethod
+    def goal_reference(cls, value):
+        return expand_reference(value, "g")
 
     @field_validator("objective")
     @classmethod

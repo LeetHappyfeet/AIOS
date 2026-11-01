@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from aios_app.hud.work_results import compact, result_view
+from aios_app.agent.references import short_reference
 
 ACTIVE = {"queued", "running"}
 
@@ -17,16 +18,16 @@ def render_work_results(work, tasks, *, compact_mode=False):
     if separate or blocked:
         lines.append("WORK REQUESTS (admission/execution status; not goal completion)")
         for request in separate:
-            lines.append(f"- Request {request['request_id']}: {request['status']} — {compact(request.get('objective'), 180)}")
+            lines.append(f"- Request {short_reference(request['request_id'], 'q')}: {request['status']} — {compact(request.get('objective'), 180)}")
             if request.get("run_id"):
-                lines.append(f"  Run {request['run_id']}: details omitted from this HUD; do not resubmit.")
+                lines.append(f"  Run {short_reference(request['run_id'], 'r')}: details omitted from this HUD; do not resubmit.")
             else:
                 lines.append("  " + compact(request.get("reason"), 240))
         if blocked:
             lines.append(f"- Operator configuration needed for {len(blocked)} request(s); operator must configure or dismiss. Do not duplicate them.")
             lines.append("  " + compact(blocked[0].get("reason"), 240))
             for request in blocked[:3]:
-                lines.append(f"  Request {request['request_id']}: {compact(request.get('objective'), 100)}")
+                lines.append(f"  Request {short_reference(request['request_id'], 'q')}: {compact(request.get('objective'), 100)}")
             if len(blocked) > 3:
                 lines.append(f"  {len(blocked) - 3} additional configuration blockers retained in operator inspection.")
     if work.get("history_count"):
@@ -44,6 +45,7 @@ def render_work_results(work, tasks, *, compact_mode=False):
         request = by_run.get(task["run_id"], {})
         request_id = task.get("request_id") or request.get("request_id")
         title = compact(task.get("objective") or request.get("objective"), 180)
+        reported = " Reported at: " + str(task["reported_at"]) if task.get("reported_at") else ""
         view = task.get("result_summary")
         if not isinstance(view, dict):
             view = result_view({("error" if task["status"] in {"failed", "interrupted", "cancelled"} else "report"): task.get("summary")}, {})
@@ -51,9 +53,9 @@ def render_work_results(work, tasks, *, compact_mode=False):
             # The final HUD has a shared budget. Offer complete short records
             # instead of one giant report entry that cannot fit at all. Keep
             # failure/limitations ahead of optional findings and raw logs.
-            lines.append(f"- Run {task['run_id']}: {task['status']}; goal review: {task.get('goal_review') or 'not linked'} — {compact(title, 100)}")
+            lines.append(f"- Run {short_reference(task['run_id'], 'r')}: {task['status']}; goal review: {task.get('goal_review') or 'not linked'} — {compact(title, 100)}{reported}")
             if request_id:
-                lines.append(f"  Request: {request_id}")
+                lines.append(f"  Request: {short_reference(request_id, 'q')}")
             if view["error"]:
                 lines.append("  Worker-reported error: " + compact(view["error"], 180))
             elif task["status"] in {"failed", "interrupted", "cancelled"}:
@@ -71,8 +73,10 @@ def render_work_results(work, tasks, *, compact_mode=False):
             lines.append("  Full report/content retained; use read_work_result when available. Do not repeat work for omitted details.")
             continue
         entry = [f"- {title or 'Workspace task'}",
-                 f"  Run: {task['run_id']}" + (f"; request: {request_id}" if request_id else ""),
+                 f"  Run: {short_reference(task['run_id'], 'r')}" + (f"; request: {short_reference(request_id, 'q')}" if request_id else ""),
                  f"  Execution: {task['status']}; goal review: {task.get('goal_review') or 'not linked'}"]
+        if reported:
+            entry.append(" " + reported)
         # Failure reason has priority over optional content and partial findings.
         if view["error"]:
             entry.append("  Error: " + view["error"])
