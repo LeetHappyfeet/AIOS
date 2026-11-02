@@ -25,6 +25,7 @@ from aios_app.pipeline.jobs import (
     _backfill_decompose_timeline_partitions,
 )
 from aios_app.pipeline.job_registry import ResourceClass, SchedulingLane, job_spec
+from aios_app.pipeline.execution import LeaseLost, run_owned
 from aios_app.scheduler.resource_governor import ResourceGovernor
 from aios_app.scheduler.runner_admission import admit_job, release_job
 
@@ -420,16 +421,16 @@ async def _heartbeat_loop(
     *,
     job_id: UUID,
     worker_id: str,
+    fail_fast: bool = False,
 ) -> None:
-    interval = max(5, settings.pipeline_heartbeat_seconds)
+    interval = max(0.1, min(max(5, settings.pipeline_heartbeat_seconds),
+                            max(1, settings.pipeline_lease_seconds) / 3))
     while True:
         await asyncio.sleep(interval)
-        alive = await heartbeat_job(
-            db,
-            job_id=job_id,
-            worker_id=worker_id,
-            lease_seconds=settings.pipeline_lease_seconds,
-        )
+        renewal = heartbeat_job(db, job_id=job_id, worker_id=worker_id,
+                                lease_seconds=settings.pipeline_lease_seconds)
+        alive = (await asyncio.wait_for(renewal, timeout=max(1.0, min(10.0, settings.pipeline_lease_seconds / 4)))
+                 if fail_fast else await renewal)
         if not alive:
             return
 
@@ -447,6 +448,30 @@ def _run_isolated_handler(job_type: str, job: Dict[str, Any]) -> None:
             await db.close()
 
     asyncio.run(_run())
+
+
+async def _run_lookup_handler(handler, job):
+    # Keep long SQL and connection waits out of the runner's heartbeat pool.
+    # This pool belongs to exactly one async task and can be terminated safely
+    # when that task is cancelled; other workers keep their connections.
+    lookup = Database(settings.db_dsn, min_size=1, max_size=2, server_settings={
+        "statement_timeout": "3000", "lock_timeout": "750",
+        "application_name": "aios:lookup:" + str(job["job_id"]),
+    })
+    try:
+        await lookup.connect()
+        await handler(lookup, job)
+    except BaseException:
+        if lookup.pool:
+            lookup.pool.terminate()
+        raise
+    finally:
+        try:
+            await asyncio.wait_for(lookup.close(), timeout=3.0)
+        except BaseException:
+            if lookup.pool:
+                lookup.pool.terminate()
+            raise
 
 
 async def _execute_claimed_job(
@@ -479,62 +504,73 @@ async def _execute_claimed_job(
         )
         return
 
-    partition_key = await _resolve_partition_key(db, job)
-    if partition_key.startswith(("char:", "source:", "world:")):
-        lock_key = f"semantic-scope:{partition_key}"
-    else:
-        lock_key = f"{spec.resource_class.value}:{partition_key}"
-    lock_started = time.monotonic()
-
+    partition_key = "unresolved"
     heartbeat = asyncio.create_task(
-        _heartbeat_loop(db, job_id=job_id, worker_id=worker_id)
+        _heartbeat_loop(db, job_id=job_id, worker_id=worker_id,
+                        fail_fast=spec.resource_class == ResourceClass.LOOKUP)
     )
-    try:
+
+    async def execute_owned():
+        nonlocal partition_key
+        partition_key = await _resolve_partition_key(db, job)
+        lock_key = (f"semantic-scope:{partition_key}"
+                    if partition_key.startswith(("char:", "source:", "world:"))
+                    else f"{spec.resource_class.value}:{partition_key}")
         async with db.connection() as lock_conn:
-            await lock_conn.execute(
-                "SELECT pg_advisory_lock(hashtextextended($1, 0))",
-                lock_key,
-            )
-            lock_wait = time.monotonic() - lock_started
+            acquired = None
             started = time.monotonic()
             try:
+                acquired = await lock_conn.fetchval(
+                    "SELECT pg_try_advisory_lock(hashtextextended($1, 0))", lock_key)
+                if not acquired:
+                    raise JobDeferred("partition advisory lock is busy", delay_seconds=15)
                 await db.execute(
-                    """
-                    UPDATE aios.pipeline_job
-                    SET partition_key=$2, updated_at=now()
-                    WHERE job_id=$1 AND worker_id=$3
-                    """,
-                    job_id,
-                    partition_key,
-                    worker_id,
-                )
-                async def _invoke_handler() -> None:
-                    if spec.isolate_blocking:
+                    """UPDATE aios.pipeline_job SET partition_key=$2,updated_at=now()
+                       WHERE job_id=$1 AND worker_id=$3 AND status='running'""",
+                    job_id, partition_key, worker_id)
+
+                async def invoke_handler():
+                    if spec.resource_class == ResourceClass.LOOKUP:
+                        await _run_lookup_handler(handler, job)
+                    elif spec.isolate_blocking:
                         await asyncio.to_thread(_run_isolated_handler, job_type, job)
                     else:
                         await handler(db, job)
 
                 if spec.requires_rdf_slot:
                     async with rdf_gate:
-                        await _invoke_handler()
+                        await invoke_handler()
                 else:
-                    await _invoke_handler()
+                    await invoke_handler()
                 await mark_done(db, job_id, worker_id=worker_id)
-                logger.info(
-                    "Job done id=%s type=%s resource=%s partition=%s "
-                    "lock_wait=%.3fs runtime=%.3fs",
-                    job_id,
-                    job_type,
-                    spec.resource_class.value,
-                    partition_key,
-                    lock_wait,
-                    time.monotonic() - started,
-                )
+                logger.info("Job done id=%s type=%s resource=%s partition=%s runtime=%.3fs",
+                    job_id, job_type, spec.resource_class.value, partition_key, time.monotonic()-started)
             finally:
-                await lock_conn.execute(
-                    "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
-                    lock_key,
-                )
+                if acquired is None:
+                    # Cancellation can race the server acquiring a session lock
+                    # before the driver receives its result. Discard that session.
+                    lock_conn.terminate()
+                elif acquired:
+                    try:
+                        await lock_conn.execute(
+                            "SELECT pg_advisory_unlock(hashtextextended($1, 0))", lock_key, timeout=3.0)
+                    except BaseException:
+                        lock_conn.terminate()
+                        raise
+
+    try:
+        if spec.resource_class == ResourceClass.LOOKUP:
+            await run_owned(execute_owned(), heartbeat, timeout=60.0)
+        else:
+            await execute_owned()
+    except LeaseLost:
+        # Relinquish only if still owned; never overwrite a replacement worker.
+        logger.warning("Stopped execution after lease loss id=%s type=%s", job_id, job_type)
+        try:
+            await asyncio.wait_for(defer_claimed_job(db, job_id, worker_id=worker_id,
+                                   delay_seconds=15), timeout=3.0)
+        except Exception:
+            logger.warning("Lease-loss release deferred to recovery id=%s", job_id, exc_info=True)
     except JobDeferred as exc:
         await defer_claimed_job(db,job_id,worker_id=worker_id,delay_seconds=exc.delay_seconds)
         logger.info("Job deferred id=%s type=%s delay=%.1fs reason=%s",
@@ -564,10 +600,9 @@ async def _execute_claimed_job(
     finally:
         heartbeat.cancel()
         try:
-            await heartbeat
-        except asyncio.CancelledError:
-            pass
-        await release_job(resource_governor, job)
+            await asyncio.gather(heartbeat, return_exceptions=True)
+        finally:
+            await release_job(resource_governor, job)
 
 
 def _semantic_lane_order(worker_index: int) -> tuple[list[str], list[str]]:

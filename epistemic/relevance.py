@@ -168,18 +168,44 @@ def _candidate_tokens(item: Mapping[str, Any]) -> set[str]:
     )
 
 
-def _quality_penalty(item: Mapping[str, Any]) -> float:
+def _quality_penalty(item: Mapping[str, Any], focus_words: set[str] | None = None) -> float:
     subject = str(item.get("subject_norm") or "").strip().lower()
     predicate = str(item.get("predicate_norm") or "").strip().lower()
     obj = str(item.get("object_norm") or "").strip().lower()
     penalty = 0.0
     if subject in _LOW_INFORMATION_SUBJECTS:
         penalty += 0.8
-    if predicate in {"be", "identity", "have"} and (subject in _LOW_INFORMATION_SUBJECTS or len(_words(obj)) <= 1):
+    object_words = _words(obj) - {"a", "an", "the", "some"}
+    if predicate in {"be", "identity", "have"} and (subject in _LOW_INFORMATION_SUBJECTS or len(object_words) <= 1):
         penalty += 0.5
     if obj in {"", "_", "*"}:
         penalty += 1.0
+    # Descriptive scene fragments can matter when explicitly asked about them,
+    # but should not dominate durable recall of an unrelated project.
+    incidental = {"tone", "voice", "expression", "posture"}
+    if _words(subject) & incidental and not (_words(subject) & incidental & (focus_words or set())):
+        penalty += 0.9
     return penalty
+
+
+def recall_quality_reason(item: Mapping[str, Any]) -> str | None:
+    """Reject a small structural fragment class, not authored personality."""
+    predicate = str(item.get("predicate_norm") or "").lower()
+    obj = str(item.get("object_norm") or "").lower().strip(" .")
+    if predicate in {"say", "said", "says", "speak"} and re.fullmatch(
+        r"(?:a|an|the|her|his|their)?\s*(?:voice|tone)", obj
+    ):
+        return "speech_fragment"
+    return None
+
+
+def _redundant(item, tokens, prior, prior_tokens, threshold):
+    if item.get("polarity", 1) != prior.get("polarity", 1):
+        return False
+    if "source_statement" in {item.get("text_representation"), prior.get("text_representation")}:
+        if str(item.get("text") or "").casefold() != str(prior.get("text") or "").casefold():
+            return False
+    return bool(tokens) and _overlap(tokens, prior_tokens) >= threshold
 
 
 def select_recalled_cognition(
@@ -192,7 +218,8 @@ def select_recalled_cognition(
     """Global recall competition across retrieval modes.
 
     Retrieval may be broad. This function decides which established memories
-    become generation-time cognition. Current-message commits bypass competition.
+    become generation-time cognition. Provisional commits fill remaining gaps
+    after meeting the same relevance/quality floor.
     """
     focus_words = _words(focus_text)
     by_id: dict[Any, dict[str, Any]] = {}
@@ -211,10 +238,17 @@ def select_recalled_cognition(
     provisional = [item for item in by_id.values() if item.get("cognitive_commit")]
     established = [item for item in by_id.values() if not item.get("cognitive_commit")]
     scored: list[tuple[float, dict[str, Any], set[str]]] = []
+    provisional_scored: list[tuple[float, dict[str, Any], set[str]]] = []
     diagnostic: list[tuple[float, dict[str, Any], str]] = []
-    suppressed = {"below_recall_floor": 0, "redundant_recall": 0, "recall_cap": 0}
+    suppressed = {"below_recall_floor": 0, "redundant_recall": 0, "recall_cap": 0,
+                  "speech_fragment": 0}
 
-    for item in established:
+    for item in established + provisional:
+        reason = recall_quality_reason(item)
+        if reason:
+            suppressed[reason] += 1
+            diagnostic.append((0.0, item, reason))
+            continue
         relevance = dict(item.get("relevance") or {})
         base = float(relevance.get("total") or 0.0)
         tokens = _candidate_tokens(item)
@@ -236,7 +270,7 @@ def select_recalled_cognition(
         confidence_bonus = 0.25 * max(0.0, min(1.0, confidence))
         kind_bonus = 0.25 if kind in {"GOAL", "RULE", "RELATIONSHIP"} else 0.0
         recall_score = base + context_bonus + salience_bonus + confidence_bonus + kind_bonus
-        quality_penalty = _quality_penalty(item)
+        quality_penalty = _quality_penalty(item, focus_words)
         recall_score -= continuity_penalty + quality_penalty
         relevance["recall"] = round(recall_score, 6)
         relevance["context_overlap"] = round(semantic_overlap, 6)
@@ -248,7 +282,7 @@ def select_recalled_cognition(
             suppressed["below_recall_floor"] += 1
             diagnostic.append((recall_score, item, "below_recall_floor"))
             continue
-        scored.append((recall_score, item, tokens))
+        (provisional_scored if item.get("cognitive_commit") else scored).append((recall_score, item, tokens))
         diagnostic.append((recall_score, item, "candidate"))
 
     scored.sort(key=lambda entry: entry[0], reverse=True)
@@ -258,7 +292,8 @@ def select_recalled_cognition(
         if len(selected) >= max_items:
             suppressed["recall_cap"] += 1
             continue
-        if tokens and any(_overlap(tokens, prior) >= 0.86 for prior in selected_tokens):
+        if any(_redundant(item, tokens, prior, prior_tokens, 0.86)
+               for prior, prior_tokens in zip(selected, selected_tokens)):
             suppressed["redundant_recall"] += 1
             continue
         selected.append(item)
@@ -267,23 +302,25 @@ def select_recalled_cognition(
     # Fast message cognition fills semantic gaps only. If mature cognition has
     # already selected an equivalent unit, the provisional interpretation has
     # completed its job and yields to the reasoned representation.
-    provisional.sort(
-        key=lambda item: float(item.get("relevance", {}).get("total", 0.0)),
-        reverse=True,
-    )
+    provisional_scored.sort(key=lambda entry: entry[0], reverse=True)
     selected_provisional: list[dict[str, Any]] = []
     authoritative_tokens = list(selected_tokens)
-    for item in provisional:
-        tokens = _candidate_tokens(item)
-        if tokens and any(_overlap(tokens, prior) >= 0.72 for prior in authoritative_tokens):
+    authoritative_items = list(selected)
+    for _, item, tokens in provisional_scored:
+        if len(selected) + len(selected_provisional) >= max_items:
+            suppressed["recall_cap"] += 1
+            continue
+        if any(_redundant(item, tokens, prior, prior_tokens, 0.72)
+               for prior, prior_tokens in zip(authoritative_items, authoritative_tokens)):
             suppressed["redundant_recall"] += 1
             continue
         selected_provisional.append(item)
-        if tokens:
-            authoritative_tokens.append(tokens)
+        authoritative_tokens.append(tokens)
+        authoritative_items.append(item)
 
     if logger.isEnabledFor(logging.DEBUG):
-        selected_ids = {str(item.get("proposition_id") or item.get("text")) for item in selected}
+        selected_ids = {str(item.get("proposition_id") or item.get("text"))
+                        for item in selected + selected_provisional}
         for rank, (score, item, status) in enumerate(
             sorted(diagnostic, key=lambda entry: entry[0], reverse=True)[:20], start=1
         ):

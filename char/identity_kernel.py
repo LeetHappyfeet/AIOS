@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from aios_app.db import Database
 
-COMPILER_VERSION = "identity-kernel-v1"
+COMPILER_VERSION = "identity-kernel-v2"
 
 
 def _json_value(value: Any) -> Any:
@@ -20,6 +20,7 @@ def _json_value(value: Any) -> Any:
 _FACET_ORDER = {
     "identity": 0,
     "appearance": 10,
+    "description": 15,
     "personality": 20,
     "values": 30,
     "expression": 40,
@@ -46,6 +47,21 @@ def _text_value(value: Any) -> str:
     if isinstance(value, dict):
         return "; ".join(f"{k}: {v}" for k, v in value.items() if v not in (None, "", [], {}))
     return str(value).strip() if value is not None else ""
+
+
+def presentation_facets(groups: dict) -> dict:
+    """Label old whole-card appearance.description neutrally, without a DB rewrite.
+
+    A newer explicit description supersedes the old import in presentation;
+    original facets and identity revision history remain intact.
+    """
+    result = {kind: list(values) for kind, values in groups.items()}
+    legacy = [item for item in result.get("appearance", []) if item["key"] == "description"]
+    if legacy:
+        result["appearance"] = [item for item in result["appearance"] if item["key"] != "description"]
+        if not result.get("description"):
+            result["description"] = legacy
+    return result
 
 
 def _render(identity: dict[str, Any], facets: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
@@ -105,8 +121,9 @@ def _render(identity: dict[str, Any], facets: list[dict[str, Any]]) -> tuple[dic
     if legacy:
         lines.append("AUTHORED BASELINE: " + " | ".join(legacy))
 
-    for facet_type in sorted(groups, key=lambda k: (_FACET_ORDER.get(k, 70), k)):
-        values = groups[facet_type]
+    presentation = presentation_facets(groups)
+    for facet_type in sorted(presentation, key=lambda k: (_FACET_ORDER.get(k, 70), k)):
+        values = presentation[facet_type]
         rendered = []
         for item in sorted(values, key=lambda x: x["key"]):
             text = _text_value(item["value"])

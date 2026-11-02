@@ -614,6 +614,8 @@ async def _prepare_hud_response(
     recent_limit: Optional[int],
     token_budget: Optional[int],
     wait_ms: int,
+    profile_name: Optional[str] = None,
+    focus_text: Optional[str] = None,
 ):
     frame = await world_runtime.prepare_frame(
         instance_id,
@@ -621,14 +623,34 @@ async def _prepare_hud_response(
         recent_limit=recent_limit,
         token_budget=token_budget,
         wait_ms=wait_ms,
+        profile_name=profile_name,
+        focus_text=focus_text,
     )
-    return {
-        "instance_id": instance_id,
-        "generation_ready": bool(frame.get("hud", {}).get("generation_ready")),
-        "freshness": frame.get("hud", {}).get("freshness", {}),
-        "frame": frame,
-        "text": render_hud_text(frame),
-    }
+    # Task delivery is fresh even when the cognitive frame was cached. Copy
+    # the snapshot so an overlay never mutates a shared singleflight result.
+    from copy import deepcopy
+    from aios_app.agent.environment_links import task_overlay
+    frame = deepcopy(frame)
+    timeline = (frame.get("hud", {}).get("freshness", {}) or {}).get("source_timeline_id")
+    if timeline is None:
+        state = await world_runtime.get_state(instance_id)
+        timeline = state.get("source_timeline_id")
+    timeline = UUID(str(timeline)) if timeline is not None else None
+    from aios_app.agent.work_admission import WorkAdmission
+    work = WorkAdmission(db)
+    frame["work"] = await work.overlay(instance_id, timeline)
+    frame["remote_tasks"] = await task_overlay(
+        db, instance_id, timeline,
+        run_ids=[UUID(r["run_id"]) for r in frame["work"]["requests"] if r.get("run_id")],
+    )
+    frame.setdefault("hud", {})["task_event_watermark"] = max(
+        (task.get("sequence") or 0 for task in frame["remote_tasks"]), default=0)
+    # Cursor/cognition can change while fresh work overlays are being read.
+    # Never label an earlier cached boundary generation-ready in that case.
+    from aios_app.hud.delivery import delivery_response
+    after = await world_runtime.get_state(instance_id)
+    # Render after readiness is finalized so console text agrees with JSON.
+    return delivery_response(instance_id, frame, after, render_hud_text)
 
 
 @app.post("/instance/{instance_id}/hud")
@@ -638,6 +660,8 @@ async def get_instance_hud(
     recent_limit: Optional[int] = None,
     token_budget: Optional[int] = None,
     wait_ms: int = 2500,
+    profile_name: Optional[str] = None,
+    focus_text: Optional[str] = None,
 ):
     """
     Authoritative live-generation HUD endpoint.
@@ -647,6 +671,8 @@ async def get_instance_hud(
     carries both the structured frame and canonical rendered text so clients do
     not need secondary /frame or /frame/text fallbacks.
     """
+    if focus_text is not None and len(focus_text) > 16000:
+        raise HTTPException(422, "HUD focus exceeds 16000 characters")
     try:
         return await _prepare_hud_response(
             instance_id,
@@ -654,7 +680,11 @@ async def get_instance_hud(
             recent_limit=recent_limit,
             token_budget=token_budget,
             wait_ms=wait_ms,
+            profile_name=profile_name,
+            focus_text=focus_text,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeNotFound as exc:

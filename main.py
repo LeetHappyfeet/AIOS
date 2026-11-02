@@ -7,6 +7,8 @@ DAG, runtime-cursor, HUD-dirty, and downstream pipeline side effects.
 
 from aios_app.main_legacy import app, db
 from aios_app.ingest_api import ingest_message
+from aios_app.ingest_sync import IngestSyncIn, validate_ingest_receipts
+from uuid import UUID
 from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn, CorpusFacetRouteIn, CharacterKnowledgeDomainsIn, KnowledgeDomainIn, KnowledgeDomainIdentifierIn
 from aios_app.char.identity_bootstrap import bootstrap_character_card
 from aios_app.char.identity_revision import accept_identity_candidate, reject_identity_candidate
@@ -32,6 +34,12 @@ app.router.routes[:] = [
 @app.post("/ingest", response_model=IngestOut)
 async def ingest(req: IngestIn) -> IngestOut:
     return await ingest_message(db, req)
+
+
+@app.post("/instance/{instance_id}/sync")
+async def sync_instance_ingest(instance_id: UUID, req: IngestSyncIn):
+    """Validate a bounded receipt page without replaying chat bodies or writing state."""
+    return await validate_ingest_receipts(db, instance_id, req)
 
 
 class CharacterCardBootstrapIn(BaseModel):
@@ -536,3 +544,6 @@ async def semantic_clusters(limit: int = 50, offset: int = 0) -> dict[str, Any]:
 from aios_app.agent.workspaces import install_workspace_routes
 from aios_app.main_legacy import get_instance_hud
 install_workspace_routes(app, db, get_instance_hud)
+# Read-only operator views of branch-scoped places and character references.
+from aios_app.entity_memory.catalog_api import catalog_router
+app.include_router(catalog_router(db))

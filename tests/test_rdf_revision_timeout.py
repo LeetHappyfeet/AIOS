@@ -85,3 +85,93 @@ async def test_revision_cancellation_propagates_and_releases_transaction():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert db.exited
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['sql_sources', 'sql_atoms', 'fuseki_sources', 'sql_revalidation'])
+async def test_recall_failure_retains_phase_and_detail(stage, monkeypatch, caplog):
+    import logging
+    from unittest.mock import AsyncMock
+    from aios_app.rdf.fuseki import FusekiError
+    service = retrieval.RDFRecallService(None)
+    sources = [{}] if stage == 'fuseki_sources' else []
+    rows = AsyncMock(side_effect=([RuntimeError('source failure')] if stage == 'sql_sources' else
+        [[], RuntimeError('atom failure')] if stage == 'sql_atoms' else [sources, []]))
+    monkeypatch.setattr(service, '_rows', rows)
+    monkeypatch.setattr(retrieval, 'entity_query', lambda *args: 'SELECT')
+    monkeypatch.setattr(service, '_query', AsyncMock(side_effect=FusekiError('HTTP 503 char/sparql unavailable')))
+    monkeypatch.setattr(service, 'validate_refs', AsyncMock(side_effect=TimeoutError()))
+    with caplog.at_level(logging.INFO):
+        result = await service.search(context(), 'kitchen sink', record=False)
+    assert result.status == 'unavailable'
+    assert result.diagnostics['stage'] == stage
+    assert result.diagnostics['sql_budget_seconds'] == retrieval.INQUIRY_SQL_BUDGET
+    assert result.diagnostics['elapsed_ms'] >= 0
+    assert f'stage={stage}' in caplog.text
+    if stage == 'fuseki_sources':
+        assert 'HTTP 503' in result.diagnostics['detail']
+        assert 'HTTP 503' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_background_recall_budget_does_not_extend_interactive_reads(monkeypatch):
+    from unittest.mock import AsyncMock
+    service = retrieval.RDFRecallService(None)
+    rows = AsyncMock(return_value=[])
+    monkeypatch.setattr(service, '_rows', rows)
+    await service.search(context(), 'kitchen sink', consumer='hud', record=False)
+    assert all(call.kwargs['sql_budget'] == retrieval.SQL_BUDGET for call in rows.await_args_list)
+    rows.reset_mock()
+    await service.search(context(), 'kitchen sink', consumer='inquiry', record=False)
+    assert all(call.kwargs['sql_budget'] == retrieval.INQUIRY_SQL_BUDGET for call in rows.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_background_fuseki_read_can_complete_after_old_deadline(monkeypatch):
+    import time
+    from unittest.mock import AsyncMock
+    from aios_app.config import settings
+    from aios_app.rdf import fuseki
+    monkeypatch.setattr(settings, 'rdf_inquiry_timeout_seconds', 5.0)
+    service = retrieval.RDFRecallService(None)
+    monkeypatch.setattr(service, '_rows', AsyncMock(side_effect=[[{'section_id':uuid4()}], []]))
+    calls=[]
+    def post(url, *, data, headers, timeout):
+        calls.append(timeout)
+        # Exceeds the former 0.8s HTTP / 0.9s async deadlines.
+        time.sleep(1.0)
+        return SimpleNamespace(status_code=200,json=lambda:{'results':{'bindings':[]}})
+    monkeypatch.setattr(fuseki.requests, 'post', post)
+    result=await service.search(context(), 'kitchen sink', consumer='inquiry', record=False)
+    assert result.status=='empty'
+    assert calls==[5.0]  # One call, with no retry amplification.
+    assert result.diagnostics['transport_budget_seconds']==5.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('consumer,expected', [('inquiry',10.0),('hud',0.8)])
+async def test_source_and_atom_queries_use_the_consumers_transport_budget(monkeypatch,consumer,expected):
+    from unittest.mock import AsyncMock
+    from aios_app.config import settings
+    monkeypatch.setattr(settings, 'rdf_inquiry_timeout_seconds', 10.0)
+    service=retrieval.RDFRecallService(None)
+    monkeypatch.setattr(service, '_rows', AsyncMock(side_effect=[
+        [{'section_id':uuid4()}],[{'atom_id':uuid4()}]]))
+    query=AsyncMock(return_value={'results':{'bindings':[]}})
+    monkeypatch.setattr(service, '_query', query)
+    result=await service.search(context(),'kitchen sink',consumer=consumer,record=False)
+    assert result.status=='empty'
+    assert query.await_count==2
+    assert all(call.kwargs['timeout_seconds']==expected for call in query.await_args_list)
+    assert result.diagnostics['transport_budget_seconds']==expected
+
+
+@pytest.mark.asyncio
+async def test_query_wrapper_still_enforces_a_hard_deadline():
+    import time
+    def blocked(*args):
+        time.sleep(.3)
+        return {'results':{'bindings':[]}}
+    service=retrieval.RDFRecallService(None,SimpleNamespace(query=blocked))
+    with pytest.raises(TimeoutError):
+        await service._query('SELECT',timeout_seconds=.01)

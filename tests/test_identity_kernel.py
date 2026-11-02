@@ -71,7 +71,7 @@ def test_card_candidates_default_to_self_authored_identity():
     facets = _facet_candidates(card)
     assert len(facets) == 2
     assert all(item["source_field"] != "scenario" for item in facets)
-    assert {item["facet_type"] for item in facets} == {"appearance", "personality"}
+    assert {item["facet_type"] for item in facets} == {"description", "personality"}
 
 
 def test_identity_json_values_decode_from_asyncpg_text():

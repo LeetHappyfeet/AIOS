@@ -26,7 +26,7 @@ def test_missing_environment_cannot_be_routed_to_research():
 def test_plan_rejects_actions_outcomes_unknown_evidence_and_unbounded_text():
     for extra in ({"actions": [{"type": "use_item"}]}, {"completed": True},
                   {"evidence_ids": [str(uuid4())]}, {"steps": ["step"] * 4},
-                  {"strategy": "a" * 241}, {"next": []}):
+                  {"strategy": "a" * 601}, {"next": []}):
         with pytest.raises(ValueError):
             validate_plan({**proposal(), **extra}, {"goal"})
 

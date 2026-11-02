@@ -10,6 +10,9 @@ from typing import Callable, Dict, Iterable, List
 from aios_app.config import settings
 from aios_app.db import Database
 from aios_app.pipeline.jobs import enqueue_job
+from aios_app.epistemic.normalizer import NORMALIZER_VERSION
+from aios_app.epistemic.semantic_integrity import INTEGRITY_VERSION
+from aios_app.epistemic.semantic_repair import REPAIR_VERSION
 
 logger = logging.getLogger("aios.supervisor")
 CURRENT_RESOLVER_VERSION = "context-resolver-v4-semantic"
@@ -221,12 +224,19 @@ STAGES: List[Stage] = [
         fresh AS (SELECT e.claim_id,e.created_at,'fresh'::text admission_band FROM eligible e WHERE NOT EXISTS(SELECT 1 FROM backlog b WHERE b.claim_id=e.claim_id) ORDER BY e.created_at DESC,e.claim_id LIMIT (SELECT fresh_quota FROM quotas))
         SELECT claim_id,admission_band FROM (SELECT claim_id,created_at,admission_band,0 band_order FROM backlog UNION ALL SELECT claim_id,created_at,admission_band,1 FROM fresh) s ORDER BY band_order,created_at LIMIT $1
     """, resolver_claim_payload, 30, 256, True),
-    Stage("normalize_proposition", "normalize_proposition", """
+    Stage("normalize_proposition", "normalize_proposition", f"""
         SELECT cc.claim_id FROM aios.claim_candidate cc JOIN aios.extracted_sentence es ON es.sentence_id=cc.sentence_id JOIN aios.document_section ds ON ds.section_id=es.section_id JOIN aios.dag_node n ON n.node_id=ds.node_id JOIN aios.ingest_event ie ON ie.event_id=n.event_id
         WHERE ie.superseded_at IS NULL
           AND EXISTS (SELECT 1 FROM aios.claim_context_resolution ccr WHERE ccr.claim_id=cc.claim_id AND ccr.resolver_version='context-resolver-v4-semantic')
           AND EXISTS (SELECT 1 FROM aios.claim_semantic_frame_projection sfp WHERE sfp.claim_id=cc.claim_id AND sfp.decomposer_version='semantic-frame-v2')
           AND (NOT EXISTS(SELECT 1 FROM aios.observation o WHERE o.claim_id=cc.claim_id) OR EXISTS(SELECT 1 FROM aios.observation o JOIN aios.claim_semantic_frame sf ON sf.claim_id=o.claim_id AND sf.decomposer_version='semantic-frame-v2' LEFT JOIN aios.observation_proposition op ON op.observation_id=o.observation_id AND op.frame_id=sf.frame_id WHERE o.claim_id=cc.claim_id AND op.frame_id IS NULL))
+          AND NOT EXISTS (
+              SELECT 1 FROM aios.claim_normalization_state ns
+              WHERE ns.claim_id=cc.claim_id AND ns.outcome='blocked'
+                AND ns.attempted_revision=ns.input_revision
+                AND ns.normalizer_version='{NORMALIZER_VERSION}'
+                AND ns.validator_version='{INTEGRITY_VERSION}'
+                AND ns.repair_version='{REPAIR_VERSION}')
           AND NOT EXISTS (SELECT 1 FROM aios.pipeline_job pj WHERE pj.job_type='normalize_proposition' AND pj.status IN ('queued','running') AND pj.payload->>'claim_id'=cc.claim_id::text)
         ORDER BY cc.created_at LIMIT $1
     """, claim_id_payload, 35, 96, True),

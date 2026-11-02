@@ -39,4 +39,4 @@ def test_external_speaker_cannot_assign_a_time_bounded_goal():
 
 def test_loaded_runtime_version_is_composite_v11():
     assert cognition.INTERPRETER_VERSION==(
-        "message-cognition-v11-source-goal-admission+epistemic-scope-v1")
+        "message-cognition-v13-source-preserving+epistemic-scope-v1")

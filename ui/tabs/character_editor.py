@@ -307,8 +307,11 @@ async def _runtime_rows(character_id: str) -> list[list[Any]]:
                rs.head_node_id, rs.source_timeline_id, rs.source_head_node_id,
                rs.lifecycle_state, rs.state_version,
                COALESCE(ec.controller_type, '') AS controller_type,
-               COALESCE(ec.controller_ref, '') AS controller_ref
+               COALESCE(ec.controller_ref, '') AS controller_ref,
+               activity.activity_band,activity.last_interaction_at,
+               activity.background_enabled,activity.eligible
         FROM aios.character_instance ci
+        LEFT JOIN aios.instance_goal_scheduling activity ON activity.instance_id=ci.instance_id
         LEFT JOIN aios.character_runtime_state rs ON rs.instance_id=ci.instance_id
         LEFT JOIN aios.world w ON w.world_id=rs.world_id
         LEFT JOIN LATERAL (
@@ -330,6 +333,8 @@ async def _runtime_rows(character_id: str) -> list[list[Any]]:
         str(r["source_timeline_id"] or ""), str(r["source_head_node_id"] or ""),
         r["lifecycle_state"] or "", r["state_version"] if r["state_version"] is not None else "",
         r["controller_type"], r["controller_ref"],
+        {0: "active", 1: "idle", 2: "background / scheduled", 3: "dormant"}.get(r["activity_band"], "dormant"),
+        str(r["last_interaction_at"] or ""), bool(r["background_enabled"]), bool(r["eligible"]),
     ] for r in rows]
 
 
@@ -650,9 +655,24 @@ def render():
                     with gr.Tab("Runtime / Worlds"):
                         runtime_table = gr.Dataframe(
                             headers=["instance_id","world_key","world_id","runtime_timeline","runtime_head",
-                                     "source_timeline","source_head","lifecycle","state_version","controller_type","controller_ref"],
+                                     "source_timeline","source_head","lifecycle","state_version","controller_type","controller_ref",
+                                     "goal_activity","last_external_interaction","background_goals","goal_checks_eligible"],
                             interactive=False, label="Character runtimes",
                         )
+                        goal_activity_instance = gr.Textbox(label="Goal scheduling instance ID")
+                        background_goals = gr.Checkbox(label="Allow goal checks while this instance is dormant", value=False)
+                        save_goal_activity = gr.Button("Save goal scheduling policy")
+                        goal_activity_status = gr.Textbox(label="Goal scheduling policy status", interactive=False)
+                        def save_goal_policy(instance_text, enabled):
+                            from uuid import UUID
+                            from aios_app.agent.goal_activity import set_background
+                            try:
+                                run_async(set_background(db, UUID(instance_text.strip()), enabled))
+                                return "Saved. Refresh diagnostics to inspect scheduling status."
+                            except Exception as exc:
+                                return f"Could not save goal policy: {exc}"
+                        save_goal_activity.click(fn=save_goal_policy,
+                            inputs=[goal_activity_instance, background_goals], outputs=goal_activity_status)
                     with gr.Tab("Scene State"):
                         scene_state = gr.JSON(label="Latest character-relative scene snapshot")
                     with gr.Tab("Speaker / Provenance"):

@@ -1,0 +1,29 @@
+@prefix catalog: <urn:aios:catalog#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+catalog:Place a rdfs:Class ; rdfs:comment "A particular place reference; never a global bedroom or store singleton." .
+catalog:Room a rdfs:Class ; rdfs:subClassOf catalog:Place .
+catalog:Bedroom a rdfs:Class ; rdfs:subClassOf catalog:Room .
+catalog:Kitchen a rdfs:Class ; rdfs:subClassOf catalog:Room .
+catalog:Store a rdfs:Class ; rdfs:subClassOf catalog:Place .
+catalog:Building a rdfs:Class ; rdfs:subClassOf catalog:Place .
+catalog:Region a rdfs:Class ; rdfs:subClassOf catalog:Place .
+catalog:placeKind a rdf:Property ; rdfs:comment "Broad existing type or unambiguous parsed place head, not an identity key." .
+catalog:EntityReference a rdfs:Class .
+catalog:PersonReference a rdfs:Class ; rdfs:subClassOf catalog:EntityReference .
+catalog:MembershipEvidence a rdfs:Class ; rdfs:comment "Source-qualified spatial relationship, not an unqualified physical location." .
+catalog:Place rdfs:subClassOf catalog:EntityReference .
+catalog:hasMembershipEvidence a rdf:Property .
+catalog:member a rdf:Property .
+catalog:place a rdf:Property .
+catalog:source a rdf:Property .
+catalog:membershipStatus a rdf:Property ; rdfs:comment "reported, denied, qualified, illustrative, or world_record; reported is not current world state." .
+catalog:spatialRelation a rdf:Property ; rdfs:comment "Keep in/on/inside/near/part_of/contains distinct. Near is not containment." .
+catalog:describedBy a rdf:Property .
+catalog:hasEntityReference a rdf:Property .
+catalog:entity a rdf:Property .
+catalog:knowledgeMode a rdf:Property ; rdfs:comment "source_mention, encounter_record, relationship_record, acquired_corpus_reference, or corpus_reference_exposure; exposure is not acquisition." .
+catalog:authority a rdf:Property .
+catalog:viewKind a rdf:Property .
+catalog:truncated a rdf:Property .

@@ -83,7 +83,7 @@ async def test_runner_returns_deferred_lease_without_marking_job_done_or_failed(
     from aios_app import runner
     @asynccontextmanager
     async def connection():
-        yield SimpleNamespace(execute=AsyncMock())
+        yield SimpleNamespace(execute=AsyncMock(), fetchval=AsyncMock(return_value=True))
     db=SimpleNamespace(connection=connection,execute=AsyncMock())
     async def handler(*args): raise JobDeferred('provider cooling down',delay_seconds=60)
     async def heartbeat(*args,**kwargs): await asyncio.Event().wait()
@@ -103,3 +103,75 @@ async def test_runner_returns_deferred_lease_without_marking_job_done_or_failed(
     defer.assert_awaited_once_with(db,job['job_id'],worker_id='owner',delay_seconds=60)
     done.assert_not_awaited()
     failed.assert_not_awaited()
+
+
+def test_planning_requirements_ignore_retry_metadata_and_evidence_order():
+    from aios_app.agent.goal_planning import planning_requirements
+    requirement = {'requirement_id':'one','question':'Where is the sink?',
+                   'coverage_status':'missing','evidence_ids':['b','a'],
+                   'rdf_refs':[], 'recall_receipt':{'inquiry_id':'old','revision':'old'},
+                   'retrieval_state':'unassessed'}
+    retried = {**requirement,'evidence_ids':['a','b'],
+               'recall_receipt':{'inquiry_id':'new','revision':'new'},
+               'retrieval_state':'internal_recall'}
+    assert planning_requirements([requirement]) == planning_requirements([retried])
+    assert planning_requirements([requirement]) != planning_requirements([{**retried,'coverage_status':'sufficient'}])
+
+
+def test_plan_text_limits_and_diagnostics():
+    from aios_app.agent.goal_planning import validate_plan, PlanTextError, build_plan_prompt
+    from test_goal_planning import proposal
+    raw = {**proposal(), 'strategy':'a'*600, 'steps':['b'*400]}
+    assert validate_plan(raw, {'goal'}) == raw
+    for field, change, expected, maximum in (
+        ('strategy', {'strategy':'a'*601}, 601, 600),
+        ('steps[0]', {'steps':['b'*401]}, 401, 400),
+        ('open_questions[0].question', {'open_questions':[{'kind':'environment','question':'c'*181}]}, 181, 180),
+    ):
+        with pytest.raises(PlanTextError) as error:
+            validate_plan({**raw, **change}, {'goal'})
+        assert error.value.details == {'field':field,'reason':'too_long','actual':expected,'maximum':maximum}
+    for value, reason in (('', 'empty'), (None, 'expected_string')):
+        with pytest.raises(PlanTextError) as error:
+            validate_plan({**raw, 'strategy':value}, {'goal'})
+        assert error.value.details['reason'] == reason
+    prompt, _ = build_plan_prompt('Learn to cook', [], [], [], {}, [])
+    assert 'strategy 1-600' in prompt and 'each step 1-400' in prompt and 'each question 1-180' in prompt
+    # The two observed provider outputs fit without another paid call.
+    assert validate_plan({**proposal(), 'strategy':'s'*282, 'steps':['t'*211]}, {'goal'})
+
+
+@pytest.mark.asyncio
+async def test_exhausted_text_correction_is_recorded_without_worker_exception(monkeypatch):
+    from aios_app.agent.goal_planning import PlanTextError
+    op={'instance_id':uuid4(),'operation_id':uuid4(),'status':'running',
+        'operation_type':'planning.propose'}
+    db=SimpleNamespace(fetchrow=AsyncMock(return_value=op),
+                       execute_returning_row=AsyncMock(return_value={'operation_id':op['operation_id']}))
+    engine=CognitiveOperationEngine(db)
+    error=PlanTextError('steps[0]', 'too_long', actual=401, maximum=400)
+    error.request_ids=['original', 'correction']
+    monkeypatch.setattr(GoalPlanningService, 'propose', AsyncMock(side_effect=error))
+    reconcile=AsyncMock()
+    finish=AsyncMock()
+    monkeypatch.setattr(engine, 'reconcile_terminal', reconcile)
+    monkeypatch.setattr(engine, '_finish', finish)
+    await engine.propose_plan(op['operation_id'])
+    saved=json.loads(db.execute_returning_row.await_args.args[2])
+    assert saved['validation']['field'] == 'steps[0]'
+    assert saved['inference_request_ids'] == ['original','correction']
+    assert saved['reason']=='plan_text_validation_failed'
+    assert "status='failed'" in db.execute_returning_row.await_args.args[0]
+    reconcile.assert_awaited_once_with(op['operation_id'])
+    finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovered_pipeline_job_does_not_repeat_succeeded_plan(monkeypatch):
+    op={'instance_id':uuid4(),'operation_id':uuid4(),'status':'succeeded',
+        'operation_type':'planning.propose'}
+    engine=CognitiveOperationEngine(SimpleNamespace(fetchrow=AsyncMock(return_value=op)))
+    propose=AsyncMock()
+    monkeypatch.setattr(GoalPlanningService,'propose',propose)
+    await engine.propose_plan(op['operation_id'])
+    propose.assert_not_awaited()

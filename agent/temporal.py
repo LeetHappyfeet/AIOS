@@ -359,6 +359,8 @@ class TemporalTriggerStore:
                            WHERE instance_id=$1 AND dedupe_key=$2""",
                         instance_id, dedupe,
                     )
+                from .goal_activity import grant_scheduled_window
+                await grant_scheduled_window(con, instance_id)
                 await con.execute(
                     """UPDATE aios.character_agent_runtime
                        SET state=CASE WHEN state='paused' THEN state ELSE 'ready' END,

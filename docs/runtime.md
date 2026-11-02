@@ -32,6 +32,11 @@ Do not run another launcher over the same active installation.
 
 ## Configuration
 
+Workspace client credentials can be saved in Gradio → **Workspace Access**.
+The installation-local `launch-config.json` persists the key across launches;
+see [workspace setup](workspace-client.md) for copying, environment precedence,
+and the optional `AIOS_LAUNCH_CONFIG` path override.
+
 [.env.example](../.env.example) lists infrastructure settings. Python settings
 are defined in [config.py](../config.py); launcher-specific controls are in
 [launch.py](../launch.py). Keep database credentials and service URLs consistent
@@ -121,3 +126,66 @@ isolated installation before relying on a backup procedure.
 
 The installation guide identifies destructive volume removal. A production
 recovery attempt should not begin with deleting volumes or resetting databases.
+
+
+### Background RDF recall deadlines
+
+`AIOS_RDF_INQUIRY_TIMEOUT_SECONDS` defaults to **5 seconds per Fuseki query**,
+clamped to 0.1–30 seconds. Set it in the installation's `.env` and restart AIOS
+to change it, for example `AIOS_RDF_INQUIRY_TIMEOUT_SECONDS=10`.
+Background character inquiries use this timeout for both source and atom reads;
+interactive HUD recall retains its 0.8-second transport limit. Each HTTP call
+has zero retries and an async deadline of the selected timeout plus 0.1 seconds.
+A recall can run both source and atom queries, each with its own deadline.
+The SQL budgets are separate and unchanged. Traces/logs report the selected
+transport budget, so a SQL timeout is distinguishable from an HTTP read timeout.
+`AIOS_FUSEKI_TIMEOUT` does not override this dedicated recall budget.
+
+An expired pipeline lease after shutdown is recovered at runner startup; while
+running, the recovery loop checks at most every 60 seconds with default settings.
+Recovery requeues the pipeline job. A goal-planning handler whose cognitive
+operation already succeeded returns without another inference, allowing the
+pipeline job to finish. No manual status edits are needed for that case.
+A job that remains expired while the runner is active requires investigating
+runner liveness and lease-recovery errors; an expired row alone cannot establish
+that recovery failed if the runner was stopped.
+
+### Blocked normalization revisions
+
+Migration `20261030_01_normalization_blocked_revisions.sql` adds
+`aios.claim_normalization_state`. Stop all AIOS workers, pull the development
+branch, run `python -m aios_app.migrate` from the package's parent directory,
+and restart. Existing claims get one attempt under the new policy; no source,
+frame, observation or character memory is deleted or reingested.
+
+If integrity validation and deterministic repair cannot produce a valid claim,
+the normalizer records `outcome='blocked'`, its input revision, integrity reasons,
+and normalizer/validator/repair versions. The supervisor skips that exact blocked
+revision. Duplicate jobs already queued also skip validation for a current block.
+The pipeline job still finishes, while its normalization outcome explicitly
+records the lack of semantic progress. Validity requirements remain unchanged.
+
+Source, sentence, section, DAG origin, semantic frame/projection and resolved
+claim-context changes advance the input revision using database triggers. Pure
+processing timestamps and integrity receipt writes do not. New revisions and
+normalizer/validator/repair version changes allow another attempt and reopen the
+bounded deterministic repair allowance. Bump the corresponding version constant
+when changing one of these algorithms. Deterministic repair that changes a frame
+also advances the revision; a still-blocked result may need one further pass to
+record the stable repaired revision.
+
+Receipt writes compare the attempted revision with the current input revision.
+An edit arriving during validation cannot stamp a block onto a newer revision.
+The old attempt remains diagnostic history until replaced by the next outcome.
+This removes normalization churn; expensive vector/topology SQL may still need
+independent profiling after the redundant work subsides.
+
+Inspect current blocks:
+
+```sql
+SELECT integrity_status,reason_codes,count(*) AS claims
+FROM aios.claim_normalization_state
+WHERE outcome='blocked' AND attempted_revision=input_revision
+GROUP BY integrity_status,reason_codes
+ORDER BY claims DESC;
+```

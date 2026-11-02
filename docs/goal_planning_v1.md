@@ -173,3 +173,61 @@ Regression tests also cover bounded evidence reaching the actual transaction pro
 source/attempt changes, duplicate review admission, unavailable providers, rate-limit
 cooldown, and state-only changes during inference. Run the cognitive-episode-recovery
 workflow, including its isolated PostgreSQL fixtures, before deployment.
+
+
+## Retrieval failure loop repair
+
+Planning fingerprints now normalize requirement evidence and coverage, excluding
+recall receipt IDs, retrieval transport state, and retry revision bookkeeping.
+Full receipts remain in the dependency store for continuation and diagnostics.
+Reordered evidence IDs alone do not cause inference; new evidence, coverage,
+questions, source context and meaningful receipt summaries still can.
+
+Unavailable, failed or stale inquiry operations impose a 60-second retry delay
+per requirement, measured from the latest operation's stored `updated_at` using
+the database clock. Replacing a plan or restarting a worker cannot reset it.
+This uses existing operation records and needs no new migration or memory reset.
+An existing plan fingerprint may change once after updating to the new format.
+
+Background inquiry RDF recall allows two seconds per SQL candidate or
+revalidation read; interactive recall retains its 350ms per-read deadline.
+Source candidates are materialized after owner, revision and search filtering,
+before source authorization joins. No candidate limit precedes authorization,
+and lineage, source eligibility, payload hashes and reference validation remain
+mandatory. Production query-plan improvements require measurement on the live DB.
+
+Unavailable recall traces now include `stage`, `failure`, `elapsed_ms`,
+`sql_budget_seconds` and bounded error `detail`. The stage distinguishes SQL
+source/atom selection, Fuseki source/atom queries and SQL revalidation. Fuseki
+HTTP/transport details are also included in the log. This exposes the underlying
+Fuseki failure without treating unavailable retrieval as an empty knowledge result.
+
+## Plan text limits and correction
+
+Strategies allow 600 characters and each of the one to three steps allows 400.
+Each of up to three information questions retains its 180-character limit.
+The prompt states the same limits as the validator, in characters, not tokens.
+The completion token budget remains 1200; these maxima do not require filling it.
+
+An oversized, empty, or non-string text field produces a field-specific
+`PlanTextError`. One additional planning inference may rewrite the full draft
+with validation feedback; no strategy, step or question is silently truncated
+for acceptance. The rejected draft excerpt is bounded and labeled untrusted.
+The correction must still pass all evidence, routing and field checks. Source
+context and operation ownership are checked before spending the correction call
+and again before accepting the result.
+
+After a second text rejection, the cognitive operation and new plan are marked
+failed through existing reconciliation, retaining any preceding accepted plan.
+The operation result records `reason=plan_text_validation_failed`, field/reason/
+actual/maximum diagnostics as applicable, and inference request IDs. Expected
+text rejection is logged as a warning without a pipeline traceback. Provider
+unavailability during correction also terminates that plan instead of deferring
+and resetting its correction allowance. Initial provider unavailability retains
+normal inference deferral. Other validation guards remain hard failures.
+
+A successful operation records `validation_corrections` and
+`inference_request_ids`. No migration or memory reset is needed. The plan
+contract version participates in the input fingerprint, allowing one fresh plan
+under the new contract even when the old same-input plan failed. Subsequent
+unchanged failures remain deduplicated.

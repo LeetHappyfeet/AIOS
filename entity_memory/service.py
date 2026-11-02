@@ -197,9 +197,13 @@ def rdf_update(section_id, payload):
             emit(relation, "attribution", json.dumps(item["attribution"]))
             emit(relation, "tense", json.dumps(item["tense"]))
             emit(relation, "aspect", json.dumps(item["aspect"]))
-    return (f"DELETE {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}\n"
-            f"INSERT {{ GRAPH <{graph}> {{\n" + "\n".join(triples) + "\n} }\n"
-            f"WHERE {{ OPTIONAL {{ GRAPH <{graph}> {{ ?s ?p ?o }} }} }}")
+    if payload:
+        from aios_app.entity_memory.catalog import reference_triples
+        triples.extend(reference_triples(payload))
+    # One Fuseki update request is atomic. INSERT DATA avoids reinserting the
+    # constant catalog once per old triple during an idempotent graph replay.
+    return (f"DELETE WHERE {{ GRAPH <{graph}> {{ ?s ?p ?o }} }};\n"
+            f"INSERT DATA {{ GRAPH <{graph}> {{\n" + "\n".join(triples) + "\n} }")
 
 
 async def project_entity_memory_once(db, fuseki, *, limit=1):

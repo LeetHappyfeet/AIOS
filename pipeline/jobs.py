@@ -345,6 +345,9 @@ async def fetch_next_job(
         WITH next_job AS (
             SELECT q.job_id
             FROM aios.pipeline_job q
+            LEFT JOIN aios.instance_goal_scheduling goal_activity
+              ON q.job_type IN ('goal_plan_continuation','goal_planning_inference')
+             AND goal_activity.instance_id=(q.payload->>'instance_id')::uuid
             LEFT JOIN LATERAL (
                 SELECT pfl.updated_at
                 FROM aios.pipeline_foreground_lineage pfl
@@ -376,6 +379,13 @@ async def fetch_next_job(
             ) current_foreground ON true
             WHERE q.status = 'queued'
               AND q.run_after <= now()
+              AND (q.job_type NOT IN ('goal_plan_continuation','goal_planning_inference') OR (
+                  goal_activity.eligible AND (q.job_type <> 'goal_plan_continuation' OR NOT EXISTS (
+                      SELECT 1 FROM aios.pipeline_job running
+                      WHERE running.status='running' AND running.job_type='goal_plan_continuation'
+                        AND running.payload->>'instance_id'=q.payload->>'instance_id'
+                  ))
+              ))
               AND ($1::text IS NULL OR q.resource_class = $1)
               AND (
                     $4::text[] IS NULL
@@ -414,6 +424,14 @@ async def fetch_next_job(
                     )
               )
             ORDER BY
+                -- Goal LOOKUP jobs have instance coordinates, not message lineage.
+                -- Reserve the ordinary backlog turn for authorized non-live work.
+                CASE WHEN q.job_type IN ('goal_plan_continuation','goal_planning_inference') THEN
+                    CASE WHEN $7::boolean THEN goal_activity.activity_band
+                         WHEN goal_activity.activity_band>0 THEN 0 ELSE 1 END
+                     ELSE 0 END ASC,
+                CASE WHEN q.job_type='goal_plan_continuation'
+                     THEN goal_activity.last_continuation_started_at END ASC NULLS FIRST,
                 CASE
                     WHEN (current_foreground.updated_at IS NOT NULL)=$7::boolean THEN 0 ELSE 1
                 END ASC,
@@ -502,6 +520,7 @@ async def heartbeat_job(
         WHERE job_id=$1
           AND status='running'
           AND worker_id=$2
+          AND lease_expires_at > clock_timestamp()
         RETURNING job_id
         """,
         job_id,

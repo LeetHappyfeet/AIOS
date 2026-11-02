@@ -501,9 +501,12 @@ def _candidate_state(
     queue_velocity: float,
     failures: int = 0,
     live: bool = False,
+    running: int = 0,
 ) -> str:
     if failures:
         return "DEGRADED"
+    if queued == 0 and running:
+        return "BUSY"
     if queued == 0 or (live and oldest_s <= 2.0):
         return "READY" if live else "CAUGHT_UP"
 
@@ -549,8 +552,12 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
         settings.db_dsn,
         min_size=1,
         max_size=max(2, settings.db_pool_min_size),
+        server_settings={"statement_timeout": "2000", "lock_timeout": "250",
+                         "application_name": "aios:pipeline-telemetry"},
     )
     await db.connect()
+    cached_rates = None
+    rates_at = 0.0
     previous_queued: int | None = None
     previous_live_queued: int | None = None
     previous_at: float | None = None
@@ -560,75 +567,13 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
     try:
         while True:
             try:
-                rows = await db.fetch(
-                    """
-                    SELECT
-                        resource_class,
-                        scheduling_lane,
-                        COUNT(*) FILTER (WHERE status='queued' AND run_after <= now())::integer AS queued,
-                        COUNT(*) FILTER (WHERE status='running')::integer AS running,
-                        COALESCE(
-                            EXTRACT(EPOCH FROM (
-                                now() - MIN(created_at) FILTER (
-                                    WHERE status='queued' AND run_after <= now()
-                                )
-                            )),
-                            0
-                        )::double precision AS oldest_seconds
-                    FROM aios.pipeline_job
-                    WHERE status IN ('queued','running')
-                    GROUP BY resource_class, scheduling_lane
-                    ORDER BY resource_class, scheduling_lane
-                    """
-                )
-                stage_rows = await db.fetch(
-                    """
-                    SELECT
-                        job_type,
-                        resource_class,
-                        scheduling_lane,
-                        COUNT(*) FILTER (WHERE status='queued' AND run_after <= now())::integer AS queued,
-                        COUNT(*) FILTER (WHERE status='running')::integer AS running,
-                        COALESCE(
-                            EXTRACT(EPOCH FROM (
-                                now() - MIN(created_at) FILTER (
-                                    WHERE status='queued' AND run_after <= now()
-                                )
-                            )),
-                            0
-                        )::double precision AS oldest_seconds
-                    FROM aios.pipeline_job
-                    WHERE status IN ('queued','running')
-                    GROUP BY job_type, resource_class, scheduling_lane
-                    HAVING COUNT(*) FILTER (WHERE status='queued' AND run_after <= now()) > 0
-                        OR COUNT(*) FILTER (WHERE status='running') > 0
-                    ORDER BY oldest_seconds DESC, queued DESC
-                    """
-                )
-                rates = await db.fetchrow(
-                    """
-                    SELECT
-                        COUNT(*) FILTER (WHERE created_at >= now() - interval '30 seconds')::integer AS arrivals_30s,
-                        COUNT(*) FILTER (
-                            WHERE status='done' AND updated_at >= now() - interval '30 seconds'
-                        )::integer AS done_30s,
-                        COUNT(*) FILTER (
-                            WHERE scheduling_lane='LIVE'
-                              AND created_at >= now() - interval '30 seconds'
-                        )::integer AS live_arrivals_30s,
-                        COUNT(*) FILTER (
-                            WHERE scheduling_lane='LIVE'
-                              AND status='done'
-                              AND updated_at >= now() - interval '30 seconds'
-                        )::integer AS live_done_30s,
-                        COUNT(*) FILTER (
-                            WHERE status='failed' AND updated_at >= now() - interval '60 seconds'
-                        )::integer AS failed_60s
-                    FROM aios.pipeline_job
-                    WHERE created_at >= now() - interval '60 seconds'
-                       OR updated_at >= now() - interval '60 seconds'
-                    """
-                )
+                from aios_app.pipeline.telemetry import STAGES_SQL, RATES_SQL, lane_totals
+                stage_rows = await db.fetch(STAGES_SQL)
+                rows = lane_totals(stage_rows)
+                if cached_rates is None or loop.time() - rates_at >= 30.0:
+                    cached_rates = await db.fetchrow(RATES_SQL)
+                    rates_at = loop.time()
+                rates = cached_rates
                 running_rows = await db.fetch(
                     """
                     SELECT
@@ -657,8 +602,12 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
 
                 lanes: list[dict[str, Any]] = []
                 total_queued = total_running = live_queued = live_running = 0
+                parked = delayed = waiting = 0
                 oldest = live_oldest = 0.0
                 for row in rows:
+                    parked += int(row["parked"] or 0)
+                    delayed += int(row["delayed"] or 0)
+                    waiting += int(row["waiting"] or 0)
                     queued = int(row["queued"] or 0)
                     running = int(row["running"] or 0)
                     age = float(row["oldest_seconds"] or 0.0)
@@ -676,6 +625,9 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
                             "lane": lane,
                             "queued": queued,
                             "running": running,
+                            "parked": int(row["parked"] or 0),
+                            "delayed": int(row["delayed"] or 0),
+                            "waiting": int(row["waiting"] or 0),
                             "oldest_s": round(age, 2),
                         }
                     )
@@ -702,6 +654,7 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
                     "global",
                     _candidate_state(
                         queued=total_queued,
+                        running=total_running,
                         oldest_s=oldest,
                         arrivals_per_s=arrivals_per_s,
                         done_per_s=done_per_s,
@@ -715,6 +668,7 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
                     "live",
                     _candidate_state(
                         queued=live_queued,
+                        running=live_running,
                         oldest_s=live_oldest,
                         arrivals_per_s=live_arrivals_per_s,
                         done_per_s=live_done_per_s,
@@ -732,6 +686,9 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
                         "lane": str(row["scheduling_lane"]),
                         "queued": int(row["queued"] or 0),
                         "running": int(row["running"] or 0),
+                        "parked": int(row["parked"] or 0),
+                        "delayed": int(row["delayed"] or 0),
+                        "waiting": int(row["waiting"] or 0),
                         "oldest_s": round(float(row["oldest_seconds"] or 0.0), 2),
                     }
                     for row in stage_rows
@@ -746,6 +703,7 @@ async def _pipeline_telemetry_loop(interval: float = 5.0) -> None:
                         "live_state": live_state,
                         "queued": total_queued,
                         "running": total_running,
+                        "parked": parked, "delayed": delayed, "waiting": waiting,
                         "oldest_s": round(oldest, 2),
                         "live_queued": live_queued,
                         "live_running": live_running,

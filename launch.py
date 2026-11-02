@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 from aios_app.config import settings
+from aios_app.launch_config import get_workspace_api_key, read_launch_config
 
 
 PYTHON = sys.executable
@@ -443,7 +444,8 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
         f"LIVE {live_state} {live_queued}q/{live_running}r lag {live_lag} "
         f"in {live_in} out {live_out} | "
         f"GLOBAL {pipeline_state} {queued}q/{running}r lag {lag} "
-        f"in {in_rate} out {done_rate} | "
+        f"in {in_rate} out {done_rate} "
+        f"parked {int(pipeline.get('parked') or 0)} delayed {int(pipeline.get('delayed') or 0)} waiting {int(pipeline.get('waiting') or 0)} | "
         f"semantic {semantic_state} {semantic_detail} index {index_rate} | "
         f"topology {topology_state} {topology_stage} | "
         f"API {api_text}",
@@ -466,6 +468,7 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
                 f"{_stage_text(row.get('job_type'))}: "
                 f"{int(row.get('queued') or 0)}q/{int(row.get('running') or 0)}r "
                 f"oldest {_format_age(row.get('oldest_s'))} "
+                f"parked {int(row.get('parked') or 0)} delayed {int(row.get('delayed') or 0)} waiting {int(row.get('waiting') or 0)} "
                 f"[{row.get('resource')}/{row.get('lane')}]",
                 flush=True,
             )
@@ -599,11 +602,13 @@ def main() -> None:
     runtimes: List[ServiceRuntime] = []
     output_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
 
+    read_launch_config()  # Fail before starting services if persisted settings are invalid.
     print("🚀 AIOS startup")
     print(f"   API: http://{settings.api_host}:{settings.api_port}")
     print(f"   PostgreSQL: {settings.db_dsn}")
     print(f"   Fuseki: {settings.fuseki_base_url}")
     print(f"   Console mode: {LOG_MODE}")
+    print(f"   Workspace access: {'configured' if get_workspace_api_key() else 'disabled (configure in Gradio Workspace Access)'}")
     print()
 
     try:

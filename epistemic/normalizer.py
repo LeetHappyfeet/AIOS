@@ -3,17 +3,19 @@ from __future__ import annotations
 """Public proposition normalizer facade for semantic-engine v4."""
 
 import json
+import logging
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.epistemic.semantic_integrity import validate_claim
-from aios_app.epistemic.semantic_repair import repair_claim
+from aios_app.epistemic.semantic_integrity import validate_claim, INTEGRITY_VERSION
+from aios_app.epistemic.semantic_repair import repair_claim, REPAIR_VERSION
 from aios_app.epistemic import normalizer_legacy as legacy
 from aios_app.epistemic.context_resolver import RESOLVER_VERSION
 from aios_app.epistemic import message_cognition as _message_cognition
 from aios_app.epistemic.epistemic_scope import install_message_cognition_scope_guard
 
 NORMALIZER_VERSION = "proposition-v3-semantic"
+logger = logging.getLogger(__name__)
 
 # Install the same conservative assertion boundary used by structural
 # normalization on the generation-critical cognition path. This facade is
@@ -105,10 +107,41 @@ async def _apply_epistemic_admission(db: Database, *, claim_id: UUID) -> None:
     )
 
 
+async def _record_normalization(db, claim_id, revision, receipt, outcome):
+    # Compare-and-set: a source/context edit or deterministic frame repair
+    # during this attempt must not stamp a blocked receipt on the newer input.
+    return await db.fetchval("""
+        UPDATE aios.claim_normalization_state ns
+        SET attempted_revision=$2,outcome=$3,normalizer_version=$4,
+            validator_version=$5,repair_version=$6,integrity_status=$7,
+            reason_codes=$8::jsonb,integrity_revision_key=si.revision_key,
+            attempted_at=now(),updated_at=now()
+        FROM aios.claim_semantic_integrity si
+        WHERE ns.claim_id=$1 AND ns.input_revision=$2 AND si.claim_id=ns.claim_id
+        RETURNING ns.claim_id
+    """,claim_id,revision,outcome,NORMALIZER_VERSION,INTEGRITY_VERSION,REPAIR_VERSION,
+        receipt.status,json.dumps(receipt.reasons))
+
+
 async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID | None:
+    state = await db.fetchrow("SELECT * FROM aios.claim_normalization_state WHERE claim_id=$1", claim_id)
+    if state is None:
+        raise RuntimeError(f"Missing normalization revision state for {claim_id}; run migrations")
+    same_policy = (state["normalizer_version"] == NORMALIZER_VERSION
+                   and state["validator_version"] == INTEGRITY_VERSION
+                   and state["repair_version"] == REPAIR_VERSION)
+    if (state["outcome"] == "blocked" and state["attempted_revision"] == state["input_revision"]
+            and same_policy):
+        return None  # Also harmless for duplicate jobs already in the queue.
+
     # Source integrity is an admission condition, not a downstream attention hint.
     receipt = await validate_claim(db, claim_id=claim_id)
     if receipt.status != "valid":
+        if state["attempted_revision"] != state["input_revision"] or not same_policy:
+            # The old cap belongs to the previous input/policy revision.
+            # Audit revisions remain intact; new evidence gets a repair chance.
+            await db.execute("""UPDATE aios.claim_semantic_integrity
+                SET repair_attempts=0,repair_state='pending' WHERE claim_id=$1""", claim_id)
         receipt = await repair_claim(db, claim_id=claim_id, receipt=receipt)
     if receipt.status != "valid":
         # Preserve the source claim and frames, but revoke existing evidence.
@@ -119,6 +152,9 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID | None:
                WHERE pe.observation_id=o.observation_id AND o.claim_id=$1""",
             claim_id,
         )
+        recorded = await _record_normalization(db,claim_id,state["input_revision"],receipt,"blocked")
+        logger.info("Normalization blocked claim=%s revision=%s integrity=%s reasons=%s current=%s",
+                    claim_id,state["input_revision"],receipt.status,receipt.reasons,bool(recorded))
         return None
     proposition_id = await legacy.normalize_claim_once(db, claim_id=claim_id)
     await _apply_epistemic_admission(db, claim_id=claim_id)
@@ -149,6 +185,7 @@ async def normalize_claim_once(db: Database, *, claim_id: UUID) -> UUID | None:
             "epistemic_admission_policy": "epistemic-scope-v1",
         }),
     )
+    await _record_normalization(db,claim_id,state["input_revision"],receipt,"normalized")
     return proposition_id
 
 

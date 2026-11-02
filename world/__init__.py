@@ -338,6 +338,8 @@ if not getattr(WorldRuntimeService, "_live_readiness_v3", False):
         recent_limit: Optional[int] = None,
         token_budget: Optional[int] = None,
         wait_ms: int = 1200,
+        profile_name: Optional[str] = None,
+        focus_text: Optional[str] = None,
     ):
         state = await self.get_state(instance_id)
         target_node_id = through_node_id or state.get("source_head_node_id")
@@ -362,6 +364,7 @@ if not getattr(WorldRuntimeService, "_live_readiness_v3", False):
                     recent_limit=recent_limit,
                     token_budget=token_budget,
                     wait_ms=1200,
+                    profile_name=profile_name, focus_text=focus_text,
                 ),
                 label=f"activation-hud-prewarm:{instance_id}:{target_node_id}",
             )
@@ -448,6 +451,7 @@ if not getattr(WorldRuntimeService, "_live_readiness_v3", False):
             recent_limit=recent_limit,
             token_budget=token_budget,
             wait_ms=0,
+            profile_name=profile_name, focus_text=focus_text,
         )
 
         if not current_target:

@@ -5,6 +5,9 @@ import re
 from uuid import UUID
 from aios_app.epistemic.semantic_integrity import validate_claim, IntegrityResult
 
+REPAIR_VERSION = "semantic-repair-v1"
+
+
 async def repair_claim(db, *, claim_id: UUID, receipt: IntegrityResult) -> IntegrityResult:
     row = await db.fetchrow(
         """SELECT repair_attempts, revision_key, validator_version, status,

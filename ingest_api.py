@@ -113,6 +113,46 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
         )
     dedupe_key = req.dedupe_key or default_dedupe_key
 
+    # Text alone cannot distinguish same-text swipes or a corrected speaker.
+    # Keep the legacy key as a read candidate so exact old receipts still work.
+    replay_keys = [dedupe_key]
+    if source_event_id and not req.dedupe_key:
+        identity = hashlib.sha256(json.dumps(
+            {"kind": req.kind or "other", "payload": payload}, sort_keys=True, ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
+        dedupe_key = f"{default_dedupe_key}::v2:{identity}"
+        replay_keys.insert(0, dedupe_key)
+
+    # Point-in-time replay lookup uses the unique dedupe index and never writes.
+    # A missing/errored/pending DAG or a superseded swipe must use the established
+    # insert/reselection/recovery path below, including its concurrent-insert guard.
+    durable = await db.fetchrow(
+        """/* durable_ingest_replay */
+        SELECT ie.event_id, ie.dedupe_key, dn.node_id, dn.timeline_id,
+               (ie.superseded_at IS NULL AND dn.node_id IS NOT NULL
+                AND ie.process_status IS DISTINCT FROM 'error'
+                AND ie.process_error IS DISTINCT FROM 'participant_binding_pending') AS durable
+        FROM aios.ingest_event ie
+        LEFT JOIN aios.dag_node dn ON dn.event_id=ie.event_id
+        WHERE ie.dedupe_key=ANY($1::text[])
+          AND ie.session_id=$2
+          AND ie.kind=$3::aios.event_kind
+          AND ie.payload @> $4::jsonb
+        ORDER BY ie.event_id DESC, dn.created_at, dn.node_id LIMIT 1
+        """,
+        replay_keys, req.session_id, req.kind or "other", json.dumps(payload),
+    )
+    if durable:
+        # Legacy superseded/partial events retain their original identity when
+        # reselected or repaired, rather than creating a second v2 event.
+        dedupe_key = durable["dedupe_key"]
+    if durable and durable["durable"]:
+        return _ingest_out(
+            event_id=int(durable["event_id"]), node_id=durable["node_id"],
+            timeline_id=durable["timeline_id"], disposition=IngestEventDisposition.ACTIVE_REPLAY,
+            source_head_node_id=await _runtime_source_head(db, req, durable["timeline_id"]),
+        )
+
     try:
         ev = await db.execute_returning_row(
             """
@@ -230,7 +270,8 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                 ) de ON true
                 WHERE ie.session_id=$1
                   AND lower(ie.source)=lower($2)
-                  AND ie.source_event_id=$3
+                  AND (ie.source_event_id=$3 OR
+                       (ie.source_kind='sillytavern_chat' AND ie.payload->>'message_id'=$5))
                   AND ie.event_id<>$4
                   AND ie.superseded_at IS NULL
                 ORDER BY ie.event_id DESC
@@ -240,6 +281,7 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
                 client_source,
                 source_event_id,
                 event_id,
+                str(source_message_id),
             )
             if prior:
                 source_slot_replaced = True
@@ -376,8 +418,11 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
         if disposition is IngestEventDisposition.NEW and affected_instance_ids:
             from aios_app.agent.admission import AutonomyAdmissionService
 
+            from aios_app.agent.goal_activity import observe_interaction
             admission = AutonomyAdmissionService(db)
             for instance_id in affected_instance_ids:
+                if req.speaker_type in {"user", "character"} and req.kind == "chat_message":
+                    await observe_interaction(db, instance_id)
                 await admission.observe_host_experience(
                     instance_id=instance_id,
                     source_node_id=node_id,
@@ -409,6 +454,13 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
         event_id,
         bool(affected_instance_ids),
     )
+    # Work markup is a source-authored request, never a world fact or shell command.
+    # Run after source adoption; a work-admission failure must not corrupt ingestion.
+    if (disposition is IngestEventDisposition.NEW and req.speaker_type == "character"
+            and req.speaker_id == req.character_id and "<aios_action>" in message_text.lower()
+            and any(op in message_text for op in ('request_work', 'read_work_result'))):
+        from aios_app.agent.work_admission import ingest_work_request
+        await ingest_work_request(db, affected_instance_ids, node_id)
     return _ingest_out(
         event_id=event_id,
         node_id=node_id,

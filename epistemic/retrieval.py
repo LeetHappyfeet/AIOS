@@ -504,7 +504,7 @@ class TopologyRetriever:
         if not query_text:
             return {}
         lineage = tuple(str(value) for value in (context.cognitive_instance_ids or context.lineage_instance_ids))
-        cache_key = (str(context.character_id), query_text, lineage)
+        cache_key = (str(context.character_id), query_text, lineage, getattr(context, "cognitive_revision", ""))
         cached = self._semantic_seed_cache.get(cache_key)
         if cached is not None:
             return cached

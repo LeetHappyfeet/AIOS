@@ -15,6 +15,7 @@ class FakeDB:
         self.executes = []
         self.returning_calls = []
         self.fetchrow_calls = []
+        self.fast_replay = None
 
     async def execute_returning_row(self, sql, *args):
         self.returning_calls.append((sql, args))
@@ -22,6 +23,8 @@ class FakeDB:
 
     async def fetchrow(self, sql, *args):
         self.fetchrow_calls.append((sql, args))
+        if "durable_ingest_replay" in sql:
+            return self.fast_replay
         return self.fetchrows.pop(0) if self.fetchrows else None
 
     async def execute(self, sql, *args):
@@ -61,6 +64,15 @@ def install_structural_mocks(monkeypatch, *, timeline_id=None, node_id=None, ins
         calls["dirty"].append(kwargs)
         return instance_ids
 
+    async def participant(*args, **kwargs):
+        return uuid4()
+
+    async def ignore(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(ingest_api, "ensure_participant", participant)
+    monkeypatch.setattr(ingest_api, "bind_available_instance", ignore)
+    monkeypatch.setattr(ingest_api, "record_message_participation", ignore)
     monkeypatch.setattr(ingest_api, "get_or_create_timeline", fake_timeline)
     monkeypatch.setattr(ingest_api, "add_node_and_edge", fake_dag)
     monkeypatch.setattr(ingest_api, "mark_matching_runtime_dirty", fake_dirty)
@@ -96,7 +108,7 @@ async def test_exact_active_replay_returns_before_pipeline_side_effects(monkeypa
     assert out.source_head_node_id == active_head_id
     assert out.source_current is False
     assert db.executes == []
-    assert len(db.fetchrow_calls) == 2
+    assert len(db.fetchrow_calls) == 3
 
 
 @pytest.mark.asyncio
@@ -280,3 +292,40 @@ async def test_new_event_not_admitted_when_no_runtime_adopts_source(monkeypatch)
     monkeypatch.setattr(admission_module, "AutonomyAdmissionService", ForbiddenAdmission)
 
     await ingest_api.ingest_message(db, request(message_id=52))
+
+
+@pytest.mark.asyncio
+async def test_durable_replay_avoids_all_writes_including_upsert(monkeypatch):
+    node_id, timeline_id, head = uuid4(), uuid4(), uuid4()
+    db = FakeDB(None, [{'source_head_node_id': head}])
+    db.fast_replay = {'event_id': 91, 'dedupe_key': 'legacy', 'node_id': node_id,
+                      'timeline_id': timeline_id, 'durable': True}
+    out = await ingest_api.ingest_message(db, request())
+    assert out.node_id == node_id and out.source_head_node_id == head
+    assert out.disposition == 'active_replay'
+    assert not db.returning_calls and not db.executes
+
+
+@pytest.mark.asyncio
+async def test_same_text_different_swipe_or_speaker_has_distinct_v2_identity():
+    req = request()
+    keys = []
+    for speaker, swipe in [('Alex', 0), ('Alex', 1), ('Other', 1)]:
+        req.speaker_id = speaker
+        req.payload['swipe_id'] = swipe
+        db = FakeDB({'event_id': 1, 'inserted': False, 'was_superseded': False},
+                    [{'node_id': uuid4(), 'timeline_id': uuid4()}, {'source_head_node_id': uuid4()}])
+        await ingest_api.ingest_message(db, req)
+        keys.append(db.returning_calls[0][1][-1])
+    assert len(set(keys)) == 3
+    assert all('::v2:' in key for key in keys)
+
+
+@pytest.mark.asyncio
+async def test_legacy_partial_replay_keeps_old_key_for_recovery(monkeypatch):
+    db = FakeDB({'event_id': 91, 'inserted': False, 'was_superseded': False},
+                [{'node_id': uuid4(), 'timeline_id': uuid4()}, {'source_head_node_id': uuid4()}])
+    db.fast_replay = {'event_id': 91, 'dedupe_key': 'legacy', 'node_id': None,
+                      'timeline_id': None, 'durable': False}
+    await ingest_api.ingest_message(db, request())
+    assert db.returning_calls[0][1][-1] == 'legacy'
