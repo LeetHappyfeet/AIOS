@@ -541,3 +541,28 @@ omitted by client transport limits remains in worker source reports/journals.
 Do not repeat a task just because its content was omitted from the HUD. Updating
 AIOS improves existing retained prose, but cannot recover structured fields or
 file contents that an old client never submitted.
+
+### Worker access to prior work (`work-evidence-v1`)
+
+Protocol v3 optionally advertises `work-evidence-v1`. It adds two worker-key
+routes under `/workspace-client/v3/{binding_id}/runs/{run_id}`:
+
+| Route | Body | Result |
+| --- | --- | --- |
+| POST `/work-history` | `worker_key`, `claim_token` | At most five prior terminal runs: objective, summary, findings, limitations, timestamp, goal/attempt IDs and result revision. Same goal/attempt first, then recency. |
+| POST `/work-result` | Lease fields plus exactly one `run_id` or `request_id`, `section`, optional `cursor`, `limit`, `revision` | Retained report section; pagination and result revisions follow `read_work_result`. Nonzero cursors require the returned revision. |
+
+Identity and scope are derived from the active lease, never model-provided
+character or instance IDs. Prior work must use the same binding and enabled
+environment link, origin instance and source timeline, and a source on the
+current origin branch. Superseded sources and denied/invalidated requests are
+excluded. The current run and nonterminal runs are excluded. Expired claims,
+cancellation, link revocation and origin branch changes reject further reads.
+An unlinked assignment has no prior-work scope; history returns `unavailable`.
+
+This grants access to task receipts for that environment even when personal
+memory sharing is disabled. It does not broaden character recall or share
+unrelated workspaces. Reads do not execute tasks, advance the conversational
+source, create knowledge acquisitions, accept goals or acknowledge consumption.
+No migration or additional server LLM call is required. The existing result
+transport limits still apply; the reader cannot recover bytes never submitted.

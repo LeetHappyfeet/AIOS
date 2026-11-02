@@ -44,6 +44,9 @@ async def test_readiness_distinguishes_policy_worker_profile_and_pairing(db, mon
 @pytest.mark.asyncio
 async def test_missing_link_and_same_instance_explain_incomplete_setup(db):
     store, origin, bid = await workspace_tests.binding(db)
+    # The no-link fixture has no ingestion records, but overlay still queries
+    # the source-receipt relation introduced with retained report retrieval.
+    await db.execute('CREATE TABLE aios.ingest_event(event_id bigint PRIMARY KEY, superseded_at timestamptz)')
     report = await WorkspaceSetup(db).readiness(origin.instance_id, bid)
     assert not report['configured'] and not report['ready']
     assert any('Attach/link' in p for p in report['problems'])

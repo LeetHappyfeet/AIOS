@@ -31,6 +31,7 @@ from .workspace_registrations import RegistrationStore, RegistrationIn, Authoriz
 from .workspace_contract import Assignment, verification_status
 from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision, WorkDismissal
 from .work_evidence import WorkEvidence, WorkResultQuery
+from .work_history import WorkerWorkHistoryQuery, WorkerWorkResultQuery, worker_work
 
 
 def decode(value):
@@ -723,6 +724,7 @@ def install_workspace_routes(app, db, hud_handler):
                 "character-session-discovery-v1",
                 "delegated-runs-v3",
                 "character-recall-v3",
+                "work-evidence-v1",
                 "task-events-v3",
             ],
             "single_writer": True,
@@ -850,6 +852,14 @@ def install_workspace_routes(app, db, hud_handler):
     @router.post("/v3/{binding_id}/runs/{run_id}/recall")
     async def recall(binding_id: UUID, run_id: UUID, req: RecallIn):
         return await EnvironmentStore(db).recall(binding_id, run_id, req)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/work-history")
+    async def work_history(binding_id: UUID, run_id: UUID, req: WorkerWorkHistoryQuery):
+        return await worker_work(db, binding_id, run_id, req)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/work-result")
+    async def worker_result(binding_id: UUID, run_id: UUID, req: WorkerWorkResultQuery):
+        return await worker_work(db, binding_id, run_id, req, read=True)
 
     @router.post("/v3/{binding_id}/runs/{run_id}/progress")
     async def progress(binding_id: UUID, run_id: UUID, req: ProgressIn):
