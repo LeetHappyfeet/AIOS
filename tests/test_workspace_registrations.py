@@ -12,6 +12,7 @@ from aios_app.agent.workspaces import WorkspaceStore, install_workspace_routes
 from aios_app.agent.work_admission import WorkAdmission, WorkRequestIn
 from aios_app.agent.policy import ActionPolicyService
 from aios_app.agent.environment_links import EnvironmentStore
+from aios_app.hud.render_text import render_hud_text
 
 db = fixtures.db
 
@@ -193,11 +194,15 @@ async def test_hud_auto_attaches_new_chat_and_pending_request_queues_when_listen
     timeline = await db.fetchval('SELECT source_timeline_id FROM aios.character_runtime_state WHERE instance_id=$1', later.instance_id)
     overlay = await WorkAdmission(db).overlay(later.instance_id, timeline)
     assert overlay['capabilities'][0]['online']
+    assert overlay['result_tool'] is None
+    assert 'RETAINED WORK EVIDENCE' not in render_hud_text({'work': overlay})
     assert await db.fetchval('SELECT count(*) FROM aios.workspace_binding WHERE registration_id=$1', rid) == 2
     # An abandoned lease is recorded as interrupted rather than replayed.
     await db.execute("UPDATE aios.workspace_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1", run_id)
     assert (await store.claim(rid, 'worker'))['run'] is None
     assert await db.fetchval('SELECT status FROM aios.workspace_run WHERE run_id=$1', run_id) == 'interrupted'
+
+
 
 
 async def shared_character_tasks(db, second_root='/project', admin=False, first_admin=False, other_host=False):

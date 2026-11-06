@@ -425,7 +425,11 @@ Readiness distinguishes configured pairing from a recently polling v3 worker
 (last 45 seconds). It does not test the VM's model provider or guarantee task
 success, and a ready environment may still require approval. Offline capabilities
 remain advertised as **not recently seen**. Ineligible environments receive a
-brief **WORK UNAVAILABLE** explanation in the conversational HUD.
+brief **WORK UNAVAILABLE** explanation in the conversational HUD when an
+environment has been configured or the conversation has work activity. Ordinary
+chats without workspace setup or activity omit workspace setup warnings.
+Report-retrieval instructions appear only when retained work evidence is visible
+to the current conversation source, even if execution is no longer available.
 
 ### Discovery and setup API
 

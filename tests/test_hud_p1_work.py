@@ -127,11 +127,28 @@ async def test_results_require_visible_nonsuperseded_ancestry(db):
     await db.execute("UPDATE aios.character_runtime_state SET source_head_node_id=$2 WHERE instance_id=$1", origin.instance_id, head)
     with pytest.raises(HTTPException):
         await service.read(origin.instance_id, WorkResultQuery(run_id=run))
+    assert (await work.overlay(origin.instance_id, timeline))["result_tool"] is None
     await db.execute("INSERT INTO aios.dag_edge VALUES($1,$2,$3)", timeline, head, source)
     assert (await service.read(origin.instance_id, WorkResultQuery(run_id=run)))["status"] == "retrieved"
+    assert (await work.overlay(origin.instance_id, timeline))["result_tool"]
     await db.execute("UPDATE aios.ingest_event SET superseded_at=now() WHERE event_id=1")
     with pytest.raises(HTTPException):
         await service.read(origin.instance_id, WorkResultQuery(run_id=run))
+    assert (await work.overlay(origin.instance_id, timeline))["result_tool"] is None
+
+
+@pytest.mark.asyncio
+async def test_hud_retains_report_guidance_after_execution_is_revoked(db):
+    values, run, _ = await completed(db)
+    work, origin, execution, bid, lid, source, req, profile = values
+    timeline = (await work.source(origin.instance_id, source))["source_timeline_id"]
+    await db.execute("UPDATE aios.character_environment_link SET enabled=false WHERE link_id=$1", lid)
+    await db.execute("UPDATE aios.workspace_binding SET last_seen_at=NULL WHERE binding_id=$1", bid)
+    overlay = await work.overlay(origin.instance_id, timeline)
+    assert not overlay["capabilities"]
+    assert overlay["result_tool"]
+    assert "RETAINED WORK EVIDENCE" in render_hud_text({"work": overlay})
+    assert (await WorkEvidence(db).read(origin.instance_id, WorkResultQuery(run_id=run)))["status"] == "retrieved"
 
 
 @pytest.mark.asyncio
