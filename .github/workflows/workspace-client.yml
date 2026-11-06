@@ -23,7 +23,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install pytest pytest-asyncio asyncpg requests qdrant-client pydantic python-dotenv fastapi httpx beautifulsoup4 lxml
+      # Match the server's framework pins: newer FastAPI releases change route
+      # introspection used by these SQL/endpoint contract tests.
+      - run: python -m pip install pytest pytest-asyncio asyncpg requests qdrant-client pydantic==2.10.3 python-dotenv fastapi==0.115.6 httpx beautifulsoup4 lxml
       - name: Validate workspace contract and migration
         env:
           AIOS_WORKSPACE_TEST_DSN: postgresql://aios:aios@127.0.0.1:5432/aios_workspace_test

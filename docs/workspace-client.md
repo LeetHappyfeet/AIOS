@@ -566,3 +566,38 @@ unrelated workspaces. Reads do not execute tasks, advance the conversational
 source, create knowledge acquisitions, accept goals or acknowledge consumption.
 No migration or additional server LLM call is required. The existing result
 transport limits still apply; the reader cannot recover bytes never submitted.
+
+## Multiple characters on one client host
+
+Apply additive migration `20261106_01_shared_environments.sql` through the normal
+migrator and restart AIOS. Upgrade AIOS_Client and restart its listeners. The new
+`shared-environments-v1` capability adds optional `environment_id` (UUID) and
+`administration_enabled` fields to registration. Each character registration remains
+its standing grant; the environment UUID groups grants on a physical client account.
+Existing registrations adopt the UUID in place while idle without changing their
+authorization, bindings, runs or memory links. A different non-null UUID is rejected;
+stop/reconcile existing runs before changing coordination settings. Old clients do
+not erase an adopted identity. This is coordination metadata, not authentication or
+remote attestation: the operator worker credential remains the API credential.
+
+Multiple profiles can listen simultaneously. Matching new chats attach automatically
+under their own character/human/scope grant without manually choosing UUIDs. All tasks
+retain their original chat/branch and return results to that binding. No cross-character
+memory access is granted. One destination per character/human/scope remains enforced.
+
+Claims for registrations on one environment serialize their conflict-check and claim
+transaction. A live run blocks another registration with the same or nested directory,
+or any other registration on the environment when either profile has administration
+enabled. Disjoint non-administrative workspaces can claim concurrently. Registrations
+without an environment UUID retain the older per-registration coordination behavior.
+
+`POST /workspace-client/registrations/{registration_id}/heartbeat` takes the same
+worker identity as claim and refreshes liveness without acquiring a task lease. The
+client uses this while waiting for local locks. Local cross-process locks cover both
+manual and automatic profiles under the same OS account, including different configs
+and AIOS servers; Windows conservatively serializes all local execution. POSIX uses
+shared host/ancestor locks and exclusive workspace locks. Local locks are acquired
+before claiming and held through execution and cleanup. Unknown or expired execution
+is never replayed automatically. These locks do not coordinate unrelated OS users,
+external writers or detached commands. Separate CLI workers retain separate inference
+gates; model concurrency sharing is provided within the UI manager.

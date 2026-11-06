@@ -721,6 +721,7 @@ def install_workspace_routes(app, db, hud_handler):
                 "delegation-readiness-v1",
                 "workspace-attachment-v1",
                 "persistent-workspaces-v1",
+                "shared-environments-v1",
                 "character-session-discovery-v1",
                 "delegated-runs-v3",
                 "character-recall-v3",
@@ -760,6 +761,10 @@ def install_workspace_routes(app, db, hud_handler):
     @router.post("/registrations/{registration_id}/claim")
     async def claim_registered_workspace(registration_id: UUID, req: ClaimIn):
         return await registrations.claim(registration_id, req.worker_key)
+
+    @router.post("/registrations/{registration_id}/heartbeat")
+    async def heartbeat_registered_workspace(registration_id: UUID, req: ClaimIn):
+        return await registrations.heartbeat(registration_id, req.worker_key)
 
     @router.post("/bind")
     async def bind(req: BindingIn):
