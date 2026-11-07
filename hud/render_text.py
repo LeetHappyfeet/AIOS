@@ -389,11 +389,16 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"- {text}" + (f" — review {timing}" if timing else ""))
     section("rules", 3, 0.1)
     rules = frame.get("rules") or []
-    if rules:
-        lines.append("\nWORLD RULES:")
-        for rule in rules:
+    for is_recalled, heading in ((False, "WORLD RULES"), (True, "RECALLED RULE CLAIMS")):
+        group = [rule for rule in rules
+                 if (rule.get("source") == "character_knowledge") == is_recalled]
+        if group:
+            lines.append(f"\n{heading}:")
+        for rule in group:
             text = _claim_text(rule) or rule.get("rule_key") or str(rule)
-            lines.append(f"-{_knowledge_annotation(rule)} {text}")
+            provenance = _content_status(rule) if is_recalled else ""
+            qualifier = f" [{provenance}]" if provenance.startswith("reported/derived") else ""
+            lines.append(f"-{qualifier}{_epistemic_label(rule)}{_knowledge_annotation(rule)} {text}")
 
     # Recent events are episodic context, not a speaker transcript. Project
     # semantic events into narrative form, collapse exact duplicates, and prefer

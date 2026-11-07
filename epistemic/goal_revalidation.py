@@ -39,7 +39,10 @@ async def revalidate_source_goals(db, instance_id, *, apply=False):
                 match_span=tuple(span) if isinstance(span, list) and len(span) == 2 else None)
             # Limit repairs to the new, well-defined exclusions. Other
             # ambiguities must not be mass-cancelled after a policy upgrade.
-            if decision.reason not in {"current_utterance_or_reaction", "incomplete_objective"}:
+            if decision.reason not in {
+                "current_utterance_or_reaction", "incomplete_objective",
+                "unresolved_goal_subject", "embedded_future_clause", "constraint_without_action",
+            }:
                 continue
             findings.append({"goal_id": str(row["goal_id"]), "objective": objective,
                              "reason": decision.reason, "policy": ADMISSION_VERSION,

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-ADMISSION_VERSION = "goal-source-admission-v3"
+ADMISSION_VERSION = "goal-source-admission-v4"
 
 # Narrator interpretations containing an embedded first-person construction
 # are not assertions made by that grammatical first person.
@@ -32,6 +32,20 @@ _AFTER_EMBEDDED_SPEECH = re.compile(
 _HYPOTHETICAL_LEAD = re.compile(
     r"\b(?:perhaps|maybe|possibly|hypothetically|if\s+only)\b.{0,90}$",
     re.I | re.S,
+)
+# A neuter pronoun has no verified character antecedent. Future-tense
+# fragments inside noun phrases likewise do not establish an adopted action.
+_UNRESOLVED_GOAL_SUBJECT = re.compile(
+    r"\bit\s+(?:(?:does\s+not|doesn't|no\s+longer)\s+)?"
+    r"(?:wants?|wanted|needs?|needed|intends?|intended|plans?|planned|"
+    r"seeks?|sought|decides?|decided|resolves?|resolved|prepares?|prepared)\s+", re.I,
+)
+_SELF_FUTURE = re.compile(r"\bI(?:'ll|'m\s+going\s+to|\s+(?:will|am\s+going\s+to))\s+", re.I)
+_INDEPENDENT_LEAD = re.compile(
+    r"""(?:(?:^|[.!?;,:—]|\b(?:and|but|so)\b)\s*["'“”‘’]?"""
+    r"""|\b(?:said|says|replied)\s*["'“‘])\s*"""
+    r"(?:(?:then|now|soon|eventually|finally|actually|today|tomorrow|tonight|"
+    r"next\s+\w+|after\s+\w+)\s+)?$", re.I,
 )
 _BARE_REFERENCE = re.compile(
     r"\b(?:it|them)\b|\b(?:this|that|these|those|one|ones)\b"
@@ -96,6 +110,25 @@ class GoalAdmission:
         return self.decision == "admit"
 
 
+def _action_text(value: str) -> str:
+    return " ".join(re.sub(r"[*_`]+", "", value).split())
+
+
+def _source_head(
+    pattern: re.Pattern[str], source: str, action: str, match_span: tuple[int, int] | None,
+) -> re.Match[str] | None:
+    if match_span is not None:
+        return pattern.match(source, match_span[0])
+    # Older receipts and enriched excerpts may not carry a span. Match the
+    # action as well so a separate commitment in the excerpt cannot decide it.
+    objective = re.sub(r"^to\s+", "", action.casefold())
+    for head in pattern.finditer(source):
+        tail = re.sub(r"^to\s+", "", _action_text(source[head.end():]).casefold())
+        if re.match(re.escape(objective) + r"(?!\w)", tail):
+            return head
+    return None
+
+
 def review_goal_source(
     *, source_text: str, objective: str,
     parse_reason: str | None = None, horizon: str | None = None,
@@ -109,7 +142,7 @@ def review_goal_source(
     """
     source = str(source_text or "").replace("’", "'")
     # Markdown emphasis is presentation, not an escape from source review.
-    action = " ".join(re.sub(r"[*_`]+", "", str(objective or "")).split())
+    action = _action_text(str(objective or ""))
     if not source.strip():
         return GoalAdmission("attribution_unresolved", "missing_source_text", "unknown")
     prefix = source[:match_span[0]] if match_span is not None else source
@@ -124,6 +157,13 @@ def review_goal_source(
         return GoalAdmission("insufficient_commitment", "hypothetical_intention", "source")
     if not action.strip():
         return GoalAdmission("insufficient_commitment", "empty_objective", "unknown")
+    if _source_head(_UNRESOLVED_GOAL_SUBJECT, source, action, match_span):
+        return GoalAdmission("attribution_unresolved", "unresolved_goal_subject", "source")
+    future = _source_head(_SELF_FUTURE, source, action, match_span)
+    if future and not _INDEPENDENT_LEAD.search(re.sub(r"[*_`]+", "", source[:future.start()])):
+        return GoalAdmission("insufficient_commitment", "embedded_future_clause", "source")
+    if re.match(r"(?i)^no\s+", action):
+        return GoalAdmission("insufficient_commitment", "constraint_without_action", "source")
     if _INCOMPLETE_OBJECTIVE.search(action):
         return GoalAdmission("insufficient_commitment", "incomplete_objective", "source")
     if _FIGURATIVE_OBJECTIVE.search(action):
