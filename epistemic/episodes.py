@@ -4,6 +4,7 @@ import json
 from uuid import UUID
 
 from aios_app.db import Database
+from aios_app.epistemic.scene_history import project_narrated_scene_events
 
 EVENT_RESOLVER_VERSION = "semantic-event-resolver-v2"
 EPISODE_RESOLVER_VERSION = "semantic-episode-resolver-v1"
@@ -25,7 +26,10 @@ async def materialize_event_occurrences_once(
             ccr.world_id
         FROM aios.observation o
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-        WHERE upper(COALESCE(ccr.claim_kind,''))='EVENT'
+        WHERE (upper(COALESCE(ccr.claim_kind,''))='EVENT' OR EXISTS (
+              SELECT 1 FROM aios.narrated_scene_observation s
+              WHERE s.observation_id=o.observation_id AND s.movement
+          ))
           AND ($1::uuid IS NULL OR o.claim_id=$1)
           AND aios.semantic_occurrence_topology_eligible(o.claim_id,o.proposition_id)
           AND aios.semantic_claim_topology_admitted(o.claim_id)
@@ -83,6 +87,7 @@ async def materialize_event_occurrences_once(
             f"observation:{row['observation_id']}",
         )
         written += 1
+    await project_narrated_scene_events(db, claim_id=claim_id, limit=limit)
     return written
 
 

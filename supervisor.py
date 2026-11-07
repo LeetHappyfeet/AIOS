@@ -244,12 +244,24 @@ STAGES: List[Stage] = [
         SELECT DISTINCT o.claim_id
         FROM aios.observation o
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-        WHERE upper(COALESCE(ccr.claim_kind,''))='EVENT'
-          AND EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=o.claim_id AND si.status='valid')
-          AND aios.semantic_claim_topology_admitted(o.claim_id)
-          AND NOT EXISTS (
-              SELECT 1 FROM aios.semantic_event_membership sem
-              WHERE sem.observation_id=o.observation_id AND sem.status='active'
+        WHERE aios.semantic_claim_topology_admitted(o.claim_id)
+          AND (
+              ((upper(COALESCE(ccr.claim_kind,''))='EVENT' OR EXISTS (
+                  SELECT 1 FROM aios.narrated_scene_observation s
+                  WHERE s.observation_id=o.observation_id AND s.movement
+              )) AND aios.semantic_occurrence_topology_eligible(o.claim_id,o.proposition_id)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM aios.semantic_event_membership sem
+                      WHERE sem.observation_id=o.observation_id AND sem.status='active'
+                  ))
+              OR EXISTS (
+                  SELECT 1 FROM aios.narrated_scene_occurrence s
+                  WHERE s.observation_id=o.observation_id AND NOT EXISTS (
+                      SELECT 1 FROM aios.semantic_topology_node n
+                      WHERE n.scope_key=s.scope_key AND n.node_type='NARRATED_SCENE_EVENT'
+                        AND n.node_key=s.semantic_event_id::text
+                  )
+              )
           )
           AND NOT EXISTS (
               SELECT 1 FROM aios.pipeline_job pj

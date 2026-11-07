@@ -96,6 +96,10 @@ async def quarantine_ineligible_vectors_once(
                     aios.semantic_proposition_topology_admitted(x.proposition_id))
                    OR (x.claim_id IS NOT NULL AND NOT
                     aios.semantic_claim_topology_admitted(x.claim_id))
+                   OR (x.node_type='NARRATED_SCENE_EVENT' AND NOT EXISTS (
+                       SELECT 1 FROM aios.narrated_scene_occurrence s
+                       WHERE s.scope_key=x.scope_key AND s.semantic_event_id::text=x.node_key
+                         AND s.claim_id=x.claim_id AND s.proposition_id=x.proposition_id))
                    OR (x.node_key LIKE 'semantic_event:%' AND EXISTS (
                        SELECT 1 FROM aios.semantic_event e
                        WHERE e.semantic_event_id::text=x.meta->>'semantic_event_id'
