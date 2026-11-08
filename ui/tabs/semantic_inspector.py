@@ -114,7 +114,7 @@ def overview():
             f"**{counts['neighbor_pairs']}** candidate neighbor pairs · "
             f"**{counts['active_clusters']}** active clusters\n\n"
             f"{result['message']}\n\n"
-            f"Active embedding: \`{result['embedding_version']}\`. "
+            f"Active embedding: `{result['embedding_version']}`. "
             f"Latest region analysis: **{run['status']}** "
             f"({run['completed_at'] or 'not completed'})" if run else
             f"**{counts['propositions']}** propositions · "
