@@ -348,6 +348,9 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
         quarantine_min_interval = max(8.0, cfg.topology_sql_seconds * 2.0)
         quarantine_retry_after: dict[str, float] = {}
         quarantine_failures: dict[str, int] = {}
+        quarantine_batches = {
+            phase: min(cfg.background_batch_size, 4) for phase in QUARANTINE_PHASES
+        }
         stage_batches = {"neighbors":"neighbor_batch_size",
                          "neighbor-classification":"relation_batch_size",
                          "relation-validation":"validation_batch_size",
@@ -363,15 +366,23 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
                     timeout=cfg.topology_stage_seconds)
             except Exception as exc:
                 failed.append(stage)
-                size = _topology_batch_key(stage, stage_batches)
-                if size:
-                    batch_sizes[size] = max(1,batch_sizes[size] // 2)
+                if stage.startswith("topology-quarantine/"):
+                    phase = stage.partition("/")[2]
+                    quarantine_batches[phase] = max(
+                        1, quarantine_batches[phase] // 2,
+                    )
+                    next_batch = quarantine_batches[phase]
+                else:
+                    size = _topology_batch_key(stage, stage_batches)
+                    if size:
+                        batch_sizes[size] = max(1, batch_sizes[size] // 2)
+                    next_batch = batch_sizes.get(size)
                 if isinstance(exc,(asyncio.TimeoutError,asyncpg.QueryCanceledError,asyncpg.LockNotAvailableError)):
                     logger.warning("Topology stage yielded stage=%s reason=%s next_batch=%s",
-                                   stage,type(exc).__name__,batch_sizes.get(size))
+                                   stage,type(exc).__name__,next_batch)
                 else:
                     logger.exception("Topology stage yielded for retry stage=%s next_batch=%s",
-                                     stage,batch_sizes.get(size))
+                                     stage,next_batch)
                 return 0
 
         while True:
@@ -394,8 +405,7 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
                 quarantine_cursor = (quarantine_cursor + 1) % len(quarantine_phases)
                 stage = f"topology-quarantine/{phase}"
                 if time.monotonic() >= quarantine_retry_after.get(phase, 0.0):
-                    phase_batch = (batch_sizes["background_batch_size"] if phase == "vectors"
-                                   else min(4, batch_sizes["background_batch_size"]))
+                    phase_batch = quarantine_batches[phase]
                     await run_stage(
                         stage, quarantine_ineligible_vectors_once,
                         db, replace(effective_cfg, batch_size=phase_batch),
@@ -414,6 +424,9 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
                         )
                     else:
                         quarantine_failures[phase] = 0
+                        quarantine_batches[phase] = min(
+                            max(1, cfg.background_batch_size), quarantine_batches[phase] + 1,
+                        )
                         quarantine_retry_after.pop(phase, None)
                 quarantine_next_at = time.monotonic() + quarantine_min_interval
             _emit_telemetry({"service": "semantic_topology",
@@ -425,7 +438,8 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
                                  key: round(max(0.0, due - time.monotonic()), 1)
                                  for key, due in quarantine_retry_after.items()
                                  if due > time.monotonic()},
-                             "adaptive_batch_sizes": dict(batch_sizes)})
+                             "adaptive_batch_sizes": dict(batch_sizes),
+                             "quarantine_batch_sizes": dict(quarantine_batches)})
             await asyncio.sleep(max(poll_seconds,5.0) if failed else poll_seconds)
     finally:
         await db.close()
