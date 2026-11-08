@@ -211,7 +211,17 @@ async def apply_migrations() -> None:
         ordered_applied = [path.name for path in files if path.name in applied]
         ordered_prefix = [path.name for path in files[:len(ordered_applied)]]
         if ordered_applied != ordered_prefix:
-            raise RuntimeError("Non-prefix migration ledger; rebuild a disposable database or repair explicitly")
+            missing_before_applied = [
+                path.name for path in files[:files.index(next(
+                    p for p in reversed(files) if p.name in applied)) + 1]
+                if path.name not in applied
+            ]
+            raise RuntimeError(
+                "Non-prefix migration ledger: files sort before already-applied "
+                f"migrations but are not recorded as applied: {missing_before_applied}. "
+                "Check migration filenames and branch order; do not manually insert "
+                "receipts or rebuild a database without investigating."
+            )
 
         for path, digest, body in prepared:
             previous = applied.get(path.name)
