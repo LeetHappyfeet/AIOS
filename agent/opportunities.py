@@ -1,5 +1,26 @@
 from __future__ import annotations
 
+import re
+
+
+def _automatic_goal_research_eligible(goal) -> bool:
+    """Automatic inquiry is opt-in by objective semantics, not every intention.
+
+    The explicit planning prerequisite path remains independent. Conservative
+    gating avoids converting everyday actions into permanent research demand.
+    """
+    meta = goal.meta or {}
+    if str(meta.get("horizon") or "").lower() in {"immediate", "scene"}:
+        return False
+    objective = str(meta.get("objective") or goal.text or "").strip()
+    objective = re.sub(r"^(?:[\\w-]+\\s+)?(?:wants?|intends?|plans?|needs?)\\s+(?:to\\s+)?", "", objective, flags=re.I)
+    return bool(re.match(
+        r"^(?:to\\s+)?(?:learn|research|investigate|study|understand|"
+        r"find\\s+out|look\\s+up|identify|determine|compare|evaluate)\\b",
+        objective, re.I,
+    ))
+
+
 import json
 import re
 from dataclasses import dataclass
@@ -168,12 +189,23 @@ class CognitiveOpportunityService:
         for goal in goals:
             if not goal.goal_id:
                 continue
+            # Goal existence is not evidence of a research dependency. Ordinary
+            # scene actions (ordering, walking, finishing an item) must not
+            # generate knowledge-gap operations merely because they are active.
+            # Explicit planner questions can still create dependencies through
+            # goal_planning; this automatic path is for knowledge-seeking goals.
+            if not _automatic_goal_research_eligible(goal):
+                continue
             goal_subject=await self.goal_subjects.project(instance_id=instance_id,goal=goal)
             if goal_subject is None:
                 continue
             demand=await self.goal_demand.resolve(
                 instance_id=instance_id,subject=goal_subject,known=list(snapshot.knowledge),
                 retrieval_unavailable=snapshot.topology_unavailable)
+            # Timeouts are not knowledge gaps; avoid persisting an unavailable
+            # requirement or queuing follow-on inquiry from this snapshot.
+            if demand.get("coverage_status") == "unavailable" or demand.get("retrieval_state") == "unavailable":
+                continue
             goal_subject_demands[goal.goal_id]=(goal_subject,demand)
             try:
                 requirement=await self.goal_dependencies.reconcile(
