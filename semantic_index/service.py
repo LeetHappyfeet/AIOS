@@ -21,6 +21,7 @@ VECTOR_MUTATION_LOCK = 867530901  # Shared by indexing and destructive quarantin
 # These are hints only: no progress/acknowledgement is stored here. Receipts
 # remain authoritative, and reaching the end starts another complete sweep.
 _PROPOSITION_SCAN_CURSORS: dict[tuple[str, str, str], tuple[object, object]] = {}
+_EPISTEMIC_SCAN_CURSORS: dict[tuple[str, str, str], tuple[object, object]] = {}
 
 
 
@@ -513,67 +514,78 @@ def _epistemic_point_id(object_key: str) -> str:
 
 
 async def index_epistemic_objects_once(db: Database, cfg: SemanticIndexConfig) -> int:
+    scan_key = (cfg.epistemic_collection, cfg.embedding_model, cfg.embedding_version)
+    cursor = _EPISTEMIC_SCAN_CURSORS.get(scan_key)
+    # Limit receipt-missing rows before eligibility and the correlated context
+    # lookup. Keyset pagination means old/ineligible entries cannot starve
+    # later ownership records indefinitely.
     rows = await db.fetch(
         """
-        SELECT * FROM (
-            SELECT
-                'character_knowledge'::text AS object_type,
-                (ck.instance_id::text || ':' || ck.proposition_id::text) AS object_key,
-                ck.instance_id, ci.character_id, ci.world_id,
-                ck.proposition_id, ck.epistemic_status, ck.acquisition_mode,
-                ck.confidence, ck.updated_at,
-                p.topic_key, p.canonical_text,
-                ctx.claim_kind, ctx.predicate_family
-            FROM aios.character_proposition_knowledge ck
-            JOIN aios.character_instance ci ON ci.instance_id=ck.instance_id
-            JOIN aios.proposition p ON p.proposition_id=ck.proposition_id
-            LEFT JOIN LATERAL (
-                SELECT ccr.claim_kind, ccr.predicate_family
-                FROM aios.observation o
-                JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-                WHERE o.proposition_id=ck.proposition_id
-                ORDER BY ccr.resolved_at DESC
-                LIMIT 1
-            ) ctx ON true
+        WITH pending AS MATERIALIZED (
+            SELECT e.*
+            FROM (
+                SELECT
+                    'character_knowledge'::text AS object_type,
+                    (ck.instance_id::text || ':' || ck.proposition_id::text) AS object_key,
+                    ck.instance_id, ci.character_id, ci.world_id,
+                    ck.proposition_id, ck.epistemic_status, ck.acquisition_mode,
+                    ck.confidence, ck.updated_at,
+                    p.topic_key, p.canonical_text
+                FROM aios.character_proposition_knowledge ck
+                JOIN aios.character_instance ci ON ci.instance_id=ck.instance_id
+                JOIN aios.proposition p ON p.proposition_id=ck.proposition_id
 
-            UNION ALL
+                UNION ALL
 
-            SELECT
-                'world_assertion'::text AS object_type,
-                ('world:' || wa.assertion_id::text) AS object_key,
-                NULL::uuid AS instance_id, NULL::text AS character_id, wa.world_id,
-                wa.proposition_id, wa.epistemic_status, wa.source_kind AS acquisition_mode,
-                wa.confidence, wa.updated_at,
-                p.topic_key, p.canonical_text,
-                ctx.claim_kind, ctx.predicate_family
-            FROM aios.world_proposition_assertion wa
-            JOIN aios.proposition p ON p.proposition_id=wa.proposition_id
-            LEFT JOIN LATERAL (
-                SELECT ccr.claim_kind, ccr.predicate_family
-                FROM aios.observation o
-                JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-                WHERE o.proposition_id=wa.proposition_id
-                ORDER BY ccr.resolved_at DESC
-                LIMIT 1
-            ) ctx ON true
-        ) e
-        WHERE e.epistemic_status NOT IN ('rejected','superseded')
-          AND aios.semantic_proposition_topology_eligible(e.proposition_id)
-          AND NOT EXISTS (
-              SELECT 1 FROM aios.semantic_vector_index_state s
-              WHERE s.object_type=e.object_type
-                AND s.object_key=e.object_key
-                AND s.qdrant_collection=$2
-                AND s.embedding_model=$3
-                AND s.embedding_version=$4
-                AND s.indexed_at >= e.updated_at
-          )
-        ORDER BY e.updated_at DESC, e.object_key DESC
-        LIMIT $1
+                SELECT
+                    'world_assertion'::text AS object_type,
+                    ('world:' || wa.assertion_id::text) AS object_key,
+                    NULL::uuid AS instance_id, NULL::text AS character_id,
+                    wa.world_id, wa.proposition_id, wa.epistemic_status,
+                    wa.source_kind AS acquisition_mode, wa.confidence, wa.updated_at,
+                    p.topic_key, p.canonical_text
+                FROM aios.world_proposition_assertion wa
+                JOIN aios.proposition p ON p.proposition_id=wa.proposition_id
+            ) e
+            WHERE e.epistemic_status NOT IN ('rejected','superseded')
+              AND ($5::timestamptz IS NULL OR
+                   (e.updated_at,e.object_key) < ($5::timestamptz,$6::text))
+              AND NOT EXISTS (
+                SELECT 1 FROM aios.semantic_vector_index_state s
+                WHERE s.object_type=e.object_type
+                  AND s.object_key=e.object_key
+                  AND s.qdrant_collection=$2
+                  AND s.embedding_model=$3
+                  AND s.embedding_version=$4
+                  AND s.indexed_at >= e.updated_at
+              )
+            ORDER BY e.updated_at DESC,e.object_key DESC
+            LIMIT $1
+        )
+        SELECT e.*,ctx.claim_kind,ctx.predicate_family,
+               aios.semantic_proposition_topology_eligible(e.proposition_id)
+                   AS topology_eligible
+        FROM pending e
+        LEFT JOIN LATERAL (
+            SELECT ccr.claim_kind, ccr.predicate_family
+            FROM aios.observation o
+            JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
+            WHERE o.proposition_id=e.proposition_id
+            ORDER BY ccr.resolved_at DESC
+            LIMIT 1
+        ) ctx ON true
+        ORDER BY e.updated_at DESC,e.object_key DESC
         """,
         cfg.batch_size, cfg.epistemic_collection,
         cfg.embedding_model, cfg.embedding_version,
+        cursor[0] if cursor else None, cursor[1] if cursor else None,
     )
+    if not rows:
+        _EPISTEMIC_SCAN_CURSORS.pop(scan_key, None)
+        return 0
+    last = rows[-1]
+    _EPISTEMIC_SCAN_CURSORS[scan_key] = (last["updated_at"], last["object_key"])
+    rows = [r for r in rows if r["topology_eligible"]]
     if not rows:
         return 0
 
