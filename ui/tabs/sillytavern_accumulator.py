@@ -134,8 +134,9 @@ are retained only as entry provenance.
             )
             refresh = gr.Button("Refresh universes", scale=1)
         new_name = gr.Textbox(
-            label="Or create/use universe by name (overrides selection)",
-            placeholder="My Little Pony",
+            label="Or create/use a fictional universe by display name (overrides selection)",
+            placeholder="Original Fantasy World",
+            info="Enter a plain-language name, not a domain key. Letters and numbers are required; spaces and punctuation are allowed. AIOS converts it to a lowercase fiction.<name-with-hyphens> key (for example: Original Fantasy World → fiction.original-fantasy-world). Leave blank to use the selected existing domain.",
         )
         submit = gr.Button("Import to corpus", variant="primary")
         results = gr.JSON(label="Imported corpus documents")
