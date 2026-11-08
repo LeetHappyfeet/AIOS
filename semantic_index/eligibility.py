@@ -191,7 +191,10 @@ async def quarantine_ineligible_vectors_once(
         if phase == "topology_nodes":
             node_sql = node_sql.replace(
                 "WHERE (x.proposition_id IS NOT NULL",
-                "WHERE x.topology_node_id=ANY($2::uuid[]) AND (x.proposition_id IS NOT NULL",
+                "WHERE x.topology_node_id=ANY($2::uuid[]) AND ((x.proposition_id IS NOT NULL",
+            ).replace(
+                "ORDER BY x.topology_node_id LIMIT $1",
+                ") ORDER BY x.topology_node_id LIMIT $1",
             )
         try:
             await db.execute(node_sql, cfg.batch_size, *([page_keys] if phase == "topology_nodes" else []))
