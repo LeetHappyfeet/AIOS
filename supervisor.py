@@ -551,18 +551,11 @@ async def enqueue_stage_jobs(db: Database, stage: Stage, *, batch_size: int) -> 
                 1, _DISCOVERY_PAGE_SIZE.get(stage.name, _DISCOVERY_PAGE_MAX) // 2,
             )
             raise
-        _DISCOVERY_CURSOR.pop(stage.name, None)
-        if cursor is not None:
-            _DISCOVERY_CURSOR[stage.name] = cursor
-        _DISCOVERY_PAGE_SIZE[stage.name] = min(
-            _DISCOVERY_PAGE_MAX,
-            _DISCOVERY_PAGE_SIZE.get(stage.name, _DISCOVERY_PAGE_MAX) + 1,
-        )
         logger.info(
             "Bounded supervisor discovery stage=%s scanned=%d eligible=%d "
             "elapsed=%.2fs page=%d",
             stage.name, scanned, len(rows), elapsed,
-            _DISCOVERY_PAGE_SIZE[stage.name],
+            _DISCOVERY_PAGE_SIZE.get(stage.name, _DISCOVERY_PAGE_MAX),
         )
     else:
         rows = await asyncio.wait_for(
@@ -574,6 +567,16 @@ async def enqueue_stage_jobs(db: Database, stage: Stage, *, batch_size: int) -> 
         payload = stage.payload_builder(dict(row))
         job_id = await enqueue_job(db, job_type=stage.job_type, payload=payload, priority=stage.priority)
         if job_id is not None: count += 1
+    if stage.name in _DISCOVERY_PAGES:
+        # Advance only after the entire page has been processed and enqueued.
+        # A failed enqueue retries the same page; receipts make duplicates safe.
+        _DISCOVERY_CURSOR.pop(stage.name, None)
+        if cursor is not None:
+            _DISCOVERY_CURSOR[stage.name] = cursor
+        _DISCOVERY_PAGE_SIZE[stage.name] = min(
+            _DISCOVERY_PAGE_MAX,
+            _DISCOVERY_PAGE_SIZE.get(stage.name, _DISCOVERY_PAGE_MAX) + 1,
+        )
     return count
 
 
