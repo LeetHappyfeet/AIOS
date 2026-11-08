@@ -42,6 +42,9 @@ async def revalidate_source_goals(db, instance_id, *, apply=False):
             if decision.reason not in {
                 "current_utterance_or_reaction", "incomplete_objective",
                 "unresolved_goal_subject", "embedded_future_clause", "constraint_without_action",
+                "transient_intention_horizon", "objective_contains_unresolved_reference",
+                "unspecified_desired_outcome", "transient_scene_action",
+                "immediate_intention", "figurative_objective",
             }:
                 continue
             findings.append({"goal_id": str(row["goal_id"]), "objective": objective,
