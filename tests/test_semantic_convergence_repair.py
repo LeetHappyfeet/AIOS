@@ -118,3 +118,34 @@ async def test_vector_cycle_honors_adaptive_stage_batch_overrides(monkeypatch):
     assert sizes["vector-propositions"] == 4
     assert sizes["vector-epistemic"] == 2
     assert sizes["semantic-admission"] == 1
+
+
+@pytest.mark.asyncio
+async def test_admission_scan_skips_unready_claims_without_stalling(monkeypatch):
+    from aios_app.semantic_index import admission
+    cfg = SemanticIndexConfig()
+    key = (cfg.proposition_collection, cfg.embedding_model, cfg.embedding_version)
+    admission._ADMISSION_SCAN_CURSORS.pop(key, None)
+    claim_id = uuid4()
+    decided = datetime.now(timezone.utc)
+    class DB:
+        def __init__(self): self.args = []
+        async def fetch(self, sql, *args):
+            assert "WITH pending AS MATERIALIZED" in sql
+            self.args.append(args)
+            return ([{"claim_id": claim_id, "proposition_id": uuid4(),
+                      "decided_at": decided, "canonical_text": "not yet indexed",
+                      "scope_key": "character:test", "vector_ready": False,
+                      "topology_eligible": True}]
+                    if len(self.args) == 1 else [])
+    db = DB()
+    try:
+        assert await admission.admit_semantic_neighbors_once(
+            db, cfg, embedder=None, store=None) == 0
+        assert admission._ADMISSION_SCAN_CURSORS[key] == (decided, claim_id)
+        assert await admission.admit_semantic_neighbors_once(
+            db, cfg, embedder=None, store=None) == 0
+        assert db.args[1][-2:] == (decided, claim_id)
+        assert key not in admission._ADMISSION_SCAN_CURSORS
+    finally:
+        admission._ADMISSION_SCAN_CURSORS.pop(key, None)
