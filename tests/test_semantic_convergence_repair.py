@@ -71,3 +71,29 @@ async def test_failed_discovery_does_not_advance_scan_cursor():
     with pytest.raises(TimeoutError):
         await service.index_propositions_once(DB(), cfg)
     assert key not in service._PROPOSITION_SCAN_CURSORS
+
+
+@pytest.mark.asyncio
+async def test_ineligible_epistemic_page_advances_then_wraps():
+    cfg = SemanticIndexConfig()
+    key = (cfg.epistemic_collection, cfg.embedding_model, cfg.embedding_version)
+    service._EPISTEMIC_SCAN_CURSORS.pop(key, None)
+    updated = datetime.now(timezone.utc)
+    object_key = "world:" + str(uuid4())
+    class DB:
+        def __init__(self):
+            self.args = []
+        async def fetch(self, sql, *args):
+            assert "WITH pending AS MATERIALIZED" in sql
+            self.args.append(args)
+            return ([{"object_key": object_key, "updated_at": updated,
+                      "topology_eligible": False}] if len(self.args) == 1 else [])
+    db = DB()
+    try:
+        assert await service.index_epistemic_objects_once(db, cfg) == 0
+        assert service._EPISTEMIC_SCAN_CURSORS[key] == (updated, object_key)
+        assert await service.index_epistemic_objects_once(db, cfg) == 0
+        assert db.args[1][-2:] == (updated, object_key)
+        assert key not in service._EPISTEMIC_SCAN_CURSORS
+    finally:
+        service._EPISTEMIC_SCAN_CURSORS.pop(key, None)
