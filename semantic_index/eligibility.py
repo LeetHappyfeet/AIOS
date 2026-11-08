@@ -53,7 +53,12 @@ async def _quarantine_page(db: Database, cfg: SemanticIndexConfig, phase: str):
     args = [cursor, size]
     if phase == "vectors":
         args.append([cfg.proposition_collection, cfg.epistemic_collection])
+    started = time.monotonic()
     rows = await db.fetch(_QUARANTINE_PAGE_SQL[phase], *args)
+    logger.info(
+        "Quarantine page phase=%s scanned=%d page=%d elapsed=%.2fs",
+        phase, len(rows), size, time.monotonic() - started,
+    )
     return [row["page_key"] for row in rows]
 
 
