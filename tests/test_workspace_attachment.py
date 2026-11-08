@@ -1,17 +1,26 @@
 """Attached work coexists with chat without taking ownership of its source cursor."""
+import json
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 import test_workspace_client as workspace_tests
 from test_workspace_client import binding, valid_evidence
-from aios_app.agent.environment_links import EnvironmentStore, LinkIn, ProgressIn, MemorySharingIn, task_overlay
-from aios_app.agent.workspaces import AssignmentIn, ObservationIn, LeaseIn, FinishIn, install_workspace_routes
+from aios_app.agent.environment_links import EnvironmentStore, LinkIn, ProgressIn, RecallIn, MemorySharingIn, task_overlay
+from aios_app.agent.workspaces import AssignmentIn, ContextIn, ObservationIn, LeaseIn, FinishIn, install_workspace_routes
 from aios_app.agent.workspace_contract import Assignment
 from aios_app.agent.workspace_setup import WorkspaceSetup
 from aios_app.agent.work_admission import WorkAdmission, ProfileIn, WorkRequestIn, WorkDecision
+from aios_app.agent.workspace_memory import relevant_notes
+from aios_app.char.identity_kernel import IdentityKernelStore
+from aios_app.epistemic.inquiry.contracts import InquiryEvidence
+from aios_app.epistemic.inquiry.lookup import InquiryLookup
+from aios_app.hud.delivery import delivery_response
 from aios_app.hud.render_text import render_hud_text
+from test_character_environments import request as delegation_request
 
 db = workspace_tests.db
 
@@ -66,7 +75,7 @@ async def test_attached_admission_approval_execution_and_hud_preserve_chat_sourc
     hud = AsyncMock(return_value={'hud':'task context'})
     app = FastAPI(); install_workspace_routes(app, db, hud)
     context = next(r.endpoint for r in app.routes if getattr(r,'path',None) == '/workspace-client/v3/{binding_id}/runs/{run_id}/context')
-    await context(bid, rid, lease)
+    await context(bid, rid, ContextIn(**lease.model_dump()))
     assert hud.await_args.kwargs['through_node_id'] == node
     assert hud.await_args.kwargs['profile_name'] == 'workspace_execution'
     observation = ObservationIn(**lease.model_dump(), event_key=uuid4(), text='Greeting file written', payload={'kind':'summary'})
@@ -168,3 +177,106 @@ async def test_attached_run_fences_branch_rewind_and_revocation(db):
     ended = await store.finish(bid, rid, FinishIn(**lease.model_dump(), status='succeeded', result={}))
     assert ended['status'] == 'cancelled'
     assert not (await work.overlay(origin.instance_id, state['source_timeline_id']))['capabilities']
+
+
+async def claim_memory_run(db, store, origin, bid, lid, objective):
+    spec = (await delegation_request(db, origin)).model_copy(update={"objective": objective})
+    await EnvironmentStore(db).delegate(bid, lid, spec)
+    run = await store.claim(bid, "worker", 3)
+    return UUID(run["run_id"]), {"worker_key": "worker", "claim_token": run["claim_token"]}
+
+
+def memory_report(notes):
+    return {
+        "report": "Full local investigation details",
+        "result_summary": {"source": "final_response", "outcome": "blocked",
+                           "summary": "TLS handshake blocked",
+                           "findings": ["TLS failed after the gateway refused the certificate"]},
+        "memory_candidates": notes,
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_reaches_later_brief_and_recall_without_chat_ingest(db, monkeypatch):
+    store, _, origin, bid, lid, state = await attached(db)
+    environment = EnvironmentStore(db)
+    rid, lease = await claim_memory_run(db, store, origin, bid, lid, "Diagnose the TLS gateway")
+    lesson = "TLS failed using the staging certificate. Inspect the gateway certificate chain first."
+    nominations = [
+        {"kind": "attempt", "text": lesson, "finding_index": 0},
+        {"kind": "attempt", "text": lesson, "finding_index": 0},
+        {"kind": "finding", "text": "password=hidden", "finding_index": 0},
+    ]
+    finish = FinishIn(**lease, status="failed", result=memory_report(nominations))
+    assert await store.finish(bid, rid, finish) == await store.finish(bid, rid, finish)
+    assert await db.fetchval("SELECT count(*) FROM aios.workspace_memory_note") == 1
+    wake = await db.fetchval("SELECT payload FROM aios.character_wake_event")
+    wake = json.loads(wake) if isinstance(wake, str) else wake
+    assert "result" not in wake and wake["evidence_ref"] == f"workspace:{rid}"
+    current = await db.fetchrow("SELECT * FROM aios.character_runtime_state WHERE instance_id=$1", origin.instance_id)
+    assert dict(current) == dict(state)
+
+    node = await chat_turn(db, origin, state)
+    timeline = state["source_timeline_id"]
+    assert await relevant_notes(db, origin.instance_id, timeline, node, "pancakes") == []
+    assert await relevant_notes(db, origin.instance_id, timeline, node, "TLS", link_id=uuid4()) == []
+    notes = await relevant_notes(db, origin.instance_id, timeline, node, "TLS")
+    assert len(notes) == 1 and notes[0]["text"] == lesson
+    assert notes[0]["execution_status"] == "failed" and notes[0]["finding_index"] == 0
+    assert lesson in render_hud_text({"workspace_memory": notes})
+    stale = delivery_response(origin.instance_id, {
+        "hud": {"freshness": {"source_head_node_id": node, "source_timeline_id": timeline}},
+        "workspace_memory": notes,
+    }, {"source_head_node_id": uuid4(), "source_timeline_id": timeline}, render_hud_text)
+    assert lesson not in stale["text"] and "workspace_memory" not in stale["frame"]
+
+    active, lease = await claim_memory_run(db, store, origin, bid, lid, "Choose the first TLS probe")
+    kernel = SimpleNamespace(kernel_json={
+        "core": {"display_name": "Cortana"},
+        "facets": {
+            "values": [{"authority": "authored", "value": "Prefer reversible probes"}],
+            "appearance": [{"authority": "authored", "value": "Irrelevant appearance"}],
+            "role": [{"authority": "reference", "value": "Untrusted candidate"}],
+        },
+    })
+    monkeypatch.setattr(IdentityKernelStore, "get", AsyncMock(return_value=kernel))
+    monkeypatch.setattr(InquiryLookup, "search", AsyncMock(return_value=InquiryEvidence("unresolved")))
+    monkeypatch.setenv("AIOS_WORKSPACE_API_KEY", "test-key")
+    foreground = AsyncMock(side_effect=AssertionError("Compact context must bypass foreground HUD"))
+    app = FastAPI()
+    install_workspace_routes(app, db, foreground)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        result = await client.post(f"/workspace-client/v3/{bid}/runs/{active}/context",
+                                   headers={"Authorization": "Bearer test-key"},
+                                   json={**lease, "compact": True})
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["format"] == "workspace-memory-v1" and body["generation_ready"]
+    assert "Prefer reversible probes" in body["text"] and lesson in body["text"]
+    assert len(body["text"]) <= 1600 and "Full local investigation" not in body["text"]
+    assert "Irrelevant appearance" not in body["text"] and "Untrusted candidate" not in body["text"]
+    recalled = await environment.recall(bid, active, RecallIn(**lease, query="TLS"))
+    assert recalled["hits"][0]["source"] == "workspace" and lesson in recalled["hits"][0]["text"]
+    assert not recalled["hits"][0]["durable_knowledge"]
+
+    await db.execute("UPDATE aios.ingest_event SET superseded_at=now() WHERE event_id=1")
+    assert await relevant_notes(db, origin.instance_id, timeline, node, "TLS") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_scope", ["cancel", "sibling"])
+async def test_out_of_scope_finish_retains_result_without_memory(db, lost_scope):
+    store, _, origin, bid, lid, state = await attached(db)
+    rid, lease = await claim_memory_run(db, store, origin, bid, lid, "Diagnose TLS")
+    if lost_scope == "cancel":
+        await EnvironmentStore(db).cancel(bid, rid)
+    else:
+        sibling = uuid4()
+        await db.execute("INSERT INTO aios.dag_node VALUES($1,$2,1)", sibling, state["source_timeline_id"])
+        await db.execute("UPDATE aios.character_runtime_state SET source_head_node_id=$2 WHERE instance_id=$1",
+                         origin.instance_id, sibling)
+    finished = await store.finish(bid, rid, FinishIn(**lease, status="failed", result=memory_report([
+        {"kind": "idea", "text": "Use a second TLS gateway for comparison"},
+    ])))
+    assert finished["result"]["result_summary"]["summary"] == "TLS handshake blocked"
+    assert await db.fetchval("SELECT count(*) FROM aios.workspace_memory_note") == 0

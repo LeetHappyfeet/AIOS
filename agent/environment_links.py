@@ -327,10 +327,11 @@ class EnvironmentStore:
             }
 
     async def recall(self, binding_id, run_id, req):
-        from aios_app.epistemic.inquiry.contracts import InquiryDemand
+        from aios_app.epistemic.inquiry.contracts import InquiryDemand, InquiryEvidence, InquiryHit
         from aios_app.epistemic.inquiry.lookup import InquiryLookup
 
         from .workspaces import WorkspaceStore
+        from .workspace_memory import note_line, relevant_notes
 
         store = WorkspaceStore(self.db)
         async with self.db.atomic():
@@ -353,15 +354,30 @@ class EnvironmentStore:
                 InquiryLookup(self.db).search(demand, target="personal"), 5
             )
         except (asyncio.TimeoutError, ConnectionError):  # noqa: UP041 -- Python 3.10
-            return {"status": "unavailable", "hits": [], "knowledge_revision": revision}
+            evidence = None
         # Revocation or a changed evidence scope during lookup must not leak old hits.
         async with self.db.atomic():
-            await store.owned(binding_id, run_id, req)
+            b, run = await store.owned(binding_id, run_id, req)
+            current = await store.current(b)
             after = await self.db.fetchval(
                 "SELECT aios.cognitive_context_revision($1)", b["instance_id"]
             )
-            if after != revision:
+            if after != revision or (b["attached"] and current["source_head_node_id"] != node):
                 return {"status": "changed", "hits": [], "knowledge_revision": after}
+            notes = []
+            if b["attached"] and run["environment_link_id"] is not None:
+                notes = await relevant_notes(
+                    self.db, b["instance_id"], current["source_timeline_id"], node,
+                    req.query, link_id=run["environment_link_id"],
+                )
+        if notes:
+            hits = tuple(InquiryHit(
+                "workspace", f"{note['run_id']}:{note['slot']}", note_line(note), note,
+            ) for note in notes)
+            prior = evidence.hits if evidence else ()
+            evidence = InquiryEvidence("partial", (*hits, *prior)[:3], "relevant_workspace_history")
+        if evidence is None:
+            return {"status": "unavailable", "hits": [], "knowledge_revision": revision}
         return {
             **asdict(evidence),
             "hits": [hit.as_dict() for hit in evidence.hits],

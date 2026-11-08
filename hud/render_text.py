@@ -457,6 +457,12 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     section("work_results", 5, 0.18)
     from aios_app.hud.work import render_work_results
     lines.extend(render_work_results(work, frame.get("remote_tasks") or [], compact_mode=total is not None))
+    if frame.get("workspace_memory"):
+        from aios_app.agent.workspace_memory import note_line
+
+        section("workspace_memory", 5, 0.12)
+        lines.append("\nRELEVANT WORK MEMORY (historical evidence and ideas)")
+        lines.extend("- " + note_line(note, with_ref=True) for note in frame["workspace_memory"])
     section("work_retrieval", 2, 0.12, atomic=True)
     if work.get("result_tool"):
         lines.append('RETAINED WORK EVIDENCE: use native read_work_result when registered, or one <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. Supply exactly one request_id or run_id. Sections: summary, findings, limitations, requested_content, report, checks. Continue with next_cursor and the returned revision. This reads reports without executing work.')

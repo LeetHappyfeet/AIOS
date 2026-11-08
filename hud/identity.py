@@ -6,6 +6,24 @@ from aios_app.char.identity_kernel import presentation_facets, _text_value
 from aios_app.hud.text_budget import excerpt
 
 
+def execution_identity(character_id, kernel):
+    """Select authored preferences that can affect workspace decisions."""
+    data = kernel.kernel_json if kernel else {}
+    core = data.get("core") or {}
+    name = core.get("display_name") or core.get("canonical_name") or character_id
+    groups = data.get("facets") or {}
+    priorities = [_text_value(core.get("moral_constraints"))]
+    for kind in ("constraint", "values", "personality", "role"):
+        priorities.extend(
+            _text_value(item["value"]) for item in groups.get(kind, [])
+            if item.get("authority") == "authored"
+        )
+    priorities.append(_text_value(core.get("primary_role")))
+    return " ".join(str(name).split()), list(dict.fromkeys(
+        " ".join(value.split()) for value in priorities if value.strip()
+    ))[:2]
+
+
 def project_identity(identity, *, user_name=None, as_of=None, idle_duration=None, max_chars=None):
     name = identity.get("display_name") or identity.get("canonical_name") or identity.get("character_id") or "unknown"
     variables = {

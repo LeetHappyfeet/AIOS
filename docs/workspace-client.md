@@ -381,6 +381,22 @@ Revoking a link cancels its work and does not restore source-writing behavior.
 The existing v3 client wire protocol is unchanged; observation acknowledgements
 identify `source: "workspace-run"` with `source_current: false` in attachment mode.
 
+### Compact worker context and work memory
+
+Apply migration `20261108_01_workspace_memory.sql` and update AIOS Client. Attached
+v3 runs negotiate `workspace-memory-v1` and receive a brief of at most 1,600
+characters with authored decision priorities, a linked active goal when present,
+and up to two relevant work notes. Character recall and retained reports remain
+available on demand. Earlier clients keep using the existing workspace HUD.
+
+The worker can nominate up to three short notes in its terminal report.
+Attempts and findings reference a finding in the retained report. External
+findings can carry a public source URL without query parameters or credentials.
+Ideas are marked untested. AIOS accepts eligible notes into branch-scoped work
+memory, where subsequent worker briefs, worker recall and the chat HUD can
+retrieve them when relevant. Notes carry run provenance and worker attribution.
+They do not update the chat source, identity kernel, world facts or goal status.
+
 ### General experiments and context budgets
 
 A capability/purpose pair selects an operator-approved work profile, not a single
