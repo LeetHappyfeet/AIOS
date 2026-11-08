@@ -74,3 +74,43 @@ def test_cluster_picker_populates_choices_and_fields(monkeypatch):
     details, dropdown = ui.list_clusters()
     assert dropdown['choices'][0][1] == cluster
     assert ui.choose_cluster(cluster) == (cluster,'','propositions_v1',0)
+
+
+def test_proposition_search_produces_selectable_rows(monkeypatch):
+    monkeypatch.setattr(ui, "_topology", lambda path, **params: {
+        "results": [{"proposition_id": seed, "canonical_text": "Window is open",
+                     "topic_key": "window", "indexed": True}],
+        "offset": 0
+    })
+    rows, message = ui.search_propositions("window", 0, True)
+    assert rows[0][0] == seed
+    assert "Select a row" in message
+    assert ui.choose_proposition(rows, SimpleNamespace(index=(0, 1))) == (
+        seed, "", "propositions_v1", 0)
+
+
+def test_empty_clusters_do_not_block_proposition_search(monkeypatch):
+    def topology(path, **params):
+        if path == "status":
+            return {"counts": {"propositions": 7, "indexed_propositions": 5,
+                    "neighbor_pairs": 2, "active_clusters": 0},
+                    "embedding_version": "v1", "latest_run": None,
+                    "message": "No qualifying active clusters."}
+        return {"results": [{"proposition_id": seed, "canonical_text": "Window open",
+                             "topic_key": "windows", "indexed": True}], "offset": 0}
+    monkeypatch.setattr(ui, "_topology", topology)
+    summary, raw = ui.overview()
+    assert "No qualifying active clusters" in summary
+    assert raw["counts"]["active_clusters"] == 0
+    rows, _ = ui.search_propositions("window", 0, True)
+    assert rows[0][0] == seed
+
+
+def test_outlier_selection_can_be_inspected(monkeypatch):
+    monkeypatch.setattr(ui, "_topology", lambda path, **params: {
+        "outliers": [{"proposition_id": seed, "canonical_text": "Window open",
+                      "reason": "weak_neighborhood", "nearest_similarity": 0.6}]})
+    rows, message = ui.list_outliers(0)
+    assert "outlier" in message
+    assert ui.choose_outlier(rows, SimpleNamespace(index=0)) == (
+        seed, "", "propositions_v1", 0)
