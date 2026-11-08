@@ -67,15 +67,20 @@ async def _import(paths, selection, new_name, include_disabled):
         if not slug:
             raise ValueError("New universe name contains no usable letters/numbers")
         key = f"fiction.{slug}"
-        # Only create on an explicit named operator request. Reusing an existing
-        # domain is deliberate; domain creation does not grant corpus access.
-        await ensure_knowledge_domain(
-            db, domain_key=key, display_name=name,
-            domain_kind="fictional_universe",
-            default_scope_key=f"{key}.reference",
-            default_epistemic_namespace=f"reference.{slug}",
-            meta={"created_by": "gradio_lorebook_import"},
+        # Never overwrite settings or re-enable an existing domain.
+        existing = await db.fetchrow(
+            "SELECT enabled FROM aios.knowledge_domain WHERE domain_key=$1", key
         )
+        if existing and not existing["enabled"]:
+            raise ValueError(f"Knowledge domain {key} exists but is disabled")
+        if not existing:
+            await ensure_knowledge_domain(
+                db, domain_key=key, display_name=name,
+                domain_kind="fictional_universe",
+                default_scope_key=f"{key}.reference",
+                default_epistemic_namespace=f"reference.{slug}",
+                meta={"created_by": "gradio_lorebook_import"},
+            )
     else:
         key = _key(selection)
     if not key:
