@@ -408,22 +408,12 @@ async def fetch_next_job(
                       SELECT 1 FROM aios.pipeline_job active
                       WHERE active.status='running'
                         AND active.partition_key IS NOT NULL
+                        AND active.partition_key=q.partition_key
                         AND (
-                          CASE
-                            WHEN q.partition_key LIKE 'char:%'
-                              OR q.partition_key LIKE 'source:%'
-                              OR q.partition_key LIKE 'world:%'
-                            THEN 'semantic-scope:' || q.partition_key
-                            ELSE q.resource_class || ':' || q.partition_key
-                          END
-                        ) = (
-                          CASE
-                            WHEN active.partition_key LIKE 'char:%'
-                              OR active.partition_key LIKE 'source:%'
-                              OR active.partition_key LIKE 'world:%'
-                            THEN 'semantic-scope:' || active.partition_key
-                            ELSE active.resource_class || ':' || active.partition_key
-                          END
+                            q.partition_key LIKE 'char:%'
+                            OR q.partition_key LIKE 'source:%'
+                            OR q.partition_key LIKE 'world:%'
+                            OR active.resource_class=q.resource_class
                         )
                   )
               )
