@@ -67,7 +67,8 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
                        totals: dict[str, int], window_started: float,
                        admission_backlog: dict[str, int] | None = None,
                        failed_stages: list[str] | None = None,
-                       failure_streaks: dict[str, int] | None = None) -> dict[str, Any]:
+                       failure_streaks: dict[str, int] | None = None,
+                       adaptive_batches: dict[str, int] | None = None) -> dict[str, Any]:
     elapsed = max(0.001, time.monotonic() - window_started)
     total_indexed = sum(totals.get(name,0) for name in (
         "source_indexed","frames_indexed","propositions_indexed","epistemic_indexed",
@@ -80,6 +81,7 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
         "admission_backlog": admission_backlog or {"pending": 0, "overdue": 0},
         "failed_stages": list(failed_stages or []),
         "failure_streaks": dict(failure_streaks or {}),
+        "adaptive_batch_sizes": dict(adaptive_batches or {}),
         # A successful cycle is not global SQL/Qdrant/Fuseki parity.
         # This worker does not have an exhaustive cross-store auditor.
         "cycle_healthy": state != "DEGRADED" and not failed_stages,
@@ -161,21 +163,25 @@ async def analyze_regions_once() -> None:
         await db.close()
 
 
-async def _run_vector_stages(db, cfg, run_stage, *, run_corpus: bool = True) -> dict[str, int]:
+async def _run_vector_stages(db, cfg, run_stage, *, run_corpus: bool = True,
+                             batch_overrides: dict[str, int] | None = None) -> dict[str, int]:
     # Admission requires a canonical proposition vector. No topology or cleanup
     # operation may be inserted into this dependency chain.
     # Explicitly adjudicated retractions must not wait behind the larger
     # topology-quarantine maintenance pass (which may yield on SQL budgets).
     await run_stage("hygiene-retirement", quarantine_adjudicated_vectors_once,
                     db, cfg, limit=8)
-    propositions = await run_stage("vector-propositions", index_propositions_once, db, cfg)
-    admission_cfg = replace(cfg, batch_size=cfg.admission_batch_size)
+    overrides = batch_overrides or {}
+    proposition_cfg = replace(cfg, batch_size=overrides.get("vector-propositions", cfg.batch_size))
+    propositions = await run_stage("vector-propositions", index_propositions_once, db, proposition_cfg)
+    admission_cfg = replace(cfg, batch_size=overrides.get("semantic-admission", cfg.admission_batch_size))
     admitted = await run_stage(
         "semantic-admission", admit_semantic_neighbors_once, db, admission_cfg,
         embedder=_get_embedder(cfg), store=_get_store(cfg, cfg.proposition_collection))
     bypassed = await run_stage("semantic-admission-repair", fail_open_stalled_admissions_once, db, cfg)
     frames = await run_stage("vector-frames", index_semantic_frames_once, db, cfg)
-    epistemic = await run_stage("vector-epistemic", index_epistemic_objects_once, db, cfg)
+    epistemic_cfg = replace(cfg, batch_size=overrides.get("vector-epistemic", cfg.batch_size))
+    epistemic = await run_stage("vector-epistemic", index_epistemic_objects_once, db, epistemic_cfg)
     background_cfg = replace(cfg, batch_size=cfg.background_batch_size)
     source = await run_stage("vector-source", index_source_sections_once, db, background_cfg)
     # Cold corpus has its own collection and guaranteed background budget.
@@ -224,6 +230,11 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         backlog = {}
         failed = []
         failure_streaks: dict[str, int] = {}
+        vector_batch_sizes = {
+            "vector-propositions": cfg.batch_size,
+            "vector-epistemic": cfg.batch_size,
+            "semantic-admission": cfg.admission_batch_size,
+        }
         last_backlog_snapshot = 0.0
         last_topic_scan = 0.0
         last_corpus_scan = 0.0
@@ -243,10 +254,17 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 else:
                     result = await _timed_stage(stage, func, *args, **kwargs)
                 failure_streaks.pop(stage, None)
+                if stage in vector_batch_sizes and isinstance(result, int):
+                    cap = cfg.admission_batch_size if stage == "semantic-admission" else cfg.batch_size
+                    # Recover capacity gradually, instead of jumping immediately
+                    # back to a repeatedly timing-out full scan.
+                    vector_batch_sizes[stage] = min(cap, vector_batch_sizes[stage] + 1)
                 return result
             except Exception as exc:
                 failed.append(stage)
                 failure_streaks[stage] = failure_streaks.get(stage, 0) + 1
+                if stage in vector_batch_sizes:
+                    vector_batch_sizes[stage] = max(1, vector_batch_sizes[stage] // 2)
                 if isinstance(exc,(asyncio.TimeoutError,asyncpg.QueryCanceledError,asyncpg.LockNotAvailableError)):
                     logger.warning("Vector stage deferred stage=%s reason=%s",stage,type(exc).__name__)
                 else:
@@ -272,7 +290,8 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 last_topic_scan = time.monotonic()
             corpus_due = time.monotonic()-last_corpus_scan >= cfg.corpus_refresh_seconds
             totals.update(await _run_vector_stages(
-                db, cfg, run_stage, run_corpus=corpus_due))
+                db, cfg, run_stage, run_corpus=corpus_due,
+                batch_overrides=vector_batch_sizes))
             if corpus_due:
                 last_corpus_scan=time.monotonic()
             last_batches = dict(totals)
@@ -289,7 +308,8 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 stage="retry" if failed else ("cycle-complete" if active else "idle"),
                 stage_started_at=None, cfg=cfg, last_batches=last_batches,
                 totals=totals, window_started=window_started, admission_backlog=backlog,
-                failed_stages=failed, failure_streaks=failure_streaks))
+                failed_stages=failed, failure_streaks=failure_streaks,
+                adaptive_batches=vector_batch_sizes))
             totals = {key: 0 for key in totals}
             window_started = time.monotonic()
             # Every cycle yields; outages cannot produce a CPU spin.
