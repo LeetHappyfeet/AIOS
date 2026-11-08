@@ -13,16 +13,15 @@ def _automatic_goal_research_eligible(goal) -> bool:
     if str(meta.get("horizon") or "").lower() in {"immediate", "scene"}:
         return False
     objective = str(meta.get("objective") or goal.text or "").strip()
-    objective = re.sub(r"^(?:[\\w-]+\\s+)?(?:wants?|intends?|plans?|needs?)\\s+(?:to\\s+)?", "", objective, flags=re.I)
+    objective = re.sub(r"^(?:[\w-]+\s+)?(?:wants?|intends?|plans?|needs?)\s+(?:to\s+)?", "", objective, flags=re.I)
     return bool(re.match(
-        r"^(?:to\\s+)?(?:learn|research|investigate|study|understand|"
-        r"find\\s+out|look\\s+up|identify|determine|compare|evaluate)\\b",
+        r"^(?:to\s+)?(?:learn|research|investigate|study|understand|"
+        r"find\s+out|look\s+up|identify|determine|compare|evaluate)\b",
         objective, re.I,
     ))
 
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
