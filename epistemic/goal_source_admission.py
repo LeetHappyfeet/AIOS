@@ -175,8 +175,8 @@ def review_goal_source(
     if _BARE_REFERENCE.search(action):
         return GoalAdmission("unresolved_reference",
                              "objective_contains_unresolved_reference", "source")
-    if str(horizon or "").lower() == "immediate":
-        return GoalAdmission("scene_only", "immediate_intention", "source")
+    if str(horizon or "").lower() in {"immediate", "scene"}:
+        return GoalAdmission("scene_only", "transient_intention_horizon", "source")
     if ((_SCENE_ACTION.search(action) or _SHORT_ERRAND_ACTION.search(action)
          or _LOCATIVE_ACTION.search(action))
             and (_NEAR_TIME.search(source) or not _EXTENDED_TIME.search(source))):
