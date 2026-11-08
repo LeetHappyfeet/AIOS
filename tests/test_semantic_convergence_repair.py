@@ -98,3 +98,23 @@ async def test_ineligible_epistemic_page_advances_then_wraps():
         assert key not in service._EPISTEMIC_SCAN_CURSORS
     finally:
         service._EPISTEMIC_SCAN_CURSORS.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_vector_cycle_honors_adaptive_stage_batch_overrides(monkeypatch):
+    cfg = SemanticIndexConfig()
+    monkeypatch.setattr(cli, "_get_embedder", lambda cfg: object())
+    monkeypatch.setattr(cli, "_get_store", lambda cfg, collection: object())
+    sizes = {}
+    async def stage(name, func, *args, **kwargs):
+        if len(args) > 1 and hasattr(args[1], "batch_size"):
+            sizes[name] = args[1].batch_size
+        return 0
+    await cli._run_vector_stages(
+        None, cfg, stage, run_corpus=False,
+        batch_overrides={"vector-propositions": 4, "vector-epistemic": 2,
+                         "semantic-admission": 1},
+    )
+    assert sizes["vector-propositions"] == 4
+    assert sizes["vector-epistemic"] == 2
+    assert sizes["semantic-admission"] == 1
