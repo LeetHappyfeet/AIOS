@@ -211,8 +211,8 @@ async def import_corpus_document(
         )
 
     if authored_sections is not None:
-        # Preserve authored entry boundaries. The complete source text is held
-        # by its content hash, while searchable text stays in corpus_section.
+        # Preserve authored entry boundaries. The document stores a hash of
+        # its source text; searchable prose stays in corpus_section.
         section_order = 0
         seen_section_hashes: set[str] = set()
         for entry in authored_sections:
