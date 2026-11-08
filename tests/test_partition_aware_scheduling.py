@@ -24,10 +24,11 @@ async def test_claim_sql_excludes_running_effective_scopes_across_resource_class
     sql, args = statements[0]
     assert "NOT EXISTS (" in sql
     assert "active.status='running'" in sql
-    assert "active.resource_class || ':' || active.partition_key" in sql
-    assert "q.resource_class || ':' || q.partition_key" in sql
-    assert "'semantic-scope:' || q.partition_key" in sql
-    assert "'semantic-scope:' || active.partition_key" in sql
+    assert "active.partition_key=q.partition_key" in sql
+    assert "active.resource_class=q.resource_class" in sql
+    assert "q.partition_key LIKE 'char:%'" in sql
+    assert "q.partition_key LIKE 'source:%'" in sql
+    assert "q.partition_key LIKE 'world:%'" in sql
     assert "q.partition_key IS NULL" in sql
     assert "q.resource_class = $1" in sql
     assert args[0] == "SEMANTIC"
