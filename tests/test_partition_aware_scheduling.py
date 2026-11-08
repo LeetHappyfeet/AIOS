@@ -55,9 +55,9 @@ async def test_rdf_gate_is_acquired_before_partition_lock(monkeypatch):
     async def connection():
         yield Con()
     class DB:
-        connection = staticmethod(connection)
         async def execute(self, *args):
             events.append("partition-record")
+    DB.connection = staticmethod(connection)
     async def no_heartbeat(*args, **kwargs):
         await asyncio.Event().wait()
     def handler(*args):
