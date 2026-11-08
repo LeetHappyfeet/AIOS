@@ -16,6 +16,13 @@ _EMBEDDER: Embedder | None = None
 _STORES: dict[str, QdrantStore] = {}
 VECTOR_MUTATION_LOCK = 867530901  # Shared by indexing and destructive quarantine.
 
+# Rotating keyset scans avoid repeatedly evaluating expensive topology eligibility
+# against the same newest (possibly ineligible) missing-receipt records.
+# These are hints only: no progress/acknowledgement is stored here. Receipts
+# remain authoritative, and reaching the end starts another complete sweep.
+_PROPOSITION_SCAN_CURSORS: dict[tuple[str, str, str], tuple[object, object]] = {}
+
+
 
 def _get_embedder(cfg: SemanticIndexConfig) -> Embedder:
     global _EMBEDDER
@@ -395,15 +402,39 @@ async def index_semantic_frames_once(db: Database, cfg: SemanticIndexConfig) -> 
 
 
 async def index_propositions_once(db: Database, cfg: SemanticIndexConfig) -> int:
+    scan_key = (cfg.proposition_collection, cfg.embedding_model, cfg.embedding_version)
+    cursor = _PROPOSITION_SCAN_CURSORS.get(scan_key)
+    # Select one receipt-missing page *before* the costly eligibility predicate
+    # and per-proposition context lookup. This guarantees that a long sequence
+    # of ineligible propositions cannot pin discovery on its first page.
     rows = await db.fetch(
         """
-        SELECT
-            p.proposition_id, p.topic_key, p.subject_norm, p.predicate_norm,
-            p.object_norm, p.polarity, p.modality, p.canonical_text, p.created_at,
-            ctx.claim_kind, ctx.predicate_family, ctx.subject_kind, ctx.object_kind,
-            ctx.origin_character_id, ctx.character_instance_id,
-            ctx.world_id, ctx.timeline_id, ctx.dag_node_id, ctx.epistemic_scope
-        FROM aios.proposition p
+        WITH pending AS MATERIALIZED (
+            SELECT p.proposition_id,p.topic_key,p.subject_norm,p.predicate_norm,
+                   p.object_norm,p.polarity,p.modality,p.canonical_text,p.created_at
+            FROM aios.proposition p
+            WHERE ($5::timestamptz IS NULL OR
+                   (p.created_at,p.proposition_id) < ($5::timestamptz,$6::uuid))
+              AND NOT EXISTS (
+                SELECT 1 FROM aios.semantic_vector_index_state s
+                WHERE s.object_type='proposition'
+                  AND s.object_key=p.proposition_id::text
+                  AND s.qdrant_collection=$2
+                  AND s.embedding_model=$3
+                  AND s.embedding_version=$4
+              )
+            ORDER BY p.created_at DESC,p.proposition_id DESC
+            LIMIT $1
+        ), checked AS MATERIALIZED (
+            SELECT p.*,aios.semantic_proposition_topology_eligible(p.proposition_id)
+                   AS topology_eligible
+            FROM pending p
+        )
+        SELECT p.*,
+            ctx.claim_kind,ctx.predicate_family,ctx.subject_kind,ctx.object_kind,
+            ctx.origin_character_id,ctx.character_instance_id,
+            ctx.world_id,ctx.timeline_id,ctx.dag_node_id,ctx.epistemic_scope
+        FROM checked p
         LEFT JOIN LATERAL (
             SELECT ccr.*
             FROM aios.observation o
@@ -412,22 +443,23 @@ async def index_propositions_once(db: Database, cfg: SemanticIndexConfig) -> int
               AND aios.semantic_occurrence_topology_eligible(o.claim_id,p.proposition_id)
             ORDER BY ccr.resolved_at DESC
             LIMIT 1
-        ) ctx ON true
-        WHERE aios.semantic_proposition_topology_eligible(p.proposition_id)
-          AND NOT EXISTS (
-            SELECT 1 FROM aios.semantic_vector_index_state s
-            WHERE s.object_type='proposition'
-              AND s.object_key=p.proposition_id::text
-              AND s.qdrant_collection=$2
-              AND s.embedding_model=$3
-              AND s.embedding_version=$4
-        )
-        ORDER BY p.created_at DESC, p.proposition_id DESC
-        LIMIT $1
+        ) ctx ON p.topology_eligible
+        ORDER BY p.created_at DESC,p.proposition_id DESC
         """,
         cfg.batch_size, cfg.proposition_collection,
         cfg.embedding_model, cfg.embedding_version,
+        cursor[0] if cursor else None, cursor[1] if cursor else None,
     )
+    if not rows:
+        # Wrap only when the current scan is exhausted; revisit newly arrived
+        # and previously failed records on the next cycle.
+        _PROPOSITION_SCAN_CURSORS.pop(scan_key, None)
+        return 0
+    # Advance only after a successful SQL scan. A failed vector upsert remains
+    # unacknowledged and will be revisited on the next sweep.
+    last = rows[-1]
+    _PROPOSITION_SCAN_CURSORS[scan_key] = (last["created_at"], last["proposition_id"])
+    rows = [r for r in rows if r["topology_eligible"]]
     if not rows:
         return 0
 
