@@ -32,8 +32,7 @@ def _cfg():
 
 
 @pytest.mark.parametrize("phase", [
-    "cluster_candidates", "event_memberships", "events",
-    "episode_memberships", "topology_nodes",
+    "cluster_candidates", "events", "episode_memberships",
 ])
 def test_derived_quarantine_phase_executes_only_one_statement(phase):
     db = RecordingDatabase()
@@ -41,6 +40,16 @@ def test_derived_quarantine_phase_executes_only_one_statement(phase):
     assert count == 0
     assert len(db.executes) == 1, phase
     assert not db.fetches, phase
+
+
+@pytest.mark.parametrize("phase", ["event_memberships", "topology_nodes"])
+def test_paged_quarantine_skips_mutation_on_exhausted_page(phase):
+    db = RecordingDatabase()
+    count = asyncio.run(quarantine_ineligible_vectors_once(db, _cfg(), phase=phase))
+    assert count == 0
+    assert not db.executes
+    assert len(db.fetches) == 1
+    assert "page_key" in db.fetches[0][0]
 
 
 def test_vector_quarantine_phase_does_not_run_global_derived_scans():
