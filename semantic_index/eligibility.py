@@ -248,9 +248,9 @@ async def quarantine_ineligible_vectors_once(
         if phase == "vectors":
             _QUARANTINE_PAGE_SIZES[phase] = max(1, _QUARANTINE_PAGE_SIZES.get(phase, _QUARANTINE_PAGE_MAX)//2)
         raise
-    if phase == "vectors":
-        _quarantine_advance(phase, page_keys)
     if not rows:
+        if phase == "vectors":
+            _quarantine_advance(phase, page_keys)
         return 0
 
     async with db.connection() as con:
@@ -264,6 +264,8 @@ async def quarantine_ineligible_vectors_once(
                   AND NOT aios.semantic_proposition_topology_eligible(proposition_id)""",
                 [r["proposition_id"] for r in rows])
             if not rows:
+                if phase == "vectors":
+                    _quarantine_advance(phase, page_keys)
                 return 0
             keys = [str(row['proposition_id']) for row in rows]
             proposition_ids = [row['proposition_id'] for row in rows]
@@ -289,6 +291,8 @@ async def quarantine_ineligible_vectors_once(
             await con.execute("""
                 DELETE FROM aios.semantic_structure_state WHERE proposition_id=ANY($1::uuid[])
             """, proposition_ids)
+    if phase == "vectors":
+        _quarantine_advance(phase, page_keys)
     logger.info("Quarantined %d ineligible propositions in %.2fs",
                 len(rows), time.monotonic() - started)
     return len(rows)
