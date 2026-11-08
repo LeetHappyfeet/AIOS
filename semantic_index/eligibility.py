@@ -112,17 +112,37 @@ async def quarantine_ineligible_vectors_once(
         return 0
     # Index receipts identify vectors we own; a failed delete leaves receipts
     # intact so the next pass retries. Filter deletion also removes owner copies.
+    # Drive discovery from receipts, not a proposition x receipts OR join.
+    # The old join contained an unanchored LIKE ('%:' || uuid) for ownership,
+    # forcing a large cross-product even when very few vectors need retirement.
+    # split_part is safe for existing typed receipt keys; malformed UUIDs are
+    # excluded before casting. Eligibility is still rechecked under the lock.
     rows = await db.fetch("""
-        SELECT DISTINCT p.proposition_id
-        FROM aios.proposition p
-        JOIN aios.semantic_vector_index_state s ON
-            (s.object_type='proposition' AND s.object_key=p.proposition_id::text)
-            OR (s.object_type='character_knowledge' AND s.object_key LIKE '%:' || p.proposition_id::text)
-            OR (s.object_type='world_assertion' AND EXISTS (
-                SELECT 1 FROM aios.world_proposition_assertion wa
-                WHERE wa.proposition_id=p.proposition_id AND s.object_key='world:' || wa.assertion_id::text))
-        WHERE s.qdrant_collection=ANY($1::text[])
-          AND NOT aios.semantic_proposition_topology_eligible(p.proposition_id)
+        WITH owned AS (
+            SELECT s.object_key::uuid AS proposition_id
+            FROM aios.semantic_vector_index_state s
+            WHERE s.qdrant_collection=ANY($1::text[])
+              AND s.object_type='proposition'
+              AND s.object_key ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            UNION
+            SELECT split_part(s.object_key, ':', 2)::uuid AS proposition_id
+            FROM aios.semantic_vector_index_state s
+            WHERE s.qdrant_collection=ANY($1::text[])
+              AND s.object_type='character_knowledge'
+              AND split_part(s.object_key, ':', 2)
+                  ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            UNION
+            SELECT wa.proposition_id
+            FROM aios.semantic_vector_index_state s
+            JOIN aios.world_proposition_assertion wa
+              ON s.object_key='world:' || wa.assertion_id::text
+            WHERE s.qdrant_collection=ANY($1::text[])
+              AND s.object_type='world_assertion'
+        )
+        SELECT p.proposition_id
+        FROM owned
+        JOIN aios.proposition p USING (proposition_id)
+        WHERE NOT aios.semantic_proposition_topology_eligible(p.proposition_id)
         ORDER BY p.proposition_id LIMIT $2
     """, [cfg.proposition_collection, cfg.epistemic_collection], cfg.batch_size)
     if not rows:
