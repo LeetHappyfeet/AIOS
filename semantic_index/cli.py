@@ -80,8 +80,10 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
         "admission_backlog": admission_backlog or {"pending": 0, "overdue": 0},
         "failed_stages": list(failed_stages or []),
         "failure_streaks": dict(failure_streaks or {}),
-        "converged": state == "CAUGHT_UP" and not failed_stages
-                     and not (admission_backlog or {}).get("pending", 0),
+        # A successful cycle is not global SQL/Qdrant/Fuseki parity.
+        # This worker does not have an exhaustive cross-store auditor.
+        "cycle_healthy": state != "DEGRADED" and not failed_stages,
+        "convergence_verified": False,
         "indexed_per_s": round(total_indexed / elapsed, 2),
         "frames_per_s": round(totals["frames_indexed"] / elapsed, 2),
         "propositions_per_s": round(totals["propositions_indexed"] / elapsed, 2),
