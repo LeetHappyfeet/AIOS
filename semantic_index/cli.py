@@ -50,6 +50,14 @@ from .reconciliation import (
 logger = logging.getLogger("aios.semantic_index.cli")
 
 
+def _topology_batch_key(stage: str, mapping: dict[str, str]) -> str | None:
+    """Resolve phased quarantine names to the adaptive batch budget."""
+    return mapping.get(stage) or (
+        mapping.get("topology-quarantine")
+        if stage.startswith("topology-quarantine/") else None
+    )
+
+
 def _emit_telemetry(payload: dict[str, Any]) -> None:
     print("AIOS_TELEMETRY " + json.dumps(payload, separators=(",", ":"), default=str), flush=True)
 
@@ -57,7 +65,9 @@ def _emit_telemetry(payload: dict[str, Any]) -> None:
 def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None,
                        cfg: SemanticIndexConfig, last_batches: dict[str, int],
                        totals: dict[str, int], window_started: float,
-                       admission_backlog: dict[str, int] | None = None) -> dict[str, Any]:
+                       admission_backlog: dict[str, int] | None = None,
+                       failed_stages: list[str] | None = None,
+                       failure_streaks: dict[str, int] | None = None) -> dict[str, Any]:
     elapsed = max(0.001, time.monotonic() - window_started)
     total_indexed = sum(totals.get(name,0) for name in (
         "source_indexed","frames_indexed","propositions_indexed","epistemic_indexed",
@@ -68,6 +78,10 @@ def _semantic_snapshot(*, state: str, stage: str, stage_started_at: float | None
         "stage_started_at": stage_started_at, "batch_size": cfg.batch_size,
         "last_batches": last_batches, "saturated_streams": saturated,
         "admission_backlog": admission_backlog or {"pending": 0, "overdue": 0},
+        "failed_stages": list(failed_stages or []),
+        "failure_streaks": dict(failure_streaks or {}),
+        "converged": state == "CAUGHT_UP" and not failed_stages
+                     and not (admission_backlog or {}).get("pending", 0),
         "indexed_per_s": round(total_indexed / elapsed, 2),
         "frames_per_s": round(totals["frames_indexed"] / elapsed, 2),
         "propositions_per_s": round(totals["propositions_indexed"] / elapsed, 2),
@@ -207,6 +221,7 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
         last_batches = {}
         backlog = {}
         failed = []
+        failure_streaks: dict[str, int] = {}
         last_backlog_snapshot = 0.0
         last_topic_scan = 0.0
         last_corpus_scan = 0.0
@@ -220,12 +235,16 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 # Bound semantic admission's per-candidate SQL/ANN work as well
                 # as its batch size. Vector upserts retain receipt-after-write ordering.
                 if stage.startswith("semantic-admission"):
-                    return await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         _timed_stage(stage,func,*args,**kwargs),
                         timeout=cfg.admission_stage_seconds)
-                return await _timed_stage(stage, func, *args, **kwargs)
+                else:
+                    result = await _timed_stage(stage, func, *args, **kwargs)
+                failure_streaks.pop(stage, None)
+                return result
             except Exception as exc:
                 failed.append(stage)
+                failure_streaks[stage] = failure_streaks.get(stage, 0) + 1
                 if isinstance(exc,(asyncio.TimeoutError,asyncpg.QueryCanceledError,asyncpg.LockNotAvailableError)):
                     logger.warning("Vector stage deferred stage=%s reason=%s",stage,type(exc).__name__)
                 else:
@@ -267,7 +286,8 @@ async def run_forever(poll_seconds: float = 1.0) -> None:
                 state="DEGRADED" if failed else ("DRAINING" if active else "CAUGHT_UP"),
                 stage="retry" if failed else ("cycle-complete" if active else "idle"),
                 stage_started_at=None, cfg=cfg, last_batches=last_batches,
-                totals=totals, window_started=window_started, admission_backlog=backlog))
+                totals=totals, window_started=window_started, admission_backlog=backlog,
+                failed_stages=failed, failure_streaks=failure_streaks))
             totals = {key: 0 for key in totals}
             window_started = time.monotonic()
             # Every cycle yields; outages cannot produce a CPU spin.
@@ -321,7 +341,7 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
                     timeout=cfg.topology_stage_seconds)
             except Exception as exc:
                 failed.append(stage)
-                size = stage_batches.get(stage)
+                size = _topology_batch_key(stage, stage_batches)
                 if size:
                     batch_sizes[size] = max(1,batch_sizes[size] // 2)
                 if isinstance(exc,(asyncio.TimeoutError,asyncpg.QueryCanceledError,asyncpg.LockNotAvailableError)):
@@ -352,8 +372,8 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
                 quarantine_cursor = (quarantine_cursor + 1) % len(quarantine_phases)
                 stage = f"topology-quarantine/{phase}"
                 if time.monotonic() >= quarantine_retry_after.get(phase, 0.0):
-                    phase_batch = (effective_cfg.background_batch_size if phase == "vectors"
-                                   else min(4, effective_cfg.background_batch_size))
+                    phase_batch = (batch_sizes["background_batch_size"] if phase == "vectors"
+                                   else min(4, batch_sizes["background_batch_size"]))
                     await run_stage(
                         stage, quarantine_ineligible_vectors_once,
                         db, replace(effective_cfg, batch_size=phase_batch),
@@ -376,7 +396,14 @@ async def run_topology_forever(poll_seconds: float = 2.0) -> None:
                 quarantine_next_at = time.monotonic() + quarantine_min_interval
             _emit_telemetry({"service": "semantic_topology",
                              "state": "DEGRADED" if failed else ("DRAINING" if any(work.values()) else "CAUGHT_UP"),
-                             "stage": "retry" if failed else "idle", "stage_started_at": None})
+                             "stage": "retry" if failed else "idle", "stage_started_at": None,
+                             "failed_stages": list(failed),
+                             "quarantine_failure_streaks": dict(quarantine_failures),
+                             "quarantine_retry_seconds": {
+                                 key: round(max(0.0, due - time.monotonic()), 1)
+                                 for key, due in quarantine_retry_after.items()
+                                 if due > time.monotonic()},
+                             "adaptive_batch_sizes": dict(batch_sizes)})
             await asyncio.sleep(max(poll_seconds,5.0) if failed else poll_seconds)
     finally:
         await db.close()
