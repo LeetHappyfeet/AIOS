@@ -28,7 +28,8 @@ def test_snapshot_discloses_degraded_stages_instead_of_claiming_convergence():
         failed_stages=["vector-propositions"],
         failure_streaks={"vector-propositions": 3},
     )
-    assert not snap["converged"]
+    assert not snap["cycle_healthy"]
+    assert snap["convergence_verified"] is False
     assert snap["failed_stages"] == ["vector-propositions"]
     assert snap["failure_streaks"]["vector-propositions"] == 3
 
