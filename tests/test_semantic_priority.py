@@ -24,10 +24,15 @@ async def test_embedding_cycle_has_no_topology_dependency_and_newest_vectors_fir
     cfg=SemanticIndexConfig()
     await cli._run_vector_stages(None,cfg,stage)
     assert [n for n,_ in calls] == [
-        "vector-propositions","semantic-admission","semantic-admission-repair",
-        "vector-frames","vector-epistemic","vector-source","vector-corpus"]
-    assert calls[1][1] == cfg.admission_batch_size
-    assert calls[-1][1] == cfg.background_batch_size
+        "hygiene-retirement", "vector-propositions", "semantic-admission",
+        "semantic-admission-repair", "vector-frames", "vector-epistemic",
+        "vector-source", "vector-corpus-prune", "vector-corpus-v2",
+        "vector-topic-retire", "vector-topics", "vector-topic-coverage",
+    ]
+    sizes = dict(calls)
+    assert sizes["semantic-admission"] == cfg.admission_batch_size
+    assert sizes["vector-corpus-v2"] == cfg.batch_size
+    assert sizes["vector-source"] == cfg.background_batch_size
 
 
 @pytest.mark.asyncio
@@ -40,7 +45,9 @@ async def test_cold_corpus_yields_when_live_embedding_batch_is_full(monkeypatch)
         calls.append(name)
         return cfg.batch_size if name=="vector-propositions" else 0
     await cli._run_vector_stages(None,cfg,stage)
-    assert "vector-corpus" not in calls
+    # Cold corpus now has an independent background budget even when live
+    # proposition indexing fills its batch.
+    assert "vector-corpus-v2" in calls
     assert "vector-source" in calls
 
 
