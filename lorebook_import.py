@@ -112,9 +112,9 @@ async def import_lorebook(
     route = await router.resolve_domain_key(
         domain_key, evidence="operator_lorebook_import"
     )
-    # File hash identifies one exact source revision. Same file can be assigned
-    # to multiple registered domains without creating a duplicate document.
-    source_id = f"sillytavern-lorebook:{parsed['sha256']}"
+    # Dedupe within each domain, without letting a later import in a second
+    # universe overwrite the first document's epistemic namespace.
+    source_id = f"sillytavern-lorebook:{domain_key}:{parsed['sha256']}"
     text = "\n\n".join(
         f"## {section['heading']}\n{section['content']}"
         for section in parsed["sections"]
@@ -122,7 +122,7 @@ async def import_lorebook(
     imported = await import_corpus_document(
         db, text=text, source_id=source_id,
         source_kind="sillytavern_lorebook",
-        title=parsed["title"], source_uri=f"sillytavern-lorebook://{parsed['sha256']}",
+        title=parsed["title"], source_uri=f"sillytavern-lorebook://{domain_key}/{parsed['sha256']}",
         meta={
             "source_format": parsed["format"],
             "source_file": parsed["file_name"],
