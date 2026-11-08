@@ -1,9 +1,9 @@
 name: Cognitive episode recovery
 on:
   push:
-    paths: ['agent/**', 'epistemic/**', 'hud/**', 'tests/*corpus*', 'inference/**', 'pipeline/jobs.py', 'runner.py', 'db.py', 'migrate.py', 'migrations/current/**', 'tests/*cognit*', 'tests/*goal*', '.github/workflows/cognitive-episode-recovery.yml']
+    paths: ['agent/**', 'char/identity_revision.py', 'epistemic/**', 'hud/**', 'tests/*corpus*', 'inference/**', 'pipeline/jobs.py', 'runner.py', 'db.py', 'migrate.py', 'migrations/current/**', 'tests/*cognit*', 'tests/*goal*', 'tests/test_identity_revision_postgres.py', '.github/workflows/cognitive-episode-recovery.yml']
   pull_request:
-    paths: ['agent/**', 'epistemic/**', 'hud/**', 'tests/*corpus*', 'inference/**', 'pipeline/jobs.py', 'runner.py', 'db.py', 'migrate.py', 'migrations/current/**', 'tests/*cognit*', 'tests/*goal*', '.github/workflows/cognitive-episode-recovery.yml']
+    paths: ['agent/**', 'char/identity_revision.py', 'epistemic/**', 'hud/**', 'tests/*corpus*', 'inference/**', 'pipeline/jobs.py', 'runner.py', 'db.py', 'migrate.py', 'migrations/current/**', 'tests/*cognit*', 'tests/*goal*', 'tests/test_identity_revision_postgres.py', '.github/workflows/cognitive-episode-recovery.yml']
 jobs:
   isolated-postgres:
     runs-on: ubuntu-latest
@@ -33,6 +33,7 @@ jobs:
             tests/test_pipeline_telemetry_postgres.py \
             tests/test_cognitive_job_identity.py \
             tests/test_cognitive_episode_postgres.py \
+            tests/test_identity_revision_postgres.py \
             tests/test_cognition_atomic_boundaries.py \
             tests/test_autonomy_scheduling_recovery.py \
             tests/test_cognitive_opportunity_serialization.py \

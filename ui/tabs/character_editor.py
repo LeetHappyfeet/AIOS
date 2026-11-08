@@ -486,7 +486,7 @@ def render():
                         with gr.Accordion("Propose manual identity facet", open=False):
                             with gr.Row():
                                 new_facet_type = gr.Dropdown(
-                                    choices=["identity","appearance","personality","values","expression",
+                                    choices=["identity","appearance","description","personality","values","expression",
                                              "constraint","role","developmental","domain"],
                                     value="personality", allow_custom_value=True, label="Facet type",
                                 )
@@ -802,6 +802,11 @@ def render():
                           if str(r["candidate_id"]) == str(candidate).strip()), None)
             if not match:
                 raise gr.Error("Candidate does not belong to the selected character")
+            if match["disposition"] != "proposed":
+                message = f"Candidate is **{match['disposition']}**. Only proposed candidates can be rejected."
+                if match["disposition"] == "accepted":
+                    message += " To change the active facet, stage and accept a replacement."
+                return (*refresh_identity_components(cid), message)
             try:
                 run_async(reject_identity_candidate(
                     db, str(candidate).strip(), reason=str(reason or "").strip() or None
