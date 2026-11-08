@@ -510,7 +510,7 @@ async def _execute_claimed_job(
                         fail_fast=spec.resource_class == ResourceClass.LOOKUP)
     )
 
-    async def execute_owned():
+    async def execute_with_partition_lock():
         nonlocal partition_key
         partition_key = await _resolve_partition_key(db, job)
         lock_key = (f"semantic-scope:{partition_key}"
@@ -529,19 +529,12 @@ async def _execute_claimed_job(
                        WHERE job_id=$1 AND worker_id=$3 AND status='running'""",
                     job_id, partition_key, worker_id)
 
-                async def invoke_handler():
-                    if spec.resource_class == ResourceClass.LOOKUP:
-                        await _run_lookup_handler(handler, job)
-                    elif spec.isolate_blocking:
-                        await asyncio.to_thread(_run_isolated_handler, job_type, job)
-                    else:
-                        await handler(db, job)
-
-                if spec.requires_rdf_slot:
-                    async with rdf_gate:
-                        await invoke_handler()
+                if spec.resource_class == ResourceClass.LOOKUP:
+                    await _run_lookup_handler(handler, job)
+                elif spec.isolate_blocking:
+                    await asyncio.to_thread(_run_isolated_handler, job_type, job)
                 else:
-                    await invoke_handler()
+                    await handler(db, job)
                 await mark_done(db, job_id, worker_id=worker_id)
                 logger.info("Job done id=%s type=%s resource=%s partition=%s runtime=%.3fs",
                     job_id, job_type, spec.resource_class.value, partition_key, time.monotonic()-started)
@@ -557,6 +550,22 @@ async def _execute_claimed_job(
                     except BaseException:
                         lock_conn.terminate()
                         raise
+
+    async def execute_owned():
+        if spec.requires_rdf_slot:
+            # Never hold a semantic-scope lock while waiting for RDF capacity.
+            # The slot is returned on cancellation and on handler failure.
+            rdf_wait_started = time.monotonic()
+            async with rdf_gate:
+                waited = time.monotonic() - rdf_wait_started
+                if waited >= 0.25:
+                    logger.info(
+                        "RDF gate wait job=%s type=%s elapsed=%.2fs",
+                        job_id, job_type, waited,
+                    )
+                await execute_with_partition_lock()
+        else:
+            await execute_with_partition_lock()
 
     try:
         if spec.resource_class == ResourceClass.LOOKUP:
