@@ -486,8 +486,9 @@ async def fetch_next_job(
                     THEN 1
                     ELSE 0
                 END ASC,
-                -- Contended scopes are filtered above; retain parameter $5
-                -- for backwards-compatible fetch_next_job callers.
+                -- Keep the legacy preference parameter typed for callers.
+                -- The actual exclusion is enforced by the NOT EXISTS above.
+                CASE WHEN $5::boolean THEN 0 ELSE 0 END ASC,
                 q.priority ASC,
                 q.created_at ASC
             FOR UPDATE OF q SKIP LOCKED
