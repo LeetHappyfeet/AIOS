@@ -10,6 +10,11 @@ from .embeddings import Embedder
 from .store import QdrantStore
 
 
+# Cursor is deliberately not an acknowledgement. Only admission decisions
+# persisted in SQL remove work; every sweep eventually wraps to newest.
+_ADMISSION_SCAN_CURSORS: dict[tuple[str, str, str], tuple[object, object]] = {}
+
+
 @dataclass(frozen=True)
 class AdmissionCandidate:
     proposition_id: UUID
@@ -233,25 +238,52 @@ async def admission_backlog_snapshot(db: Database, *, timeout_seconds: int = 120
 async def admit_semantic_neighbors_once(db: Database, cfg: SemanticIndexConfig, *,
                                         embedder: Embedder, store: QdrantStore) -> int:
     """Classify normalized exact-novel observations after proposition indexing."""
+    scan_key = (cfg.proposition_collection, cfg.embedding_model, cfg.embedding_version)
+    cursor = _ADMISSION_SCAN_CURSORS.get(scan_key)
     rows = await db.fetch(
         """
-        SELECT o.claim_id,o.proposition_id,p.canonical_text,
-               aios.exact_admission_scope_key(o.claim_id) AS scope_key
-        FROM aios.observation o
-        JOIN aios.proposition p ON p.proposition_id=o.proposition_id
-        JOIN aios.semantic_exact_admission sea ON sea.claim_id=o.claim_id
-        JOIN aios.semantic_vector_index_state svi
-          ON svi.object_type='proposition' AND svi.object_key=o.proposition_id::text
-         AND svi.qdrant_collection=$2 AND svi.embedding_model=$3 AND svi.embedding_version=$4
-        WHERE sea.decision='novel_exact'
-          AND aios.semantic_occurrence_topology_eligible(o.claim_id,o.proposition_id)
-          AND NOT EXISTS (SELECT 1 FROM aios.semantic_neighbor_admission sna
-              WHERE sna.claim_id=o.claim_id
-                AND sna.decision NOT IN ('bypass_timeout','bypass_error','bypass_unavailable'))
-        ORDER BY o.observed_at DESC,o.observation_id DESC LIMIT $1
+        WITH pending AS MATERIALIZED (
+            SELECT sea.claim_id,sea.proposition_id,sea.decided_at
+            FROM aios.semantic_exact_admission sea
+            WHERE sea.decision='novel_exact'
+              AND ($5::timestamptz IS NULL OR
+                   (sea.decided_at,sea.claim_id) < ($5::timestamptz,$6::uuid))
+              AND NOT EXISTS (
+                SELECT 1 FROM aios.semantic_neighbor_admission sna
+                WHERE sna.claim_id=sea.claim_id
+                  AND sna.decision NOT IN
+                    ('bypass_timeout','bypass_error','bypass_unavailable')
+              )
+            ORDER BY sea.decided_at DESC,sea.claim_id DESC LIMIT $1
+        )
+        SELECT pending.claim_id,pending.proposition_id,pending.decided_at,
+               p.canonical_text,
+               aios.exact_admission_scope_key(pending.claim_id) AS scope_key,
+               (svi.object_key IS NOT NULL) AS vector_ready,
+               aios.semantic_occurrence_topology_eligible(
+                   pending.claim_id,pending.proposition_id) AS topology_eligible
+        FROM pending
+        LEFT JOIN aios.proposition p ON p.proposition_id=pending.proposition_id
+        LEFT JOIN aios.semantic_vector_index_state svi
+          ON svi.object_type='proposition'
+         AND svi.object_key=pending.proposition_id::text
+         AND svi.qdrant_collection=$2 AND svi.embedding_model=$3
+         AND svi.embedding_version=$4
+        ORDER BY pending.decided_at DESC,pending.claim_id DESC
         """, cfg.batch_size, cfg.proposition_collection,
         cfg.embedding_model, cfg.embedding_version,
+        cursor[0] if cursor else None, cursor[1] if cursor else None,
     )
+    if not rows:
+        _ADMISSION_SCAN_CURSORS.pop(scan_key, None)
+        return 0
+    # Test fixtures may supply only core decision fields. Production rows
+    # include the scan position and vector/topology readiness.
+    last = rows[-1]
+    if last.get("decided_at") is not None:
+        _ADMISSION_SCAN_CURSORS[scan_key] = (last["decided_at"], last["claim_id"])
+    rows = [r for r in rows if r.get("vector_ready", True)
+            and r.get("topology_eligible", True) and r.get("canonical_text")]
     if not rows:
         return 0
     # Encode the bounded batch once, not one model invocation per claim.
