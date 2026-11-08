@@ -13,6 +13,11 @@ CREATE INDEX IF NOT EXISTS idx_aios_character_knowledge_vector_scan
 CREATE INDEX IF NOT EXISTS idx_aios_world_assertion_vector_scan
     ON aios.world_proposition_assertion (updated_at DESC, assertion_id);
 
+-- Admission's pending keyset avoids rechecking the same recent unready claim.
+CREATE INDEX IF NOT EXISTS idx_aios_semantic_admission_scan
+    ON aios.semantic_exact_admission (decided_at DESC, claim_id DESC)
+    WHERE decision='novel_exact';
+
 -- Receipt-driven quarantine now walks object type and collection first.
 CREATE INDEX IF NOT EXISTS idx_aios_vector_receipt_quarantine
     ON aios.semantic_vector_index_state
