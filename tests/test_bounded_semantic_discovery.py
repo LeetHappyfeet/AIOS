@@ -97,3 +97,26 @@ async def test_quarantine_candidate_page_advances_on_success(phase):
     finally:
         eligibility._QUARANTINE_CURSORS.pop(phase, None)
         eligibility._QUARANTINE_PAGE_SIZES.pop(phase, None)
+
+
+@pytest.mark.asyncio
+async def test_topology_node_page_predicate_scopes_every_or_arm():
+    cfg = SimpleNamespace(batch_size=2, proposition_collection="props",
+                          epistemic_collection="epistemic")
+    key = uuid4()
+    class DB:
+        async def fetch(self, sql, *args):
+            return [{"page_key": key}]
+        async def execute(self, sql, *args):
+            # The page restriction must govern every OR branch, including
+            # NARRATED_SCENE_EVENT and semantic_event retractions.
+            assert "WHERE x.topology_node_id=ANY($2::uuid[]) AND ((" in sql
+            assert ") ORDER BY x.topology_node_id LIMIT $1" in sql
+            assert args[1] == [key]
+            return "DELETE 0"
+    try:
+        await eligibility.quarantine_ineligible_vectors_once(DB(), cfg,
+                                                             phase="topology_nodes")
+    finally:
+        eligibility._QUARANTINE_CURSORS.pop("topology_nodes", None)
+        eligibility._QUARANTINE_PAGE_SIZES.pop("topology_nodes", None)
