@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 
 from aios_app.entity_memory.catalog import (
     PERSON_TYPES,
@@ -11,6 +12,8 @@ from aios_app.entity_memory.catalog import (
     reference_view,
     world_entity_iri,
 )
+from aios_app.entity_memory.place_resolution import resolve_places
+from aios_app.entity_memory.extraction import normalized
 from aios_app.entity_memory.retrieval import (
     _ANCESTRY,
     _SOURCE_ACCESS,
@@ -28,7 +31,7 @@ _SOURCE_CATALOG = (
     _ANCESTRY
     + _SOURCE_SELECT
     + _SOURCE_ACCESS
-    + "ORDER BY ep.updated_at DESC,ep.section_id LIMIT 25"
+    + "ORDER BY n.event_id DESC,ep.section_id LIMIT 25"
 )
 _WORLD_EDGES = (
     _ANCESTRY
@@ -249,13 +252,20 @@ class EntityCatalogService:
 
         return await self._read(read)
 
-    async def character(self, instance_id, *, context=None):
+    async def character(self, instance_id, *, context=None, head_node_id=None):
         async def read():
             from aios_app.hud.context import HUDContextResolver
 
             ctx = context or await HUDContextResolver(self.db).resolve(instance_id)
             if ctx.instance_id != instance_id:
                 raise ValueError("catalog context must match the observer instance")
+            if head_node_id is not None and head_node_id != ctx.source_head_node_id:
+                if not await self.db.fetchval(
+                    _ANCESTRY + "SELECT EXISTS(SELECT 1 FROM ancestry WHERE node_id=$3)",
+                    ctx.source_head_node_id, ctx.source_timeline_id, head_node_id,
+                ):
+                    raise LookupError("requested head is outside the adopted source ancestry")
+                ctx = replace(ctx, source_head_node_id=head_node_id)
             graph = f"urn:aios:catalog:instance:{instance_id}:scope:{scope_key(ctx)}"
             catalog = _empty(
                 "character",
@@ -275,6 +285,7 @@ class EntityCatalogService:
                 owners_for(ctx),
             )
             catalog["truncated"] = len(rows) > MAX_SOURCES
+            sources, chat_sources = [], []
             for row in rows[:MAX_SOURCES]:
                 payload = as_json(row["payload"])
                 if (
@@ -284,7 +295,22 @@ class EntityCatalogService:
                 ):
                     continue
                 catalog["truncated"] |= bool(payload.get("truncated"))
-                _merge(catalog, reference_view(payload), mode="source_mention")
+                if head_node_id is not None and (
+                    row["timeline_id"] != ctx.source_timeline_id or row["node_kind"] != "chat_message"
+                ):
+                    continue
+                sources.append(payload)
+                if row["timeline_id"] == ctx.source_timeline_id and row["node_kind"] == "chat_message":
+                    chat_sources.append((row["node_id"], payload))
+            bindings, receipts = resolve_places([payload for _, payload in reversed(chat_sources)])
+            catalog["place_bindings"] = receipts
+            for payload in sources:
+                _merge(catalog, reference_view(payload, place_bindings=bindings.get(payload["section_id"])),
+                       mode="source_mention")
+            if context is None and getattr(ctx, "timeline_id", None):
+                catalog["scene_event_places"] = await self._scene_event_places(ctx, chat_sources, bindings)
+            if head_node_id is not None:
+                return _finish(catalog)
             rows = await self.db.fetch(
                 _RELATIONSHIPS,
                 ctx.source_head_node_id,
@@ -336,3 +362,35 @@ class EntityCatalogService:
             return _finish(catalog)
 
         return await self._read(read)
+
+    async def _scene_event_places(self, ctx, sources, bindings):
+        """Link history to a resolved place only through that event's own source turn."""
+        candidates = {}
+        for node_id, payload in sources:
+            aliases = bindings.get(payload["section_id"], {})
+            anchors = {anchor["entity_id"]: anchor for anchor in payload.get("anchors", [])}
+            for destination in payload.get("movement_destinations", []):
+                place_id = destination["place_id"]
+                if place_id in aliases:
+                    key = (node_id, normalized(anchors[place_id]["label"]), destination["action"])
+                    candidates.setdefault(key, set()).add(aliases[place_id])
+        if not candidates:
+            return []
+        scope = f"world:{ctx.world_id}:timeline:{ctx.timeline_id}:narrated-events"
+        rows = await self.db.fetch(
+            """
+            SELECT node_key, dag_node_id, meta->>'object_label' AS label, meta->>'action' AS action
+            FROM aios.semantic_topology_node
+            WHERE scope_key=$1 AND node_type='NARRATED_SCENE_EVENT'
+              AND dag_node_id=ANY($2::uuid[]) AND meta->>'movement'='true'
+            ORDER BY node_key LIMIT $3
+            """, scope, list({key[0] for key in candidates}), MAX_EDGES,
+        )
+        result = []
+        for row in rows:
+            action = (row["action"] or "").split("_", 1)[0]
+            matches = candidates.get((row["dag_node_id"], normalized(row["label"] or ""), action), set())
+            if len(matches) == 1:
+                result.append({"event": "urn:aios:scene-event:" + row["node_key"],
+                               "place": "urn:aios:memory-entity:" + next(iter(matches))})
+        return result
