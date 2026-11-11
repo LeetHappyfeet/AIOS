@@ -72,6 +72,59 @@ def candidate_pairs(rows: list[dict], *, minimum_documents: int = MIN_DISTINCT_D
     ))
 
 
+async def mark_stale_gaps(db, *, domain_key: str, limit: int = 200) -> int:
+    """Invalidate old source snapshots without relying on a bounded rescan.
+
+    This checks changed/deleted source sections, not whether a relation has
+    since become verified. Such questions remain candidates for later review.
+    """
+    rows = await db.fetch(
+        """SELECT gap_id,evidence_sections,evidence_revision
+           FROM aios.corpus_structure_gap
+           WHERE domain_key=$1 AND status='candidate'
+           ORDER BY last_seen_at DESC,gap_id LIMIT $2""",
+        domain_key,max(1,min(int(limit),500)),
+    )
+    if not rows:
+        return 0
+    section_ids = list({sid for row in rows for sid in row["evidence_sections"]})
+    evidence = await db.fetch(
+        """SELECT cs.section_id,cd.source_fingerprint,
+                  rp.built_revision AS reference_revision,
+                  (rp.built_revision=rp.revision AND
+                   rp.rdf_revision=rp.built_revision) AS reference_ready
+           FROM aios.corpus_section cs
+           JOIN aios.corpus_discovery_projection cd ON cd.section_id=cs.section_id
+           JOIN aios.corpus_reference_projection rp ON rp.section_id=cs.section_id
+           JOIN aios.corpus_document_domain dd ON dd.document_id=cs.document_id
+           WHERE dd.knowledge_domain=$1 AND cs.section_id=ANY($2::uuid[])""",
+        domain_key,section_ids,
+    )
+    current = {str(r["section_id"]):r for r in evidence}
+    stale_ids = []
+    for gap in rows:
+        revisions = []
+        for sid in gap["evidence_sections"]:
+            row = current.get(str(sid))
+            if not row or not row["reference_ready"]:
+                break
+            revisions.append((
+                str(sid),str(row["source_fingerprint"])+":"+str(row["reference_revision"])
+            ))
+        else:
+            if revision_key(revisions) == gap["evidence_revision"]:
+                continue
+        stale_ids.append(gap["gap_id"])
+    if stale_ids:
+        await db.execute(
+            """UPDATE aios.corpus_structure_gap
+               SET status='stale'
+               WHERE gap_id=ANY($1::uuid[]) AND status='candidate'""",
+            stale_ids,
+        )
+    return len(stale_ids)
+
+
 async def scan_structure_gaps(db, *, domain_key: str, limit: int = 200) -> dict:
     """Scan a bounded domain sample; deliberately operator-initiated in V1.
 
@@ -121,6 +174,7 @@ async def scan_structure_gaps(db, *, domain_key: str, limit: int = 200) -> dict:
         domain_key, limit, PAIR_THRESHOLD,
     )
     pair_candidates = candidate_pairs([dict(row) for row in rows])
+    stale_marked = await mark_stale_gaps(db,domain_key=domain_key)
     pair_created = 0
     pair_updated = 0
     skipped_verified = 0
@@ -219,6 +273,7 @@ async def scan_structure_gaps(db, *, domain_key: str, limit: int = 200) -> dict:
     return {
         "domain": domain_key, "version": VERSION, "sample_limit": limit,
         "linked_topic_rows": len(rows), "pair_candidates": len(pair_candidates),
+        "stale_prior_candidates": stale_marked,
         "pairs_inserted": pair_created, "pairs_refreshed": pair_updated,
         "verified_pairs_skipped": skipped_verified,
         "dense_sections_examined": len(dense_rows),
