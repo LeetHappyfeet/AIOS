@@ -5,6 +5,7 @@ import hashlib
 import logging
 from typing import Literal
 from uuid import UUID
+from pathlib import PurePosixPath
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,6 +21,19 @@ class RegistrationIn(BaseModel):
     user_name: str = Field(min_length=1, max_length=160)
     scope_key: str = Field(default='conversation', min_length=1, max_length=160)
     root_hint: str = Field(min_length=1, max_length=1000)
+    environment_id: UUID | None = None
+    administration_enabled: bool = False
+
+
+def overlapping_roots(first, second):
+    # Clients send canonical roots; normalize Windows separators/case for routing.
+    def path(value):
+        value = value.replace('\\', '/')
+        if (len(value) > 1 and value[1] == ':') or value.startswith('//'):
+            value = value.casefold()
+        return PurePosixPath(value)
+    a, b = path(first), path(second)
+    return a == b or a in b.parents or b in a.parents
 
 
 class AuthorizationIn(BaseModel):
@@ -36,16 +50,30 @@ class RegistrationStore:
         from .workspaces import public
         async with self.db.atomic():
             await self.db.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", 'registration:' + req.workspace_key)
-            old = await self.db.fetchrow('SELECT * FROM aios.workspace_registration WHERE workspace_key=$1', req.workspace_key)
+            old = await self.db.fetchrow('SELECT * FROM aios.workspace_registration WHERE workspace_key=$1 FOR UPDATE', req.workspace_key)
             if old:
-                mismatches = [k for k in type(req).model_fields if old[k] != getattr(req, k)]
+                mismatches = [k for k in type(req).model_fields
+                              if k not in ('environment_id', 'administration_enabled') and old[k] != getattr(req, k)]
+                if req.environment_id and old['environment_id'] not in (None, req.environment_id):
+                    mismatches.append('environment_id')
                 if mismatches:
                     raise HTTPException(409, 'Registered workspace identity changed: ' + ', '.join(mismatches))
+                if req.environment_id and (old['environment_id'] != req.environment_id or
+                                          old['administration_enabled'] != req.administration_enabled):
+                    # Never weaken or move the coordination identity of a live run.
+                    if await self.db.fetchval('''SELECT EXISTS(SELECT 1 FROM aios.workspace_run w
+                        JOIN aios.workspace_binding b USING(binding_id)
+                        WHERE b.registration_id=$1 AND w.status='running')''', old['registration_id']):
+                        raise HTTPException(409, 'Stop existing runs before changing environment coordination')
+                    old = await self.db.execute_returning_row('''UPDATE aios.workspace_registration
+                        SET environment_id=$2,administration_enabled=$3 WHERE registration_id=$1 RETURNING *''',
+                        old['registration_id'], req.environment_id, req.administration_enabled)
                 return public(old)
             row = await self.db.execute_returning_row('''INSERT INTO aios.workspace_registration
-                (workspace_key,worker_key,character_id,user_name,scope_key,root_hint)
-                VALUES($1,$2,$3,$4,$5,$6) RETURNING *''',
-                req.workspace_key, req.worker_key, req.character_id, req.user_name, req.scope_key, req.root_hint)
+                (workspace_key,worker_key,character_id,user_name,scope_key,root_hint,environment_id,administration_enabled)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *''',
+                req.workspace_key, req.worker_key, req.character_id, req.user_name, req.scope_key, req.root_hint,
+                req.environment_id, req.administration_enabled)
             return public(row)
 
     async def get(self, registration_id, worker_key=None, *, lock=False):
@@ -145,13 +173,10 @@ class RegistrationStore:
     async def claim(self, registration_id, worker_key):
         from .work_admission import WorkAdmission
         from .workspaces import WorkspaceStore
+        heartbeat = await self.heartbeat(registration_id, worker_key)
         async with self.db.atomic():
-            r = await self.get(registration_id, worker_key, lock=True)
-            await self.db.execute('UPDATE aios.workspace_registration SET last_seen_at=now() WHERE registration_id=$1', registration_id)
-            await self.db.execute('UPDATE aios.workspace_binding SET last_seen_at=now() WHERE registration_id=$1', registration_id)
-            enabled = r['enabled'] and r['disposition'] != 'deny'
             bindings = await self.db.fetch('SELECT binding_id FROM aios.workspace_binding WHERE registration_id=$1 ORDER BY binding_id', registration_id)
-        if not enabled:
+        if heartbeat['status'] == 'needs_authorization':
             return {'run': None, 'status': 'needs_authorization'}
         # Do not hold the registration lock while admission locks request rows.
         for b in bindings:
@@ -160,6 +185,19 @@ class RegistrationStore:
             r = await self.get(registration_id, worker_key, lock=True)
             if not r['enabled'] or r['disposition'] == 'deny':
                 return {'run': None, 'status': 'needs_authorization'}
+            if r['environment_id']:
+                # A short transaction lock makes conflict-check plus claim atomic
+                # across character grants. Leases retain the long-lived ownership.
+                await self.db.execute("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+                                      'workspace-environment:' + str(r['environment_id']))
+                active = await self.db.fetch('''SELECT reg.root_hint,reg.administration_enabled
+                    FROM aios.workspace_run w JOIN aios.workspace_binding b USING(binding_id)
+                    JOIN aios.workspace_registration reg USING(registration_id)
+                    WHERE reg.environment_id=$1 AND w.status='running' AND w.lease_expires_at>now()''',
+                    r['environment_id'])
+                if any(r['administration_enabled'] or peer['administration_enabled'] or
+                       overlapping_roots(r['root_hint'], peer['root_hint']) for peer in active):
+                    return {'run': None, 'status': 'busy'}
             # Serialize all chat bindings sharing one physical workspace.
             if await self.db.fetchval('''SELECT EXISTS(SELECT 1 FROM aios.workspace_run w
                 JOIN aios.workspace_binding b USING(binding_id) WHERE b.registration_id=$1
@@ -170,3 +208,11 @@ class RegistrationStore:
                 AND w.status IN ('queued','running') ORDER BY (w.status='running') DESC,w.created_at LIMIT 1''', registration_id)
             run = await WorkspaceStore(self.db).claim(b['binding_id'], worker_key, 3) if b else None
             return {'run': run, 'status': 'listening', 'binding_id': str(b['binding_id']) if run else None}
+
+    async def heartbeat(self, registration_id, worker_key):
+        """Keep a waiting listener visible without taking an execution lease."""
+        async with self.db.atomic():
+            r = await self.get(registration_id, worker_key, lock=True)
+            await self.db.execute('UPDATE aios.workspace_registration SET last_seen_at=now() WHERE registration_id=$1', registration_id)
+            await self.db.execute('UPDATE aios.workspace_binding SET last_seen_at=now() WHERE registration_id=$1', registration_id)
+            return {'status': 'listening' if r['enabled'] and r['disposition'] != 'deny' else 'needs_authorization'}

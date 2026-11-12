@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from math import prod
+from math import isfinite, prod
 from typing import Optional
 from uuid import UUID
 
@@ -244,3 +244,58 @@ async def reweight_character_knowledge(
         updated += 1
 
     return updated
+
+
+async def save_character_epistemic_profile(
+    db: Database,
+    *,
+    character_id: str,
+    data: dict,
+    memory_continuity: str,
+) -> tuple[dict, int]:
+    """Persist the UI profile and refresh existing knowledge as one transaction.
+
+    Keep continuity in the same transaction as the profile and knowledge weights:
+    a failed reweight must not leave the character partly configured.
+    """
+    mode = str(memory_continuity or "").strip().lower()
+    if mode not in {"character", "user", "isolated"}:
+        raise ValueError("Invalid memory continuity")
+
+    values = {**DEFAULT_PROFILE, **data}
+    scalar_fields = (
+        "skepticism", "curiosity", "authority_trust", "novelty_seeking",
+        "emotional_reactivity", "retention",
+    )
+    map_fields = ("source_trust", "topic_interest", "domain_expertise", "trait_weights")
+    for field in scalar_fields:
+        value = float(values[field])
+        if not isfinite(value) or not 0 <= value <= 1:
+            raise ValueError(f"{field} must be between 0 and 1")
+        values[field] = value
+    for field in map_fields:
+        mapping = values[field] or {}
+        if not isinstance(mapping, dict):
+            raise ValueError(f"{field} must be a key/value mapping")
+        normalized = {}
+        for key, value in mapping.items():
+            name = str(key).strip()
+            weight = float(value)
+            if not name or not isfinite(weight) or not 0 <= weight <= 1:
+                raise ValueError(f"{field} entries require a name and weight between 0 and 1")
+            normalized[name] = weight
+        values[field] = normalized
+
+    async with db.atomic():
+        profile = await upsert_profile(db, character_id=character_id, data=values)
+        await db.execute(
+            """
+            UPDATE aios.character_epistemic_profile
+            SET memory_continuity=$2, updated_at=now()
+            WHERE character_id=$1
+            """,
+            character_id, mode,
+        )
+        count = await reweight_character_knowledge(db, character_id=character_id)
+    profile["memory_continuity"] = mode
+    return profile, count

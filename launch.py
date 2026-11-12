@@ -438,6 +438,15 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
     if topology.get("stage_started_at"):
         topology_stage += " " + _format_age(time.time() - float(topology["stage_started_at"]))
     api_text = f"{api_ms:.0f}ms" if api_ok and api_ms is not None else "DOWN"
+    # GLOBAL/CAUGHT_UP is only pipeline-queue status. Never present it as
+    # proof of SQL/Qdrant/Fuseki parity while independent workers are failing.
+    semantic_failed = list(semantic.get("failed_stages") or [])
+    topology_failed = list(topology.get("failed_stages") or [])
+    admission_pending = int((semantic.get("admission_backlog") or {}).get("pending") or 0)
+    sync_state = ("DEGRADED" if (semantic_state == "DEGRADED"
+                  or topology_state == "DEGRADED"
+                  or semantic_failed or topology_failed)
+                  else "PENDING" if admission_pending else "UNVERIFIED")
 
     print(
         "[AIOS] "
@@ -448,9 +457,18 @@ def _render_status(runtime_by_name: Dict[str, ServiceRuntime]) -> None:
         f"parked {int(pipeline.get('parked') or 0)} delayed {int(pipeline.get('delayed') or 0)} waiting {int(pipeline.get('waiting') or 0)} | "
         f"semantic {semantic_state} {semantic_detail} index {index_rate} | "
         f"topology {topology_state} {topology_stage} | "
-        f"API {api_text}",
+        f"sync {sync_state} | API {api_text}",
         flush=True,
     )
+    if semantic_failed or topology_failed or admission_pending:
+        details = []
+        if semantic_failed:
+            details.append("semantic failed=" + ",".join(semantic_failed[:4]))
+        if topology_failed:
+            details.append("topology failed=" + ",".join(topology_failed[:4]))
+        if admission_pending:
+            details.append(f"admission pending={admission_pending}")
+        print("       sync: " + " | ".join(details), flush=True)
 
     stages = list(pipeline.get("stage_backlog") or [])
     stages.sort(

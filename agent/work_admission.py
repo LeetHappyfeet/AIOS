@@ -793,19 +793,25 @@ class WorkAdmission:
                    FROM aios.character_environment_link l WHERE l.origin_instance_id=$1""",
                 instance_id)
             current = [l for l in links if l["enabled"] and l["origin_source_timeline_id"] == timeline_id]
-            if not links:
+            if not links and (rows or history_count or error):
                 unavailable = "No execution environment is linked. Ask the operator to complete Workspace Delegation setup."
-            elif not current:
+            elif links and not current:
                 unavailable = "No enabled environment link matches this conversation source. Operator pairing needs reconciliation."
-            elif not any(l["has_profile"] for l in current):
+            elif current and not any(l["has_profile"] for l in current):
                 unavailable = "No enabled work profile is configured for this conversation."
-            else:
+            elif current:
                 unavailable = "No eligible capability: instance pairing or workspace.run policy blocks execution. Ask the operator to check delegation readiness."
+        # A tool schema is not evidence that this conversation has a report to
+        # read. Reuse retrieval's branch/source visibility checks, independently
+        # of current execution permission or worker presence.
+        result_available = bool(retrieved_result)
+        if not result_available and rows:
+            result_available = bool(await WorkEvidence(self.db).rows(instance_id))
         return {
             "unavailable_reason": routing_problem or unavailable,
             "request_error": decode(error) if error else None,
             "retrieved_result": retrieved_result,
-            "result_tool": result_tool_schema(),
+            "result_tool": result_tool_schema() if result_available else None,
             "history_count": history_count,
             "capabilities": [dict(p) for p in profiles],
             "requests": [

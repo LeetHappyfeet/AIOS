@@ -216,8 +216,12 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     pending_work = working_scene.get("pending_work") or working_scene.get("pending_action")
     last_change = working_scene.get("last_significant_change")
     if _scene_text(immediate_goal):
+        # References are execution-routing tokens, not conversational context.
+        # Expose only the immediate one when an execution capability is offered.
+        work_enabled = bool((frame.get("work") or {}).get("capabilities"))
         reference = (" [goal_ref: " + short_reference(immediate_goal["goal_id"], "g") + "]"
-                     if isinstance(immediate_goal, Mapping) and immediate_goal.get("goal_id") else "")
+                     if work_enabled and isinstance(immediate_goal, Mapping)
+                     and immediate_goal.get("goal_id") else "")
         scene_lines.append(f"Immediate managed goal: {_scene_text(immediate_goal)[:180]}{reference}")
         if isinstance(immediate_goal, Mapping):
             scene_lines.extend(_render_goal_plan(immediate_goal.get("plan")))
@@ -225,8 +229,10 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
                 status=str(requirement.get("coverage_status") or "unassessed")
                 count=len(requirement.get("dossier_ids") or [])
                 question = str(requirement.get("question") or requirement.get("query_text") or "Unspecified requirement")
-                scene_lines.append(
-                    f"Goal knowledge ({question}): {status}; linked research dossiers: {count}")
+                # Retrieval outages are diagnostics, not missing character knowledge.
+                if status != "unavailable":
+                    scene_lines.append(
+                        f"Goal knowledge ({question}): {status}; linked research dossiers: {count}")
     if _scene_text(pending_work):
         scene_lines.append(f"Pending work: {_scene_text(pending_work)}")
     # A pre-patch scene can still contain a copied DAG turn. Suppress it.
@@ -369,10 +375,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         for goal, text in rendered_goals:
             annotation = _knowledge_annotation(goal) if isinstance(goal, dict) else ""
             requirements=(goal.get("knowledge_requirements") or []) if isinstance(goal, Mapping) else []
-            demand=f" [knowledge: {requirements[0].get('coverage_status', 'unassessed')}]" if requirements else ""
-            reference = (f" [goal_ref: {short_reference(goal_id, 'g')}]"
-                         if isinstance(goal, Mapping) and (goal_id := goal.get("goal_id")) else "")
-            lines.append(f"-{annotation} {text}{demand}{reference}")
+            # Other goals are context, not individually addressable execution tools.
+            # Their knowledge coverage and opaque IDs belong in diagnostics.
+            lines.append(f"-{annotation} {text}")
             if isinstance(goal, Mapping):
                 lines.extend("  " + entry for entry in _render_goal_plan(goal.get("plan")))
     section("scheduled_goals", 10, 0.05)
@@ -389,11 +394,16 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"- {text}" + (f" — review {timing}" if timing else ""))
     section("rules", 3, 0.1)
     rules = frame.get("rules") or []
-    if rules:
-        lines.append("\nWORLD RULES:")
-        for rule in rules:
+    for is_recalled, heading in ((False, "WORLD RULES"), (True, "RECALLED RULE CLAIMS")):
+        group = [rule for rule in rules
+                 if (rule.get("source") == "character_knowledge") == is_recalled]
+        if group:
+            lines.append(f"\n{heading}:")
+        for rule in group:
             text = _claim_text(rule) or rule.get("rule_key") or str(rule)
-            lines.append(f"-{_knowledge_annotation(rule)} {text}")
+            provenance = _content_status(rule) if is_recalled else ""
+            qualifier = f" [{provenance}]" if provenance.startswith("reported/derived") else ""
+            lines.append(f"-{qualifier}{_epistemic_label(rule)}{_knowledge_annotation(rule)} {text}")
 
     # Recent events are episodic context, not a speaker transcript. Project
     # semantic events into narrative form, collapse exact duplicates, and prefer
@@ -441,7 +451,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         action = {"op": "request_work", "capability": example['capability'], "purpose": example['purpose'],
                   "objective": "Describe the concrete task and desired result here", "constraints": []}
         lines.append('Copy capability and purpose exactly from the list; do not invent names. Put the concrete task in objective. Budgets, authority and host checks are configured by the operator.')
-        lines.append('For work toward a listed managed goal, include its goal_ref. AIOS validates the goal and chooses its current attempt; omitted references are unlinked when several goals are active.')
+        lines.append('For work toward the immediate managed goal, include its goal_ref when shown. AIOS validates the goal and chooses its current attempt; omitted references may be unlinked when several goals are active.')
         if (example['capability'], example['purpose']) == ('workspace', 'experimental_task'):
             lines.append('Different experimental tasks reuse workspace / experimental_task; no new capability or purpose is needed for each objective.')
         lines.append('To request work, use native request_work when registered. Otherwise emit exactly one complete structured block in your reply, outside Markdown code fences. Example with an available pair: <aios_action>' + json.dumps(action, separators=(',', ':')) + '</aios_action>. Replace objective with the actual bounded task. AIOS returns admission/status in a later HUD. Never claim execution from a request, or resubmit work already pending.')
@@ -452,6 +462,12 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     section("work_results", 5, 0.18)
     from aios_app.hud.work import render_work_results
     lines.extend(render_work_results(work, frame.get("remote_tasks") or [], compact_mode=total is not None))
+    if frame.get("workspace_memory"):
+        from aios_app.agent.workspace_memory import note_line
+
+        section("workspace_memory", 5, 0.12)
+        lines.append("\nRELEVANT WORK MEMORY (historical evidence and ideas)")
+        lines.extend("- " + note_line(note, with_ref=True) for note in frame["workspace_memory"])
     section("work_retrieval", 2, 0.12, atomic=True)
     if work.get("result_tool"):
         lines.append('RETAINED WORK EVIDENCE: use native read_work_result when registered, or one <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. Supply exactly one request_id or run_id. Sections: summary, findings, limitations, requested_content, report, checks. Continue with next_cursor and the returned revision. This reads reports without executing work.')

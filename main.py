@@ -547,3 +547,7 @@ install_workspace_routes(app, db, get_instance_hud)
 # Read-only operator views of branch-scoped places and character references.
 from aios_app.entity_memory.catalog_api import catalog_router
 app.include_router(catalog_router(db))
+
+# Read-only discovery and health endpoints for the operator's semantic inspector.
+from aios_app.semantic_index.operator_api import topology_router
+app.include_router(topology_router(db))

@@ -5,6 +5,7 @@ import logging
 import time
 import asyncpg
 from dataclasses import dataclass
+from uuid import UUID
 from typing import Callable, Dict, Iterable, List
 
 from aios_app.config import settings
@@ -244,12 +245,24 @@ STAGES: List[Stage] = [
         SELECT DISTINCT o.claim_id
         FROM aios.observation o
         JOIN aios.claim_context_resolution ccr ON ccr.claim_id=o.claim_id
-        WHERE upper(COALESCE(ccr.claim_kind,''))='EVENT'
-          AND EXISTS (SELECT 1 FROM aios.claim_semantic_integrity si WHERE si.claim_id=o.claim_id AND si.status='valid')
-          AND aios.semantic_claim_topology_admitted(o.claim_id)
-          AND NOT EXISTS (
-              SELECT 1 FROM aios.semantic_event_membership sem
-              WHERE sem.observation_id=o.observation_id AND sem.status='active'
+        WHERE aios.semantic_claim_topology_admitted(o.claim_id)
+          AND (
+              ((upper(COALESCE(ccr.claim_kind,''))='EVENT' OR EXISTS (
+                  SELECT 1 FROM aios.narrated_scene_observation s
+                  WHERE s.observation_id=o.observation_id AND s.movement
+              )) AND aios.semantic_occurrence_topology_eligible(o.claim_id,o.proposition_id)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM aios.semantic_event_membership sem
+                      WHERE sem.observation_id=o.observation_id AND sem.status='active'
+                  ))
+              OR EXISTS (
+                  SELECT 1 FROM aios.narrated_scene_occurrence s
+                  WHERE s.observation_id=o.observation_id AND NOT EXISTS (
+                      SELECT 1 FROM aios.semantic_topology_node n
+                      WHERE n.scope_key=s.scope_key AND n.node_type='NARRATED_SCENE_EVENT'
+                        AND n.node_key=s.semantic_event_id::text
+                  )
+              )
           )
           AND NOT EXISTS (
               SELECT 1 FROM aios.pipeline_job pj
@@ -461,16 +474,109 @@ def stage_admission_capacity(*, stage: Stage, total_queued: int, stage_queued: i
     return min(batch_size, remaining_cycle, stage_capacity, global_capacity)
 
 
-async def enqueue_stage_jobs(db: Database, stage: Stage, *, batch_size: int) -> int:
-    rows: Iterable[Dict[str, object]] = await asyncio.wait_for(
-        db.fetch_bounded(stage.eligibility_sql, batch_size, timeout_seconds=5.0),
+# Four expensive maintenance lanes scan a small indexed page before invoking
+# topology admission predicates or multi-table projection eligibility.
+# A cursor is only a discovery hint. Durable job/projection receipts remain
+# authoritative, and exhausted pages wrap to the beginning.
+_DISCOVERY_PAGES: dict[str, tuple[str, str, str]] = {
+    "materialize_event_occurrences": (
+        "SELECT claim_id FROM aios.observation WHERE ($1::uuid IS NULL OR claim_id>$1) "
+        "ORDER BY claim_id LIMIT $2",
+        "WHERE aios.semantic_claim_topology_admitted(o.claim_id)",
+        "WHERE o.claim_id=ANY($2::uuid[]) AND aios.semantic_claim_topology_admitted(o.claim_id)",
+    ),
+    "derive_character_acquisition_topology": (
+        "SELECT acquisition_id FROM aios.knowledge_acquisition_event "
+        "WHERE proposition_id IS NOT NULL AND processed_at IS NOT NULL "
+        "AND ($1::uuid IS NULL OR acquisition_id>$1) ORDER BY acquisition_id LIMIT $2",
+        "WHERE kae.proposition_id IS NOT NULL AND kae.processed_at IS NOT NULL",
+        "WHERE kae.acquisition_id=ANY($2::uuid[]) AND kae.proposition_id IS NOT NULL "
+        "AND kae.processed_at IS NOT NULL",
+    ),
+    "rdf_epistemic_project": (
+        "SELECT claim_id FROM aios.observation WHERE ($1::uuid IS NULL OR claim_id>$1) "
+        "ORDER BY claim_id LIMIT $2",
+        "WHERE ie.superseded_at IS NULL",
+        "WHERE o.claim_id=ANY($2::uuid[]) AND ie.superseded_at IS NULL",
+    ),
+    "derive_claim_topology": (
+        "SELECT claim_id FROM aios.observation WHERE ($1::uuid IS NULL OR claim_id>$1) "
+        "ORDER BY claim_id LIMIT $2",
+        "WHERE ie.superseded_at IS NULL",
+        "WHERE o.claim_id=ANY($2::uuid[]) AND ie.superseded_at IS NULL",
+    ),
+}
+_DISCOVERY_CURSOR: dict[str, UUID] = {}
+_DISCOVERY_PAGE_SIZE: dict[str, int] = {}
+_DISCOVERY_PAGE_MAX = 64
+
+
+async def _paged_stage_candidates(db: Database, stage: Stage, *, batch_size: int):
+    """Return (eligible rows, scanned rows, elapsed, next cursor).
+
+    Cursor advancement is performed by the caller *after* the complete
+    eligibility query succeeds. SQL timeouts must retry the same page.
+    """
+    candidate_sql, marker, predicate = _DISCOVERY_PAGES[stage.name]
+    if stage.eligibility_sql.count(marker) != 1:
+        raise RuntimeError(f"Unsafe page filter insertion for {stage.name}")
+    page_size = _DISCOVERY_PAGE_SIZE.get(stage.name, _DISCOVERY_PAGE_MAX)
+    cursor = _DISCOVERY_CURSOR.get(stage.name)
+    start = time.monotonic()
+    candidate_rows = await asyncio.wait_for(
+        db.fetch_bounded(candidate_sql, cursor, page_size, timeout_seconds=5.0),
         timeout=7.0,
     )
+    if not candidate_rows:
+        return [], 0, time.monotonic() - start, None
+    ids = [row["acquisition_id" if stage.name == "derive_character_acquisition_topology"
+               else "claim_id"] for row in candidate_rows]
+    query = stage.eligibility_sql.replace(marker, predicate, 1)
+    rows = await asyncio.wait_for(
+        db.fetch_bounded(query, batch_size, ids, timeout_seconds=5.0),
+        timeout=7.0,
+    )
+    return rows, len(ids), time.monotonic() - start, ids[-1]
+
+
+async def enqueue_stage_jobs(db: Database, stage: Stage, *, batch_size: int) -> int:
+    if stage.name in _DISCOVERY_PAGES:
+        try:
+            rows, scanned, elapsed, cursor = await _paged_stage_candidates(
+                db, stage, batch_size=batch_size,
+            )
+        except (asyncio.TimeoutError, asyncpg.QueryCanceledError,
+                asyncpg.LockNotAvailableError):
+            _DISCOVERY_PAGE_SIZE[stage.name] = max(
+                1, _DISCOVERY_PAGE_SIZE.get(stage.name, _DISCOVERY_PAGE_MAX) // 2,
+            )
+            raise
+        logger.info(
+            "Bounded supervisor discovery stage=%s scanned=%d eligible=%d "
+            "elapsed=%.2fs page=%d",
+            stage.name, scanned, len(rows), elapsed,
+            _DISCOVERY_PAGE_SIZE.get(stage.name, _DISCOVERY_PAGE_MAX),
+        )
+    else:
+        rows = await asyncio.wait_for(
+            db.fetch_bounded(stage.eligibility_sql, batch_size, timeout_seconds=5.0),
+            timeout=7.0,
+        )
     count = 0
     for row in rows:
         payload = stage.payload_builder(dict(row))
         job_id = await enqueue_job(db, job_type=stage.job_type, payload=payload, priority=stage.priority)
         if job_id is not None: count += 1
+    if stage.name in _DISCOVERY_PAGES:
+        # Advance only after the entire page has been processed and enqueued.
+        # A failed enqueue retries the same page; receipts make duplicates safe.
+        _DISCOVERY_CURSOR.pop(stage.name, None)
+        if cursor is not None:
+            _DISCOVERY_CURSOR[stage.name] = cursor
+        _DISCOVERY_PAGE_SIZE[stage.name] = min(
+            _DISCOVERY_PAGE_MAX,
+            _DISCOVERY_PAGE_SIZE.get(stage.name, _DISCOVERY_PAGE_MAX) + 1,
+        )
     return count
 
 

@@ -18,6 +18,61 @@ QUARANTINE_PHASES = (
     "episode_memberships", "topology_nodes", "vectors",
 )
 
+# Per-phase cursors are discovery hints only. Every exhausted scan wraps;
+# eligibility is rechecked before mutations and receipts are never inferred
+# from these cursors. Scan pages are kept separate per maintenance phase.
+_QUARANTINE_CURSORS: dict[str, object] = {}
+_QUARANTINE_PAGE_SIZES: dict[str, int] = {}
+_QUARANTINE_PAGE_MAX = 32
+
+_QUARANTINE_PAGE_SQL = {
+    "event_memberships": """
+        SELECT proposition_id AS page_key FROM aios.semantic_event_membership
+        WHERE status='active' AND ($1::uuid IS NULL OR proposition_id>$1)
+        ORDER BY proposition_id LIMIT $2
+    """,
+    "topology_nodes": """
+        SELECT topology_node_id AS page_key FROM aios.semantic_topology_node
+        WHERE $1::uuid IS NULL OR topology_node_id>$1
+        ORDER BY topology_node_id LIMIT $2
+    """,
+    "vectors": """
+        SELECT DISTINCT object_key AS page_key
+        FROM aios.semantic_vector_index_state
+        WHERE object_type IN ('proposition','character_knowledge','world_assertion')
+          AND qdrant_collection=ANY($3::text[])
+          AND ($1::text IS NULL OR object_key>$1)
+        ORDER BY object_key LIMIT $2
+    """,
+}
+
+
+async def _quarantine_page(db: Database, cfg: SemanticIndexConfig, phase: str):
+    size = _QUARANTINE_PAGE_SIZES.get(phase, _QUARANTINE_PAGE_MAX)
+    cursor = _QUARANTINE_CURSORS.get(phase)
+    args = [cursor, size]
+    if phase == "vectors":
+        args.append([cfg.proposition_collection, cfg.epistemic_collection])
+    started = time.monotonic()
+    rows = await db.fetch(_QUARANTINE_PAGE_SQL[phase], *args)
+    logger.info(
+        "Quarantine page phase=%s scanned=%d page=%d elapsed=%.2fs",
+        phase, len(rows), size, time.monotonic() - started,
+    )
+    return [row["page_key"] for row in rows]
+
+
+def _quarantine_advance(phase: str, keys: list) -> None:
+    if keys:
+        _QUARANTINE_CURSORS[phase] = keys[-1]
+    else:
+        _QUARANTINE_CURSORS.pop(phase, None)
+    _QUARANTINE_PAGE_SIZES[phase] = min(
+        _QUARANTINE_PAGE_MAX, _QUARANTINE_PAGE_SIZES.get(phase, _QUARANTINE_PAGE_MAX) + 1,
+    )
+
+
+
 
 async def quarantine_ineligible_vectors_once(
     db: Database, cfg: SemanticIndexConfig, *, phase: str | None = None,
@@ -30,6 +85,18 @@ async def quarantine_ineligible_vectors_once(
     if phase is not None and phase not in QUARANTINE_PHASES:
         raise ValueError(f"unsupported quarantine phase: {phase}")
     started = time.monotonic()
+    page_keys = None
+    if phase in _QUARANTINE_PAGE_SQL:
+        try:
+            page_keys = await _quarantine_page(db, cfg, phase)
+        except Exception:
+            _QUARANTINE_PAGE_SIZES[phase] = max(
+                1, _QUARANTINE_PAGE_SIZES.get(phase, _QUARANTINE_PAGE_MAX) // 2,
+            )
+            raise
+        if not page_keys:
+            _quarantine_advance(phase, [])
+            return 0
     # Historical snapshots and decisions remain available for audit. Current
     # clusters containing withdrawn support stop contributing derived pivots.
     if phase is None or phase == "cluster_candidates":
@@ -46,7 +113,7 @@ async def quarantine_ineligible_vectors_once(
             FROM batch WHERE c.cluster_id=batch.cluster_id
         """, cfg.batch_size)
     if phase is None or phase == "event_memberships":
-        await db.execute("""
+        event_sql = """
             WITH batch AS (
                 SELECT m.ctid FROM aios.semantic_event_membership m
                 WHERE m.status='active' AND (
@@ -58,7 +125,20 @@ async def quarantine_ineligible_vectors_once(
             UPDATE aios.semantic_event_membership m SET status='superseded',updated_at=now(),
                 meta=meta || '{"withdrawal_reason":"non_standalone_topology"}'::jsonb
             WHERE m.ctid IN (SELECT ctid FROM batch)
-        """, cfg.batch_size)
+        """
+        if page_keys is not None and phase == "event_memberships":
+            event_sql = event_sql.replace(
+                "WHERE m.status='active' AND (",
+                "WHERE m.status='active' AND m.proposition_id=ANY($2::uuid[]) AND (",
+            )
+        try:
+            await db.execute(event_sql, cfg.batch_size, *([page_keys] if phase == "event_memberships" else []))
+        except Exception:
+            if phase == "event_memberships":
+                _QUARANTINE_PAGE_SIZES[phase] = max(1, _QUARANTINE_PAGE_SIZES.get(phase, _QUARANTINE_PAGE_MAX)//2)
+            raise
+        if phase == "event_memberships":
+            _quarantine_advance(phase, page_keys)
     if phase is None or phase == "events":
         await db.execute("""
             WITH batch AS (
@@ -89,13 +169,17 @@ async def quarantine_ineligible_vectors_once(
     # Node/edge deletion triggers write durable RDF deletion deltas. Only
     # derived topology is removed; its original evidence stays in SQL.
     if phase is None or phase == "topology_nodes":
-        await db.execute("""
+        node_sql = """
             DELETE FROM aios.semantic_topology_node n WHERE n.topology_node_id IN (
                 SELECT x.topology_node_id FROM aios.semantic_topology_node x
                 WHERE (x.proposition_id IS NOT NULL AND NOT
                     aios.semantic_proposition_topology_admitted(x.proposition_id))
                    OR (x.claim_id IS NOT NULL AND NOT
                     aios.semantic_claim_topology_admitted(x.claim_id))
+                   OR (x.node_type='NARRATED_SCENE_EVENT' AND NOT EXISTS (
+                       SELECT 1 FROM aios.narrated_scene_occurrence s
+                       WHERE s.scope_key=x.scope_key AND s.semantic_event_id::text=x.node_key
+                         AND s.claim_id=x.claim_id AND s.proposition_id=x.proposition_id))
                    OR (x.node_key LIKE 'semantic_event:%' AND EXISTS (
                        SELECT 1 FROM aios.semantic_event e
                        WHERE e.semantic_event_id::text=x.meta->>'semantic_event_id'
@@ -103,25 +187,78 @@ async def quarantine_ineligible_vectors_once(
                              WHERE m.semantic_event_id=e.semantic_event_id AND m.status='active')))
                 ORDER BY x.topology_node_id LIMIT $1
             )
-        """, cfg.batch_size)
+        """
+        if phase == "topology_nodes":
+            node_sql = node_sql.replace(
+                "WHERE (x.proposition_id IS NOT NULL",
+                "WHERE x.topology_node_id=ANY($2::uuid[]) AND ((x.proposition_id IS NOT NULL",
+            ).replace(
+                "ORDER BY x.topology_node_id LIMIT $1",
+                ") ORDER BY x.topology_node_id LIMIT $1",
+            )
+        try:
+            await db.execute(node_sql, cfg.batch_size, *([page_keys] if phase == "topology_nodes" else []))
+        except Exception:
+            if phase == "topology_nodes":
+                _QUARANTINE_PAGE_SIZES[phase] = max(1, _QUARANTINE_PAGE_SIZES.get(phase, _QUARANTINE_PAGE_MAX)//2)
+            raise
+        if phase == "topology_nodes":
+            _quarantine_advance(phase, page_keys)
     if phase is not None and phase != "vectors":
         return 0
     # Index receipts identify vectors we own; a failed delete leaves receipts
     # intact so the next pass retries. Filter deletion also removes owner copies.
-    rows = await db.fetch("""
-        SELECT DISTINCT p.proposition_id
-        FROM aios.proposition p
-        JOIN aios.semantic_vector_index_state s ON
-            (s.object_type='proposition' AND s.object_key=p.proposition_id::text)
-            OR (s.object_type='character_knowledge' AND s.object_key LIKE '%:' || p.proposition_id::text)
-            OR (s.object_type='world_assertion' AND EXISTS (
-                SELECT 1 FROM aios.world_proposition_assertion wa
-                WHERE wa.proposition_id=p.proposition_id AND s.object_key='world:' || wa.assertion_id::text))
-        WHERE s.qdrant_collection=ANY($1::text[])
-          AND NOT aios.semantic_proposition_topology_eligible(p.proposition_id)
+    # Drive discovery from receipts, not a proposition x receipts OR join.
+    # The old join contained an unanchored LIKE ('%:' || uuid) for ownership,
+    # forcing a large cross-product even when very few vectors need retirement.
+    # split_part is safe for existing typed receipt keys; malformed UUIDs are
+    # excluded before casting. Eligibility is still rechecked under the lock.
+    vector_sql = """
+        WITH owned AS (
+            SELECT s.object_key::uuid AS proposition_id
+            FROM aios.semantic_vector_index_state s
+            WHERE s.qdrant_collection=ANY($1::text[])
+              AND s.object_type='proposition'
+              AND s.object_key ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            UNION
+            SELECT split_part(s.object_key, ':', 2)::uuid AS proposition_id
+            FROM aios.semantic_vector_index_state s
+            WHERE s.qdrant_collection=ANY($1::text[])
+              AND s.object_type='character_knowledge'
+              AND split_part(s.object_key, ':', 2)
+                  ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            UNION
+            SELECT wa.proposition_id
+            FROM aios.semantic_vector_index_state s
+            JOIN aios.world_proposition_assertion wa
+              ON s.object_key='world:' || wa.assertion_id::text
+            WHERE s.qdrant_collection=ANY($1::text[])
+              AND s.object_type='world_assertion'
+        )
+        SELECT p.proposition_id
+        FROM owned
+        JOIN aios.proposition p USING (proposition_id)
+        WHERE NOT aios.semantic_proposition_topology_eligible(p.proposition_id)
         ORDER BY p.proposition_id LIMIT $2
-    """, [cfg.proposition_collection, cfg.epistemic_collection], cfg.batch_size)
+    """
+    if phase == "vectors":
+        for receipt_type in ("proposition", "character_knowledge", "world_assertion"):
+            marker = f"AND s.object_type='{receipt_type}'"
+            vector_sql = vector_sql.replace(
+                marker, marker + " AND s.object_key=ANY($3::text[])",
+            )
+    try:
+        rows = await db.fetch(
+            vector_sql, [cfg.proposition_collection, cfg.epistemic_collection],
+            cfg.batch_size, *([page_keys] if phase == "vectors" else []),
+        )
+    except Exception:
+        if phase == "vectors":
+            _QUARANTINE_PAGE_SIZES[phase] = max(1, _QUARANTINE_PAGE_SIZES.get(phase, _QUARANTINE_PAGE_MAX)//2)
+        raise
     if not rows:
+        if phase == "vectors":
+            _quarantine_advance(phase, page_keys)
         return 0
 
     async with db.connection() as con:
@@ -135,6 +272,8 @@ async def quarantine_ineligible_vectors_once(
                   AND NOT aios.semantic_proposition_topology_eligible(proposition_id)""",
                 [r["proposition_id"] for r in rows])
             if not rows:
+                if phase == "vectors":
+                    _quarantine_advance(phase, page_keys)
                 return 0
             keys = [str(row['proposition_id']) for row in rows]
             proposition_ids = [row['proposition_id'] for row in rows]
@@ -160,6 +299,8 @@ async def quarantine_ineligible_vectors_once(
             await con.execute("""
                 DELETE FROM aios.semantic_structure_state WHERE proposition_id=ANY($1::uuid[])
             """, proposition_ids)
+    if phase == "vectors":
+        _quarantine_advance(phase, page_keys)
     logger.info("Quarantined %d ineligible propositions in %.2fs",
                 len(rows), time.monotonic() - started)
     return len(rows)

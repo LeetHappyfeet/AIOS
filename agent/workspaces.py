@@ -31,6 +31,10 @@ from .workspace_registrations import RegistrationStore, RegistrationIn, Authoriz
 from .workspace_contract import Assignment, verification_status
 from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision, WorkDismissal
 from .work_evidence import WorkEvidence, WorkResultQuery
+from .work_history import WorkerWorkHistoryQuery, WorkerWorkResultQuery, worker_work
+from .workspace_memory import (
+    CAPABILITY as WORKSPACE_MEMORY, candidates_from_result, relevant_notes, render_brief, save_notes,
+)
 
 
 def decode(value):
@@ -92,6 +96,10 @@ class ClaimRequest(ClaimIn):
 
 class LeaseIn(ClaimIn):
     claim_token: UUID
+
+
+class ContextIn(LeaseIn):
+    compact: bool = False
 
 
 class ObservationIn(LeaseIn):
@@ -535,6 +543,13 @@ class WorkspaceStore:
                 ),
                 "goal_review": "pending" if spec.goal_id else "not_linked",
             }
+            raw_notes = result.pop("memory_candidates", None)
+            result.pop("memory_candidate_digest", None)
+            notes = candidates_from_result(raw_notes, result)
+            if notes:
+                result["memory_candidate_digest"] = hashlib.sha256(json.dumps(
+                    [note.model_dump() for _, note in notes], sort_keys=True,
+                ).encode()).hexdigest()
             # Finishing execution is never an assertion of goal completion.
             status = "finished" if req.status == "succeeded" else req.status
             if row["cancel_requested"]:
@@ -545,6 +560,29 @@ class WorkspaceStore:
                 if row["status"] == status and decode(row["result"]) == result:
                     return public(row)
                 raise HTTPException(409, "Run already ended with a different result")
+            if (notes and b["attached"] and row["required_protocol_version"] == 3
+                    and status != "cancelled" and row["environment_link_id"] is not None):
+                # Terminal reports can still be delivered after the origin moves.
+                # A stale or revoked run cannot add to character memory.
+                try:
+                    environments = EnvironmentStore(self.db)
+                    link = await environments.link(binding_id, row["environment_link_id"])
+                    await environments.origin(link, ancestor_node_id=row["origin_source_node_id"])
+                except HTTPException as exc:
+                    if exc.status_code not in {404, 409}:
+                        raise
+                else:
+                    visible = await self.db.fetchval(
+                        """SELECT EXISTS (
+                             SELECT 1 FROM aios.dag_node src JOIN aios.ingest_event ie USING(event_id)
+                             WHERE src.node_id=$1 AND ie.superseded_at IS NULL
+                             AND NOT EXISTS (SELECT 1 FROM aios.character_work_request wr
+                                             WHERE wr.run_id=$2 AND wr.status IN ('denied','invalidated'))
+                           )""",
+                        row["origin_source_node_id"], run_id,
+                    )
+                    if visible:
+                        await save_notes(self.db, run_id, notes)
             row = await self.db.execute_returning_row(
                 "UPDATE aios.workspace_run SET status=$2,result=$3::jsonb,updated_at=now() WHERE run_id=$1 RETURNING *",
                 run_id,
@@ -575,7 +613,9 @@ class WorkspaceStore:
                 payload={
                     "run_id": str(run_id),
                     "status": status,
-                    "result": result,
+                    **({"evidence_ref": f"workspace:{run_id}",
+                        "verification_status": result["verification_status"]}
+                       if b["attached"] else {"result": result}),
                     "verification": "worker_evidence",
                     "goal_completion": "requires_review",
                 },
@@ -596,14 +636,15 @@ class WorkspaceStore:
                     },
                     dedupe_key=f"workspace-finish:{run_id}",
                 )
+            summary = result.get("result_summary")
+            summary = summary.get("summary") if isinstance(summary, dict) else None
+            event_summary = summary if b["attached"] else result.get("report")
             await append_event(
                 self.db,
                 run_id,
                 "host:finished",
                 status,
-                str(result.get("report") or result.get("error") or "Execution ended")[
-                    :1000
-                ],
+                str(event_summary or result.get("error") or "Execution ended")[:1000],
                 {
                     "verification_status": result["verification_status"],
                     "goal_review": result["goal_review"],
@@ -720,9 +761,12 @@ def install_workspace_routes(app, db, hud_handler):
                 "delegation-readiness-v1",
                 "workspace-attachment-v1",
                 "persistent-workspaces-v1",
+                "shared-environments-v1",
                 "character-session-discovery-v1",
                 "delegated-runs-v3",
                 "character-recall-v3",
+                "work-evidence-v1",
+                WORKSPACE_MEMORY,
                 "task-events-v3",
             ],
             "single_writer": True,
@@ -758,6 +802,10 @@ def install_workspace_routes(app, db, hud_handler):
     @router.post("/registrations/{registration_id}/claim")
     async def claim_registered_workspace(registration_id: UUID, req: ClaimIn):
         return await registrations.claim(registration_id, req.worker_key)
+
+    @router.post("/registrations/{registration_id}/heartbeat")
+    async def heartbeat_registered_workspace(registration_id: UUID, req: ClaimIn):
+        return await registrations.heartbeat(registration_id, req.worker_key)
 
     @router.post("/bind")
     async def bind(req: BindingIn):
@@ -828,7 +876,7 @@ def install_workspace_routes(app, db, hud_handler):
 
     # New work is explicitly capability/version gated; v2 clients never claim it.
     @router.post("/v3/{binding_id}/runs/{run_id}/context")
-    async def execution_context(binding_id: UUID, run_id: UUID, req: LeaseIn):
+    async def execution_context(binding_id: UUID, run_id: UUID, req: ContextIn):
         async with db.atomic():
             b, run = await store.owned(binding_id, run_id, req)
             current = await store.current(b)
@@ -837,6 +885,31 @@ def install_workspace_routes(app, db, hud_handler):
                 raise HTTPException(409, "Cancellation requested")
             if node is None:
                 raise HTTPException(409, "Workspace needs an initial observation")
+            if req.compact and b["attached"] and run["required_protocol_version"] == 3:
+                from aios_app.char.identity_kernel import IdentityKernelStore
+                from aios_app.hud.identity import execution_identity
+
+                kernel = await IdentityKernelStore(db).get(b["character_id"])
+                spec = decode(run["assignment"]) or {}
+                goal_id = UUID(spec["goal_id"]) if spec.get("goal_id") else None
+                goal = None
+                if goal_id is not None:
+                    goal = await db.fetchval(
+                        """SELECT goal_text FROM aios.character_agent_goal
+                           WHERE goal_id=$1 AND instance_id=$2 AND status='active'""",
+                        goal_id, b["instance_id"],
+                    )
+                notes = await relevant_notes(
+                    db, b["instance_id"], current["source_timeline_id"], node,
+                    run["objective"], goal_id=goal_id if goal else None,
+                    link_id=run["environment_link_id"],
+                )
+                return {
+                    "generation_ready": True,
+                    "freshness": {"source_current": True},
+                    "format": WORKSPACE_MEMORY,
+                    "text": render_brief(execution_identity(b["character_id"], kernel), goal, notes),
+                }
         return await hud_handler(
             instance_id=b["instance_id"],
             through_node_id=node,
@@ -850,6 +923,14 @@ def install_workspace_routes(app, db, hud_handler):
     @router.post("/v3/{binding_id}/runs/{run_id}/recall")
     async def recall(binding_id: UUID, run_id: UUID, req: RecallIn):
         return await EnvironmentStore(db).recall(binding_id, run_id, req)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/work-history")
+    async def work_history(binding_id: UUID, run_id: UUID, req: WorkerWorkHistoryQuery):
+        return await worker_work(db, binding_id, run_id, req)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/work-result")
+    async def worker_result(binding_id: UUID, run_id: UUID, req: WorkerWorkResultQuery):
+        return await worker_work(db, binding_id, run_id, req, read=True)
 
     @router.post("/v3/{binding_id}/runs/{run_id}/progress")
     async def progress(binding_id: UUID, run_id: UUID, req: ProgressIn):

@@ -34,6 +34,7 @@ async def test_readiness_distinguishes_policy_worker_profile_and_pairing(db, mon
         'SELECT source_timeline_id FROM aios.character_runtime_state WHERE instance_id=$1', origin.instance_id))
     assert not overlay['capabilities'] and 'policy' in overlay['unavailable_reason']
     assert 'WORK UNAVAILABLE:' in render_hud_text({'work': overlay})
+    assert overlay['result_tool'] is None
     await db.execute("DELETE FROM aios.character_action_policy")
     await db.execute("UPDATE aios.workspace_work_profile SET enabled=false WHERE profile_id=$1", UUID(profile['profile_id']))
     assert 'No enabled work profile' in (await service.readiness(origin.instance_id, bid))['environments'][0]['problems'][0]
@@ -44,13 +45,31 @@ async def test_readiness_distinguishes_policy_worker_profile_and_pairing(db, mon
 @pytest.mark.asyncio
 async def test_missing_link_and_same_instance_explain_incomplete_setup(db):
     store, origin, bid = await workspace_tests.binding(db)
+    # The no-link fixture has no ingestion records, but overlay still queries
+    # the source-receipt relation introduced with retained report retrieval.
+    await db.execute('CREATE TABLE aios.ingest_event(event_id bigint PRIMARY KEY, superseded_at timestamptz)')
     report = await WorkspaceSetup(db).readiness(origin.instance_id, bid)
     assert not report['configured'] and not report['ready']
     assert any('Attach/link' in p for p in report['problems'])
     from aios_app.agent.work_admission import WorkAdmission
     timeline = await db.fetchval('SELECT source_timeline_id FROM aios.character_runtime_state WHERE instance_id=$1', origin.instance_id)
     overlay = await WorkAdmission(db).overlay(origin.instance_id, timeline)
+    assert overlay['unavailable_reason'] is None
+    assert overlay['result_tool'] is None
+    hud = render_hud_text({'work': overlay})
+    assert 'WORK UNAVAILABLE' not in hud
+    assert 'RETAINED WORK EVIDENCE' not in hud
+    # An explicit work attempt makes the missing setup relevant to this chat.
+    head = await db.fetchval('SELECT source_head_node_id FROM aios.character_runtime_state WHERE instance_id=$1', origin.instance_id)
+    await db.execute('INSERT INTO aios.ingest_event VALUES(1,NULL)')
+    await db.execute('INSERT INTO aios.dag_node(node_id,timeline_id,event_id) VALUES($1,$2,1)', head, timeline)
+    await db.execute('''INSERT INTO aios.work_source_receipt VALUES($1,$2,
+        '{"status":"needs_clarification","reason":"No eligible workspace"}'::jsonb)''', origin.instance_id, head)
+    overlay = await WorkAdmission(db).overlay(origin.instance_id, timeline)
+    hud = render_hud_text({'work': overlay})
     assert 'No execution environment' in overlay['unavailable_reason']
+    assert 'WORK REQUEST NEEDS CLARIFICATION' in hud
+    assert 'RETAINED WORK EVIDENCE' not in hud
 
 
 def test_discovery_and_setup_routes_keep_authority_separate(monkeypatch):

@@ -99,7 +99,7 @@ def test_effective_interpreter_version_includes_scope_policy():
     from aios_app.epistemic.epistemic_scope import install_message_cognition_scope_guard
     install_message_cognition_scope_guard(cognition)
     assert cognition.INTERPRETER_VERSION == (
-        "message-cognition-v13-source-preserving+epistemic-scope-v1"
+        "message-cognition-v14-intention-scope+epistemic-scope-v1"
     )
 
 

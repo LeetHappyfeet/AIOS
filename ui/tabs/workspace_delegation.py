@@ -201,7 +201,7 @@ CHECKS = json.dumps(EXPERIMENT_TEMPLATE['required_checks'], indent=2)
 def render():
     with gr.Tab("Workspace Delegation"):
         gr.Markdown("### Persistent character workspace (recommended)\n"
-                    "In the client, choose Automatic chat routing, save the character, human routing key and workspace, "
+                    "Multiple characters can use the same client host, each with its own workspace authorization. In the client, choose Automatic chat routing, save the character, human routing key and workspace, "
                     "then Register / validate workspace and start listening. Authorize it here once. "
                     "Future chats for this character, human and scope attach automatically; no instance/link copying. "
                     "The experimental-task capability is installed automatically. Chat memories are not merged. "

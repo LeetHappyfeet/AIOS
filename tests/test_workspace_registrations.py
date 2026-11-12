@@ -12,6 +12,7 @@ from aios_app.agent.workspaces import WorkspaceStore, install_workspace_routes
 from aios_app.agent.work_admission import WorkAdmission, WorkRequestIn
 from aios_app.agent.policy import ActionPolicyService
 from aios_app.agent.environment_links import EnvironmentStore
+from aios_app.hud.render_text import render_hud_text
 
 db = fixtures.db
 
@@ -32,10 +33,14 @@ async def registration(db, **changes):
     return store, UUID(r['registration_id'])
 
 
-async def chat(db, *, legacy=False, user='human'):
+async def chat(db, *, legacy=False, user='human', character='Cortana'):
     _, req, bid = await binding(db)
     if not legacy:
         await db.execute('DELETE FROM aios.workspace_binding WHERE binding_id=$1', bid)
+    if character != 'Cortana':
+        await db.execute('UPDATE aios.character_instance SET character_id=$2 WHERE instance_id=$1', req.instance_id, character)
+        await db.execute('UPDATE aios.timeline SET character_id=$2 WHERE session_id=$1', req.session_id, character)
+        req = req.model_copy(update={'character_id': character})
     if user != 'human':
         await db.execute('UPDATE aios.timeline SET user_name=$2 WHERE session_id=$1', req.session_id, user)
     await db.execute('INSERT INTO aios.dag_node(node_id,timeline_id,event_id) VALUES($1,$2,1)',
@@ -189,8 +194,117 @@ async def test_hud_auto_attaches_new_chat_and_pending_request_queues_when_listen
     timeline = await db.fetchval('SELECT source_timeline_id FROM aios.character_runtime_state WHERE instance_id=$1', later.instance_id)
     overlay = await WorkAdmission(db).overlay(later.instance_id, timeline)
     assert overlay['capabilities'][0]['online']
+    assert overlay['result_tool'] is None
+    assert 'RETAINED WORK EVIDENCE' not in render_hud_text({'work': overlay})
     assert await db.fetchval('SELECT count(*) FROM aios.workspace_binding WHERE registration_id=$1', rid) == 2
     # An abandoned lease is recorded as interrupted rather than replayed.
     await db.execute("UPDATE aios.workspace_run SET lease_expires_at=now()-interval '1 second' WHERE run_id=$1", run_id)
     assert (await store.claim(rid, 'worker'))['run'] is None
     assert await db.fetchval('SELECT status FROM aios.workspace_run WHERE run_id=$1', run_id) == 'interrupted'
+
+
+
+
+async def shared_character_tasks(db, second_root='/project', admin=False, first_admin=False, other_host=False):
+    environment = uuid4()
+    store, first = await registration(db, environment_id=environment, administration_enabled=first_admin)
+    _, second = await registration(db, workspace_key='second-character', character_id='Other',
+        root_hint=second_root, environment_id=uuid4() if other_host else environment,
+        administration_enabled=admin)
+    await store.authorize(first, AuthorizationIn(enabled=True, disposition='allow'))
+    await store.authorize(second, AuthorizationIn(enabled=True, disposition='allow'))
+    await db.execute('CREATE TABLE aios.ingest_event(event_id bigint PRIMARY KEY,viewpoint_id text,superseded_at timestamptz)')
+    await db.execute("INSERT INTO aios.ingest_event VALUES(1,'Cortana',NULL)")
+    await db.execute('ALTER TABLE aios.dag_node ADD COLUMN speaker_role text,ADD COLUMN speaker_id text,ADD COLUMN message_text text')
+    runs, origins = [], []
+    for rid, character in ((first, 'Cortana'), (second, 'Other')):
+        origin, _ = await chat(db, character=character)
+        origins.append(origin)
+        await store.heartbeat(rid, 'worker')
+        node = await db.fetchval('SELECT source_head_node_id FROM aios.character_runtime_state WHERE instance_id=$1', origin.instance_id)
+        # Work admission resolves each new instance, without manual binding calls.
+        receipt = await WorkAdmission(db).request(origin.instance_id, WorkRequestIn(request_id=uuid4(),
+            source_node_id=node, capability='workspace', purpose='experimental_task', objective='Inspect runtime'))
+        assert receipt['status'] == 'queued'
+        runs.append(UUID(receipt['run_id']))
+        assert await db.fetchval('SELECT count(*) FROM aios.cognitive_evidence_instances($1)', origin.instance_id) == 1
+    return store, first, second, runs, origins, environment
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('second_root,admin,first_admin,other_host,busy', [
+    ('/project', False, False, False, True),
+    ('/project/child', False, False, False, True),
+    ('/', False, False, False, True),
+    ('/project-other', False, False, False, False),
+    ('/other', True, False, False, True),
+    ('/other', False, True, False, True),
+    ('/project', False, False, True, False),
+])
+async def test_two_characters_share_host_without_sharing_chat_or_memory(db, second_root, admin, first_admin, other_host, busy):
+    store, first, second, runs, origins, environment = await shared_character_tasks(
+        db, second_root, admin, first_admin, other_host)
+    a = await store.claim(first, 'worker')
+    assert UUID(a['run']['run_id']) == runs[0]
+    with pytest.raises(HTTPException, match='Stop existing runs'):
+        await registration(db, environment_id=environment, administration_enabled=not first_admin)
+    b = await store.claim(second, 'worker')
+    if busy:
+        assert b == {'run': None, 'status': 'busy'}
+        assert await db.fetchval('SELECT status FROM aios.workspace_run WHERE run_id=$1', runs[1]) == 'queued'
+        # Once the first run ends, the second character can claim its own task.
+        await db.execute("UPDATE aios.workspace_run SET status='finished' WHERE run_id=$1", runs[0])
+        b = await store.claim(second, 'worker')
+    assert UUID(b['run']['run_id']) == runs[1]
+    assert await db.fetchval('SELECT instance_id FROM aios.workspace_binding WHERE binding_id=$1', UUID(b['binding_id'])) == origins[1].instance_id
+
+
+@pytest.mark.asyncio
+async def test_environment_upgrade_preserves_grant_and_rejects_host_substitution(db):
+    store, rid = await registration(db)
+    await store.authorize(rid, AuthorizationIn(enabled=True, disposition='allow'))
+    environment = uuid4()
+    _, same = await registration(db, environment_id=environment)
+    assert same == rid
+    row = await store.get(rid)
+    assert row['enabled'] and row['disposition'] == 'allow' and row['environment_id'] == environment
+    with pytest.raises(HTTPException, match='environment_id'):
+        await registration(db, environment_id=uuid4())
+    # Old clients cannot silently erase the adopted identity.
+    await registration(db)
+    assert (await store.get(rid))['environment_id'] == environment
+
+
+@pytest.mark.asyncio
+async def test_waiting_heartbeat_keeps_listener_online_without_leasing(db):
+    store, rid = await registration(db, environment_id=uuid4())
+    assert await store.heartbeat(rid, 'worker') == {'status': 'needs_authorization'}
+    await store.authorize(rid, AuthorizationIn(enabled=True))
+    assert await store.heartbeat(rid, 'worker') == {'status': 'listening'}
+    assert (await store.listing())[0]['worker_online']
+    assert await db.fetchval('SELECT count(*) FROM aios.workspace_run') == 0
+    with pytest.raises(HTTPException, match='Unknown'):
+        await store.heartbeat(rid, 'wrong-worker')
+
+
+def test_root_conflicts_handle_windows_and_path_component_boundaries():
+    from aios_app.agent.workspace_registrations import overlapping_roots
+    assert overlapping_roots('C:\\Project', 'c:/project/child')
+    assert overlapping_roots('/project/child', '/project')
+    assert not overlapping_roots('/project-other', '/project')
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_character_claims_exclude_shared_workspace_on_postgres(db):
+    import asyncio
+    import os
+    if not os.environ.get('AIOS_WORKSPACE_TEST_DSN'):
+        pytest.skip('Native PostgreSQL pool required for concurrency test')
+    store, first, second, runs, _, _ = await shared_character_tasks(db)
+    results = await asyncio.gather(store.claim(first, 'worker'), store.claim(second, 'worker'))
+    claimed = [r for r in results if r['run'] is not None]
+    assert len(claimed) == 1
+    assert len([r for r in results if r['status'] == 'busy']) == 1
+    assert UUID(claimed[0]['run']['run_id']) in runs
+    assert await db.fetchval("SELECT count(*) FROM aios.workspace_run WHERE status='running'") == 1
+    assert await db.fetchval("SELECT count(*) FROM aios.workspace_run WHERE status='queued'") == 1

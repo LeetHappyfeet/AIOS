@@ -27,3 +27,7 @@ catalog:knowledgeMode a rdf:Property ; rdfs:comment "source_mention, encounter_r
 catalog:authority a rdf:Property .
 catalog:viewKind a rdf:Property .
 catalog:truncated a rdf:Property .
+catalog:PlaceBinding a rdfs:Class ; rdfs:comment "A source-qualified place reference resolved in the selected branch view." .
+catalog:mention a rdf:Property ; rdfs:comment "Original source-local anchor used in a place binding." .
+catalog:evidence a rdf:Property ; rdfs:comment "Source relation supporting a place binding." .
+catalog:reportedDestination a rdf:Property ; rdfs:comment "A narrated event's place reference in the selected catalog view." .

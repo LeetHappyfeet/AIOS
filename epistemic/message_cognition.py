@@ -11,7 +11,7 @@ from uuid import UUID
 from aios_app.db import Database
 from aios_app.epistemic.goals import CharacterGoalService, valid_goal_objective
 
-INTERPRETER_VERSION = "message-cognition-v13-source-preserving"
+INTERPRETER_VERSION = "message-cognition-v14-intention-scope"
 MAX_UNITS = 12
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
@@ -68,9 +68,12 @@ _UNCERTAIN_RE = re.compile(
     re.I,
 )
 _RULE_RE = re.compile(
-    rf"\b{_SUBJECT}\s+(?P<verb>must|mustn't|cannot|can't|may\s+not|is\s+required\s+to|"
+    rf"\b{_SUBJECT}\s+(?P<verb>must|mustn't|may\s+not|is\s+required\s+to|"
     rf"is\s+allowed\s+to|is\s+forbidden\s+to)\s+(?P<object>[^.!?]{{2,220}})",
     re.I,
+)
+_ABILITY_LIMIT_RE = re.compile(
+    rf"\b{_SUBJECT}\s+(?P<verb>cannot|can't)\s+(?P<object>[^.!?]{{2,220}})", re.I,
 )
 _RELATIONSHIP_RE = re.compile(
     r"\b(?:friend|enemy|ally|partner|assistant|sidekick|battle buddy|trust(?:s|ed|ing)?|"
@@ -398,6 +401,10 @@ def _parse_sentence(sentence: str) -> ParsedCandidate | None:
     match = _RULE_RE.search(sentence)
     if match:
         return ParsedCandidate("RULE", match.group("subject"), match.group("verb"), match.group("object"), 0.93, "deontic_predicate")
+    match = _ABILITY_LIMIT_RE.search(sentence)
+    if match:
+        return ParsedCandidate("BELIEF", match.group("subject"), match.group("verb"),
+                               match.group("object"), 0.90, "reported_ability_limit")
     if not _CAUSAL_DESIRE_RE.search(sentence):
         match = _GOAL_RE.search(sentence)
         if match:
@@ -630,9 +637,17 @@ def ambiguous_cognition_sentences(
     """
     if not _same_identity(speaker_id, character_id):
         return []
+    diagnostics = []
     explicit_units = interpret_message(
-        text,character_id=character_id,speaker_id=speaker_id,
-        speaker_role=speaker_role,viewpoint_id=viewpoint_id)
+        text, character_id=character_id, speaker_id=speaker_id,
+        speaker_role=speaker_role, viewpoint_id=viewpoint_id, diagnostics=diagnostics,
+    )
+    # An embedded future clause was resolved as non-executive source. Sending
+    # it back for goal inference would invite the same mistake via paraphrase.
+    embedded_sources = {
+        entry["source_excerpt"] for entry in diagnostics
+        if entry["reason"] == "insufficient_commitment:embedded_future_clause"
+    }
     explicit_sources={
         str(unit.meta.get("source_text") or "").strip()
         for unit in explicit_units
@@ -657,7 +672,8 @@ def ambiguous_cognition_sentences(
     for sentence_index, sentence in enumerate(message_sentences):
         clean=sentence.strip()
         explicit_timer_goal = clean in explicit_timer_goals
-        if (not clean or (clean in explicit_sources and not explicit_timer_goal)
+        if (not clean or clean[:240] in embedded_sources
+                or (clean in explicit_sources and not explicit_timer_goal)
                 or _QUESTION_RE.search(clean)):
             continue
         # Dialogue/action prose with first-person commitment, future intent,

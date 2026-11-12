@@ -74,6 +74,7 @@ async def import_corpus_document(
     identity_binding: str = "external",
     catalog_route: CorpusRoute | None = None,
     facets: Iterable[CorpusFacet] | None = None,
+    authored_sections: Iterable[dict] | None = None,
 ) -> dict:
     """Store cold reference text without acquisitions or world assertions."""
     if not text.strip():
@@ -209,42 +210,67 @@ async def import_corpus_document(
             max(0.0, min(float(facet.confidence), 1.0)), json.dumps(facet.meta or {}),
         )
 
-    units = split_long_document(text)
-    heading: str | None = None
-    section_order = 0
-    seen_section_hashes: set[str] = set()
-    for unit in units:
-        if unit.unit_type == "section":
-            heading = unit.title
-            continue
-        content = unit.content.strip()
-        if not content:
-            continue
-        content_hash = _sha256(content)
-        # A source page may repeat identical blocks (navigation, quotes, or
-        # splitter overlap). The schema deliberately keeps one copy of a
-        # section per document, so collapse duplicates before insertion rather
-        # than relying on the uniqueness constraint to abort the import.
-        if content_hash in seen_section_hashes:
-            continue
-        seen_section_hashes.add(content_hash)
-        await db.execute(
-            """
-            INSERT INTO aios.corpus_section (
-                document_id, section_order, section_path, heading,
-                content, content_hash, meta
+    if authored_sections is not None:
+        # Preserve authored entry boundaries. The document stores a hash of
+        # its source text; searchable prose stays in corpus_section.
+        section_order = 0
+        seen_section_hashes: set[str] = set()
+        for entry in authored_sections:
+            body = str(entry.get("content") or "").strip()
+            if not body:
+                continue
+            body_hash = _sha256(body)
+            if body_hash in seen_section_hashes:
+                continue
+            seen_section_hashes.add(body_hash)
+            await db.execute(
+                """INSERT INTO aios.corpus_section
+                   (document_id, section_order, section_path, heading,
+                    content, content_hash, meta)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)""",
+                document_id, section_order,
+                str(entry.get("path") or f"entries/{section_order}"),
+                str(entry.get("heading") or "") or None,
+                body, body_hash, json.dumps(entry.get("meta") or {}),
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
-            """,
-            document_id,
-            section_order,
-            unit.path,
-            heading,
-            content,
-            content_hash,
-            json.dumps({"start_char": unit.start_char, "end_char": unit.end_char}),
-        )
-        section_order += 1
+            section_order += 1
+    else:
+        units = split_long_document(text)
+        heading: str | None = None
+        section_order = 0
+        seen_section_hashes: set[str] = set()
+        for unit in units:
+            if unit.unit_type == "section":
+                heading = unit.title
+                continue
+            content = unit.content.strip()
+            if not content:
+                continue
+            content_hash = _sha256(content)
+            # A source page may repeat identical blocks (navigation, quotes, or
+            # splitter overlap). The schema deliberately keeps one copy of a
+            # section per document, so collapse duplicates before insertion rather
+            # than relying on the uniqueness constraint to abort the import.
+            if content_hash in seen_section_hashes:
+                continue
+            seen_section_hashes.add(content_hash)
+            await db.execute(
+                """
+                INSERT INTO aios.corpus_section (
+                    document_id, section_order, section_path, heading,
+                    content, content_hash, meta
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+                """,
+                document_id,
+                section_order,
+                unit.path,
+                heading,
+                content,
+                content_hash,
+                json.dumps({"start_char": unit.start_char, "end_char": unit.end_char}),
+            )
+            section_order += 1
 
     return {
         "document_id": document_id,

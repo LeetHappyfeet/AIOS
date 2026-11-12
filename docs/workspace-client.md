@@ -381,6 +381,22 @@ Revoking a link cancels its work and does not restore source-writing behavior.
 The existing v3 client wire protocol is unchanged; observation acknowledgements
 identify `source: "workspace-run"` with `source_current: false` in attachment mode.
 
+### Compact worker context and work memory
+
+Apply migration `20261108_01_workspace_memory.sql` and update AIOS Client. Attached
+v3 runs negotiate `workspace-memory-v1` and receive a brief of at most 1,600
+characters with authored decision priorities, a linked active goal when present,
+and up to two relevant work notes. Character recall and retained reports remain
+available on demand. Earlier clients keep using the existing workspace HUD.
+
+The worker can nominate up to three short notes in its terminal report.
+Attempts and findings reference a finding in the retained report. External
+findings can carry a public source URL without query parameters or credentials.
+Ideas are marked untested. AIOS accepts eligible notes into branch-scoped work
+memory, where subsequent worker briefs, worker recall and the chat HUD can
+retrieve them when relevant. Notes carry run provenance and worker attribution.
+They do not update the chat source, identity kernel, world facts or goal status.
+
 ### General experiments and context budgets
 
 A capability/purpose pair selects an operator-approved work profile, not a single
@@ -425,7 +441,11 @@ Readiness distinguishes configured pairing from a recently polling v3 worker
 (last 45 seconds). It does not test the VM's model provider or guarantee task
 success, and a ready environment may still require approval. Offline capabilities
 remain advertised as **not recently seen**. Ineligible environments receive a
-brief **WORK UNAVAILABLE** explanation in the conversational HUD.
+brief **WORK UNAVAILABLE** explanation in the conversational HUD when an
+environment has been configured or the conversation has work activity. Ordinary
+chats without workspace setup or activity omit workspace setup warnings.
+Report-retrieval instructions appear only when retained work evidence is visible
+to the current conversation source, even if execution is no longer available.
 
 ### Discovery and setup API
 
@@ -541,3 +561,63 @@ omitted by client transport limits remains in worker source reports/journals.
 Do not repeat a task just because its content was omitted from the HUD. Updating
 AIOS improves existing retained prose, but cannot recover structured fields or
 file contents that an old client never submitted.
+
+### Worker access to prior work (`work-evidence-v1`)
+
+Protocol v3 optionally advertises `work-evidence-v1`. It adds two worker-key
+routes under `/workspace-client/v3/{binding_id}/runs/{run_id}`:
+
+| Route | Body | Result |
+| --- | --- | --- |
+| POST `/work-history` | `worker_key`, `claim_token` | At most five prior terminal runs: objective, summary, findings, limitations, timestamp, goal/attempt IDs and result revision. Same goal/attempt first, then recency. |
+| POST `/work-result` | Lease fields plus exactly one `run_id` or `request_id`, `section`, optional `cursor`, `limit`, `revision` | Retained report section; pagination and result revisions follow `read_work_result`. Nonzero cursors require the returned revision. |
+
+Identity and scope are derived from the active lease, never model-provided
+character or instance IDs. Prior work must use the same binding and enabled
+environment link, origin instance and source timeline, and a source on the
+current origin branch. Superseded sources and denied/invalidated requests are
+excluded. The current run and nonterminal runs are excluded. Expired claims,
+cancellation, link revocation and origin branch changes reject further reads.
+An unlinked assignment has no prior-work scope; history returns `unavailable`.
+
+This grants access to task receipts for that environment even when personal
+memory sharing is disabled. It does not broaden character recall or share
+unrelated workspaces. Reads do not execute tasks, advance the conversational
+source, create knowledge acquisitions, accept goals or acknowledge consumption.
+No migration or additional server LLM call is required. The existing result
+transport limits still apply; the reader cannot recover bytes never submitted.
+
+## Multiple characters on one client host
+
+Apply additive migration `20261106_01_shared_environments.sql` through the normal
+migrator and restart AIOS. Upgrade AIOS_Client and restart its listeners. The new
+`shared-environments-v1` capability adds optional `environment_id` (UUID) and
+`administration_enabled` fields to registration. Each character registration remains
+its standing grant; the environment UUID groups grants on a physical client account.
+Existing registrations adopt the UUID in place while idle without changing their
+authorization, bindings, runs or memory links. A different non-null UUID is rejected;
+stop/reconcile existing runs before changing coordination settings. Old clients do
+not erase an adopted identity. This is coordination metadata, not authentication or
+remote attestation: the operator worker credential remains the API credential.
+
+Multiple profiles can listen simultaneously. Matching new chats attach automatically
+under their own character/human/scope grant without manually choosing UUIDs. All tasks
+retain their original chat/branch and return results to that binding. No cross-character
+memory access is granted. One destination per character/human/scope remains enforced.
+
+Claims for registrations on one environment serialize their conflict-check and claim
+transaction. A live run blocks another registration with the same or nested directory,
+or any other registration on the environment when either profile has administration
+enabled. Disjoint non-administrative workspaces can claim concurrently. Registrations
+without an environment UUID retain the older per-registration coordination behavior.
+
+`POST /workspace-client/registrations/{registration_id}/heartbeat` takes the same
+worker identity as claim and refreshes liveness without acquiring a task lease. The
+client uses this while waiting for local locks. Local cross-process locks cover both
+manual and automatic profiles under the same OS account, including different configs
+and AIOS servers; Windows conservatively serializes all local execution. POSIX uses
+shared host/ancestor locks and exclusive workspace locks. Local locks are acquired
+before claiming and held through execution and cleanup. Unknown or expired execution
+is never replayed automatically. These locks do not coordinate unrelated OS users,
+external writers or detached commands. Separate CLI workers retain separate inference
+gates; model concurrency sharing is provided within the UI manager.
