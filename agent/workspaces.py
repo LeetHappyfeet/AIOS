@@ -32,6 +32,7 @@ from .workspace_contract import Assignment, verification_status
 from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision, WorkDismissal
 from .work_evidence import WorkEvidence, WorkResultQuery
 from .work_history import WorkerWorkHistoryQuery, WorkerWorkResultQuery, worker_work
+from .research_discovery import ResearchNominationIn
 from .workspace_memory import (
     CAPABILITY as WORKSPACE_MEMORY, candidates_from_result, relevant_notes, render_brief, save_notes,
 )
@@ -938,6 +939,12 @@ def install_workspace_routes(app, db, hud_handler):
     @router.post("/v3/{binding_id}/runs/{run_id}/recall")
     async def recall(binding_id: UUID, run_id: UUID, req: RecallIn):
         return await EnvironmentStore(db).recall(binding_id, run_id, req)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/research/nominate")
+    async def research_nomination(binding_id: UUID, run_id: UUID,
+                                  req: "ResearchNominationIn"):
+        from .research_discovery import nominate
+        return await nominate(db, store, binding_id=binding_id, run_id=run_id, req=req)
 
     @router.post("/v3/{binding_id}/runs/{run_id}/work-history")
     async def work_history(binding_id: UUID, run_id: UUID, req: WorkerWorkHistoryQuery):
