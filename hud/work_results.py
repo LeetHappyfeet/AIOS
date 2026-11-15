@@ -117,7 +117,19 @@ def result_view(result, assignment):
     for key, value in (("completion_tokens", usage.get("completion_tokens")), ("max_tokens", diagnostics.get("max_tokens"))):
         if type(value) is int:
             response_details.append(f"{key}={value}")
+    character = result.get("character_report")
+    character = character if isinstance(character, Mapping) else {}
+    # Generated first-person interpretation is a report, never evidence.
+    character_view = None
+    if character.get("version") == "character-activity-v1":
+        statement = compact(character.get("summary"), 650)
+        reflection = compact(character.get("reflection"), 650)
+        threads = _items(character.get("open_threads"), 3, 180)
+        if statement and reflection:
+            character_view = {"summary": statement, "reflection": reflection,
+                              "open_threads": threads}
     return {
+        "character_report": character_view,
         "model_response": "; ".join(response_details),
         "requested_content": sections,
         "content_sections_omitted": max(0, len(content) - 4) + (
