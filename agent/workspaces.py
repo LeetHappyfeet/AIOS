@@ -585,6 +585,16 @@ class WorkspaceStore:
                     )
                     if visible:
                         await save_notes(self.db, run_id, notes)
+            # Source nominations are worker attestations, never world/character facts.
+            # The client supplies no arbitrary target instance: derive it from the
+            # leased run's origin, preserving source-timeline identity.
+            if status == "finished":
+                from .research_discovery import register_run_discoveries
+                await register_run_discoveries(
+                    self.db, run_id=run_id,
+                    instance_id=row["origin_instance_id"] or b["instance_id"],
+                    result=result,
+                )
             row = await self.db.execute_returning_row(
                 "UPDATE aios.workspace_run SET status=$2,result=$3::jsonb,updated_at=now() WHERE run_id=$1 RETURNING *",
                 run_id,
