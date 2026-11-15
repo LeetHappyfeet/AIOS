@@ -177,3 +177,28 @@ a NEW authorized research exposure refreshes the dossier's saved text revision.
 A closed/budget-exhausted dossier may be inspected, but cannot silently renew
 its work cap. Research source records do not duplicate the actual source text;
 the corpus remains cold and can be rematerialized on cue.
+
+## Feature branch: discovery bridge integration
+
+`feature/hybrid-research-discovery-bridge` adds a discovery-only receipt table
+(`aios.research_external_discovery`) and accepts validated source nominations
+from a completed, leased AIOS-Client research work run. Nominations arrive in the
+existing `result_summary.source_nominations` payload, supported by
+`research_citations`. This does **not** modify `advance()`, `study()`, corpus
+ACLs, the cold corpus, or epistemic acquisition. The final worker report is not
+proof of the cited claim. Only metadata is retained; book contents stay outside
+AIOS until a later separately authorized import phase.
+
+When a nomination supplies a dossier UUID, the server verifies it belongs to the
+work run's origin instance. Invalid/foreign dossier references are dropped; a
+nomination may remain run-scoped and unlinked. Runs that are cancelled, failed or
+interrupted do not register discoveries. Retries are idempotent on
+`(run_id,evidence_id)`. The worker API key can read the bound workspace's
+nomination receipts through
+`GET /workspace-client/v3/{binding_id}/research/discoveries?run_id=...`.
+No independent authority to create corpus documents or share private content is
+conferred by receiving the receipt. Operators must apply the new migration through
+the canonical migrator before upgrading the client.
+
+Next passes: separately authorized source revision/import queue, text transfer,
+source ACL, dossier continuation after indexing, and policy-controlled study.
