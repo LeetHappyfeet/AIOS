@@ -274,14 +274,17 @@ bindings, links, runs, receipts or review history are removed or reassigned.
 2. Click **Register / validate workspace**, then **Listen for AIOS work**. A
    registration needs no session, instance or link UUID. Registration alone grants
    no execution authority; the listener reports `needs_authorization` until enabled.
-3. In AIOS Gradio **Workspace Delegation**, click **Refresh registered workspaces**,
-   select the worker/path, check **Authorize this workspace for current and future
-   chats**, choose its standing policy, and **Save workspace authorization**. This
-   is the one-time operator authorization. `require_approval` still requires each
-   task's decision; `allow` admits bounded requests under the configured profile.
-4. Fetch a fresh HUD in the chat. AIOS matches character + human + scope and creates
-   a branch-scoped attachment and experimental-task preset automatically. Subsequent
-   matching chats use the same registered worker without copying coordinates.
+3. In AIOS Gradio **Workspace Delegation → Workspaces**, click **Refresh
+   workspaces**, select the registered workspace by its path, and click
+   **Authorize workspace**. The default approval policy requires an operator
+   decision for each request. Use **Save approval policy** to edit the policy
+   later. **Disable workspace** revokes active links and cancels linked work.
+4. Under **Chat connections**, select the character and chat. Click **Connect
+   this chat** to attach the authorized workspace and install the experimental-task
+   preset. A matching chat also attaches when AIOS builds its HUD. The status
+   panel shows the attached workspace, available capabilities, and approval
+   requirement. Manual pairing and custom profiles are under **Advanced workspace
+   setup**. Review requests under **Work requests for the selected chat**.
 
 Automatic routing uses a persistent registration, with a separate child binding for
 each chat. The existing v3 run/context/recall/lease/evidence protocol remains in use.

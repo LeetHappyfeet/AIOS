@@ -308,3 +308,48 @@ async def test_simultaneous_character_claims_exclude_shared_workspace_on_postgre
     assert UUID(claimed[0]['run']['run_id']) in runs
     assert await db.fetchval("SELECT count(*) FROM aios.workspace_run WHERE status='running'") == 1
     assert await db.fetchval("SELECT count(*) FROM aios.workspace_run WHERE status='queued'") == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_connection_reports_next_step_and_uses_existing_attachment_service(db):
+    from aios_app.agent.workspace_setup import WorkspaceSetup
+
+    setup = WorkspaceSetup(db)
+    origin, _ = await chat(db)
+
+    async def status():
+        return await setup.connection_status(await setup.readiness(origin.instance_id))
+
+    summary, _, can_connect = await status()
+    assert "No matching workspace" in summary
+    assert not can_connect
+
+    store, registration_id = await registration(db)
+    summary, details, can_connect = await status()
+    assert "Authorization needed" in summary
+    assert details['matching_registration']['registration_id'] == str(registration_id)
+    assert not can_connect
+    assert 'workspace_key' not in await store.details(registration_id)
+
+    await store.authorize(registration_id, AuthorizationIn(enabled=True))
+    await store.heartbeat(registration_id, 'worker')
+    summary, _, can_connect = await status()
+    assert "Connect this chat" in summary
+    assert can_connect
+
+    assert await store.ensure_available(origin.instance_id) is None
+    summary, details, can_connect = await status()
+    assert "Connected · Operator approval required" in summary
+    assert "worker · /project" in summary
+    assert "workspace / experimental_task" in summary
+    assert details['ready']
+    assert not can_connect
+    assert (await store.details(registration_id))['active_link_count'] == 1
+
+    await store.authorize(registration_id, AuthorizationIn(enabled=False))
+    summary, details, can_connect = await status()
+    assert "Link revoked" in summary
+    assert "workspace replacement" in summary
+    assert not details['ready']
+    assert not can_connect
+    assert (await store.details(registration_id))['active_link_count'] == 0

@@ -88,6 +88,33 @@ class RegistrationStore:
             last_seen_at>now()-interval '45 seconds' AS worker_online
             FROM aios.workspace_registration ORDER BY created_at''')]
 
+    async def details(self, registration_id):
+        from .workspaces import public
+        row = await self.db.fetchrow(
+            """SELECT r.*, r.last_seen_at>now()-interval '45 seconds' AS worker_online,
+                      (SELECT count(*) FROM aios.character_environment_link l
+                       JOIN aios.workspace_binding b ON b.binding_id=l.execution_binding_id
+                       WHERE b.registration_id=r.registration_id AND l.enabled) AS active_link_count
+               FROM aios.workspace_registration r WHERE r.registration_id=$1""",
+            registration_id,
+        )
+        if not row:
+            raise HTTPException(404, "Workspace registration no longer exists")
+        result = public(row)
+        result.pop('workspace_key')
+        return result
+
+    async def registration_for_origin(self, origin):
+        return await self.db.fetchrow(
+            """SELECT registration_id, enabled, disposition, root_hint, worker_key,
+                      last_seen_at>now()-interval '45 seconds' AS worker_online
+               FROM aios.workspace_registration
+               WHERE character_id=$1 AND user_name=$2 AND scope_key=$3
+               ORDER BY enabled DESC, last_seen_at DESC NULLS LAST, created_at DESC, registration_id
+               LIMIT 1""",
+            origin['character_id'], origin['user_name'], origin['scope_key'],
+        )
+
     async def authorize(self, registration_id, req):
         """Operator-only; worker credentials cannot broaden standing authority."""
         from .environment_links import EnvironmentStore

@@ -1,6 +1,7 @@
 """Operator setup and read-only diagnostics for chat delegation."""
 from __future__ import annotations
 
+from html import escape
 from uuid import UUID, uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,7 +81,7 @@ class WorkspaceSetup:
         from .workspaces import WorkspaceStore, public
         origin = await self.origin(instance_id)
         links = await self.db.fetch(
-            """SELECT l.*,b.last_seen_at>now()-interval '45 seconds' AS online
+            """SELECT l.*,b.worker_key,b.root_hint,b.last_seen_at>now()-interval '45 seconds' AS online
                FROM aios.character_environment_link l
                JOIN aios.workspace_binding b ON b.binding_id=l.execution_binding_id
                WHERE l.origin_instance_id=$1 AND ($2::uuid IS NULL OR l.execution_binding_id=$2)
@@ -118,6 +119,7 @@ class WorkspaceSetup:
                 problems.append("Worker has not polled in the last 45 seconds; start the v3 listener")
             environments.append({"link_id": str(link['link_id']),
                 "binding_id": str(link['execution_binding_id']), "enabled": link['enabled'],
+                "worker_key": link['worker_key'], "root_hint": link['root_hint'],
                 "share_memory": link['share_memory'], "attached": link['origin_instance_id'] == link['execution_instance_id'],
                 "worker_online": bool(link['online']),
                 "configured": configured, "ready": not problems,
@@ -138,3 +140,66 @@ class WorkspaceSetup:
                 "configured": not problems and any(e['configured'] for e in environments),
                 "problems": problems, "environments": environments,
                 "note": "Authentication and binding success do not establish chat delegation readiness. Approval may still be required."}
+
+
+    async def connection_status(self, report, routing_problem=None):
+        """Describe automatic setup independently of the legacy binding picker."""
+        from .workspace_registrations import RegistrationStore
+        from .workspaces import public
+
+        origin = report['origin']
+        registration = await RegistrationStore(self.db).registration_for_origin(origin)
+        binding = await self.db.fetchrow(
+            """SELECT b.registration_id, b.worker_key, b.root_hint
+               FROM aios.workspace_binding b WHERE b.instance_id=$1""",
+            UUID(origin['instance_id']),
+        )
+        status, can_connect = self.describe_connection(report, registration, binding, routing_problem)
+        details = dict(report)
+        if not report['environments']:
+            details['problems'] = [status] if routing_problem or not can_connect else []
+        details['matching_registration'] = public(registration) if registration else None
+        details['automatic_routing_problem'] = routing_problem
+        return status, details, can_connect
+
+    @staticmethod
+    def describe_connection(report, registration, binding, routing_problem=None):
+        environments = report['environments']
+        enabled = [env for env in environments if env['enabled']]
+        if enabled:
+            summaries = []
+            for env in enabled:
+                workspace = f"{escape(env['worker_key'])} · {escape(env['root_hint'])}"
+                if env['ready']:
+                    approval = "Operator approval required" if env['approval_required'] else "Requests can run under the saved policy"
+                    status = f"**Connected · {approval}**"
+                else:
+                    problems = " / ".join(escape(problem) for problem in env['problems'])
+                    status = f"**Linked · Work unavailable** — {problems}"
+                capabilities = ", ".join(
+                    f"{escape(profile['capability'])} / {escape(profile['purpose'])}"
+                    for profile in env['profiles'] if profile['enabled']
+                )
+                summaries.append(f"{status}  \n{workspace}" + (f"  \n{capabilities}" if capabilities else ""))
+            if routing_problem:
+                summaries.append(f"**Automatic connection failed** — {escape(routing_problem)}")
+            return "\n\n".join(summaries), False
+        if environments:
+            return "**Link revoked.** This chat needs explicit workspace replacement.", False
+        if routing_problem:
+            return f"**Connection blocked** — {escape(routing_problem)}", True
+        origin = report['origin']
+        if not origin['source_timeline_id'] or not origin['source_head_node_id']:
+            return "**Chat source pending.** Send a message in this chat and refresh.", False
+        if not registration:
+            return "**No matching workspace.** In AIOS-Client, register a workspace with this chat’s character, human, and scope.", False
+        workspace = f"{escape(registration['worker_key'])} · {escape(registration['root_hint'])}"
+        if not registration['enabled'] or registration['disposition'] == 'deny':
+            return f"**Authorization needed.** Authorize {workspace} under Workspaces.", False
+        if binding and (
+            binding['registration_id'] not in (None, registration['registration_id'])
+            or any(binding[key] != registration[key] for key in ('worker_key', 'root_hint'))
+        ):
+            return "**Different workspace already bound.** This chat needs explicit workspace replacement.", False
+        listener = "" if registration['worker_online'] else " Start the AIOS-Client listener to run work."
+        return f"**Authorized · Chat not connected.** Select **Connect this chat** to attach {workspace}.{listener}", True
