@@ -154,7 +154,7 @@ def profiles(binding, link_id):
 
 def load_profile(profile_id):
     if not profile_id:
-        return (gr.skip(),) * 10
+        return (gr.skip(),) * 11
     async def load():
         from aios_app.agent.workspaces import public
         r = await db.fetchrow("SELECT * FROM aios.workspace_work_profile WHERE profile_id=$1", uid(profile_id))
@@ -163,15 +163,17 @@ def load_profile(profile_id):
         return public(r)
     p = run(load())
     t = p['assignment_template']
-    return (p['capability'], p['purpose'], p['description'], p['enabled'],
+    return (p['capability'], p['purpose'], p['description'], p['enabled'], t.get('execution_mode') or 'default',
             json.dumps(t.get('required_checks', []), indent=2), json.dumps(t.get('expected_outputs', []), indent=2),
             json.dumps(t.get('preserve_paths', [])), t['budgets']['model_steps'], t['budgets']['wall_seconds'], t['budgets']['context_chars'])
 
 
-def save_profile(binding, link_id, capability, purpose, description, enabled, checks, outputs, preserve, steps, seconds, context):
+def save_profile(binding, link_id, capability, purpose, description, enabled, execution_mode, checks, outputs, preserve, steps, seconds, context):
     try:
         template = {"required_checks": json.loads(checks), "expected_outputs": json.loads(outputs),
                     "preserve_paths": json.loads(preserve), "budgets": {"model_steps": steps, "wall_seconds": seconds, "context_chars": context}}
+        if execution_mode != "default":
+            template["execution_mode"] = execution_mode
         req = ProfileIn(capability=capability, purpose=purpose, description=description, enabled=enabled, assignment_template=template)
         return run(WorkAdmission(db).configure(uid(binding), uid(link_id), req))
     except (ValueError, ValidationError) as exc:
@@ -376,6 +378,13 @@ def render():
             purpose = gr.Textbox(label="Purpose", value=EXPERIMENT.purpose)
             description = gr.Textbox(label="Description", value=EXPERIMENT.description)
             enabled = gr.Checkbox(label="Profile enabled", value=True)
+            execution_mode = gr.Dropdown(
+                label="Command access",
+                choices=[("Use workspace default", "default"), ("Inspection tools only", "inspection_only"),
+                         ("Allow workspace commands", "commands")],
+                value="default",
+                info="For inspection-only profiles, set expected outputs and required checks to empty lists.",
+            )
             checks = gr.Textbox(label="Required host checks (JSON array)", value=CHECKS, lines=6)
             outputs = gr.Textbox(label="Expected outputs (JSON array)", value=json.dumps(EXPERIMENT_TEMPLATE['expected_outputs']))
             preserve = gr.Textbox(label="Paths to preserve (JSON array)", value="[]")
@@ -431,7 +440,7 @@ def render():
             chat_connection, origin, connection_outputs)
         link_id.change(profiles, [binding, link_id], [profile, profile_list])
         refresh_profiles.click(profiles, [binding, link_id], [profile, profile_list])
-        fields = [capability, purpose, description, enabled, checks, outputs, preserve, steps, seconds, context]
+        fields = [capability, purpose, description, enabled, execution_mode, checks, outputs, preserve, steps, seconds, context]
         profile.change(load_profile, profile, fields)
         save.click(save_profile, [binding, link_id] + fields, report).success(
             chat_connection, origin, connection_outputs)

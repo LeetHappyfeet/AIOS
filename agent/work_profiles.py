@@ -59,27 +59,24 @@ def expand_request_template(template: dict, request_id: UUID) -> dict:
     return expand(deepcopy(template))
 
 
-def reporting_template(template: dict, *, read_only: bool):
-    """Resolve the built-in file-report convention before the assignment is sealed.
+INLINE_GUIDANCE = (
+    '\nReturn the findings directly in the final JSON response with outcome, summary, evidence, '
+    'limitations, artifacts (empty when no files were produced), and requested_content. '
+    'Do not create a file just to deliver the report. Report observations and identify anything '
+    'not determined. Client audit logs are retained by the host.'
+)
 
-    Only the exact built-in output/check pair can be replaced. Custom operator
-    checks must never be silently bypassed by character-supplied constraints.
-    """
-    if not read_only:
+
+def reporting_template(template: dict, *, inline: bool):
+    """Replace only the built-in file report and its matching format check."""
+    if not inline:
         return deepcopy(template), EXPERIMENT_GUIDANCE
     value = deepcopy(template)
     standard = experimental_profile().assignment_template
     criteria = ("expected_outputs", "required_checks")
     has_criteria = any(value.get(k) for k in criteria)
     if has_criteria and any(value.get(k, []) != standard.get(k, []) for k in criteria):
-        raise ValueError("Read-only inspection conflicts with custom profile outputs/checks; configure a profile without file outputs or shell checks")
+        raise ValueError("Inline reporting conflicts with custom profile outputs/checks")
     value["expected_outputs"] = []
     value["required_checks"] = []
-    return value, (
-        '\nRead-only inspection: use inspect_environment and permitted file reads. '
-        'Do not create a report file or run shell commands. Return the findings directly '
-        'in the final JSON response with outcome, summary, evidence, limitations, artifacts '
-        '(empty when no files were produced), and requested_content. '
-        'Report observations and explicitly identify anything not determined. '
-        'Client audit logs are retained by the host outside the task output contract.'
-    )
+    return value, INLINE_GUIDANCE

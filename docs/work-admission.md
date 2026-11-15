@@ -173,22 +173,24 @@ Tests exercise real workspace lifecycle SQL with minimal independent cognition
 fixtures, plus native-route credential separation and HUD rendering. Native
 PostgreSQL CI additionally checks concurrent duplicate submissions. Local PGlite
 checks do not establish live model or production SillyTavern reliability.
-## Read-only experimental inspections
+## Command access and reporting
 
-Explicit read-only/no-file constraints in a request now select direct JSON
-reporting for the standard `workspace / experimental_task` preset. Admission
-removes only the exact built-in experiment-report output/check pair before sealing
-the assignment, and keeps budgets, policy, approval and routing rules intact.
-Already read-only profiles with no outputs/checks are also supported. A custom
-output/check conflict returns `needs_configuration`; the character cannot bypass
-custom operator checks. Existing queued assignments are immutable and must be
-replaced with a fresh request if they contain the old contradictory file-report
-requirement.
+A work request can set `execution_mode` to `commands` or `inspection_only`.
+An operator can require `inspection_only` in the capability profile's assignment
+template. Such a profile uses empty expected outputs and required checks. A
+request that needs command execution under an inspection-only profile returns
+`needs_configuration` before queueing. Explicit no-command instructions can also
+select inspection-only execution. An incidental mention of “read-only” leaves
+ordinary workspace command access available.
 
-Use the updated AIOS-Client for enforced inspection mode and `inspect_environment`.
-Recognized wording is a conservative restriction convention, not a general policy
-language or an OS sandbox. Inspection mode denies arbitrary shell/code execution,
-stdin, writes, Git subprocesses and HTTP tools; host audit logging continues.
-The HUD prioritizes submitted failure/stop reasons and bounded provider finish
-metadata before partial findings. Missing failure details are stated explicitly;
-partial worker observations never establish task success.
+Use `report_mode: "inline"` to request a direct JSON result. A no-report-file
+instruction also selects inline reporting. For the standard
+`workspace / experimental_task` preset, inline reporting removes only its built-in
+report-file output and format check. Conflicting custom checks and outputs return
+`needs_configuration`. Existing approvals and workspace permissions still apply.
+
+Update AIOS and AIOS-Client together. Previously sealed assignments without an
+execution mode retain the legacy phrase behavior and their original hash. Submit a
+fresh request to use the new behavior. In command mode, task instructions such as
+“do not install anything” guide the model. The OS permissions of the worker
+account determine what its commands can actually change.
