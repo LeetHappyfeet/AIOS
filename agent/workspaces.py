@@ -769,6 +769,7 @@ def install_workspace_routes(app, db, hud_handler):
                 "delegated-runs-v3",
                 "character-recall-v3",
                 "work-evidence-v1",
+                "research-discovery-v1",
                 WORKSPACE_MEMORY,
                 "character-activity-v1",
                 "task-events-v3",
