@@ -100,6 +100,8 @@ class LeaseIn(ClaimIn):
 
 class ContextIn(LeaseIn):
     compact: bool = False
+    # Older clients do not trigger optional character summarization.
+    character_activity: bool = False
 
 
 class ObservationIn(LeaseIn):
@@ -916,7 +918,8 @@ def install_workspace_routes(app, db, hud_handler):
         # Inference must run outside the lease/database lock. The result is
         # cached against the immutable run, never regenerated per model step.
         from .work_activity_context import brief_for_run
-        activity = await brief_for_run(db, run, b["character_id"])
+        activity = (await brief_for_run(db, run, b["character_id"])
+                    if req.character_activity else None)
         if response is None:
             response = await hud_handler(
                 instance_id=b["instance_id"],
