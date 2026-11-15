@@ -4,6 +4,16 @@ from aios_app.hud.work_results import result_view
 from aios_app.hud.work import render_work_results
 
 
+from aios_app.agent.workspaces import ContextIn
+
+
+def test_legacy_v3_context_does_not_request_inference():
+    from uuid import uuid4
+    req = ContextIn(worker_key="existing-client", claim_token=uuid4())
+    assert req.character_activity is False
+    assert req.compact is False
+
+
 def test_brief_rejects_empty_oversized_or_fabricated_shapes():
     assert validate_brief({"summary": ""}) is None
     assert validate_brief({"summary": "I plan a game", "intentions": ["ok"] * 5}) is None
