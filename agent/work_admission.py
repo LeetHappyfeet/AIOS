@@ -10,12 +10,13 @@ import hashlib
 import json
 import re
 import logging
+from typing import Literal
 from uuid import UUID, uuid5, NAMESPACE_URL
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .workspace_contract import Assignment, requires_read_only
+from .workspace_contract import Assignment, ExecutionMode
 from .work_evidence import WorkEvidence, WorkResultQuery, result_tool_schema
 from .references import expand_reference
 
@@ -26,6 +27,13 @@ class WorkIntent(BaseModel):
     purpose: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     objective: str = Field(min_length=3, max_length=4000)
     constraints: list[str] = Field(default_factory=list, max_length=10)
+    execution_mode: ExecutionMode | None = Field(default=None, description=(
+        "Use commands when command execution is necessary, or inspection_only when commands are forbidden. "
+        "The operator's profile still limits authority."
+    ))
+    report_mode: Literal["inline", "profile"] | None = Field(default=None, description=(
+        "Use inline to return the report without a report file, or profile to use the configured reporting criteria."
+    ))
     # Select an existing managed goal; AIOS resolves and validates its attempt.
     goal_ref: UUID | None = Field(default=None, strict=False,
         description="Managed goal UUID or exact g_ reference copied from the HUD.")
@@ -85,7 +93,7 @@ class ProfileIn(BaseModel):
         spec = Assignment.model_validate(
             {"objective": "Operator execution profile", **value}
         )
-        if not spec.required_checks:
+        if not spec.required_checks and spec.execution_mode != "inspection_only":
             raise ValueError("A work profile must define required host checks")
         return spec.model_dump(
             mode="json", exclude={"objective", "goal_id", "attempt_id"}
@@ -114,6 +122,44 @@ class WorkDismissal(BaseModel):
 
 def decode(value):
     return json.loads(value) if isinstance(value, str) else value
+
+
+NO_COMMANDS = re.compile(
+    r"\b(?:do not|don't|never|must not) (?:run|execute|launch|invoke) "
+    r"(?:(?:any|arbitrary|shell|terminal) ){0,3}commands?\b"
+    r"|\b(?:no (?:(?:shell|terminal) )?commands?|(?:read[ -]only )?inspection[ -]only)"
+    r"(?=\s*(?:[.!?;,]|\n|$))",
+    re.IGNORECASE,
+)
+EXPLICIT_COMMAND = re.compile(
+    r"(?:^|[.!?;:\n]\s*)\s*(?:run|execute|invoke)\s+`[^`]+`"
+    r"|\b(?:check with|using|use) (?:read[ -]only )?(?:shell )?(?:commands|checks) such as `[^`]+`",
+    re.IGNORECASE,
+)
+INLINE_REPORT = re.compile(
+    r"\b(?:do not|don't|never) (?:create|write) (?:a |the |any )?report file\b"
+    r"|\breturn (?:the )?(?:final )?(?:report|findings|json) (?:directly|inline)\b"
+    r"|\bno file (?:creation|modification)\b"
+    r"|\bwithout creating or modifying (?:any )?files\b"
+    r"|\bdo not (?:create or modify|modify or create) (?:any )?files\b",
+    re.IGNORECASE,
+)
+
+
+def execution_settings(intent, template, objective):
+    no_commands = bool(NO_COMMANDS.search(objective))
+    inspection_only = (
+        no_commands or intent.execution_mode == "inspection_only"
+        or template.get("execution_mode") == "inspection_only"
+    )
+    needs_commands = intent.execution_mode == "commands" or bool(EXPLICIT_COMMAND.search(objective))
+    if inspection_only and needs_commands:
+        raise ValueError("Request needs commands, but a request constraint or workspace profile forbids them")
+    if (inspection_only and intent.report_mode == "profile"
+            and (template.get("expected_outputs") or template.get("required_checks"))):
+        raise ValueError("Inspection-only execution conflicts with the requested profile outputs/checks")
+    inline = inspection_only or intent.report_mode == "inline" or bool(INLINE_REPORT.search(objective))
+    return ("inspection_only" if inspection_only else "commands"), inline
 
 
 def fingerprint(value):
@@ -517,13 +563,22 @@ class WorkAdmission:
             objective += "\nAdditional requested constraints:\n" + "\n".join(
                 "- " + c for c in intent.constraints
             )
-        from .work_profiles import expand_request_template, EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE, reporting_template
-        if (p['capability'], p['purpose']) == (EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE):
-            try:
-                template, guidance = reporting_template(template, read_only=requires_read_only(objective))
-            except ValueError as exc:
-                return await self.state(row, "needs_configuration", str(exc), **pinned)
-            objective += guidance
+        from .work_profiles import (
+            EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE, INLINE_GUIDANCE,
+            expand_request_template, reporting_template,
+        )
+        try:
+            mode, inline = execution_settings(intent, template, objective)
+            if (p['capability'], p['purpose']) == (EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE):
+                template, guidance = reporting_template(template, inline=inline)
+                objective += guidance
+            elif inline:
+                if template.get("expected_outputs") or template.get("required_checks"):
+                    raise ValueError("Inline reporting conflicts with custom profile outputs/checks")
+                objective += INLINE_GUIDANCE
+        except ValueError as exc:
+            return await self.state(row, "needs_configuration", str(exc), **pinned)
+        template = {**template, "execution_mode": mode}
         try:
             spec = DelegationIn(
                 request_id=row["request_id"],
@@ -793,19 +848,25 @@ class WorkAdmission:
                    FROM aios.character_environment_link l WHERE l.origin_instance_id=$1""",
                 instance_id)
             current = [l for l in links if l["enabled"] and l["origin_source_timeline_id"] == timeline_id]
-            if not links:
+            if not links and (rows or history_count or error):
                 unavailable = "No execution environment is linked. Ask the operator to complete Workspace Delegation setup."
-            elif not current:
+            elif links and not current:
                 unavailable = "No enabled environment link matches this conversation source. Operator pairing needs reconciliation."
-            elif not any(l["has_profile"] for l in current):
+            elif current and not any(l["has_profile"] for l in current):
                 unavailable = "No enabled work profile is configured for this conversation."
-            else:
+            elif current:
                 unavailable = "No eligible capability: instance pairing or workspace.run policy blocks execution. Ask the operator to check delegation readiness."
+        # A tool schema is not evidence that this conversation has a report to
+        # read. Reuse retrieval's branch/source visibility checks, independently
+        # of current execution permission or worker presence.
+        result_available = bool(retrieved_result)
+        if not result_available and rows:
+            result_available = bool(await WorkEvidence(self.db).rows(instance_id))
         return {
             "unavailable_reason": routing_problem or unavailable,
             "request_error": decode(error) if error else None,
             "retrieved_result": retrieved_result,
-            "result_tool": result_tool_schema(),
+            "result_tool": result_tool_schema() if result_available else None,
             "history_count": history_count,
             "capabilities": [dict(p) for p in profiles],
             "requests": [

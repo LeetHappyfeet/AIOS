@@ -395,6 +395,28 @@ async def fetch_next_job(
                     $6::text[] IS NULL
                     OR q.job_type = ANY($6::text[])
               )
+              -- Claim only jobs whose effective advisory-lock scope is not
+              -- already owned by a running job. Scope locks cross resource
+              -- classes: RDF and SEMANTIC work both use semantic-scope:char,
+              -- semantic-scope:source, and semantic-scope:world.
+              -- This is a scheduler hint, NOT a locking guarantee: competing
+              -- transactions can race, so the runner must still acquire its
+              -- PostgreSQL advisory lock before execution.
+              AND (
+                  q.partition_key IS NULL
+                  OR NOT EXISTS (
+                      SELECT 1 FROM aios.pipeline_job active
+                      WHERE active.status='running'
+                        AND active.partition_key IS NOT NULL
+                        AND active.partition_key=q.partition_key
+                        AND (
+                            q.partition_key LIKE 'char:%'
+                            OR q.partition_key LIKE 'source:%'
+                            OR q.partition_key LIKE 'world:%'
+                            OR active.resource_class=q.resource_class
+                        )
+                  )
+              )
               AND (
                     q.job_type <> 'decompose_claim_frames'
                     OR q.partition_key IS NULL
@@ -454,17 +476,9 @@ async def fetch_next_job(
                     THEN 1
                     ELSE 0
                 END ASC,
-                CASE
-                    WHEN $5::boolean
-                     AND q.partition_key IS NOT NULL
-                     AND EXISTS (
-                        SELECT 1
-                        FROM aios.pipeline_job active
-                        WHERE active.status='running'
-                          AND active.partition_key=q.partition_key
-                     )
-                    THEN 1 ELSE 0
-                END ASC,
+                -- Keep the legacy preference parameter typed for callers.
+                -- The actual exclusion is enforced by the NOT EXISTS above.
+                CASE WHEN $5::boolean THEN 0 ELSE 0 END ASC,
                 q.priority ASC,
                 q.created_at ASC
             FOR UPDATE OF q SKIP LOCKED

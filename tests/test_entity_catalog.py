@@ -641,3 +641,147 @@ def test_mixed_source_observers_do_not_gain_all_entity_references(contexts):
     graph = Dataset()
     graph.update(rdf_update(p["section_id"], p))
     assert not list(graph.quads((None, URIRef(NS + "hasEntityReference"), None, None)))
+
+
+def test_nested_places_and_hedges_use_the_phrase_head_and_clause_evidence():
+    from aios_app.entity_memory.extraction import extract_memory
+
+    nlp = pytest.importorskip("en_core_web_sm").load()
+    text = "Jon walked into the kitchen of Garfield's house in San Francisco."
+    data = extract_memory(nlp(text), scope="story", section_id="1")
+    assert {a["label"] for a in data["anchors"] if a["kind"] == "place"} == {
+        "the kitchen", "Garfield's house", "San Francisco",
+    }
+    view = reference_view(dict(data, section_id="1"))
+    parents = {place["place"]["label"]: [edge["entity"]["label"] for edge in place["contents"]]
+               for place in view["places"]}
+    assert parents["Garfield's house"] == ["the kitchen"]
+    assert parents["San Francisco"] == ["Garfield's house"]
+    assert len(data["movement_destinations"]) == 1
+    data = extract_memory(nlp("Jon walked into Central Park. The park is busy."),
+                          scope="story", section_id="park")
+    places = {anchor["label"]: anchor["place_reference"]
+              for anchor in data["anchors"] if anchor["kind"] == "place"}
+    assert places == {"Central Park": "named", "The park": "definite"}
+
+    for text in (
+        "Maybe the kitchen is in Garfield's house.",
+        '"The kitchen is in Garfield\'s house."',
+        "Jon said the kitchen is in Garfield's house.",
+    ):
+        data = extract_memory(nlp(text), scope="story", section_id="2")
+        view = reference_view(dict(data, section_id="2"))
+        assert not any(place["contents"] for place in view["places"])
+        assert not any(a.get("place_usable") for a in data["anchors"])
+
+
+def test_competing_kitchens_require_a_parent_and_an_explicit_identity_can_add_a_name():
+    from aios_app.entity_memory.extraction import extract_memory
+    from aios_app.entity_memory.place_resolution import resolve_places
+
+    nlp = pytest.importorskip("en_core_web_sm").load()
+
+    def source(index, text):
+        section = str(index)
+        return dict(extract_memory(nlp(text), scope="story", section_id=section),
+                    section_id=section)
+
+    bare = source(1, "Jon walked into the kitchen.")
+    explicit = source(2, "The kitchen is Garfield's kitchen.")
+    other = source(3, "Jon's kitchen is in Jon's house.")
+    ambiguous = source(4, "The kitchen is warm.")
+    in_other = source(5, "The kitchen is in Jon's house.")
+    bindings, receipts = resolve_places([bare, explicit, other, ambiguous, in_other])
+
+    def kitchen_ids(payload):
+        return [a["entity_id"] for a in payload["anchors"] if a.get("place_head") == "kitchen"]
+
+    original, = kitchen_ids(bare)
+    assert {bindings["2"][anchor] for anchor in kitchen_ids(explicit)} == {original}
+    other_id, = kitchen_ids(other)
+    assert other_id != original
+    ambiguous_id, = kitchen_ids(ambiguous)
+    assert bindings["4"][ambiguous_id] == ambiguous_id
+    current, = kitchen_ids(in_other)
+    assert bindings["5"][current] == other_id
+    assert any(receipt.get("evidence", "").endswith(":relation:0") for receipt in receipts)
+
+
+@pytest.mark.asyncio
+async def test_catalog_resolves_later_place_context_at_the_selected_head(env):
+    from dataclasses import replace
+
+    from aios_app.entity_memory.service import collect_entity_memory_once, project_entity_memory_once
+    from aios_app.hud.context import HUDContext
+    from test_entity_memory_postgres import seed
+
+    nlp = pytest.importorskip("en_core_web_sm").load()
+    e = env
+    source_timeline = e.ctx.source_timeline_id
+    runtime_timeline = uuid4()
+
+    async def add_turn(event, text, parent=None):
+        section, _ = await seed(e.db, event=event, doc=nlp(text))
+        node = await e.db.fetchval("SELECT node_id FROM aios.document_section WHERE section_id=$1", section)
+        await e.db.execute("UPDATE aios.dag_node SET timeline_id=$2 WHERE node_id=$1", node, source_timeline)
+        if parent:
+            await e.db.execute("INSERT INTO aios.dag_edge VALUES($1,$2,$3)", source_timeline, parent, node)
+        return node
+
+    first = await add_turn(2, "Jon walked into the kitchen.")
+    second = await add_turn(3, "The kitchen is in Garfield's house.", first)
+    head = await add_turn(4, "Garfield's house is in San Francisco.", second)
+    sibling = await add_turn(5, "Garfield's house is in New York.", second)
+    assert await collect_entity_memory_once(e.db) == 4
+    assert await project_entity_memory_once(e.db, e.graphs, limit=4) == 4
+
+    e.ctx = HUDContext(
+        instance_id=e.ctx.instance_id, character_id=e.ctx.character_id, entity_id=uuid4(),
+        world_id=e.ctx.world_id, world_key="story", timeline_id=runtime_timeline,
+        head_node_id=None, source_timeline_id=source_timeline, source_head_node_id=head,
+        state_version=1, lifecycle_state="ready", location_entity_id=None,
+        lineage_world_ids=(), lineage_instance_ids=(e.ctx.instance_id,), scene_entity_ids=frozenset(),
+    )
+    await e.db.execute("""CREATE TABLE aios.semantic_topology_node(
+        node_key text,dag_node_id uuid,scope_key text,node_type text,meta jsonb)""")
+    event = str(uuid4())
+    scope = f"world:{e.ctx.world_id}:timeline:{runtime_timeline}:narrated-events"
+    await e.db.execute(
+        """INSERT INTO aios.semantic_topology_node VALUES($1,$2,$3,'NARRATED_SCENE_EVENT',
+           '{"movement":true,"object_label":"the kitchen","action":"walk"}')""", event, first, scope,
+    )
+    earlier = await e.catalog.character(e.ctx.instance_id, head_node_id=first)
+    current = await e.catalog.character(e.ctx.instance_id)
+    kitchen, = earlier["places"]
+    kitchen_id = kitchen["place"]["id"]
+    assert kitchen["place"]["label"] == "the kitchen"
+    assert not earlier["place_bindings"]
+    places = {p["place"]["label"].lower(): p for p in current["places"]}
+    assert places["the kitchen"]["place"]["id"] == kitchen_id
+    assert places["garfield's house"]["contents"][0]["entity"]["id"] == kitchen_id
+    assert places["san francisco"]["contents"][0]["entity"]["id"] == places["garfield's house"]["place"]["id"]
+    assert "new york" not in places
+    with pytest.raises(LookupError):
+        await e.catalog.character(e.ctx.instance_id, head_node_id=sibling)
+    alternative = await e.catalog.character(e.ctx.instance_id, context=replace(e.ctx, source_head_node_id=sibling))
+    assert {p["place"]["label"].lower() for p in alternative["places"]} == {
+        "the kitchen", "garfield's house", "new york",
+    }
+    graph = Dataset()
+    graph.parse(data=catalog_trig(current), format="trig")
+    assert list(graph.quads((URIRef("urn:aios:scene-event:" + event),
+                             URIRef(NS + "reportedDestination"), URIRef(kitchen_id), None)))
+    results = list(graph.query(f"""
+        PREFIX c: <{NS}>
+        SELECT ?city WHERE {{ GRAPH ?view {{
+          <urn:aios:scene-event:{event}> c:reportedDestination ?room .
+          ?house c:hasMembershipEvidence [c:member ?room; c:membershipStatus "reported"] .
+          ?city c:hasMembershipEvidence [c:member ?house; c:membershipStatus "reported"] .
+        }} }}
+    """))
+    assert [str(row.city) for row in results] == [places["san francisco"]["place"]["id"]]
+
+    await e.db.execute("UPDATE aios.ingest_event SET superseded_at=now() WHERE event_id=3")
+    withdrawn = await e.catalog.character(e.ctx.instance_id)
+    house = next(p for p in withdrawn["places"] if p["place"]["label"] == "Garfield's house")
+    assert not house["contents"]

@@ -208,3 +208,21 @@ async def test_telemetry_counts_pending_once_and_reuses_rate_sample(monkeypatch)
     rates.assert_awaited_once()
     db.close.assert_awaited_once()
     assert all(p['queued'] == 0 and p['parked'] == 2 and p['oldest_s'] == 0 for p in packets)
+
+
+def test_launch_reports_semantic_degradation_even_when_global_queue_is_empty(monkeypatch, capsys):
+    from aios_app import launch
+    monkeypatch.setitem(launch._TELEMETRY, 'pipeline', {
+        'state': 'CAUGHT_UP', 'queued': 0, 'running': 0})
+    monkeypatch.setitem(launch._TELEMETRY, 'semantic_index', {
+        'state': 'DEGRADED', 'stage': 'retry',
+        'failed_stages': ['vector-propositions'],
+        'admission_backlog': {'pending': 7, 'overdue': 2}})
+    monkeypatch.setitem(launch._TELEMETRY, 'semantic_topology', {
+        'state': 'CAUGHT_UP', 'stage': 'idle'})
+    launch._render_status({})
+    output = capsys.readouterr().out
+    assert 'GLOBAL CAUGHT_UP' in output
+    assert 'sync DEGRADED' in output
+    assert 'semantic failed=vector-propositions' in output
+    assert 'admission pending=7' in output

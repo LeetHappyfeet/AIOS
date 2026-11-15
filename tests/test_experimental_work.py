@@ -1,5 +1,6 @@
 """One operator profile accepts different objectives without weakening admission."""
 import json
+import re
 import shlex
 import subprocess
 from uuid import UUID, uuid4
@@ -76,6 +77,10 @@ async def test_hud_uses_real_available_pair_and_mismatch_explains_how_to_correct
     overlay = await work.overlay(origin.instance_id, state['source_timeline_id'])
     rendered = render_hud_text({'work':overlay})
     assert 'listed_capability' not in rendered and 'listed_purpose' not in rendered
-    action = extract_work_intent(rendered)
+    # A HUD advertises multiple tool examples; each character reply still
+    # permits only one action. Validate the request example in isolation.
+    examples = [json.loads(x) for x in re.findall(r'<aios_action>(.*?)</aios_action>', rendered)]
+    example = next(x for x in examples if x.get('op') == 'request_work')
+    action = extract_work_intent('<aios_action>' + json.dumps(example) + '</aios_action>')
     assert (action.capability, action.purpose) == ('workspace','experimental_task')
     assert 'do not invent names' in rendered

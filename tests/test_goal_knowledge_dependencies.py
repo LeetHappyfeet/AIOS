@@ -116,7 +116,7 @@ def test_goal_hud_displays_requirement_not_false_progress():
         "goals":[{"goal_id":str(goal),"text":"Research sports-media sources"}],
     }
     hud=render_hud_text(frame)
-    assert "Goal knowledge: missing; linked research dossiers: 1" in hud
+    assert "Goal knowledge (Unspecified requirement): missing; linked research dossiers: 1" in hud
     assert "completed" not in hud.lower()
 
 

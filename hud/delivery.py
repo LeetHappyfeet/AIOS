@@ -28,6 +28,8 @@ def delivery_response(instance_id, frame, state, render_text):
         freshness["delivery_current"] = False
         freshness["active_source_head_node_id"] = state.get("source_head_node_id")
         freshness["delivery_reason"] = "runtime_changed_during_delivery"
+        if not source_same:
+            frame.pop("workspace_memory", None)
     else:
         freshness["delivery_current"] = True
     freshness.update({
@@ -40,6 +42,7 @@ def delivery_response(instance_id, frame, state, render_text):
         "instance_id": str(instance_id), "freshness": {k: v for k, v in freshness.items() if k != "hud_revision"},
         "generation_ready": hud["generation_ready"],
         "work": frame.get("work"), "remote_tasks": frame.get("remote_tasks"),
+        "workspace_memory": frame.get("workspace_memory"),
         "text": text,
     }, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")).hexdigest()
     freshness["hud_revision"] = revision

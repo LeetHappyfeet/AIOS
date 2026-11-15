@@ -23,11 +23,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install pytest pytest-asyncio asyncpg requests qdrant-client pydantic python-dotenv fastapi httpx beautifulsoup4 lxml
+      # Match the server's framework pins: newer FastAPI releases change route
+      # introspection used by these SQL/endpoint contract tests.
+      - run: python -m pip install pytest pytest-asyncio asyncpg requests qdrant-client pydantic==2.10.3 python-dotenv fastapi==0.115.6 httpx beautifulsoup4 lxml
       - name: Validate workspace contract and migration
         env:
           AIOS_WORKSPACE_TEST_DSN: postgresql://aios:aios@127.0.0.1:5432/aios_workspace_test
         run: |
           mkdir -p "$RUNNER_TEMP/aios-pythonpath"
           ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aios-pythonpath/aios_app"
-          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python -m pytest -q tests/test_hud_p1_work.py tests/test_workspace_registrations.py tests/test_catalog_timeout.py tests/test_work_results.py tests/test_experimental_work.py tests/test_workspace_attachment.py tests/test_workspace_setup.py tests/test_launch_config.py tests/test_work_admission.py tests/test_workspace_client.py tests/test_character_environments.py tests/test_environment_hud_context.py tests/test_agent_capabilities.py
+          PYTHONPATH="$RUNNER_TEMP/aios-pythonpath" python -m pytest -q tests/test_hud_p1_work.py tests/test_workspace_registrations.py tests/test_catalog_timeout.py tests/test_work_results.py tests/test_work_history.py tests/test_experimental_work.py tests/test_workspace_attachment.py tests/test_workspace_setup.py tests/test_launch_config.py tests/test_work_admission.py tests/test_workspace_client.py tests/test_character_environments.py tests/test_environment_hud_context.py tests/test_agent_capabilities.py

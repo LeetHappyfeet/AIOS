@@ -643,6 +643,17 @@ async def _prepare_hud_response(
         db, instance_id, timeline,
         run_ids=[UUID(r["run_id"]) for r in frame["work"]["requests"] if r.get("run_id")],
     )
+    source_head = (frame.get("hud", {}).get("freshness") or {}).get("source_head_node_id")
+    focus = focus_text or next((
+        row.get("message_text") for row in frame.get("recent_events", [])
+        if row.get("speaker_role") == "user" and row.get("message_text")
+    ), None)
+    if source_head and focus and (frame["work"]["requests"] or frame["remote_tasks"]):
+        from aios_app.agent.workspace_memory import relevant_notes
+
+        frame["workspace_memory"] = await relevant_notes(
+            db, instance_id, timeline, UUID(str(source_head)), focus,
+        )
     frame.setdefault("hud", {})["task_event_watermark"] = max(
         (task.get("sequence") or 0 for task in frame["remote_tasks"]), default=0)
     # Cursor/cognition can change while fresh work overlays are being read.

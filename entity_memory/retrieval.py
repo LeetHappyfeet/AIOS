@@ -68,7 +68,8 @@ _ANCESTRY = """WITH RECURSIVE ancestry(node_id,depth) AS (
 # continuity requires a source-eligible acquisition in the explicit cognitive scope.
 _SOURCE_SELECT = """
 SELECT ep.section_id,ep.payload,ep.revision,ep.built_revision,ep.rdf_revision,ep.dataset,
-       ds.content,n.node_id,n.timeline_id,n.speaker_id,n.speaker_role::text speaker_role
+       ds.content,n.node_id,n.timeline_id,n.speaker_id,n.speaker_role::text speaker_role,
+       n.event_id,n.kind::text AS node_kind
 FROM aios.entity_memory_projection ep
 JOIN aios.document_section ds ON ds.section_id=ep.section_id
 JOIN aios.dag_node n ON n.node_id=ds.node_id

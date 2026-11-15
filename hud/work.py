@@ -49,6 +49,15 @@ def render_work_results(work, tasks, *, compact_mode=False):
         view = task.get("result_summary")
         if not isinstance(view, dict):
             view = result_view({("error" if task["status"] in {"failed", "interrupted", "cancelled"} else "report"): task.get("summary")}, {})
+        character_report = view.get("character_report")
+        if character_report and task is latest:
+            # Character voice is derived, worker-supplied narrative. Keep the
+            # original source and execution caveat visible to the LLM.
+            lines.append("MY COMPUTER — CHARACTER ACTIVITY (first-person worker interpretation; not verified facts)")
+            lines.append("- " + compact(character_report["summary"], 650))
+            lines.append("- Reflection: " + compact(character_report["reflection"], 650))
+            for thread in character_report["open_threads"][:3]:
+                lines.append("  Open thread (not an assigned goal): " + compact(thread, 180))
         if compact_mode:
             # The final HUD has a shared budget. Offer complete short records
             # instead of one giant report entry that cannot fit at all. Keep

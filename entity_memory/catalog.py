@@ -14,6 +14,7 @@ SPATIAL = {
     "located_inside": "inside",
     "located_on": "on",
     "located_near": "near",
+    "part_of": "part_of",
 }
 PLACE_TYPES = {
     "place",
@@ -24,6 +25,11 @@ PLACE_TYPES = {
     "store",
     "building",
     "region",
+    "house",
+    "apartment",
+    "park",
+    "city",
+    "town",
 }
 PERSON_TYPES = {"person", "character", "agent", "user"}
 
@@ -37,6 +43,11 @@ PLACE_CLASSES = {
     "store": "Store",
     "building": "Building",
     "region": "Region",
+    "house": "Building",
+    "apartment": "Building",
+    "park": "Place",
+    "city": "Place",
+    "town": "Place",
 }
 
 
@@ -81,13 +92,18 @@ def membership_status(relation):
     return "reported"
 
 
-def reference_view(payload, *, corpus=False):
-    """Group existing anchors; preserve IDs and every original relationship."""
+def reference_view(payload, *, corpus=False, place_bindings=None):
+    """Group source evidence using optional branch-local place bindings."""
     graph = source_graph(payload["section_id"], corpus=corpus)
     prefix = "urn:aios:corpus:entity:" if corpus else "urn:aios:memory-entity:"
+    place_bindings = {} if corpus else (place_bindings or {})
+
+    def entity_id(value):
+        return prefix + place_bindings.get(value, value)
+
     entities = [
         {
-            "id": prefix + a["entity_id"],
+            "id": entity_id(a["entity_id"]),
             "label": a["label"],
             "kind": a["kind"],
             "authority": "reference_only" if corpus else "source_report_only",
@@ -97,17 +113,20 @@ def reference_view(payload, *, corpus=False):
     for anchor, entity in zip(payload.get("anchors", []), entities):
         if entity["kind"] == "place":
             entity["category"] = place_category({**anchor}, payload.get("mentions", []))
-    by_id = {e["id"]: e for e in entities}
+    by_id = {}
+    for entity in entities:
+        by_id.setdefault(entity["id"], entity)
+    entities = list(by_id.values())
     places = {
         e["id"]: {"place": e, "contents": [], "other_evidence": []}
         for e in entities
         if e["kind"] == "place"
     }
     for index, relation in enumerate(payload.get("relations", [])):
-        subject = prefix + relation["subject"]
-        target = prefix + relation["object"]
+        subject = entity_id(relation["subject"])
+        target = entity_id(relation["object"])
         if (
-            relation["predicate"] not in SPATIAL
+            relation["predicate"] not in SPATIAL or subject == target
             or subject not in by_id
             or target not in places
         ):
@@ -254,6 +273,14 @@ def catalog_trig(catalog):
             for key in ("modal", "attribution"):
                 if key in edge:
                     emit(edge["id"], NS + key, json.dumps(edge[key]))
+    for index, binding in enumerate(catalog.get("place_bindings", [])):
+        node = catalog["graph"] + ":place-binding:" + str(index)
+        emit(node, RDF_TYPE, NS + "PlaceBinding", True)
+        for key in ("mention", "place", "source", "evidence"):
+            if binding.get(key):
+                emit(node, NS + key, binding[key], True)
+    for link in catalog.get("scene_event_places", []):
+        emit(link["event"], NS + "reportedDestination", link["place"], True)
     for index, reference in enumerate(catalog.get("familiarity", [])):
         node = catalog["graph"] + ":reference:" + str(index)
         emit(catalog["observer"], NS + "hasEntityReference", node, True)

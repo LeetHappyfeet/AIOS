@@ -168,15 +168,16 @@ async def reject_identity_candidate(
     *,
     reason: str | None = None,
 ) -> None:
-    result = await db.execute(
+    rejected_id = await db.fetchval(
         """
         UPDATE aios.character_identity_candidate
         SET disposition='rejected',
             decided_at=now(),
-            meta=meta || jsonb_build_object('rejection_reason',$2)
+            meta=meta || jsonb_build_object('rejection_reason',$2::text)
         WHERE candidate_id=$1::uuid AND disposition='proposed'
+        RETURNING candidate_id
         """,
         str(candidate_id), reason,
     )
-    if result.endswith(" 0"):
+    if rejected_id is None:
         raise LookupError(f"no proposed identity candidate {candidate_id}")

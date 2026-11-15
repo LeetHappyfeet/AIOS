@@ -97,8 +97,14 @@ async def deferred_project_scope_rdf(
     return _TOPOLOGY_MODULE._rdf_graph(decision)
 
 
+def _node_iri(node_id: Any, node_type: str | None, node_key: str | None) -> str:
+    if node_type == "NARRATED_SCENE_EVENT":
+        return f"urn:aios:scene-event:{quote(str(node_key), safe='')}"
+    return f"urn:aios:topology-node:{node_id}"
+
+
 def _node_triples(scope_iri: str, row: Any) -> list[str]:
-    node_iri = f"urn:aios:topology-node:{row['topology_node_id']}"
+    node_iri = _node_iri(row["topology_node_id"], row["node_type"], row["node_key"])
     triples = [
         f"<{scope_iri}> <urn:aios:topology#hasNode> <{node_iri}> .",
         f"<{node_iri}> <urn:aios:topology#nodeType> {json.dumps(row['node_type'])} .",
@@ -108,6 +114,34 @@ def _node_triples(scope_iri: str, row: Any) -> list[str]:
         triples.append(
             f"<{node_iri}> <urn:aios:topology#label> {json.dumps(row['label'])} ."
         )
+    if row["node_type"] == "NARRATED_SCENE_EVENT":
+        meta = _TOPOLOGY_MODULE._json_object(row["meta"])
+        namespace = "urn:aios:scene#"
+        triples.append(f"<{node_iri}> a <{namespace}NarratedEvent> .")
+        iri_fields = (
+            ("world", "urn:aios:world:", row["world_id"]),
+            ("timeline", "urn:aios:timeline:", row["timeline_id"]),
+            ("sourceTimeline", "urn:aios:timeline:", meta.get("source_timeline_id")),
+            ("sourceNode", "urn:aios:dag:node:", row["dag_node_id"]),
+            ("observation", "urn:aios:observation:", meta.get("observation_id")),
+            ("claim", "urn:aios:world:claim:", row["claim_id"]),
+            ("proposition", "urn:aios:proposition:", row["proposition_id"]),
+            ("actor", "urn:aios:world-entity:", meta.get("actor_entity_id")),
+            ("object", "urn:aios:world-entity:", meta.get("object_entity_id")),
+        )
+        for predicate, prefix, value in iri_fields:
+            if value:
+                iri = prefix + quote(str(value), safe="")
+                triples.append(f"<{node_iri}> <{namespace}{predicate}> <{iri}> .")
+        literals = {
+            "eventKind": "movement" if meta.get("movement") else "action",
+            "action": meta.get("action"),
+            "actorLabel": meta.get("actor_label"),
+            "objectLabel": meta.get("object_label"),
+        }
+        for predicate, value in literals.items():
+            if value:
+                triples.append(f"<{node_iri}> <{namespace}{predicate}> {json.dumps(value)} .")
     return triples
 
 
@@ -193,7 +227,7 @@ def _delete_change_sparql(graph: str, scope_iri: str, change: Any) -> str:
     old = _TOPOLOGY_MODULE._json_object(change["old_state"])
 
     if kind == "node":
-        iri = f"urn:aios:topology-node:{object_id}"
+        iri = _node_iri(object_id, old.get("node_type"), old.get("node_key"))
         return (
             f"DELETE WHERE {{ GRAPH <{graph}> {{ <{scope_iri}> "
             f"<urn:aios:topology#hasNode> <{iri}> . }} }}; "
@@ -253,7 +287,8 @@ async def _fetch_current_delta_rows(
     if node_ids:
         rows = await db.fetch(
             """
-            SELECT topology_node_id, node_type, node_key, label
+            SELECT topology_node_id, node_type, node_key, label,
+                   world_id, timeline_id, dag_node_id, claim_id, proposition_id, meta
             FROM aios.semantic_topology_node
             WHERE topology_node_id = ANY($1::uuid[])
             """,
@@ -510,7 +545,8 @@ async def _project_scope_rdf_batched(
         while True:
             rows = await db.fetch(
                 """
-                SELECT topology_node_id, node_type, node_key, label
+                SELECT topology_node_id, node_type, node_key, label,
+                       world_id, timeline_id, dag_node_id, claim_id, proposition_id, meta
                 FROM aios.semantic_topology_node
                 WHERE scope_key=$1
                   AND ($2::uuid IS NULL OR topology_node_id > $2::uuid)

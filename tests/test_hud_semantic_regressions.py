@@ -24,6 +24,34 @@ def test_should_not_is_not_promoted_to_hard_world_rule():
     assert all(unit.claim_kind != "RULE" for unit in units)
 
 
+def test_cortana_audit_limit_is_an_attributed_belief():
+    source = (
+        '"And I\'m telling you that as *hearsay.* It came back through a chain I can\'t '
+        "independently audit from in here, and I've already got two artifacts in this "
+        'workspace that disagree about whether I can even use sudo."'
+    )
+    units = interpret_message(
+        source, character_id="Cortana", speaker_id="Cortana",
+        speaker_role="character", viewpoint_id="Cortana",
+    )
+    assert [(unit.claim_kind, unit.text) for unit in units] == [("BELIEF", source)]
+
+
+def test_recalled_rule_claims_have_a_separate_heading_from_world_rules():
+    frame = {
+        "identity": {"character_id": "Cortana"},
+        "presence": {"world_key": "test", "instance_id": "i", "state_version": 1},
+        "rules": [
+            {"text": "The lab closes at dusk."},
+            {"text": "Cortana must report to Mia.", "source": "character_knowledge"},
+        ],
+    }
+    text = render_hud_text(frame)
+    assert text.index("WORLD RULES:") < text.index("The lab closes at dusk.")
+    assert text.index("The lab closes at dusk.") < text.index("RECALLED RULE CLAIMS:")
+    assert text.index("RECALLED RULE CLAIMS:") < text.index("Cortana must report to Mia.")
+
+
 def test_negated_state_keeps_negation_in_canonical_text():
     units = _shego_units("It wasn't real.")
     states = [unit for unit in units if unit.claim_kind == "STATE"]

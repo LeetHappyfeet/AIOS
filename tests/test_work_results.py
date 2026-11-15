@@ -12,6 +12,7 @@ from aios_app.agent.work_profiles import experimental_profile, expand_request_te
 from aios_app.hud.work_results import result_view
 from aios_app.agent.workspaces import WorkspaceStore, FinishIn, LeaseIn
 from aios_app.agent.workspace_contract import Assignment
+from aios_app.agent.references import short_reference
 from aios_app.hud.render_text import render_hud_text
 
 db = workspace_tests.db
@@ -105,7 +106,8 @@ async def test_finish_retains_full_result_and_review_does_not_replace_it(db):
     assert 'Integration untested' in text
     assert '# Actual file\nContents from disk\n' in text
     assert 'Goal evidence accepted' not in text
-    assert str(req.request_id) in text and str(rid) in text
+    assert short_reference(req.request_id, 'q') in text
+    assert short_reference(rid, 'r') in text
     info = await work.inspect(origin.instance_id, req.request_id)
     assert info['execution']['result']['report'] == raw['report']
     assert 'claim_token' not in info['execution']

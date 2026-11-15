@@ -36,8 +36,14 @@ def catalog_router(db):
 
     @router.get("/instance/{instance_id}/entity-catalog")
     async def character_catalog(
-        instance_id: UUID, format: str = Query(default="json", pattern="^(json|trig)$")
+        instance_id: UUID,
+        format: str = Query(default="json", pattern="^(json|trig)$"),
+        head_node_id: UUID | None = None,
     ):
-        return await respond(EntityCatalogService(db).character(instance_id), format)
+        service = EntityCatalogService(db)
+        read = service.character(instance_id) if head_node_id is None else service.character(
+            instance_id, head_node_id=head_node_id
+        )
+        return await respond(read, format)
 
     return router

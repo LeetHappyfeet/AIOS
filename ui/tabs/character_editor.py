@@ -17,7 +17,7 @@ from aios_app.db import Database
 from aios_app.epistemic.weights import (
     DEFAULT_PROFILE as DEFAULT_EPISTEMIC_PROFILE,
     get_profile as get_epistemic_profile,
-    upsert_profile as upsert_epistemic_profile,
+    save_character_epistemic_profile,
 )
 from aios_app.hud.profile import (
     bind_character_profile,
@@ -486,7 +486,7 @@ def render():
                         with gr.Accordion("Propose manual identity facet", open=False):
                             with gr.Row():
                                 new_facet_type = gr.Dropdown(
-                                    choices=["identity","appearance","personality","values","expression",
+                                    choices=["identity","appearance","description","personality","values","expression",
                                              "constraint","role","developmental","domain"],
                                     value="personality", allow_custom_value=True, label="Facet type",
                                 )
@@ -539,7 +539,7 @@ def render():
 
             with gr.Tab("Epistemics & Learning"):
                 gr.Markdown(
-                    "These values are consumed by AIOS attention, trust, retention, belief weighting, and corpus-learning policy."
+                    "Legacy numeric policy: some sliders affect knowledge ranking and corpus learning, not factual truth or live emotions. Advanced trait weights are stored but have no runtime consumer. Saving reweights existing knowledge."
                 )
                 with gr.Row():
                     skepticism = gr.Slider(0, 1, value=.5, step=.01, label="Skepticism")
@@ -802,6 +802,11 @@ def render():
                           if str(r["candidate_id"]) == str(candidate).strip()), None)
             if not match:
                 raise gr.Error("Candidate does not belong to the selected character")
+            if match["disposition"] != "proposed":
+                message = f"Candidate is **{match['disposition']}**. Only proposed candidates can be rejected."
+                if match["disposition"] == "accepted":
+                    message += " To change the active facet, stage and accept a replacement."
+                return (*refresh_identity_components(cid), message)
             try:
                 run_async(reject_identity_candidate(
                     db, str(candidate).strip(), reason=str(reason or "").strip() or None
@@ -822,23 +827,23 @@ def render():
             cid = _character_id(selection)
             if not cid:
                 raise gr.Error("Character is required")
-            run_async(upsert_epistemic_profile(db, character_id=cid, data={
-                "skepticism": skepticism_v, "curiosity": curiosity_v,
-                "authority_trust": authority_v, "novelty_seeking": novelty_v,
-                "emotional_reactivity": reactivity_v, "retention": retention_v,
-                "source_trust": _rows_mapping(source_rows),
-                "topic_interest": _rows_mapping(interest_rows),
-                "domain_expertise": _rows_mapping(expertise_rows),
-                "trait_weights": _rows_mapping(trait_rows),
-            }))
-            mode = str(continuity_v or "character").lower()
-            if mode not in {"character","user","isolated"}:
-                raise gr.Error("Invalid memory continuity")
-            run_async(db.execute(
-                "UPDATE aios.character_epistemic_profile SET memory_continuity=$2, updated_at=now() WHERE character_id=$1",
-                cid, mode,
-            ))
-            return f"Saved epistemic and learning profile for **{cid}**."
+            try:
+                _profile, count = run_async(save_character_epistemic_profile(
+                    db, character_id=cid,
+                    data={
+                        "skepticism": skepticism_v, "curiosity": curiosity_v,
+                        "authority_trust": authority_v, "novelty_seeking": novelty_v,
+                        "emotional_reactivity": reactivity_v, "retention": retention_v,
+                        "source_trust": _rows_mapping(source_rows),
+                        "topic_interest": _rows_mapping(interest_rows),
+                        "domain_expertise": _rows_mapping(expertise_rows),
+                        "trait_weights": _rows_mapping(trait_rows),
+                    },
+                    memory_continuity=continuity_v,
+                ))
+            except ValueError as exc:
+                raise gr.Error(str(exc)) from exc
+            return f"Saved epistemic and learning profile for **{cid}**; reweighted **{count}** knowledge rows."
 
         save_epistemics.click(
             fn=save_epistemics_click,

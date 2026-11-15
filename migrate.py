@@ -17,6 +17,10 @@ BASELINE_RECEIPT = "0001_aios_baseline"
 # One canonical ordered chain. Do not squash or edit released SQL/checksums.
 # Fresh installs and existing canonical-baseline installs use identical files.
 REQUIRED_ACTIVE_MIGRATIONS = frozenset({
+    "20261108_03_semantic_convergence_scan_indexes.sql",
+    "20261108_02_place_reference_evidence.sql",
+    "20261108_01_workspace_memory.sql",
+    "20261107_02_narrated_scene_history.sql",
     "20261101_02_pipeline_liveness.sql",
     "20261101_01_goal_activity_scheduling.sql",
     "20261030_02_workspace_attachment.sql",
@@ -207,7 +211,17 @@ async def apply_migrations() -> None:
         ordered_applied = [path.name for path in files if path.name in applied]
         ordered_prefix = [path.name for path in files[:len(ordered_applied)]]
         if ordered_applied != ordered_prefix:
-            raise RuntimeError("Non-prefix migration ledger; rebuild a disposable database or repair explicitly")
+            missing_before_applied = [
+                path.name for path in files[:files.index(next(
+                    p for p in reversed(files) if p.name in applied)) + 1]
+                if path.name not in applied
+            ]
+            raise RuntimeError(
+                "Non-prefix migration ledger: files sort before already-applied "
+                f"migrations but are not recorded as applied: {missing_before_applied}. "
+                "Check migration filenames and branch order; do not manually insert "
+                "receipts or rebuild a database without investigating."
+            )
 
         for path, digest, body in prepared:
             previous = applied.get(path.name)
