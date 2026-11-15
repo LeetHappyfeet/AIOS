@@ -767,6 +767,7 @@ def install_workspace_routes(app, db, hud_handler):
                 "character-recall-v3",
                 "work-evidence-v1",
                 WORKSPACE_MEMORY,
+                "character-activity-v1",
                 "task-events-v3",
             ],
             "single_writer": True,
@@ -904,21 +905,32 @@ def install_workspace_routes(app, db, hud_handler):
                     run["objective"], goal_id=goal_id if goal else None,
                     link_id=run["environment_link_id"],
                 )
-                return {
+                response = {
                     "generation_ready": True,
                     "freshness": {"source_current": True},
                     "format": WORKSPACE_MEMORY,
                     "text": render_brief(execution_identity(b["character_id"], kernel), goal, notes),
                 }
-        return await hud_handler(
-            instance_id=b["instance_id"],
-            through_node_id=node,
-            recent_limit=4,
-            token_budget=2500,
-            wait_ms=2500,
-            profile_name="workspace_execution",
-            focus_text=run["objective"],
-        )
+            else:
+                response = None
+        # Inference must run outside the lease/database lock. The result is
+        # cached against the immutable run, never regenerated per model step.
+        from .work_activity_context import brief_for_run
+        activity = await brief_for_run(db, run, b["character_id"])
+        if response is None:
+            response = await hud_handler(
+                instance_id=b["instance_id"],
+                through_node_id=node,
+                recent_limit=4,
+                token_budget=2500,
+                wait_ms=2500,
+                profile_name="workspace_execution",
+                focus_text=run["objective"],
+            )
+        if activity:
+            response = dict(response)
+            response["character_activity"] = activity
+        return response
 
     @router.post("/v3/{binding_id}/runs/{run_id}/recall")
     async def recall(binding_id: UUID, run_id: UUID, req: RecallIn):
