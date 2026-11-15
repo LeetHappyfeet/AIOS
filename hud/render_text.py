@@ -451,6 +451,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         action = {"op": "request_work", "capability": example['capability'], "purpose": example['purpose'],
                   "objective": "Describe the concrete task and desired result here", "constraints": []}
         lines.append('Copy capability and purpose exactly from the list; do not invent names. Put the concrete task in objective. Budgets, authority and host checks are configured by the operator.')
+        lines.append('Character-owned computer activity: you may describe requested workspace actions in first person as work you intend to do on your computer. The execution runtime is a tool context, not automatically a separate person. A request is only an intention; describe files, successful commands, and accomplishments in the past tense only when an execution result supports them. Do not turn worker reports into independently verified facts.')
         lines.append('For work toward the immediate managed goal, include its goal_ref when shown. AIOS validates the goal and chooses its current attempt; omitted references may be unlinked when several goals are active.')
         if (example['capability'], example['purpose']) == ('workspace', 'experimental_task'):
             lines.append('Different experimental tasks reuse workspace / experimental_task; no new capability or purpose is needed for each objective.')
