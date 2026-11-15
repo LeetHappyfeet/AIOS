@@ -798,6 +798,27 @@ def install_workspace_routes(app, db, hud_handler):
         # Exact runtime/session/user/scope coordinates, rather than session guesses.
         return {"sessions": await store.instances(character_id)}
 
+    @router.get("/v3/{binding_id}/research/discoveries")
+    async def research_discoveries(binding_id: UUID, run_id: UUID | None = None):
+        # Operator/worker-key protected endpoint, scoped to a concrete binding.
+        # This returns worker evidence only; no source contents or corpus grants.
+        await store.binding(binding_id)
+        rows = await db.fetch(
+            """SELECT d.run_id,d.evidence_id,d.instance_id,d.dossier_id,
+                      d.source_id,d.source_kind,d.title,d.document_sha256,
+                      d.section,d.location,d.public_url,d.created_at
+               FROM aios.research_external_discovery d
+               JOIN aios.workspace_run w ON w.run_id=d.run_id
+               WHERE w.binding_id=$1 AND ($2::uuid IS NULL OR d.run_id=$2)
+               ORDER BY d.created_at DESC,d.run_id,d.evidence_id LIMIT 50""",
+            binding_id, run_id,
+        )
+        return {"discoveries": [
+            {key: str(value) if isinstance(value, UUID) else value
+             for key, value in dict(row).items()}
+            for row in rows
+        ], "epistemic_status": "worker_discovery_not_corpus_or_character_knowledge"}
+
     @router.get("/v3/readiness")
     async def readiness(origin_instance_id: UUID, binding_id: UUID | None = None):
         return await WorkspaceSetup(db).readiness(origin_instance_id, binding_id)
