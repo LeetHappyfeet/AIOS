@@ -443,19 +443,17 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     work = frame.get("work") or {}
     capabilities = work.get("capabilities") or []
     if capabilities:
-        lines.append("WORK CAPABILITIES (request intent; AIOS decides authorization and routing)")
+        lines.append("WORK CAPABILITIES")
         for capability in capabilities:
             description = " ".join(str(capability["description"]).split())[:300]
-            lines.append(f"- {capability['capability']} / {capability['purpose']}: {description}; worker {'recently seen' if capability['online'] else 'not recently seen'}")
-        example = next((p for p in capabilities if (p['capability'], p['purpose']) == ('workspace', 'experimental_task')), capabilities[0])
-        action = {"op": "request_work", "capability": example['capability'], "purpose": example['purpose'],
-                  "objective": "Describe the concrete task and desired result here", "constraints": []}
-        lines.append('Copy capability and purpose exactly from the list; do not invent names. Put the concrete task in objective. Budgets, authority and host checks are configured by the operator.')
-        lines.append('Character-owned computer activity: you may describe requested workspace actions in first person as work you intend to do on your computer. The execution runtime is a tool context, not automatically a separate person. A request is only an intention; describe files, successful commands, and accomplishments in the past tense only when an execution result supports them. Do not turn worker reports into independently verified facts.')
-        lines.append('For work toward the immediate managed goal, include its goal_ref when shown. AIOS validates the goal and chooses its current attempt; omitted references may be unlinked when several goals are active.')
-        if (example['capability'], example['purpose']) == ('workspace', 'experimental_task'):
-            lines.append('Different experimental tasks reuse workspace / experimental_task; no new capability or purpose is needed for each objective.')
-        lines.append('To request work, use native request_work when registered. Otherwise emit exactly one complete structured block in your reply, outside Markdown code fences. Example with an available pair: <aios_action>' + json.dumps(action, separators=(',', ':')) + '</aios_action>. Replace objective with the actual bounded task. AIOS returns admission/status in a later HUD. Never claim execution from a request, or resubmit work already pending.')
+            offline = " (worker not recently seen)" if not capability["online"] else ""
+            lines.append(f"- {capability['capability']} / {capability['purpose']} — {description}{offline}")
+        example = capabilities[0]
+        action = {"op": "request_work", "capability": example["capability"],
+                  "purpose": example["purpose"], "objective": "Describe the task and desired result"}
+        lines.append("Use request_work with a listed pair and concrete objective. Include goal_ref when working on the displayed goal. Wait for results before claiming completion or retrying.")
+        lines.append("Without a native tool, emit one action block outside code fences: <aios_action>"
+                     + json.dumps(action, separators=(",", ":")) + "</aios_action>")
     elif work.get("unavailable_reason"):
         lines.append("WORK UNAVAILABLE: " + str(work["unavailable_reason"])[:300])
     if work.get("request_error"):
@@ -471,7 +469,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.extend("- " + note_line(note, with_ref=True) for note in frame["workspace_memory"])
     section("work_retrieval", 2, 0.12, atomic=True)
     if work.get("result_tool"):
-        lines.append('RETAINED WORK EVIDENCE: use native read_work_result when registered, or one <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. Supply exactly one request_id or run_id. Sections: summary, findings, evidence, search_log, research_progress, limitations, requested_content, report, checks. An empty findings list is not an empty evidence record: inspect evidence and search_log before requesting new work. Continue with next_cursor and the returned revision. This reads reports without executing work.')
+        lines.append('RETAINED WORK EVIDENCE: Use read_work_result with one run_id or request_id. Fallback: <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. Sections: summary, findings, evidence, search_log, research_progress, limitations, requested_content, report, checks. Empty findings do not imply empty evidence; inspect evidence and search_log before requesting new work. For more, use next_cursor and revision.')
     section("retrieved_result", 2, 0.24, atomic=True)
     if work.get("retrieved_result"):
         lines.append(result_page(work["retrieved_result"], None if total is None else int(total * 4 * 0.24)))
