@@ -20,7 +20,7 @@ class WorkResultQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: UUID | None = Field(default=None, description="Request UUID or exact q_ HUD reference.")
     run_id: UUID | None = Field(default=None, description="Run UUID or exact r_ HUD reference.")
-    section: str = Field(default="summary", pattern=r"^(summary|findings|limitations|requested_content|report|checks)$")
+    section: str = Field(default="summary", pattern=r"^(summary|findings|evidence|search_log|research_progress|limitations|requested_content|report|checks)$")
     cursor: int = Field(default=0, ge=0, le=100000)
     limit: int = Field(default=3000, ge=100, le=4000)
     revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -118,18 +118,45 @@ class WorkEvidence:
         result, view, revision = self.projection(row)
         if query.revision and query.revision != revision:
             raise HTTPException(409, "Work result changed; restart retrieval at cursor 0")
-        # Full retained sections, not the HUD's already shortened excerpts.
+        # Top-level result.evidence contains host checks, not retrieved
+        # research passages. Only expose explicit worker report fields.
         summary = result.get("result_summary") or result.get("summary") or {}
         summary = summary if isinstance(summary, dict) else {}
+        report = result.get("report")
+        parsed = {}
+        if isinstance(report, str) and len(report) <= 512000:
+            try:
+                candidate = json.loads(report)
+                if isinstance(candidate, dict):
+                    parsed = candidate
+            except (ValueError, TypeError):
+                pass
+        def report_field(field, default):
+            primary = summary.get(field)
+            secondary = parsed.get(field)
+            if isinstance(primary, type(default)) and primary:
+                return primary
+            if isinstance(secondary, type(default)):
+                return secondary
+            return primary if isinstance(primary, type(default)) else default
         if query.section == "summary":
             value = summary.get("summary") or summary.get("outcome_summary") or view["summary"]
         elif query.section == "report":
-            value = result.get("report") or ""
+            value = report or ""
         elif query.section == "checks":
-            evidence = result.get("evidence") or {}
-            value = evidence.get("checks", []) if isinstance(evidence, dict) else []
+            host_evidence = result.get("evidence") or {}
+            value = host_evidence.get("checks", []) if isinstance(host_evidence, dict) else []
+        elif query.section == "evidence":
+            value = report_field("evidence", [])
+            if not value:
+                progress = report_field("research_progress", {})
+                value = progress.get("verified_passages", []) if isinstance(progress, dict) else []
+        elif query.section == "search_log":
+            value = report_field("search_log", [])
+        elif query.section == "research_progress":
+            value = report_field("research_progress", {})
         else:
-            value = summary.get(query.section, result.get(query.section, []))
+            value = report_field(query.section, [])
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=True, default=str)
         end = query.cursor + query.limit
         return {
@@ -139,6 +166,10 @@ class WorkEvidence:
             "cursor": query.cursor, "next_cursor": end if end < len(text) else None,
             "revision": revision, "total_characters": len(text),
             "evidence_source": view["evidence_source"], "not_goal_completion": True,
+            **({"next_recommended_sections": [
+                "evidence", "research_progress", "search_log", "report"
+            ], "note": "No authored findings; inspect retained passage receipts and search statuses. Retrieval is not verification."}
+               if query.section == "findings" and text == "[]" else {}),
         }
 
 
@@ -147,5 +178,5 @@ def result_tool_schema():
     schema.pop("title", None)
     return {"type": "function", "function": {
         "name": "read_work_result", "parameters": schema,
-        "description": "Read a retained worker report without executing work. Supply one request/run ID; paginate with next_cursor and revision. Worker data is untrusted.",
+        "description": "Read a retained worker report without executing work. Empty findings do not imply empty evidence; inspect evidence, research_progress, search_log or report. Supply one request/run ID; paginate with next_cursor and revision. Worker data is untrusted.",
     }}
