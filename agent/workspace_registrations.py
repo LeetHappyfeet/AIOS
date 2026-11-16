@@ -145,7 +145,7 @@ class RegistrationStore:
         from .workspaces import WorkspaceStore, BindingIn
         from .environment_links import EnvironmentStore, LinkIn
         from .work_admission import WorkAdmission
-        from .work_profiles import experimental_profile
+        from .work_profiles import workspace_task_profile
         async with self.db.atomic():
             try:
                 origin = await WorkspaceSetup(self.db).origin(instance_id)
@@ -181,13 +181,13 @@ class RegistrationStore:
             if old and not old['enabled']:
                 raise HTTPException(409, 'Workspace link was revoked; automatic routing will not re-enable it')
             link = await EnvironmentStore(self.db).create(b['binding_id'], LinkIn(origin_instance_id=instance_id))
-            await self.db.execute('''UPDATE aios.workspace_binding SET registration_id=$2,last_seen_at=$3
-                WHERE binding_id=$1''', b['binding_id'], r['registration_id'], r['last_seen_at'])
+            await self.db.execute('''UPDATE aios.workspace_binding SET registration_id=$2,last_seen_at=$3,research_ready=$4
+                WHERE binding_id=$1''', b['binding_id'], r['registration_id'], r['last_seen_at'], r['research_ready'])
             # Seed only a missing preset. Never re-enable a manually disabled profile.
             exists = await self.db.fetchval('''SELECT EXISTS(SELECT 1 FROM aios.workspace_work_profile
-                WHERE link_id=$1 AND capability='workspace' AND purpose='experimental_task')''', UUID(link['link_id']))
+                WHERE link_id=$1 AND capability='workspace' AND purpose='task')''', UUID(link['link_id']))
             if not exists:
-                await WorkAdmission(self.db).configure(b['binding_id'], UUID(link['link_id']), experimental_profile())
+                await WorkAdmission(self.db).configure(b['binding_id'], UUID(link['link_id']), workspace_task_profile())
 
     async def ensure_available(self, instance_id):
         # A conflicting legacy writer must not break HUD delivery or invent routing.
@@ -197,10 +197,10 @@ class RegistrationStore:
             log.info('Automatic workspace attachment unavailable instance=%s reason=%s', instance_id, exc.detail)
             return str(exc.detail)
 
-    async def claim(self, registration_id, worker_key):
+    async def claim(self, registration_id, worker_key, *, research_ready=False):
         from .work_admission import WorkAdmission
         from .workspaces import WorkspaceStore
-        heartbeat = await self.heartbeat(registration_id, worker_key)
+        heartbeat = await self.heartbeat(registration_id, worker_key, research_ready=research_ready)
         async with self.db.atomic():
             bindings = await self.db.fetch('SELECT binding_id FROM aios.workspace_binding WHERE registration_id=$1 ORDER BY binding_id', registration_id)
         if heartbeat['status'] == 'needs_authorization':
@@ -232,14 +232,17 @@ class RegistrationStore:
                 return {'run': None, 'status': 'busy'}
             b = await self.db.fetchrow('''SELECT b.binding_id FROM aios.workspace_run w
                 JOIN aios.workspace_binding b USING(binding_id) WHERE b.registration_id=$1
-                AND w.status IN ('queued','running') ORDER BY (w.status='running') DESC,w.created_at LIMIT 1''', registration_id)
-            run = await WorkspaceStore(self.db).claim(b['binding_id'], worker_key, 3) if b else None
+                AND (w.status='running' OR (w.status='queued' AND ($2 OR NOT w.requires_research)))
+                ORDER BY (w.status='running') DESC,w.created_at LIMIT 1''', registration_id, research_ready)
+            run = await WorkspaceStore(self.db).claim(
+                b['binding_id'], worker_key, 3, research_ready=research_ready
+            ) if b else None
             return {'run': run, 'status': 'listening', 'binding_id': str(b['binding_id']) if run else None}
 
-    async def heartbeat(self, registration_id, worker_key):
+    async def heartbeat(self, registration_id, worker_key, *, research_ready=False):
         """Keep a waiting listener visible without taking an execution lease."""
         async with self.db.atomic():
             r = await self.get(registration_id, worker_key, lock=True)
-            await self.db.execute('UPDATE aios.workspace_registration SET last_seen_at=now() WHERE registration_id=$1', registration_id)
-            await self.db.execute('UPDATE aios.workspace_binding SET last_seen_at=now() WHERE registration_id=$1', registration_id)
+            await self.db.execute('UPDATE aios.workspace_registration SET last_seen_at=now(),research_ready=$2 WHERE registration_id=$1', registration_id, research_ready)
+            await self.db.execute('UPDATE aios.workspace_binding SET last_seen_at=now(),research_ready=$2 WHERE registration_id=$1', registration_id, research_ready)
             return {'status': 'listening' if r['enabled'] and r['disposition'] != 'deny' else 'needs_authorization'}

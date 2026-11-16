@@ -22,8 +22,8 @@ separate from the chat cursor. Independent environments still require matching
 character/user and separate source timelines/worlds.
 No instance, machine, environment link, or permission is inferred from a name.
 
-For open-ended experiments, Gradio's **Enable general experimental tasks on
-selected link** creates `workspace / experimental_task`. Change `objective` for
+For general workspace tasks, Gradio's **Enable workspace tasks on selected
+link** creates `workspace / task`. Change `objective` for
 each task; no per-task purpose name is needed. Its 100,000-character context cap
 replaces the overly small greeting-test budget for new work. It verifies a
 request-specific outcome/evidence report; it does not universally verify task
@@ -128,6 +128,21 @@ work is standalone and cannot automatically close any goal. A later attempt neve
 replaces a pinned one. An unrecognized capability returns needs_configuration;
 AIOS never falls back to an unrelated machine.
 
+## Workspace tasks and research search
+
+Existing workspace profiles migrate to `workspace / task` with their IDs,
+enabled state, and criteria intact. Existing requests using the previous purpose
+can still be retried with either spelling. If a link already has profiles under
+both names, resolve the duplicate before running the migration.
+
+Upgrade AIOS Client first so research workers recognize the new report filename.
+In Workspace Delegation, select an authorized link and use **Enable research
+search on selected link**. The HUD shows `research / search` while a Client in
+research mode with valid source grants is polling that link. Existing workspace
+execution policy still applies. A disconnected or reconfigured research worker
+leaves queued research for a research-ready listener on that binding. Put
+source-specific restrictions in the request objective or constraints.
+
 ## Native and internal callers
 
 `frame.work.tool` contains an OpenAI-style `request_work` schema. A compatible
@@ -185,7 +200,7 @@ ordinary workspace command access available.
 
 Use `report_mode: "inline"` to request a direct JSON result. A no-report-file
 instruction also selects inline reporting. For the standard
-`workspace / experimental_task` preset, inline reporting removes only its built-in
+`workspace / task` preset, inline reporting removes only its built-in
 report-file output and format check. Conflicting custom checks and outputs return
 `needs_configuration`. Existing approvals and workspace permissions still apply.
 

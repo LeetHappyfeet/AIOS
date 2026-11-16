@@ -91,7 +91,11 @@ class ClaimIn(BaseModel):
     worker_key: str
 
 
-class ClaimRequest(ClaimIn):
+class ListenerIn(ClaimIn):
+    research_ready: bool = False
+
+
+class ClaimRequest(ListenerIn):
     protocol_version: Literal[2, 3] = 2
 
 
@@ -234,7 +238,7 @@ class WorkspaceStore:
             return public(new)
 
     async def submit(
-        self, binding_id, req, *, environment=None, operator_assignment=True
+        self, binding_id, req, *, environment=None, operator_assignment=True, requires_research=False
     ):
         from .actions import ActionDispatcher, default_action_registry
         from .lifecycle import CharacterAgencyStore
@@ -297,14 +301,15 @@ class WorkspaceStore:
                     409, f"Workspace action was not admitted: {action.status}"
                 )
             row = await self.db.execute_returning_row(
-                """INSERT INTO aios.workspace_run(binding_id,action_id,request_id,objective,assignment,assignment_hash)
-                VALUES($1,$2,$3,$4,$5::jsonb,$6) RETURNING *""",
+                """INSERT INTO aios.workspace_run(binding_id,action_id,request_id,objective,assignment,assignment_hash,requires_research)
+                VALUES($1,$2,$3,$4,$5::jsonb,$6,$7) RETURNING *""",
                 binding_id,
                 action.action_id,
                 req.request_id,
                 req.objective,
                 json.dumps(spec.model_dump(mode="json")),
                 spec.digest(),
+                requires_research,
             )
             if environment:
                 row = await self.db.execute_returning_row(
@@ -322,7 +327,7 @@ class WorkspaceStore:
             )
             return public(row)
 
-    async def claim(self, binding_id, worker_key, protocol_version=2):
+    async def claim(self, binding_id, worker_key, protocol_version=2, *, research_ready=False):
         async with self.db.atomic():
             await self.binding(binding_id, worker_key, lock=True)
             # Never replay an abandoned coding run: shell side effects may have happened.
@@ -355,12 +360,14 @@ class WorkspaceStore:
                 WHERE run_id=(SELECT r.run_id FROM aios.workspace_run r JOIN aios.character_action a USING(action_id)
                     WHERE r.binding_id=$1 AND r.status='queued' AND a.status='queued'
                     AND r.required_protocol_version<=$3 AND NOT r.cancel_requested
+                    AND ($4 OR NOT r.requires_research)
                     AND (r.environment_link_id IS NULL OR EXISTS(
                       SELECT 1 FROM aios.character_environment_link l WHERE l.link_id=r.environment_link_id AND l.enabled))
                     ORDER BY r.created_at,r.run_id LIMIT 1 FOR UPDATE OF r SKIP LOCKED) RETURNING *""",
                 binding_id,
                 uuid4(),
                 protocol_version,
+                research_ready,
             )
             if row:
                 await self.db.execute(
@@ -805,12 +812,12 @@ def install_workspace_routes(app, db, hud_handler):
         return await registrations.register(req)
 
     @router.post("/registrations/{registration_id}/claim")
-    async def claim_registered_workspace(registration_id: UUID, req: ClaimIn):
-        return await registrations.claim(registration_id, req.worker_key)
+    async def claim_registered_workspace(registration_id: UUID, req: ListenerIn):
+        return await registrations.claim(registration_id, req.worker_key, research_ready=req.research_ready)
 
     @router.post("/registrations/{registration_id}/heartbeat")
-    async def heartbeat_registered_workspace(registration_id: UUID, req: ClaimIn):
-        return await registrations.heartbeat(registration_id, req.worker_key)
+    async def heartbeat_registered_workspace(registration_id: UUID, req: ListenerIn):
+        return await registrations.heartbeat(registration_id, req.worker_key, research_ready=req.research_ready)
 
     @router.post("/bind")
     async def bind(req: BindingIn):
@@ -846,13 +853,17 @@ def install_workspace_routes(app, db, hud_handler):
             raise HTTPException(409, 'This workspace uses automatic chat routing; listen through its registration')
         if req.protocol_version == 3:
             await db.execute(
-                "UPDATE aios.workspace_binding SET last_seen_at=now() WHERE binding_id=$1",
+                "UPDATE aios.workspace_binding SET last_seen_at=now(),research_ready=$2 WHERE binding_id=$1",
                 binding_id,
+                req.research_ready,
             )
 
             await WorkAdmission(db).reconsider(binding_id=binding_id)
         return {
-            "run": await store.claim(binding_id, req.worker_key, req.protocol_version)
+            "run": await store.claim(
+                binding_id, req.worker_key, req.protocol_version,
+                research_ready=req.protocol_version == 3 and req.research_ready,
+            )
         }
 
     @router.get("/{binding_id}/runs/{run_id}")

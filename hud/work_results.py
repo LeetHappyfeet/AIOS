@@ -51,16 +51,17 @@ def _report_only(checks):
     # or a check ID alone. UUID substitution is the only template expansion.
     if not checks:
         return False
-    from aios_app.agent.work_profiles import experimental_profile
-    expected = experimental_profile().assignment_template["required_checks"][0]
-    pattern = re.escape(expected["command"]).replace(
-        re.escape("{request_id}"), r"(?:\{request_id\}|[0-9a-fA-F-]{36})"
-    )
-    return bool(checks) and all(
-        isinstance(c, Mapping) and c.get("id") == expected["id"]
-        and re.fullmatch(pattern, str(c.get("command") or ""))
-        for c in checks
-    )
+    from aios_app.agent.work_profiles import workspace_task_profile
+
+    for legacy_report in (False, True):
+        expected = workspace_task_profile(legacy_report=legacy_report).assignment_template["required_checks"][0]
+        pattern = re.escape(expected["command"]).replace(
+            re.escape("{request_id}"), r"(?:\{request_id\}|[0-9a-fA-F-]{36})"
+        )
+        if all(isinstance(c, Mapping) and c.get("id") == expected["id"]
+               and re.fullmatch(pattern, str(c.get("command") or "")) for c in checks):
+            return True
+    return False
 
 
 def result_view(result, assignment):

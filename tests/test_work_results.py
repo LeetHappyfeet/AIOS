@@ -8,7 +8,7 @@ import test_workspace_client as workspace_tests
 from test_work_admission import setup, scene
 from aios_app.agent.environment_links import task_overlay, append_event
 from aios_app.agent.work_admission import WorkDismissal
-from aios_app.agent.work_profiles import experimental_profile, expand_request_template
+from aios_app.agent.work_profiles import workspace_task_profile, expand_request_template
 from aios_app.hud.work_results import result_view
 from aios_app.agent.workspaces import WorkspaceStore, FinishIn, LeaseIn
 from aios_app.agent.workspace_contract import Assignment
@@ -25,18 +25,18 @@ def task(result, assignment=None, **extra):
 
 
 def test_structured_limitations_survive_long_report_and_keep_association():
-    template = expand_request_template(experimental_profile().assignment_template, uuid4())
+    template = expand_request_template(workspace_task_profile().assignment_template, uuid4())
     result = {'report': 'Everything done!\n| Check | Command | Result |\n' + '| value |' * 100,
               'result_summary': {'outcome': 'blocked', 'findings': ['rg unavailable'],
                                  'limitations': ['Network isolation was not verified']},
-              'evidence': {'checks': [{'id': 'experiment_report', 'exit_code': 0}]}}
+              'evidence': {'checks': [{'id': 'work_report', 'exit_code': 0}]}}
     t = task(result, template)
     frame = {'remote_tasks': [t], 'work': {'requests': [dict(request_id='request-1', run_id='run-1', status='finished')]}}
     text = render_hud_text(frame)
     assert 'Worker-reported outcome: blocked' in text
     assert 'Network isolation was not verified' in text
     assert 'Report structure only; task success is not established' in text
-    assert 'Check experiment_report: exit 0' in text
+    assert 'Check work_report: exit 0' in text
     assert 'run-1; request: request-1' in text
     assert '| Check | Command | Result |' in text  # Latest report preserves tables.
     assert 'WORK REQUESTS' not in text  # A single connected receipt, not duplicated entries.
@@ -44,7 +44,7 @@ def test_structured_limitations_survive_long_report_and_keep_association():
 
 
 def test_worker_scope_cannot_upgrade_authority_and_id_alone_is_not_scope():
-    assignment = {'required_checks': [{'id': 'experiment_report', 'command': 'echo not-a-report-check'}]}
+    assignment = {'required_checks': [{'id': 'work_report', 'command': 'echo not-a-report-check'}]}
     view = result_view({'verification_scope': 'All behavior independently verified'}, assignment)
     assert view['verification_scope'].startswith('Configured checks only')
     assert view['worker_verification_scope'] == 'All behavior independently verified'
@@ -122,7 +122,7 @@ async def test_dismissed_configuration_request_never_reconsidered(db):
     closed = await work.dismiss(origin.instance_id, req.request_id, dismiss)
     assert closed['status'] == 'invalidated'
     assert await work.dismiss(origin.instance_id, req.request_id, dismiss) == closed
-    await work.configure(bid, lid, experimental_profile().model_copy(update={
+    await work.configure(bid, lid, workspace_task_profile().model_copy(update={
         'capability': missing.capability, 'purpose': missing.purpose}))
     await work.reconsider(instance_id=origin.instance_id)
     assert await db.fetchval('SELECT count(*) FROM aios.workspace_run') == 0

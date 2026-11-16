@@ -21,6 +21,17 @@ from .work_evidence import WorkEvidence, WorkResultQuery, result_tool_schema
 from .references import expand_reference
 
 
+LEGACY_TASK_PURPOSE = "experimental_task"
+WORKSPACE_TASK = ("workspace", "task")
+RESEARCH_SEARCH = ("research", "search")
+
+
+def canonical_purpose(capability, purpose):
+    if (capability, purpose) == ("workspace", LEGACY_TASK_PURPOSE):
+        return WORKSPACE_TASK[1]
+    return purpose
+
+
 class WorkIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     capability: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
@@ -256,6 +267,7 @@ class WorkAdmission:
         from .environment_links import EnvironmentStore
         from .workspaces import WorkspaceStore, public
 
+        purpose = canonical_purpose(req.capability, req.purpose)
         async with self.db.atomic():
             await WorkspaceStore(self.db).binding(binding_id, lock=True)
             await EnvironmentStore(self.db).link(binding_id, link_id)
@@ -264,7 +276,7 @@ class WorkAdmission:
                 "SELECT * FROM aios.workspace_work_profile WHERE link_id=$1 AND capability=$2 AND purpose=$3 FOR UPDATE",
                 link_id,
                 req.capability,
-                req.purpose,
+                purpose,
             )
             if old:
                 if decode(old["assignment_template"]) != req.assignment_template:
@@ -286,7 +298,7 @@ class WorkAdmission:
                    VALUES($1,$2,$3,$4,$5::jsonb,$6) RETURNING *""",
                     link_id,
                     req.capability,
-                    req.purpose,
+                    purpose,
                     req.description,
                     json.dumps(req.assignment_template),
                     req.enabled,
@@ -295,7 +307,11 @@ class WorkAdmission:
 
     async def request(self, instance_id, req, *, character_source=False):
         intent = req.intent().model_dump(mode="json", exclude_none=True)
+        intent["purpose"] = canonical_purpose(intent["capability"], intent["purpose"])
         digest = fingerprint(intent)
+        digests = [digest]
+        if (intent["capability"], intent["purpose"]) == WORKSPACE_TASK:
+            digests.append(fingerprint({**intent, "purpose": LEGACY_TASK_PURPOSE}))
         async with self.db.atomic():
             # Resolve retries first; later chat turns must not duplicate an admitted job.
             await self.db.execute(
@@ -310,7 +326,7 @@ class WorkAdmission:
                 if (
                     alias["instance_id"] != instance_id
                     or alias["source_node_id"] != req.source_node_id
-                    or alias["intent_hash"] != digest
+                    or alias["intent_hash"] not in digests
                 ):
                     raise HTTPException(
                         409, "Request ID reused with different work or identity"
@@ -326,16 +342,18 @@ class WorkAdmission:
             )
             if old is None:
                 old = await self.db.fetchrow(
-                    "SELECT * FROM aios.character_work_request WHERE instance_id=$1 AND source_node_id=$2 AND intent_hash=$3 FOR UPDATE",
+                    """SELECT * FROM aios.character_work_request
+                       WHERE instance_id=$1 AND source_node_id=$2 AND intent_hash=ANY($3::text[])
+                       ORDER BY (intent_hash=($3::text[])[1]) DESC LIMIT 1 FOR UPDATE""",
                     instance_id,
                     req.source_node_id,
-                    digest,
+                    digests,
                 )
             if old:
                 if (
                     old["instance_id"] != instance_id
                     or old["source_node_id"] != req.source_node_id
-                    or old["intent_hash"] != digest
+                    or old["intent_hash"] not in digests
                 ):
                     raise HTTPException(
                         409, "Request ID reused with different work or identity"
@@ -349,13 +367,13 @@ class WorkAdmission:
             await RegistrationStore(self.db).ensure_available(instance_id)
             duplicate = await self.db.fetchrow(
                 """SELECT r.* FROM aios.character_work_request r LEFT JOIN aios.workspace_run w USING(run_id)
-                   WHERE r.instance_id=$1 AND r.source_timeline_id=$2 AND r.intent_hash=$3
+                   WHERE r.instance_id=$1 AND r.source_timeline_id=$2 AND r.intent_hash=ANY($3::text[])
                      AND r.status NOT IN ('denied','invalidated')
                      AND (r.run_id IS NULL OR w.status IN ('queued','running'))
                    ORDER BY r.created_at LIMIT 1 FOR UPDATE OF r""",
                 instance_id,
                 source["source_timeline_id"],
-                digest,
+                digests,
             )
             if duplicate:
                 await self.alias(req, instance_id, digest, duplicate["request_id"])
@@ -431,18 +449,22 @@ class WorkAdmission:
         if row["run_id"] or row["status"] in {"denied", "invalidated"}:
             return self.receipt(row)
         intent = WorkIntent.model_validate(decode(row["intent"]))
+        purpose = canonical_purpose(intent.capability, intent.purpose)
+        research = (intent.capability, purpose) == RESEARCH_SEARCH
         profiles = await self.db.fetch(
-            """SELECT p.*,b.instance_id AS execution_instance_id,b.last_seen_at,
+            """SELECT p.*,b.instance_id AS execution_instance_id,
                       l.execution_binding_id,l.origin_source_timeline_id
                FROM aios.workspace_work_profile p JOIN aios.character_environment_link l USING(link_id)
                JOIN aios.workspace_binding b ON b.binding_id=l.execution_binding_id
                WHERE l.origin_instance_id=$1 AND l.enabled AND p.enabled AND p.capability=$2 AND p.purpose=$3
                  AND l.origin_source_timeline_id=$4
-               ORDER BY b.last_seen_at DESC NULLS LAST,p.profile_id""",
+               ORDER BY ($5 AND b.research_ready AND COALESCE(b.last_seen_at>now()-interval '45 seconds',false)) DESC,
+                        b.last_seen_at DESC NULLS LAST,p.profile_id""",
             row["instance_id"],
             intent.capability,
-            intent.purpose,
+            purpose,
             row["source_timeline_id"],
+            research,
         )
         if row["profile_id"]:
             profiles = [p for p in profiles if p["profile_id"] == row["profile_id"]]
@@ -450,7 +472,10 @@ class WorkAdmission:
             available = await self.db.fetch(
                 """SELECT DISTINCT p.capability,p.purpose
                    FROM aios.workspace_work_profile p JOIN aios.character_environment_link l USING(link_id)
+                   JOIN aios.workspace_binding b ON b.binding_id=l.execution_binding_id
                    WHERE l.origin_instance_id=$1 AND l.origin_source_timeline_id=$2 AND l.enabled AND p.enabled
+                     AND ((p.capability,p.purpose) <> ('research','search')
+                          OR (b.research_ready AND b.last_seen_at>now()-interval '45 seconds'))
                    ORDER BY p.capability,p.purpose LIMIT 12""",
                 row['instance_id'], row['source_timeline_id'])
             names = ', '.join(f"{p['capability']} / {p['purpose']}" for p in available)
@@ -524,6 +549,16 @@ class WorkAdmission:
                 row, "invalidated", "Accepted profile criteria changed"
             )
         pinned = {"profile_id": p["profile_id"], "profile_snapshot": template}
+        online = await self.db.fetchval(
+            "SELECT last_seen_at>now()-interval '45 seconds' AND (NOT $2 OR research_ready) FROM aios.workspace_binding WHERE binding_id=$1",
+            p["execution_binding_id"],
+            research,
+        )
+        if research and not online:
+            return await self.state(
+                row, "waiting_client", "Waiting for a research worker with authorized sources",
+                **(pinned if row["profile_id"] else {}),
+            )
         if "require_approval" in decisions and not (approved or row["approved_by"]):
             return await self.state(
                 row,
@@ -531,10 +566,6 @@ class WorkAdmission:
                 "Work requires operator authorization",
                 **pinned,
             )
-        online = await self.db.fetchval(
-            "SELECT last_seen_at>now()-interval '45 seconds' FROM aios.workspace_binding WHERE binding_id=$1",
-            p["execution_binding_id"],
-        )
         if not online:
             return await self.state(
                 row,
@@ -564,12 +595,12 @@ class WorkAdmission:
                 "- " + c for c in intent.constraints
             )
         from .work_profiles import (
-            EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE, INLINE_GUIDANCE,
+            INLINE_GUIDANCE,
             expand_request_template, reporting_template,
         )
         try:
             mode, inline = execution_settings(intent, template, objective)
-            if (p['capability'], p['purpose']) == (EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE):
+            if (p['capability'], p['purpose']) in (WORKSPACE_TASK, RESEARCH_SEARCH):
                 template, guidance = reporting_template(template, inline=inline)
                 objective += guidance
             elif inline:
@@ -600,6 +631,7 @@ class WorkAdmission:
             spec,
             environment=link,
             operator_assignment=bool(approved or row["approved_by"]),
+            requires_research=research,
         )
         return await self.state(
             row,
@@ -782,6 +814,8 @@ class WorkAdmission:
                JOIN aios.character_instance ei ON ei.instance_id=b.instance_id
                JOIN aios.character_instance oi ON oi.instance_id=l.origin_instance_id
                WHERE l.origin_instance_id=$1 AND l.origin_source_timeline_id=$2 AND l.enabled AND p.enabled
+                 AND ((p.capability,p.purpose) <> ('research','search')
+                      OR (b.research_ready AND b.last_seen_at>now()-interval '45 seconds'))
                  AND ((b.attached AND b.instance_id=l.origin_instance_id AND b.timeline_id=l.origin_source_timeline_id)
                       OR (NOT b.attached AND b.instance_id<>l.origin_instance_id AND b.timeline_id<>l.origin_source_timeline_id
                           AND COALESCE(ei.current_world_id,ei.world_id)<>COALESCE(oi.current_world_id,oi.world_id)))

@@ -17,8 +17,8 @@ from aios_app.agent.workspace_setup import WorkspaceSetup, ExecutionIn
 from aios_app.agent.workspace_registrations import AuthorizationIn, RegistrationStore
 from aios_app.agent.workspaces import WorkspaceStore
 from aios_app.agent.environment_links import EnvironmentStore, LinkIn, MemorySharingIn
-from aios_app.agent.work_admission import WorkAdmission, ProfileIn, WorkDecision, WorkDismissal
-from aios_app.agent.work_profiles import experimental_profile
+from aios_app.agent.work_admission import WorkAdmission, ProfileIn, WorkDecision, WorkDismissal, decode
+from aios_app.agent.work_profiles import research_search_profile, workspace_task_profile
 from aios_app.agent.policy import ActionPolicyService
 from aios_app.ui.registry import register_tab
 
@@ -224,8 +224,26 @@ def dismiss(origin, request, reviewer, reason):
     return run(WorkAdmission(db).dismiss(uid(origin), uid(request), WorkDismissal(reviewer=reviewer, reason=reason)))
 
 
-def enable_experiments(binding, link_id):
-    return run(WorkAdmission(db).configure(uid(binding), uid(link_id), experimental_profile()))
+async def enable_task_profile(binding, link_id, preset):
+    work = WorkAdmission(db)
+    async with db.atomic():
+        existing = await db.fetchval(
+            """SELECT assignment_template FROM aios.workspace_work_profile
+               WHERE link_id=$1 AND capability=$2 AND purpose=$3""",
+            link_id, preset.capability, preset.purpose,
+        )
+        legacy = workspace_task_profile(legacy_report=True).assignment_template
+        if preset.capability == "workspace" and existing is not None and decode(existing) == legacy:
+            preset = workspace_task_profile(legacy_report=True)
+        return await work.configure(binding, link_id, preset)
+
+
+def enable_workspace_tasks(binding, link_id):
+    return run(enable_task_profile(uid(binding), uid(link_id), workspace_task_profile()))
+
+
+def enable_research_search(binding, link_id):
+    return run(enable_task_profile(uid(binding), uid(link_id), research_search_profile()))
 
 
 APPROVAL_POLICIES = [
@@ -290,10 +308,10 @@ def authorize_workspace(registration, disposition, action, confirmed=False):
     return registered_workspaces(registration)
 
 
-EXPERIMENT = experimental_profile()
-EXPERIMENT_TEMPLATE = EXPERIMENT.assignment_template
+TASK = workspace_task_profile()
+TASK_TEMPLATE = TASK.assignment_template
 
-CHECKS = json.dumps(EXPERIMENT_TEMPLATE['required_checks'], indent=2)
+CHECKS = json.dumps(TASK_TEMPLATE['required_checks'], indent=2)
 
 
 @register_tab
@@ -360,23 +378,20 @@ def render():
             report = gr.JSON(label="Readiness / operation result")
             save_memory = gr.Button("Apply memory sharing setting to selected link")
             revoke = gr.Button("Revoke selected link and cancel its active work")
-            gr.Markdown("### General experimental tasks\nEnable `workspace / experimental_task` once on the selected link. "
-                        "The character can then request different bounded tasks by changing objective, including inspection, coding and workspace changes. "
-                        "The preset allows 60 model steps, 30 minutes and 100,000 context characters. "
-                        "Existing execution policies and the client's local permissions still apply. "
-                        "Each request writes its own JSON report of outcome, evidence and limitations. "
-                        "The host check validates that report's structure; task success still requires task-specific evidence. "
-                        "Failed runs are not automatically replayed.")
-            enable_general = gr.Button("Enable general experimental tasks on selected link")
-            gr.Markdown("### Advanced capability profile\nThe fields below start with experimental-task defaults. "
-                        "Profile criteria are immutable after creation; use a new purpose for different criteria. "
-                        "Descriptions and enabled status can be edited. `{request_id}` expands to the host request UUID in paths and checks.")
+            gr.Markdown("### Work profiles\n"
+                        "Workspace tasks cover inspection, coding, and file changes. "
+                        "Research search requires a listening Client in research mode with granted sources.")
+            enable_general = gr.Button("Enable workspace tasks on selected link")
+            enable_research = gr.Button("Enable research search on selected link")
+            gr.Markdown("### Advanced capability profile\nThe fields start with workspace task defaults. "
+                        "Descriptions and enabled status can be edited. Use a new purpose to change criteria. "
+                        "`{request_id}` expands to the host request UUID in paths and checks.")
             refresh_profiles = gr.Button("Load profiles on selected link")
             profile = gr.Dropdown(label="Existing profile", choices=[])
             profile_list = gr.JSON(label="Saved profiles")
-            capability = gr.Textbox(label="Capability", value=EXPERIMENT.capability)
-            purpose = gr.Textbox(label="Purpose", value=EXPERIMENT.purpose)
-            description = gr.Textbox(label="Description", value=EXPERIMENT.description)
+            capability = gr.Textbox(label="Capability", value=TASK.capability)
+            purpose = gr.Textbox(label="Purpose", value=TASK.purpose)
+            description = gr.Textbox(label="Description", value=TASK.description)
             enabled = gr.Checkbox(label="Profile enabled", value=True)
             execution_mode = gr.Dropdown(
                 label="Command access",
@@ -386,7 +401,7 @@ def render():
                 info="For inspection-only profiles, set expected outputs and required checks to empty lists.",
             )
             checks = gr.Textbox(label="Required host checks (JSON array)", value=CHECKS, lines=6)
-            outputs = gr.Textbox(label="Expected outputs (JSON array)", value=json.dumps(EXPERIMENT_TEMPLATE['expected_outputs']))
+            outputs = gr.Textbox(label="Expected outputs (JSON array)", value=json.dumps(TASK_TEMPLATE['expected_outputs']))
             preserve = gr.Textbox(label="Paths to preserve (JSON array)", value="[]")
             with gr.Row():
                 steps = gr.Number(label="Maximum model steps", value=60, precision=0)
@@ -444,7 +459,9 @@ def render():
         profile.change(load_profile, profile, fields)
         save.click(save_profile, [binding, link_id] + fields, report).success(
             chat_connection, origin, connection_outputs)
-        enable_general.click(enable_experiments, [binding, link_id], report).success(
+        enable_general.click(enable_workspace_tasks, [binding, link_id], report).success(
+            chat_connection, origin, connection_outputs)
+        enable_research.click(enable_research_search, [binding, link_id], report).success(
             chat_connection, origin, connection_outputs)
         save_policy.click(policies, [origin, binding, op, ep], report).success(
             chat_connection, origin, connection_outputs)
