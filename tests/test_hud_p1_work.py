@@ -272,3 +272,82 @@ async def test_stored_goal_revalidation_is_opt_in_and_preserves_evidence(db):
     assert await db.fetchval("SELECT status FROM aios.character_agent_goal WHERE goal_id=$1", good) == "active"
     assert await db.fetchval("SELECT count(*) FROM aios.message_cognitive_unit") == len(rows)
     assert await revalidate_source_goals(db, origin.instance_id, apply=True) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_findings_suggests_recoverable_evidence_without_new_work(db):
+    values, run, _ = await completed(db)
+    work, origin, execution, bid, lid, source, req, profile = values
+    research = {
+        "objective": "Investigate Great Lakes glaciation using calibre only",
+        "outcome": "partial",
+        "summary": "Passages retrieved but synthesis truncated",
+        "findings": [],
+        "evidence": [
+            {"evidence_id": "a" * 24, "source_id": "calibre",
+             "title": "Quaternary", "section": "page:7",
+             "note": "Passage retrieved; not independently verified"}
+        ],
+        "search_log": [
+            {"query": "striations", "source_id": "calibre",
+             "status": "source_error", "errors": {"calibre": "http_status_404"}},
+        ],
+        "research_progress": {
+            "searches": 1, "verified_passages": [
+                {"evidence_id": "a" * 24, "section": "page:7",
+                 "passage_excerpt": "ice sheets reached central North America"}],
+        },
+        "limitations": ["Model synthesis truncated"],
+    }
+    result = {"report": json.dumps(research),
+              "result_summary": {"outcome": "partial",
+                                 "summary": research["summary"],
+                                 "findings": [], "limitations": research["limitations"]},
+              "evidence": {"checks": [{"id": "experiment_report", "exit_code": 0}],
+                           "operator_private": "never expose from research evidence"},
+              "operator_secret": "not available through section retrieval"}
+    await db.execute("UPDATE aios.workspace_run SET status='finished',result=$2::jsonb WHERE run_id=$1",
+                     run, json.dumps(result))
+    service = WorkEvidence(db)
+    findings = await service.read(origin.instance_id,
+                                  WorkResultQuery(run_id=run, section="findings"))
+    assert findings["text"] == "[]"
+    assert findings["next_recommended_sections"][:2] == ["evidence", "research_progress"]
+    evidence = await service.read(origin.instance_id,
+                                  WorkResultQuery(run_id=run, section="evidence"))
+    assert "Quaternary" in evidence["text"]
+    assert "operator_private" not in evidence["text"]
+    search = await service.read(origin.instance_id,
+                                WorkResultQuery(run_id=run, section="search_log"))
+    assert "http_status_404" in search["text"]
+    progress = await service.read(origin.instance_id,
+                                  WorkResultQuery(run_id=run, section="research_progress"))
+    assert "central North America" in progress["text"]
+    checks = await service.read(origin.instance_id,
+                                WorkResultQuery(run_id=run, section="checks"))
+    assert "experiment_report" in checks["text"]
+    assert "Quaternary" not in checks["text"]
+    assert await db.fetchval("SELECT count(*) FROM aios.workspace_run") == 1
+    timeline = (await work.source(origin.instance_id, source))["source_timeline_id"]
+    hud = render_hud_text({"work": await work.overlay(origin.instance_id, timeline)})
+    assert "No authored findings" in hud or "empty evidence" in hud
+    with pytest.raises(HTTPException):
+        await service.read(execution.instance_id,
+                           WorkResultQuery(run_id=run, section="evidence"))
+
+
+@pytest.mark.asyncio
+async def test_recovery_sections_tolerate_non_json_truncated_report(db):
+    values, run, _ = await completed(db)
+    work, origin, *_ = values
+    result = {"report": '{"evidence": [{"incomplete":',
+              "result_summary": {"summary": "Partial report", "findings": [],
+                                 "research_progress": {"verified_passages": [
+                                     {"section": "page:6", "evidence_id": "b" * 24}
+                                 ]}}}
+    await db.execute("UPDATE aios.workspace_run SET result=$2::jsonb WHERE run_id=$1",
+                     run, json.dumps(result))
+    response = await WorkEvidence(db).read(
+        origin.instance_id, WorkResultQuery(run_id=run, section="evidence"))
+    assert "page:6" in response["text"]
+    assert "incomplete" not in response["text"]
