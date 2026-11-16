@@ -22,9 +22,22 @@ Use the native `read_work_result` tool or one block in a character reply:
 
 For chat transport, wrap the JSON in `<aios_action>` and `</aios_action>` outside
 Markdown fences. Supply exactly one `request_id` or `run_id`. Sections are
-`summary`, `findings`, `limitations`, `requested_content`, `report`, and `checks`.
+`summary`, `findings`, `evidence`, `research_progress`, `search_log`,
+`limitations`, `requested_content`, `report`, and `checks`.
 Continue with `next_cursor` and the returned `revision`; a changed revision
 requires starting at cursor zero. Pages contain at most 4000 characters.
+
+If `findings` is empty (`[]`) after failed or truncated synthesis, the response
+includes `next_recommended_sections`. Read `evidence` for worker-reported
+passage references, `research_progress` for retained verified-passage receipts,
+and `search_log` for exact search statuses, when those fields were delivered.
+These are observations, **not** model-authored findings or independent proof.
+A missing/empty field means that material was not retained in the server report;
+it does not prove the library contained nothing. `checks` remains the separate
+host verification section, never merged into research `evidence`.
+No new research work is requested by these reads, and no additional access to
+workspace-local files or credentials is granted.
+
 
 Native HTTP clients can POST the same fields (without `op`) to
 `/agent/instance/{instance_id}/work/result`, using the existing distinct
