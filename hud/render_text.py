@@ -470,6 +470,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     section("work_retrieval", 2, 0.12, atomic=True)
     if work.get("result_tool"):
         lines.append('RETAINED WORK EVIDENCE: Use read_work_result with one run_id or request_id. Fallback: <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. For more, use next_cursor and revision.')
+        lines.append('When findings is empty, read the retained evidence, research_progress and search_log sections before requesting new work. Empty findings are not evidence of no research.')
     section("retrieved_result", 2, 0.24, atomic=True)
     if work.get("retrieved_result"):
         lines.append(result_page(work["retrieved_result"], None if total is None else int(total * 4 * 0.24)))
