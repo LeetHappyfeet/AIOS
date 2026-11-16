@@ -79,6 +79,8 @@ def render_work_results(work, tasks, *, compact_mode=False):
             lines.append("  Checks: " + compact(view["verification_scope"], 120))
             for finding in view["findings"][:2]:
                 lines.append("  Worker-reported finding: " + compact(finding, 180))
+            if task is latest and task["status"] not in ACTIVE and not view["findings"]:
+                lines.append("  No authored findings; retained passage evidence may still exist. Read section evidence, then search_log or report. Do not infer no research was done.")
             lines.append("  Full report retained.")
             continue
         entry = [f"- {title or 'Workspace task'}",
@@ -108,6 +110,8 @@ def render_work_results(work, tasks, *, compact_mode=False):
             if view["summary"]:
                 entry.append("  Worker summary: " + view["summary"])
             findings = view["findings"]
+            if not findings:
+                entry.append("  No authored findings; inspect retained section evidence, then search_log or report for research receipts. Empty findings do not prove no research was done.")
             if view.get("requested_content"):
                 # Requested text takes precedence over a long evidence recital.
                 for finding in findings[:3]:
