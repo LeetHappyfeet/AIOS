@@ -471,7 +471,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.extend("- " + note_line(note, with_ref=True) for note in frame["workspace_memory"])
     section("work_retrieval", 2, 0.12, atomic=True)
     if work.get("result_tool"):
-        lines.append('RETAINED WORK EVIDENCE: use native read_work_result when registered, or one <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. Supply exactly one request_id or run_id. Sections: summary, findings, limitations, requested_content, report, checks. Continue with next_cursor and the returned revision. This reads reports without executing work.')
+        lines.append('RETAINED WORK EVIDENCE: use native read_work_result when registered, or one <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. Supply exactly one request_id or run_id. Sections: summary, findings, evidence, search_log, research_progress, limitations, requested_content, report, checks. An empty findings list is not an empty evidence record: inspect evidence and search_log before requesting new work. Continue with next_cursor and the returned revision. This reads reports without executing work.')
     section("retrieved_result", 2, 0.24, atomic=True)
     if work.get("retrieved_result"):
         lines.append(result_page(work["retrieved_result"], None if total is None else int(total * 4 * 0.24)))
