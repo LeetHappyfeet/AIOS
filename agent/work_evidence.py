@@ -132,11 +132,13 @@ class WorkEvidence:
             except (ValueError, TypeError):
                 pass
         def report_field(field, default):
-            if field in summary and isinstance(summary[field], type(default)):
-                return summary[field]
-            if field in parsed and isinstance(parsed[field], type(default)):
-                return parsed[field]
-            return default
+            primary = summary.get(field)
+            secondary = parsed.get(field)
+            if isinstance(primary, type(default)) and primary:
+                return primary
+            if isinstance(secondary, type(default)):
+                return secondary
+            return primary if isinstance(primary, type(default)) else default
         if query.section == "summary":
             value = summary.get("summary") or summary.get("outcome_summary") or view["summary"]
         elif query.section == "report":
