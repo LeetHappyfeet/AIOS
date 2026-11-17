@@ -636,6 +636,11 @@ async def _prepare_hud_response(
         state = await world_runtime.get_state(instance_id)
         timeline = state.get("source_timeline_id")
     timeline = UUID(str(timeline)) if timeline is not None else None
+    if frame.get("timeline") and not (frame.get("hud", {}).get("freshness") or {}).get("replayed_snapshot"):
+        from aios_app.hud.temporal import timeline_hud
+        frame["timeline"] = await timeline_hud(
+            db, instance_id, timeline, frame.get("recent_events") or [], frame.get("memories") or [],
+        )
     from aios_app.agent.work_admission import WorkAdmission
     work = WorkAdmission(db)
     frame["work"] = await work.overlay(instance_id, timeline)

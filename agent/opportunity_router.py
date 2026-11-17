@@ -70,8 +70,10 @@ class OpportunityRouter:
         # Avoid asking the character to choose among duplicate cognitive modes.
         formation=next((row for row in attention_rows
                         if str(row["opportunity_type"])=="goal_formation"),None)
-        selected=[formation] if formation is not None else []
-        seen={"goal_formation"} if formation is not None else set()
+        reminder = next((row for row in attention_rows
+                         if row.get("operation_type") == "reflection.schedule_reminder"), None)
+        selected = [row for row in (formation, reminder) if row is not None]
+        seen = {str(row["opportunity_type"]) for row in selected}
         for row in attention_rows:
             key=str(row["opportunity_type"])
             if key in seen: continue

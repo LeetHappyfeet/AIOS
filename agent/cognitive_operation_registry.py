@@ -31,6 +31,9 @@ SPECS = {
     "inquiry.resolve": CognitiveOperationSpec(
         "inquiry.resolve", frozenset({"research","reflection","planning","executive"})
     ),
+    "reflection.schedule_reminder": CognitiveOperationSpec(
+        "reflection.schedule_reminder", frozenset({"reflection", "executive"})
+    ),
     "reflection.review": CognitiveOperationSpec(
         "reflection.review", frozenset({"reflection","executive"})
     ),

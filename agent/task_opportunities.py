@@ -23,11 +23,15 @@ class TaskOpportunityPlanner:
         dependencies=await self.dependencies(task.task_id)
         dependency_focus=' '.join(str(d.get('result') or '')[:240] for d in dependencies)
         focus=' '.join(x for x in (task.retrieval_focus,task.objective,dependency_focus) if x).strip()
+        reminder = next((event["payload"] for event in task.meta.get("events", [])
+                         if event.get("source_type") == "reminder_review"), None)
+        reminder_review = ((UUID(reminder["goal_id"]), reminder["trigger_id"]) if reminder else None)
         batch=await self.opportunities.generate(
             instance_id=task.instance_id,
             source_node_id=task.source_through_node_id or task.source_node_id,
             focus_override=focus,
             limit=max(limit,8),
+            **({"reminder_review": reminder_review} if reminder_review else {}),
         )
         rows=list(batch.opportunities)
         allowed={

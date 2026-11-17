@@ -192,6 +192,13 @@ class CognitiveOperationEngine:
                                               "planner_status":"not_queued"})
                 else:
                     await self._finish(op,{"kind":"inquiry",**receipt})
+            elif kind == "reflection.schedule_reminder":
+                job_id = await enqueue_job(
+                    self.db, job_type="reminder_schedule_inference", priority=140,
+                    payload={"instance_id": str(op["instance_id"]), "operation_id": str(operation_id)},
+                )
+                if job_id is None:
+                    raise RuntimeError("could not enqueue reminder scheduling")
             elif kind in {"reflection.review","planning.review","executive.review"}:
                 await self._queue_decision(op)
             elif kind=="planning.propose":
@@ -376,6 +383,27 @@ class CognitiveOperationEngine:
                 "source_objective":unit.meta.get("objective")})
         except Exception as exc:
             await self._fail(op,exc)
+            raise
+
+    async def schedule_reminder(self, operation_id: UUID) -> None:
+        from .reminders import CharacterReminders
+
+        row = await self.db.fetchrow(
+            """SELECT * FROM aios.character_cognitive_operation
+               WHERE operation_id=$1 AND status='running'
+                 AND operation_type='reflection.schedule_reminder'""", operation_id,
+        )
+        if not row:
+            await self.reconcile_terminal(operation_id)
+            return
+        op = dict(row)
+        try:
+            result = await CharacterReminders(self.db).schedule(op, self._mapping(op["input"]))
+            await self._finish(op, result)
+        except JobDeferred:
+            raise
+        except Exception as exc:
+            await self._fail(op, exc)
             raise
 
     async def _queue_decision(self, op: Mapping[str,Any]) -> None:

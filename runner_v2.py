@@ -76,6 +76,25 @@ async def handle_cognitive_operation(db: Database, job: Dict[str, Any]) -> None:
 
 base.JOB_HANDLERS["cognitive_operation"] = handle_cognitive_operation
 
+
+async def handle_reminder_schedule(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.cognitive_operations import CognitiveOperationEngine
+
+    await CognitiveOperationEngine(db).schedule_reminder(UUID(job["payload"]["operation_id"]))
+
+
+async def handle_reminder_due(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.reminders import CharacterReminders
+
+    payload = job["payload"]
+    await CharacterReminders(db).handle_due(UUID(payload["instance_id"]), UUID(payload["trigger_id"]))
+
+
+base.JOB_HANDLERS["reminder_schedule_inference"] = handle_reminder_schedule
+base.JOB_HANDLERS["character_reminder_due"] = handle_reminder_due
+
 async def handle_internal_cognition_inference(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
     from aios_app.agent.transactions import InternalCognitionTransactions
@@ -242,7 +261,7 @@ _original_resolve_partition_key = base._resolve_partition_key
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
-    if job_type in {"goal_plan_continuation", "goal_planning_inference","agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference"} and payload.get("instance_id"):
+    if job_type in {"goal_plan_continuation", "goal_planning_inference","agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference", "character_reminder_due", "reminder_schedule_inference"} and payload.get("instance_id"):
         return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])

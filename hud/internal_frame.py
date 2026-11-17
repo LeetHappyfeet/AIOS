@@ -34,7 +34,7 @@ def _scene_text(value: Any) -> str:
 
 
 def _item_text(item: Mapping[str, Any]) -> str:
-    return _clip(
+    value = _clip(
         item.get("text")
         or item.get("canonical_text")
         or item.get("message_text")
@@ -42,6 +42,8 @@ def _item_text(item: Mapping[str, Any]) -> str:
         or "",
         260,
     )
+    age = item.get("time_label")
+    return f"[{age}] {value}" if age and value else value
 
 
 class InternalHUDAssembler:
@@ -106,6 +108,7 @@ class InternalHUDAssembler:
         )
 
         lines = [identity]
+        lines.extend((frame.get("timeline") or [])[:2])
         if subject:
             lines.extend(["SUBJECT:", _clip(subject, 260)])
 
@@ -130,6 +133,8 @@ class InternalHUDAssembler:
                 lines.append(title + ":")
                 lines.extend(f"- {value}" for value in texts)
 
+        if frame.get("timeline"):
+            add_items("RECENT EVENTS", frame.get("recent_events") or [], profile.recent_event_items)
         if profile.include_memories:
             add_items("RELEVANT MEMORY", frame.get("memories") or [], profile.memory_items)
         if profile.include_beliefs:
@@ -164,10 +169,11 @@ class InternalHUDAssembler:
                 if bits:
                     lines.extend(["GOAL STATE:", "; ".join(bits)])
 
-        choice_lines = ["CHOOSE ONE:"]
+        choice_lines = ["CHOOSE ONE:"] if candidates else []
         for item in candidates:
             choice_lines.append(f"{item['key']}. {_clip(item['label'], 180)}")
-        choice_lines.append('Return JSON only: {"choice":"A"}')
+        if candidates:
+            choice_lines.append('Return one allowed choice key and nothing else.')
 
         # Never truncate the decision surface. Context is expendable; the complete
         # A-E choice set and response contract are not.
@@ -175,7 +181,7 @@ class InternalHUDAssembler:
         char_budget = resolved_budget * 4
         context_budget = max(160, char_budget - len(suffix) - 1)
         prefix = "\n".join(lines)[:context_budget].rstrip()
-        prompt = f"{prefix}\n{suffix}" if prefix else suffix
+        prompt = "\n".join(part for part in (prefix, suffix) if part)
         fingerprint = hashlib.sha256(
             json.dumps({
                 "instance": str(instance_id),

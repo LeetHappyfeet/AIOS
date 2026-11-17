@@ -157,6 +157,12 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         f"Instance: {presence.get('instance_id', 'unknown')}",
         f"State version: {presence.get('state_version', 'unknown')}",
     ])
+    timeline = frame.get("timeline") or []
+    if timeline:
+        lines.append(timeline[0])
+        section("reminders", 7, 0.06)
+        lines.extend(timeline[1:])
+        section("presence", 4, 0.1)
     location = scene.get("location")
     if location:
         lines.append(f"Location: {_name(location)}")
@@ -282,7 +288,8 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         for item in memories:
             provenance = _content_status(item)
             qualifier = f" [{provenance}]" if provenance.startswith("reported/derived") else ""
-            lines.append(f"-{qualifier}{_epistemic_label(item)}{_knowledge_annotation(item)} {_claim_text(item)}")
+            age = f" [{item['time_label']}]" if item.get("time_label") else ""
+            lines.append(f"-{qualifier}{_epistemic_label(item)}{_knowledge_annotation(item)}{age} {_claim_text(item)}")
     section("memory_status", 6, 0.05)
     retrieval_evidence = frame.get("retrieval_evidence") or {}
     if retrieval_evidence.get("route") == "character":
@@ -424,6 +431,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             rendered_text = event.get("text") or event.get("message_text")
             if not rendered_text:
                 continue
+            age = f" [{event['time_label']}]" if event.get("time_label") else ""
             if event.get("message_text"):
                 stream = event.get("event_stream") or "runtime"
                 role = event.get("speaker_role") or "other"
@@ -434,9 +442,9 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
                     from aios_app.agent.research_action import strip_tool_markup
                     rendered_text=strip_tool_markup(rendered_text)
                 if rendered_text:
-                    lines.append(f"- [{stream}|{role}:{speaker}] {rendered_text}")
+                    lines.append(f"- [{stream}|{role}:{speaker}]{age} {rendered_text}")
             else:
-                lines.append(f"- {rendered_text}")
+                lines.append(f"-{age} {rendered_text}")
     lines.section("boundaries", priority=0)
     lines.append("\nStay inside this HUD's epistemic and branch boundaries.")
     section("work_capabilities", 3, 0.50, atomic=True)

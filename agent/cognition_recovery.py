@@ -43,8 +43,9 @@ class CognitionRecovery:
                WHERE (o.status='running' AND o.updated_at<now()-interval '10 minutes'
                       AND NOT EXISTS (
                           SELECT 1 FROM aios.pipeline_job j
-                          WHERE j.payload->>'operation_id'=o.operation_id::text AND j.status='running'
-                            AND j.lease_expires_at>now()))
+                          WHERE j.payload->>'operation_id'=o.operation_id::text
+                            AND ((j.status='running' AND j.lease_expires_at>now())
+                                 OR (j.job_type='reminder_schedule_inference' AND j.status='queued'))))
                   OR (o.status='waiting_inference' AND o.transaction_id IS NOT NULL
                       AND t.status IN ('failed','stale','invalid','superseded'))
                   OR (o.status='waiting_inference' AND o.transaction_id IS NULL

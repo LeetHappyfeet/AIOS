@@ -19,7 +19,7 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
-HUD_VERSION = "hud-v7"
+HUD_VERSION = "hud-v8"
 
 
 @dataclass(frozen=True)
@@ -406,6 +406,14 @@ class HUDAssembler:
                     "durable_knowledge":False,
                 }
 
+        from .temporal import attach_time_references, timeline_hud
+        event_items = [dict(item) for item in event_items]
+        memories = [dict(item) for item in memories]
+        await attach_time_references(self.db, event_items, memories)
+        timeline = await timeline_hud(
+            self.db, context.instance_id, context.source_timeline_id, event_items, memories,
+        )
+
         suppressed = cognitive_snapshot.firewall_suppressed
         return {
             "identity": identity,
@@ -423,6 +431,7 @@ class HUDAssembler:
                 "location_entity_id": context.location_entity_id,
             },
             "scene": scene,
+            "timeline": timeline,
             "entity_catalog": entity_catalog,
             "research_activity": research_activity,
             "retrieval_evidence": cognitive_snapshot.retrieval_evidence,
