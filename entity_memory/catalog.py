@@ -16,6 +16,7 @@ SPATIAL = {
     "located_near": "near",
     "part_of": "part_of",
 }
+PLACE_TYPE_EVIDENCE = {"located_in", "located_inside", "located_at", "part_of"}
 PLACE_TYPES = {
     "place",
     "location",

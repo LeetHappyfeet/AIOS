@@ -134,6 +134,35 @@ def test_names_repeat_only_in_document_namespace():
     assert all(a["character_id"] is None for a in build_payload(first, doc)["anchors"])
 
 
+def test_corpus_place_labels_need_more_than_gpe_and_keep_ner_evidence():
+    from spacy.lang.en import English
+    from spacy.tokens import Doc, Span
+
+    vocab = English().vocab
+    doc = Doc(
+        vocab,
+        words=["Romance", ",", "Takato", ".", "Mia", "is", "in", "Paris", "."],
+        spaces=[False, True, False, True, True, True, True, False, False],
+        pos=["PROPN", "PUNCT", "PROPN", "PUNCT", "PROPN", "AUX", "ADP", "PROPN", "PUNCT"],
+        lemmas=["Romance", ",", "Takato", ".", "Mia", "be", "in", "Paris", "."],
+        heads=[0, 0, 0, 0, 5, 5, 5, 6, 5],
+        deps=["ROOT", "punct", "conj", "punct", "nsubj", "ROOT", "prep", "pobj", "punct"],
+    )
+    doc.ents = [Span(doc, index, index + 1, label="GPE") for index in (0, 2, 7)]
+    payload = build_payload(row(text=doc.text), cached_doc(doc.to_json()))
+    anchors = {a["label"]: a for a in payload["anchors"]}
+    assert anchors["Romance"]["kind"] == anchors["Takato"]["kind"] == "unknown"
+    assert anchors["Paris"]["kind"] == "place"
+    assert next(r for r in payload["relations"] if r["predicate"] == "located_in")["object"] == (
+        anchors["Paris"]["entity_id"]
+    )
+    mentions = [m for m in payload["mentions"] if m["text"] in {"Romance", "Takato"}]
+    assert {m["text"] for m in mentions} == {"Romance", "Takato"}
+    for mention in mentions:
+        assert mention["ner_label"] == "GPE"
+        assert doc.text[mention["start"] : mention["end"]] == mention["text"]
+
+
 def test_dictionary_examples_have_local_entities_and_qualified_relations():
     text = "Definition: A foolish person.\nExample: Bob has a red car.\nExample: Bob has a blue car."
     r = row(namespace="reference.urban", text=text, meta={"term": "goof"})
