@@ -257,7 +257,16 @@ class TemporalTriggerStore:
             """WITH due AS (
                    SELECT trigger_id
                    FROM aios.character_temporal_trigger
-                   WHERE status='scheduled' AND clock_type='wall' AND due_at <= now()
+                   WHERE clock_type='wall' AND due_at <= now()
+                     AND (status='scheduled' OR (status='timeline_inactive' AND EXISTS (
+                         SELECT 1 FROM aios.character_runtime_state rs
+                         WHERE rs.instance_id=character_temporal_trigger.instance_id
+                           AND rs.source_timeline_id::text=character_temporal_trigger.payload->>'source_timeline_id'
+                     ) AND NOT EXISTS (
+                         SELECT 1 FROM aios.pipeline_job j WHERE j.job_type='character_reminder_due'
+                           AND j.payload->>'trigger_id'=character_temporal_trigger.trigger_id::text
+                           AND j.status IN ('queued','running')
+                     )))
                    ORDER BY priority,due_at
                    FOR UPDATE SKIP LOCKED
                    LIMIT $1
@@ -303,7 +312,7 @@ class TemporalTriggerStore:
                 )
                 await self.db.execute(
                     """UPDATE aios.character_temporal_trigger
-                       SET status='fired',fired_at=now(),updated_at=now(),
+                       SET status='fired',fired_at=COALESCE(fired_at,now()),updated_at=now(),
                            payload=payload || jsonb_build_object('wake_id',$2::text)
                        WHERE trigger_id=$1 AND status='firing'""",
                     trigger_id, str(wake_id),
@@ -325,7 +334,7 @@ class TemporalTriggerStore:
         async with self.db.atomic():
             claimed = await self.db.fetchval(
                 """UPDATE aios.character_temporal_trigger
-                   SET status='fired',fired_at=now(),updated_at=now()
+                   SET status='fired',fired_at=COALESCE(fired_at,now()),updated_at=now()
                    WHERE trigger_id=$1 AND status='firing' RETURNING trigger_id""",
                 row["trigger_id"],
             )

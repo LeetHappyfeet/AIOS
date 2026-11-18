@@ -387,6 +387,20 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             lines.append(f"-{annotation} {text}")
             if isinstance(goal, Mapping):
                 lines.extend("  " + entry for entry in _render_goal_plan(goal.get("plan")))
+    projects = frame.get("projects") or []
+    if projects:
+        section("projects", 8, 0.10)
+        lines.append("PROJECT CONTINUATION")
+        for project in projects:
+            goal = " ".join(str(project["goal"]).split())[:100]
+            note = " ".join(str(project.get("note") or "").split())[:80]
+            revision = f" (plan {project['plan_revision']})" if project.get("plan_revision") else ""
+            lines.append(f"- {goal}{revision} [{project['status']}]" + (f" {note}" if note else ""))
+            if project.get("next_reminder_at"):
+                lines.append(f"  Next reminder: {project['next_reminder_at']}")
+            if project.get("worker_report"):
+                report = " ".join(str(project["worker_report"]).split())[:120]
+                lines.append(f"  Worker report: {report}")
     section("scheduled_goals", 10, 0.05)
     scheduled_goals = frame.get("scheduled_goals") or []
     if scheduled_goals:

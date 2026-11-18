@@ -950,10 +950,10 @@ class GoalPlanningService:
                  AND p.status IN ('ready','waiting_information','queued')
                ORDER BY p.goal_id,(p.status<>'queued') DESC,p.revision DESC""", instance_id, goal_ids)
         from .work_evidence import WorkEvidence
-        work_rows = await WorkEvidence(self.db).rows(instance_id) if rows else []
+        evidence = WorkEvidence(self.db)
         current_work = {}
         for r in rows:
-            current_work[r["goal_id"]] = WorkEvidence.planning_from_rows(work_rows, r["goal_id"], r["attempt_id"])
+            current_work[r["goal_id"]] = await evidence.planning(instance_id, r["goal_id"], r["attempt_id"])
         return {r["goal_id"]: {"plan_id": str(r["plan_id"]), "status": r["status"],
                                "revision": r["revision"], "proposal": mapping(r["proposal"]),
                                "context_current": r["context_current"] and

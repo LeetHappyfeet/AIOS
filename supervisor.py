@@ -591,6 +591,8 @@ async def _schedule_agent_work(db: Database) -> None:
         await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)
         await temporal.emit_due(limit=100)
         await AutonomyScheduler(db).schedule_ready(limit=100)
+        from aios_app.agent.reminder_continuation import ReminderContinuation
+        await ReminderContinuation(db).enqueue_due()
     except Exception:
         logger.exception("Agent autonomy scheduling failed")
 

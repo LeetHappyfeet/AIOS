@@ -19,7 +19,7 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
-HUD_VERSION = "hud-v8"
+HUD_VERSION = "hud-v9"
 
 
 @dataclass(frozen=True)
@@ -409,7 +409,10 @@ class HUDAssembler:
         from .temporal import attach_time_references, timeline_hud
         event_items = [dict(item) for item in event_items]
         memories = [dict(item) for item in memories]
-        await attach_time_references(self.db, event_items, memories)
+        await attach_time_references(
+            self.db, event_items, memories, timeline_id=context.source_timeline_id,
+            head_node_id=context.source_head_node_id,
+        )
         timeline = await timeline_hud(
             self.db, context.instance_id, context.source_timeline_id, event_items, memories,
         )

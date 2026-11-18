@@ -288,7 +288,7 @@ class InferenceBroker:
                 raise
         raise InferenceUnavailable(
             f"All inference providers failed for '{request.worker_class}': {last_error}"
-        )
+        ) from last_error
 
     async def _attempt(
         self, provider: InferenceProvider, request: InferenceRequest

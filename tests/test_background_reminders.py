@@ -93,6 +93,7 @@ async def test_due_reminder_reopens_attention_for_the_linked_goal():
         "reason": "Check the report", "due_at": now, "fired_at": now,
     })
     db.fetchval = AsyncMock(return_value="active")
+    db.execute = AsyncMock()
     reminders = CharacterReminders(db)
     reminders._check_available = AsyncMock()
     reminders._current_source_timeline = AsyncMock(return_value=timeline_id)
@@ -110,3 +111,94 @@ async def test_due_reminder_reopens_attention_for_the_linked_goal():
     )
     assert reminders.runtime.wake.call_args.kwargs["payload"]["goal_id"] == str(goal_id)
     assert reminders.runtime.wake.call_args.kwargs["dedupe_key"] == f"reminder:review:{trigger_id}"
+
+
+@pytest.mark.asyncio
+async def test_invalid_decisions_retry_before_terminal_failure():
+    from aios_app.pipeline.jobs import JobDeferred
+
+    db = MagicMock()
+    db.atomic = asynccontextmanager(lambda: _atomic())
+    db.fetchval = AsyncMock(side_effect=[1, 2, 3, uuid4()])
+    instance_id, trigger_id = uuid4(), uuid4()
+    reminders = CharacterReminders(db)
+    for delay in (30, 120):
+        with pytest.raises(JobDeferred) as error:
+            await reminders._retry_invalid(instance_id, trigger_id)
+        assert error.value.delay_seconds == delay
+    await reminders._retry_invalid(instance_id, trigger_id)
+    assert db.fetchval.call_args.args[1:4] == (instance_id, trigger_id, "review failed")
+
+
+@pytest.mark.asyncio
+async def test_inactive_timeline_suspends_before_goal_lookup_or_inference():
+    db = MagicMock()
+    db.fetchrow = AsyncMock(return_value={
+        "payload": {"source_timeline_id": str(uuid4()), "reminder_goal_id": str(uuid4())},
+    })
+    db.execute = AsyncMock()
+    reminders = CharacterReminders(db)
+    reminders._check_available = AsyncMock()
+    reminders._current_source_timeline = AsyncMock(return_value=uuid4())
+    reminders._goal = AsyncMock()
+    reminders._infer = AsyncMock()
+    instance_id, trigger_id = uuid4(), uuid4()
+
+    await reminders.handle_due(instance_id, trigger_id)
+
+    assert "status='timeline_inactive'" in db.execute.call_args.args[0]
+    assert db.execute.call_args.args[1:] == (instance_id, trigger_id)
+    reminders._goal.assert_not_awaited()
+    reminders._infer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_continuation_requests_planning_for_its_own_goal():
+    from aios_app.agent.reminder_continuation import ReminderContinuation
+    from aios_app.pipeline.jobs import JobDeferred
+
+    instance_id, goal_id, attempt_id, trigger_id, timeline_id = (uuid4() for _ in range(5))
+    continuation_row = {
+        "instance_id": instance_id, "goal_id": goal_id, "attempt_id": attempt_id,
+        "trigger_id": trigger_id, "source_timeline_id": timeline_id,
+        "active_timeline": timeline_id, "intent": None,
+    }
+    db = MagicMock()
+    db.fetchrow = AsyncMock(side_effect=[continuation_row, None])
+    db.fetchval = AsyncMock(side_effect=[True, None])
+    db.execute = AsyncMock()
+    service = ReminderContinuation(db)
+    service.planner.snapshot = AsyncMock(return_value={
+        "context": MagicMock(source_timeline_id=timeline_id), "attempt_id": attempt_id,
+        "fingerprint": "revision-1",
+    })
+    service.planner.schedule = AsyncMock()
+
+    with pytest.raises(JobDeferred, match="reviewed goal"):
+        await service.run(trigger_id)
+
+    service.planner.schedule.assert_awaited_once_with(instance_id, goal_id)
+
+
+@pytest.mark.asyncio
+async def test_continuation_reuses_persisted_intent(monkeypatch):
+    from aios_app.agent.reminder_continuation import ReminderContinuation, request_id
+
+    instance_id, goal_id, trigger_id, source_node_id, canonical = (uuid4() for _ in range(5))
+    db = MagicMock()
+    db.execute = AsyncMock()
+    submit = AsyncMock(return_value={"status": "waiting_client", "request_id": str(canonical)})
+    monkeypatch.setattr("aios_app.agent.work_admission.WorkAdmission.request", submit)
+    row = {
+        "trigger_id": trigger_id, "instance_id": instance_id,
+        "intent": {"request_id": str(request_id(trigger_id)), "source_node_id": str(source_node_id),
+                   "goal_ref": str(goal_id), "capability": "workspace", "purpose": "task",
+                   "objective": "Review the inventory report"},
+    }
+
+    await ReminderContinuation(db)._submit(row)
+
+    args = submit.call_args
+    assert args.args[1].request_id == request_id(trigger_id)
+    assert args.kwargs["reminder_trigger_id"] == trigger_id
+    assert db.execute.call_args.args[1:] == (trigger_id, "submitted", "waiting_client", canonical)

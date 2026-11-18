@@ -108,7 +108,7 @@ class CognitiveOpportunityService:
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                        limit:int=8, focus_override:str|None=None,
-                       reminder_review: tuple[UUID, str] | None = None) -> OpportunityBatch:
+                       reminder_review: tuple[UUID, str, str | None] | None = None) -> OpportunityBatch:
         context=await self.contexts.resolve(instance_id)
         raw=await self.db.fetchrow(
             "SELECT * FROM aios.character_runtime_state WHERE instance_id=$1",instance_id)
@@ -396,7 +396,8 @@ class CognitiveOpportunityService:
                 source_node_id or context.source_head_node_id,recent_source_events,
                 coordinate["evidence_revision"])
             if reminder_review:
-                if goal.goal_id != reminder_review[0]:
+                if goal.goal_id != reminder_review[0] or (len(reminder_review) > 2 and
+                        reminder_review[2] and str(coordinate["attempt_id"]) != reminder_review[2]):
                     continue
                 revision = f"{revision}:reminder:{reminder_review[1]}"
             if revision in attempted_revisions:
@@ -422,6 +423,7 @@ class CognitiveOpportunityService:
                 "goal_review",f"Consider whether what just happened changes my goal: {g}",
                 "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
                 "attempt_id":str(attempt_id),"review_revision":revision,
+                **({"reminder_trigger_id": reminder_review[1]} if reminder_review else {}),
                 "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
                 "recent_source_events":recent_source_events,
                 "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),
@@ -445,20 +447,26 @@ class CognitiveOpportunityService:
 
         # Offer one reminder decision for a goal relevant to the latest source.
         # Creating the reminder requires a separately selected background operation.
-        reminder_goal = next((item[6] for item in review_candidates if item[1]), None)
+        reminder_candidate = next((item for item in review_candidates if item[1]), None)
+        reminder_goal = reminder_candidate[6] if reminder_candidate else None
         if not reminder_review and delta_focus and reminder_goal and reminder_goal.goal_id:
             goal_id = str(reminder_goal.goal_id)
             pending = await self.db.fetchval(
                 """SELECT 1 FROM aios.character_temporal_trigger
                    WHERE instance_id=$1 AND payload->>'reminder_goal_id'=$2
                      AND payload->>'source_timeline_id'=$3
-                     AND status IN ('scheduled','firing','fired') LIMIT 1""",
+                     AND (status IN ('scheduled','firing','fired','timeline_inactive')
+                          OR (payload->>'attempt_id'=$4 AND payload->>'evidence_revision'=$5)) LIMIT 1""",
                 instance_id, goal_id, str(context.source_timeline_id),
+                str(reminder_candidate[10]), str(review_coordinates[reminder_goal.goal_id]["evidence_revision"]),
             )
             if not pending:
                 proposals.append(self._p(
                     "reflection", f"Consider setting a reminder to revisit my goal: {reminder_goal.text}",
-                    "reflection.schedule_reminder", {"goal_id": goal_id},
+                    "reflection.schedule_reminder", {
+                        "goal_id": goal_id, "attempt_id": str(reminder_candidate[10]),
+                        "evidence_revision": str(review_coordinates[reminder_goal.goal_id]["evidence_revision"]),
+                    },
                     source_node_id, context, relevance=.85, goal_affinity=.7, recency=1,
                     key=f"reminder:{goal_id}:{source_node_id}",
                     evidence=[{"kind": "active_goal", "goal_id": goal_id}],

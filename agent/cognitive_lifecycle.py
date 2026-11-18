@@ -178,7 +178,10 @@ class CognitiveLifecycleReconciler:
                                 evidence_ids=[str(operation["operation_id"])], attempt_id=attempt_id)
                         except LookupError:
                             pass
-            elif operation_type != "planning.review" and operation_type != "planning.propose" and not payload.get("planning_only"):
+                if option_index in {0, 1} and payload.get("reminder_trigger_id") and attempt_id:
+                    from .reminder_continuation import ReminderContinuation
+                    await ReminderContinuation(self.db).record(operation, goal_id, attempt_id)
+            elif operation_type not in {"planning.review", "planning.propose", "reflection.schedule_reminder"} and not payload.get("planning_only"):
                 # Successful non-review work can be evidence of progress.
                 await self.record_goal_evidence(
                     instance_id=operation["instance_id"],goal_id=goal_id,

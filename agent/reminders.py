@@ -8,6 +8,7 @@ from uuid import UUID
 from aios_app.hud.internal_frame import InternalHUDAssembler
 from aios_app.inference.broker import InferenceBroker, InferenceRequest, InferenceUnavailable
 from aios_app.pipeline.jobs import JobDeferred
+from aios_app.inference.protocol import StructuredResponseError
 
 from .runtime import AgentRuntimeStore
 from .temporal import TemporalTriggerStore
@@ -58,7 +59,7 @@ def valid_delay(value) -> bool:
 
 
 def wake_decision(raw):
-    if set(raw) != set(WAKE_SCHEMA) or not valid_note(raw.get("note")):
+    if not isinstance(raw, dict) or set(raw) != set(WAKE_SCHEMA) or not valid_note(raw.get("note")):
         raise ValueError("invalid reminder decision")
     decision, delay = raw["decision"], raw["delay_seconds"]
     if decision == "defer" and valid_delay(delay):
@@ -95,6 +96,8 @@ class CharacterReminders:
                 allowed_actions={}, output_schema=schema, max_tokens=240,
             ))
         except InferenceUnavailable as exc:
+            if schema == WAKE_SCHEMA and isinstance(exc.__cause__, StructuredResponseError):
+                raise ValueError("invalid reminder model response") from exc
             raise JobDeferred("reminder inference unavailable", delay_seconds=60) from exc
         return hud, response.response.raw
 
@@ -130,7 +133,7 @@ class CharacterReminders:
             return {"kind": "reminder_rejected", "reason": str(exc)}
         if due_at is None:
             return {"kind": "reminder_skipped"}
-        return await self._store_proposal(op, goal_id, hud, raw["reason"], due_at, dedupe_key)
+        return await self._store_proposal(op, goal_id, hud, raw["reason"], due_at, dedupe_key, payload)
 
     async def _current_source_timeline(self, instance_id):
         return await self.db.fetchval(
@@ -138,7 +141,7 @@ class CharacterReminders:
             instance_id,
         )
 
-    async def _store_proposal(self, op, goal_id, hud, reason, due_at, dedupe_key) -> dict:
+    async def _store_proposal(self, op, goal_id, hud, reason, due_at, dedupe_key, proposal) -> dict:
         instance_id = op["instance_id"]
         if not hud.source_timeline_id or hud.source_timeline_id != op["source_timeline_id"]:
             return {"kind": "reminder_skipped", "reason": "source timeline changed"}
@@ -156,17 +159,28 @@ class CharacterReminders:
                 """SELECT trigger_id FROM aios.character_temporal_trigger
                    WHERE instance_id=$1 AND payload->>'reminder_goal_id'=$2
                      AND payload->>'source_timeline_id'=$3
-                     AND status IN ('scheduled','firing','fired') LIMIT 1""",
+                     AND status IN ('scheduled','firing','fired','timeline_inactive') LIMIT 1""",
                 instance_id, str(goal_id), str(hud.source_timeline_id),
             )
             if existing:
                 return {"kind": "reminder_already_pending", "trigger_id": str(existing)}
+            attempt = await self._open_attempt(instance_id, goal_id, hud.source_timeline_id)
+            if not attempt or (proposal.get("attempt_id") and str(attempt) != proposal["attempt_id"]):
+                return {"kind": "reminder_skipped", "reason": "goal attempt changed"}
             timer = await self.temporal.create_timer(
                 instance_id=instance_id, reason=reason.strip(), due_at=due_at,
-                payload={"reminder_goal_id": str(goal_id), "source_timeline_id": str(hud.source_timeline_id)},
+                payload={"reminder_goal_id": str(goal_id), "source_timeline_id": str(hud.source_timeline_id),
+                         "attempt_id": str(attempt), "evidence_revision": proposal.get("evidence_revision")},
                 dedupe_key=dedupe_key,
             )
         return {"kind": "reminder_scheduled", **timer}
+
+    async def _open_attempt(self, instance_id, goal_id, timeline_id):
+        return await self.db.fetchval(
+            """SELECT attempt_id FROM aios.character_goal_attempt
+               WHERE instance_id=$1 AND goal_id=$2 AND source_timeline_id=$3
+                 AND closed_at IS NULL""", instance_id, goal_id, UUID(str(timeline_id)),
+        )
 
     async def handle_due(self, instance_id: UUID, trigger_id: UUID) -> None:
         await self._check_available(instance_id)
@@ -179,32 +193,32 @@ class CharacterReminders:
             return
         payload = self.temporal.payload_object(row["payload"])
         if str(await self._current_source_timeline(instance_id)) != payload["source_timeline_id"]:
-            await self._complete(instance_id, trigger_id, "closed", "Source timeline changed.")
+            await self._suspend(instance_id, trigger_id)
             return
         goal_id = UUID(payload["reminder_goal_id"])
         goal = await self._goal(instance_id, goal_id)
         if goal.get("status") != "active":
             await self._complete(instance_id, trigger_id, "closed", "Linked goal is no longer active.")
             return
-        hud, raw = await self._infer(instance_id, goal["goal_text"], {
-            "goal": goal["goal_text"],
-            "reason": row["reason"],
-            "due_at": row["due_at"].isoformat(),
-            "fired_at": row["fired_at"].isoformat(),
-        }, WAKE_PROMPT, WAKE_SCHEMA)
-        if str(hud.source_timeline_id) != payload["source_timeline_id"]:
-            await self._complete(instance_id, trigger_id, "closed", "Source timeline changed.")
-            return
         try:
+            hud, raw = await self._infer(instance_id, goal["goal_text"], {
+                "goal": goal["goal_text"],
+                "reason": row["reason"],
+                "due_at": row["due_at"].isoformat(),
+                "fired_at": row["fired_at"].isoformat(),
+            }, WAKE_PROMPT, WAKE_SCHEMA)
+            if str(hud.source_timeline_id) != payload["source_timeline_id"]:
+                await self._suspend(instance_id, trigger_id)
+                return
             decision, note, delay = wake_decision(raw)
         except ValueError:
-            await self._complete(instance_id, trigger_id, "review failed", "Model returned an invalid decision.")
+            await self._retry_invalid(instance_id, trigger_id)
             return
 
         async with self.db.atomic():
             await self._check_available(instance_id)
             if await self._current_source_timeline(instance_id) != hud.source_timeline_id:
-                await self._complete(instance_id, trigger_id, "closed", "Source timeline changed.")
+                await self._suspend(instance_id, trigger_id)
                 return
             goal_status = await self.db.fetchval(
                 """SELECT status FROM aios.character_agent_goal
@@ -213,21 +227,49 @@ class CharacterReminders:
             if goal_status != "active":
                 await self._complete(instance_id, trigger_id, "closed", "Linked goal changed during review.")
                 return
+            attempt = payload.get("attempt_id")
+            if attempt and str(await self._open_attempt(instance_id, goal_id, hud.source_timeline_id)) != attempt:
+                await self._complete(instance_id, trigger_id, "closed", "Original goal attempt closed.")
+                return
             if not await self._complete(instance_id, trigger_id, decision, note):
                 return
             if decision == "defer":
                 await self.temporal.create_timer(
                     instance_id=instance_id, reason=row["reason"], duration_seconds=delay,
-                    payload=payload, dedupe_key=f"reminder:defer:{trigger_id}",
+                    payload={**payload, "deferral_count": int(payload.get("deferral_count", 0)) + 1}, dedupe_key=f"reminder:defer:{trigger_id}",
                 )
             elif decision == "review":
+                from .goal_activity import grant_scheduled_window
+                await grant_scheduled_window(self.db, instance_id)
                 await self.runtime.wake(
                     instance_id=instance_id, event_type="GOAL_REVIEW_DUE",
                     source_type="reminder_review", source_id=str(trigger_id),
                     payload={"goal_id": str(goal_id), "trigger_id": str(trigger_id),
-                             "goal_text": goal["goal_text"], "reason": note},
+                             "goal_text": goal["goal_text"], "reason": note, "attempt_id": attempt},
                     dedupe_key=f"reminder:review:{trigger_id}", priority=20,
                 )
+
+    async def _retry_invalid(self, instance_id, trigger_id):
+        # Commit the counter before deferring the pipeline job.
+        async with self.db.atomic():
+            count = await self.db.fetchval(
+                """UPDATE aios.character_temporal_trigger
+                   SET invalid_decisions=invalid_decisions+1,updated_at=now()
+                   WHERE instance_id=$1 AND trigger_id=$2 AND status='fired'
+                   RETURNING invalid_decisions""", instance_id, trigger_id,
+            )
+            if count and count >= 3:
+                await self._complete(instance_id, trigger_id, "review failed",
+                                     "Three invalid reminder decisions.")
+        if count in (1, 2):
+            raise JobDeferred("invalid reminder model response", delay_seconds=30 if count == 1 else 120)
+
+    async def _suspend(self, instance_id, trigger_id):
+        await self.db.execute(
+            """UPDATE aios.character_temporal_trigger
+               SET status='timeline_inactive',last_outcome='timeline_inactive',updated_at=now()
+               WHERE instance_id=$1 AND trigger_id=$2 AND status='fired'""", instance_id, trigger_id,
+        )
 
     async def _check_available(self, instance_id):
         available = await self.db.fetchval(

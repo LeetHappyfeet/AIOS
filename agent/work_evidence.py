@@ -41,7 +41,7 @@ class WorkEvidence:
     def __init__(self, db):
         self.db = db
 
-    async def rows(self, instance_id, *, request_id=None, run_id=None):
+    async def rows(self, instance_id, *, request_id=None, run_id=None, goal_id=None, attempt_id=None):
         # Reuse the conversation's source cursor, not the execution instance's
         # cursor. A fork or a superseded source must not leak old receipts.
         return await self.db.fetch(
@@ -67,8 +67,10 @@ class WorkEvidence:
                  AND EXISTS(SELECT 1 FROM visible WHERE node_id=r.source_node_id)
                  AND ($2::uuid IS NULL OR r.request_id=$2)
                  AND ($3::uuid IS NULL OR w.run_id=$3)
-               ORDER BY r.created_at DESC,r.request_id DESC LIMIT 6""",
-            instance_id, request_id, run_id,
+                 AND ($4::uuid IS NULL OR r.goal_id IS NULL OR (r.goal_id=$4 AND r.attempt_id=$5::uuid))
+                 AND ($4::uuid IS NULL OR w.status NOT IN ('queued','running'))
+               ORDER BY ($4::uuid IS NOT NULL AND r.goal_id IS NOT NULL) DESC,r.created_at DESC,r.request_id DESC LIMIT 6""",
+            instance_id, request_id, run_id, goal_id, attempt_id,
         )
 
     @staticmethod
@@ -84,7 +86,7 @@ class WorkEvidence:
 
     async def planning(self, instance_id, goal_id, attempt_id):
         return self.planning_from_rows(
-            await self.rows(instance_id), goal_id, attempt_id)
+            await self.rows(instance_id, goal_id=goal_id, attempt_id=attempt_id), goal_id, attempt_id)
 
     @classmethod
     def planning_from_rows(cls, rows, goal_id, attempt_id):

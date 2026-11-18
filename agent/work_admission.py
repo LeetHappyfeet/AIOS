@@ -305,7 +305,7 @@ class WorkAdmission:
                 )
             )
 
-    async def request(self, instance_id, req, *, character_source=False):
+    async def request(self, instance_id, req, *, character_source=False, reminder_trigger_id=None):
         intent = req.intent().model_dump(mode="json", exclude_none=True)
         intent["purpose"] = canonical_purpose(intent["capability"], intent["purpose"])
         digest = fingerprint(intent)
@@ -340,6 +340,9 @@ class WorkAdmission:
                 "SELECT * FROM aios.character_work_request WHERE request_id=$1 FOR UPDATE",
                 req.request_id,
             )
+            continuation = None
+            if old is None and reminder_trigger_id is not None:
+                continuation = await self._validate_reminder_origin(instance_id, req, reminder_trigger_id)
             if old is None:
                 old = await self.db.fetchrow(
                     """SELECT * FROM aios.character_work_request
@@ -350,6 +353,8 @@ class WorkAdmission:
                     digests,
                 )
             if old:
+                if continuation and old["attempt_id"] != continuation["attempt_id"]:
+                    raise HTTPException(409, "Identical work was already requested at this source on a different attempt")
                 if (
                     old["instance_id"] != instance_id
                     or old["source_node_id"] != req.source_node_id
@@ -375,7 +380,7 @@ class WorkAdmission:
                 source["source_timeline_id"],
                 digests,
             )
-            if duplicate:
+            if duplicate and (not continuation or duplicate["attempt_id"] == continuation["attempt_id"]):
                 await self.alias(req, instance_id, digest, duplicate["request_id"])
                 return self.receipt(duplicate)
             goals = await self.db.fetch(
@@ -390,9 +395,11 @@ class WorkAdmission:
             if req.goal_ref is not None and len(goals) != 1:
                 raise HTTPException(409, "goal_ref must identify an active goal with an open attempt in this conversation")
             goal = dict(goals[0]) if len(goals) == 1 else {}
+            if continuation and goal.get("attempt_id") != continuation["attempt_id"]:
+                raise HTTPException(409, "Original reminder attempt changed")
             row = await self.db.execute_returning_row(
-                """INSERT INTO aios.character_work_request(request_id,instance_id,source_timeline_id,source_node_id,intent,intent_hash,goal_id,attempt_id)
-                   VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8) RETURNING *""",
+                """INSERT INTO aios.character_work_request(request_id,instance_id,source_timeline_id,source_node_id,intent,intent_hash,goal_id,attempt_id,reminder_trigger_id)
+                   VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9) RETURNING *""",
                 req.request_id,
                 instance_id,
                 source["source_timeline_id"],
@@ -401,8 +408,45 @@ class WorkAdmission:
                 digest,
                 goal.get("goal_id"),
                 goal.get("attempt_id"),
+                reminder_trigger_id,
             )
             return await self.advance(row)
+
+    async def _validate_reminder_origin(self, instance_id, req, trigger_id):
+        from .goal_planning import GoalPlanningService
+        from .reminder_continuation import request_id
+
+        origin = await self.db.fetchrow(
+            """SELECT * FROM aios.character_reminder_continuation
+               WHERE trigger_id=$1 AND instance_id=$2 AND status='pending' FOR UPDATE""",
+            trigger_id, instance_id,
+        )
+        if (not origin or req.request_id != request_id(trigger_id) or req.goal_ref != origin["goal_id"]
+                or req.source_node_id != origin["source_node_id"]
+                or req.model_dump(mode="json") != decode(origin["intent"])):
+            raise HTTPException(409, "Invalid reminder work origin")
+        await self.db.fetchval(
+            "SELECT goal_id FROM aios.character_agent_goal WHERE goal_id=$1 FOR UPDATE", origin["goal_id"],
+        )
+        plan = await self.db.fetchval(
+            """SELECT 1 FROM aios.character_goal_plan WHERE plan_id=$1 AND status='ready'
+                 AND input_fingerprint=$2 AND attempt_id=$3 FOR SHARE""",
+            origin["plan_id"], origin["input_fingerprint"], origin["attempt_id"],
+        )
+        snap = await GoalPlanningService(self.db).snapshot(instance_id, origin["goal_id"])
+        if (not plan or not snap or snap["attempt_id"] != origin["attempt_id"]
+                or snap["fingerprint"] != origin["input_fingerprint"]
+                or snap["context"].source_timeline_id != origin["source_timeline_id"]):
+            raise HTTPException(409, "Reminder plan or original goal attempt changed")
+        if await self.db.fetchval(
+            """SELECT 1 FROM aios.character_work_request r LEFT JOIN aios.workspace_run w USING(run_id)
+               WHERE r.instance_id=$1 AND r.attempt_id=$2
+                 AND r.status NOT IN ('denied','invalidated','dismissed')
+                 AND (r.run_id IS NULL OR w.status IN ('queued','running')) LIMIT 1""",
+            instance_id, origin["attempt_id"],
+        ):
+            raise HTTPException(409, "Existing work is pending on this attempt")
+        return origin
 
     async def alias(self, req, instance_id, digest, canonical):
         await self.db.execute(
@@ -421,6 +465,7 @@ class WorkAdmission:
             "reason": row["reason"],
             "run_id": str(row["run_id"]) if row["run_id"] else None,
             "completed": False,
+            **({"reminder_trigger_id": str(row["reminder_trigger_id"])} if row.get("reminder_trigger_id") else {}),
             "goal_ref": str(row["goal_id"]) if row.get("goal_id") else None,
             "goal_association": "linked" if row.get("goal_id") else "unlinked; select goal_ref when multiple goals are active",
         }
