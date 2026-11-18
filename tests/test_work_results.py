@@ -82,7 +82,7 @@ def test_untrusted_malformed_optional_fields_are_bounded():
     assert len(view['limitations']) == 5
     result['result_summary'].update(findings=['f' * 1000] * 10, artifacts=['a' * 1000] * 10)
     text = render_hud_text({'remote_tasks': [task(result) for _ in range(8)]})
-    assert len(text) < 13000 and 'Earlier result:' in text
+    assert len(text) < 13000 and 'Earlier run' in text
 
 
 @pytest.mark.asyncio
@@ -192,3 +192,36 @@ def test_repeated_configuration_blockers_share_one_explanation():
     assert '5 request(s)' in text
     assert text.count('Missing profile') == 1
     assert '2 additional configuration blockers' in text
+
+
+@pytest.mark.parametrize("budget", [None, 2000])
+def test_research_hud_prefers_receipts_and_labels_retrieved_older_run(budget):
+    latest = task({"result_summary": {
+        "outcome": "partial",
+        "summary": "moraine returned zero results",
+        "limitations": ["No write/shell tool was exposed"],
+        "research_progress": {
+            "verified_passages": [{"title": "Conodonts", "section": "page:9"}],
+            "acquisition_errors": [{"title": "GLG-123", "error": "response_too_large",
+                                    "limit_bytes": 12 * 1048576}],
+        },
+        "research_citations": [{"title": "Ichnofacies", "section": "page:5"}],
+        "search_log": [{"query": "moraine", "status": "source_error",
+                        "errors": {"calibre": "http_status_404"}}],
+    }}, reported_at="2026-11-18 08:11:45+00:00")
+    old = task({"report": "STALE INLINE PROSE"})
+    old["run_id"] = "old-run"
+    frame = {"remote_tasks": [latest, old], "work": {"retrieved_result": {
+        "run_id": "old-run", "reported_at": "2026-11-16 13:12:53+00:00",
+        "section": "findings", "text": "Older selected evidence",
+    }}}
+    if budget is not None:
+        frame["hud"] = {"token_budget": budget}
+    text = render_hud_text(frame)
+    assert "research outcome: partial" in text
+    assert "Conodonts (page:9); Ichnofacies (page:5)" in text
+    assert "GLG-123 — response_too_large (download limit 12 MiB)" in text
+    assert "moraine [http_status_404]" in text
+    assert "zero results" not in text and "No write/shell" not in text
+    assert "Earlier run old-run" in text and "STALE INLINE PROSE" not in text
+    assert "RETRIEVED WORK RESULT (run old-run, reported 2026-11-16;" in text

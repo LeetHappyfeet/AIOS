@@ -64,6 +64,65 @@ def _report_only(checks):
     return False
 
 
+def _research_lines(summary):
+    def records(value):
+        return [row for row in value[:24] if isinstance(row, Mapping)] if isinstance(value, list) else []
+
+    progress = summary.get("research_progress")
+    progress = progress if isinstance(progress, Mapping) else {}
+    errors = records(progress.get("acquisition_errors"))
+    searches = records(summary.get("search_log"))
+    passages = records(progress.get("verified_passages")) + records(summary.get("research_citations"))
+    if not (progress or searches or passages):
+        return []
+    pages = {}
+    for row in passages:
+        title = compact(row.get("title"), 78)
+        source = compact(row.get("source_id"), 30)
+        key = (title, source, compact(row.get("evidence_id"), 48))
+        sections = row.get("sections_read")
+        sections = sections[:8] if isinstance(sections, list) else []
+        for location in [row.get("section"), *sections]:
+            section = compact(location, 35)
+            if title and section and section not in pages.setdefault(key, []):
+                pages[key].append(section)
+    lines = []
+    if pages:
+        refs = [f"{title} ({', '.join(sections[:4])})"
+                for (title, _, _), sections in list(pages.items())[:2]]
+        lines.append("  Retained passage receipts: " + "; ".join(refs))
+    else:
+        lines.append("  No page or section receipts in the retained preview.")
+    if errors:
+        row = next((r for r in errors if r.get("error") == "response_too_large"), errors[0])
+        limit = row.get("limit_bytes")
+        size = f" (download limit {limit / 1048576:g} MiB)" if type(limit) is int and 0 < limit <= 2**40 else ""
+        lines.append("  Acquisition blocked: " + compact(row.get("title"), 100)
+                     + " — " + compact(row.get("error"), 60) + size)
+    else:
+        # Earlier clients sometimes retained the blocker only in worker prose.
+        findings = summary.get("findings")
+        if isinstance(findings, list):
+            blocker = next((row for row in findings[:6] if isinstance(row, str)
+                            and row.startswith("ACQUISITION FAILURE:")), "")
+            if blocker:
+                lines.append("  Worker-reported acquisition blocker: "
+                             + compact(blocker.removeprefix("ACQUISITION FAILURE:"), 185))
+    failures = []
+    for row in searches:
+        errors = row.get("errors")
+        status = compact(row.get("status"), 40)
+        if not errors and status not in {"source_error", "source_unhealthy", "partial_results", "query_rejected"}:
+            continue
+        detail = ", ".join(dict.fromkeys(compact(v, 38) for v in list(errors.values())[:2])) if isinstance(errors, Mapping) else ""
+        failures.append(f"{compact(row.get('query'), 48)} [{detail or status}]")
+    if failures:
+        lines.append("  Search coverage incomplete: " + "; ".join(failures[:3]))
+    elif not searches:
+        lines.append("  Search status log unavailable in the retained preview.")
+    return lines
+
+
 def result_view(result, assignment):
     result = result if isinstance(result, Mapping) else {}
     assignment = assignment if isinstance(assignment, Mapping) else {}
@@ -131,6 +190,7 @@ def result_view(result, assignment):
                               "open_threads": threads}
     return {
         "character_report": character_view,
+        "research_lines": _research_lines(summary),
         "model_response": "; ".join(response_details),
         "requested_content": sections,
         "content_sections_omitted": max(0, len(content) - 4) + (

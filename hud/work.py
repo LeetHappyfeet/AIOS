@@ -49,6 +49,21 @@ def render_work_results(work, tasks, *, compact_mode=False):
         view = task.get("result_summary")
         if not isinstance(view, dict):
             view = result_view({("error" if task["status"] in {"failed", "interrupted", "cancelled"} else "report"): task.get("summary")}, {})
+        run_ref = short_reference(task["run_id"], "r")
+        if task is not latest and task["status"] not in ACTIVE:
+            lines.append(f"- Earlier run {run_ref}: {task['status']}; goal review: "
+                         f"{task.get('goal_review') or 'not linked'} — {compact(title, 80)}{reported}")
+            continue
+        if task is latest and view.get("research_lines"):
+            lines.append(f"- Run {run_ref}: {task['status']}; research outcome: "
+                         f"{view['worker_outcome']}; goal review: {task.get('goal_review') or 'not linked'}{reported}")
+            if view["error"]:
+                lines.append("  Worker-reported error: " + compact(view["error"], 180))
+            lines.extend(view["research_lines"])
+            lines.append("  Checks: " + str(task.get("verification_status") or "not reported")
+                         + " — " + view["verification_scope"])
+            lines.append("  Full report retained.")
+            continue
         character_report = view.get("character_report")
         if character_report and task is latest:
             # Character voice is derived, worker-supplied narrative. Keep the
@@ -79,7 +94,7 @@ def render_work_results(work, tasks, *, compact_mode=False):
             lines.append("  Checks: " + compact(view["verification_scope"], 120))
             for finding in view["findings"][:2]:
                 lines.append("  Worker-reported finding: " + compact(finding, 180))
-            if task is latest and task["status"] not in ACTIVE and not view["findings"]:
+            if task is latest and not view["findings"]:
                 lines.append("  No authored findings; retained passage evidence may still exist. Read section evidence, then search_log or report. Do not infer no research was done.")
             lines.append("  Full report retained.")
             continue
@@ -96,13 +111,9 @@ def render_work_results(work, tasks, *, compact_mode=False):
         if view.get("model_response"):
             entry.append("  Model response (worker report): " + view["model_response"])
         if task is not latest:
-            if task["status"] in ACTIVE:
-                entry.append("  Progress (worker report): " + compact(task.get("summary"), 240))
-                if task.get("cancel_requested"):
-                    entry.append("  Cancellation requested; execution has not yet reported termination.")
-            else:
-                entry.append("  Earlier result: " + compact(view.get("summary") or "; ".join(view.get("findings") or []) or view.get("report_excerpt"), 220))
-                entry.append("  Outcome (worker report): " + view["worker_outcome"] + "; configured checks: " + str(task.get("verification_status") or "not reported") + ". Retained history; do not repeat merely because details are omitted.")
+            entry.append("  Progress (worker report): " + compact(task.get("summary"), 240))
+            if task.get("cancel_requested"):
+                entry.append("  Cancellation requested; execution has not yet reported termination.")
         else:
             entry.append("  Worker-reported outcome: " + view["worker_outcome"])
             # Answer first. A greeting at the start of a prose report must not

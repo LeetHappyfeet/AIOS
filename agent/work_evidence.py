@@ -164,6 +164,7 @@ class WorkEvidence:
         return {
             "status": "retrieved", "request_id": str(row["request_id"]),
             "run_id": str(row["run_id"]), "execution_status": row["status"],
+            **({"reported_at": str(row["reported_at"])} if row.get("reported_at") else {}),
             "section": query.section, "text": text[query.cursor:end],
             "cursor": query.cursor, "next_cursor": end if end < len(text) else None,
             "revision": revision, "total_characters": len(text),
