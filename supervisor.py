@@ -586,6 +586,8 @@ async def _schedule_agent_work(db: Database) -> None:
         from aios_app.agent.autonomy import AutonomyScheduler
         from aios_app.agent.runtime import AgentRuntimeStore
         from aios_app.agent.temporal import TemporalTriggerStore
+        from aios_app.epistemic.goal_revalidation import repair_procedural_goals
+        await repair_procedural_goals(db)
         temporal = TemporalTriggerStore(db)
         await temporal.reset_stale_firing()
         await AgentRuntimeStore(db).emit_due_heartbeats(limit=100)

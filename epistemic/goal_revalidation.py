@@ -10,7 +10,7 @@ import asyncio
 import json
 from uuid import UUID
 
-from .goal_source_admission import ADMISSION_VERSION, review_goal_source
+from .goal_source_admission import ADMISSION_VERSION, NON_GOAL_REASONS, review_goal_source
 from .goals import CharacterGoalService
 
 
@@ -39,7 +39,7 @@ async def revalidate_source_goals(db, instance_id, *, apply=False):
                 match_span=tuple(span) if isinstance(span, list) and len(span) == 2 else None)
             # Limit repairs to the new, well-defined exclusions. Other
             # ambiguities must not be mass-cancelled after a policy upgrade.
-            if decision.reason not in {
+            if decision.reason not in NON_GOAL_REASONS | {
                 "current_utterance_or_reaction", "incomplete_objective",
                 "unresolved_goal_subject", "embedded_future_clause", "constraint_without_action",
                 "transient_intention_horizon", "objective_contains_unresolved_reference",
@@ -72,6 +72,71 @@ async def main():
         print(json.dumps(await revalidate_source_goals(db, args.instance, apply=args.apply), indent=2))
     finally:
         await db.close()
+
+
+
+
+async def repair_procedural_goals(db, *, limit=32):
+    """Bounded upgrade of generated goals using their retained source evidence."""
+    from .goal_source_admission import NON_GOAL_REASONS, non_goal_reason
+
+    affected = set()
+    async with db.atomic():
+        rows = await db.fetch(
+            """SELECT g.goal_id,g.instance_id,g.goal_text,g.source_node_id,g.meta,
+                      u.meta AS unit_meta,u.unit_id
+               FROM aios.character_agent_goal g
+               LEFT JOIN aios.message_cognitive_unit u
+                 ON u.unit_id::text=g.meta->>'source_unit_id'
+                 AND u.claim_kind='GOAL' AND u.meta->>'character_owned'='true'
+                 AND EXISTS (SELECT 1 FROM aios.message_cognitive_commit c
+                             WHERE c.commit_id=u.commit_id AND c.instance_id=g.instance_id
+                               AND c.node_id=g.source_node_id)
+               WHERE g.status IN ('active','scheduled')
+                 AND (g.meta->>'source'='message_cognition'
+                      OR g.meta->>'created_by'='legacy_runtime_goal_import')
+                 AND g.meta->>'procedural_review_version' IS DISTINCT FROM $1
+               ORDER BY g.created_at,g.goal_id
+               LIMIT $2 FOR UPDATE OF g SKIP LOCKED""",
+            ADMISSION_VERSION, max(1, min(int(limit), 128)),
+        )
+        for row in rows:
+            meta = CharacterGoalService._json_object(row["meta"])
+            unit = CharacterGoalService._json_object(row["unit_meta"])
+            objective = unit.get("objective") or meta.get("objective") or row["goal_text"]
+            reason = non_goal_reason(objective)
+            if unit.get("source_text") and unit.get("objective"):
+                span = unit.get("source_span")
+                review = review_goal_source(
+                    source_text=unit["source_text"], objective=unit["objective"],
+                    parse_reason=unit.get("parse_reason"), horizon=unit.get("horizon"),
+                    match_span=tuple(span) if isinstance(span, list) and len(span) == 2 else None,
+                )
+                # Reapply the existing utterance/constraint exclusions only
+                # where the original character-owned source unit is available.
+                if review.reason in NON_GOAL_REASONS | {
+                    "current_utterance_or_reaction", "objective_contains_unresolved_reference",
+                    "embedded_future_clause", "constraint_without_action",
+                }:
+                    reason = review.reason
+            if reason:
+                await CharacterGoalService(db).finish(
+                    instance_id=row["instance_id"], goal_id=row["goal_id"], status="cancelled",
+                    resolution_kind="source_revalidation:" + ADMISSION_VERSION + ":" + reason,
+                    source_node_id=row["source_node_id"],
+                    evidence_ids=[str(row["unit_id"])] if row["unit_id"] else [],
+                    refresh_scene=False,
+                )
+                affected.add(row["instance_id"])
+            await db.execute(
+                """UPDATE aios.character_agent_goal SET meta=meta || $2::jsonb
+                   WHERE goal_id=$1""",
+                row["goal_id"], json.dumps({"procedural_review_version": ADMISSION_VERSION}),
+            )
+    for instance_id in affected:
+        await CharacterGoalService(db)._invalidate(instance_id)
+        await CharacterGoalService(db)._refresh_scene(instance_id)
+    return len(rows)
 
 
 if __name__ == "__main__":

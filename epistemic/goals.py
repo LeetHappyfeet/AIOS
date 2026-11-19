@@ -8,12 +8,14 @@ from typing import Any, Mapping
 from uuid import UUID
 
 from aios_app.db import Database
-from aios_app.epistemic.goal_source_admission import review_goal_source, ADMISSION_VERSION
+from aios_app.epistemic.goal_source_admission import review_goal_source, ADMISSION_VERSION, non_goal_reason
 
 
 def valid_goal_objective(value: str | None) -> bool:
     """Reject incomplete infinitives left by prose/markup sentence splitting."""
     objective = " ".join(str(value or "").split())
+    if non_goal_reason(objective):
+        return False
     if not objective or not re.search(r"[A-Za-z]", objective):
         return False
     if re.match(r"(?i)^to\b", objective) and not re.match(
@@ -596,7 +598,7 @@ class CharacterGoalService:
             return
         for value in values:
             text = self._legacy_text(value)
-            if not text:
+            if not valid_goal_objective(text):
                 continue
             # Compatibility import is deliberately idempotent. It only bridges
             # old runtime state; it never reactivates a terminal managed goal.

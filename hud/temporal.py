@@ -41,7 +41,7 @@ async def attach_time_references(db, events, memories, *, timeline_id=None, head
                    UNION
                    SELECT e.parent_node_id,a.depth+1 FROM ancestors a
                    JOIN aios.dag_edge e ON e.child_node_id=a.node_id AND e.timeline_id=$1
-                   WHERE a.depth<64 AND e.edge_type='next'
+                   WHERE a.depth<512 AND e.edge_type='next'
                )
                SELECT node_id,min(depth) AS depth FROM ancestors
                WHERE node_id=ANY($3::uuid[]) GROUP BY node_id""", timeline_id, head_node_id, node_ids,
@@ -53,6 +53,8 @@ async def attach_time_references(db, events, memories, *, timeline_id=None, head
         if node in experience:
             depth = experience[node]
             item["experience_position"] = "branch head" if depth == 0 else f"{depth} source steps earlier on branch"
+        elif item.get("event_stream") == "source":
+            item["experience_position"] = "branch distance unavailable"
         event_time = item.get("event_time") or source.get("event_time")
         if isinstance(event_time, datetime) and event_time.tzinfo is not None:
             item["time_reference"] = {"kind": "source time", "at": event_time.isoformat()}
