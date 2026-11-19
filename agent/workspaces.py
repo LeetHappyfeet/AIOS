@@ -599,6 +599,17 @@ class WorkspaceStore:
                 status,
                 json.dumps(result),
             )
+            # Revisit only continuations already tracking this canonical request.
+            # Reading and reviewing the report still checks origin/attempt visibility.
+            await self.db.execute(
+                """UPDATE aios.character_reminder_continuation c
+                   SET next_evaluation_at=now()
+                   FROM aios.character_work_request r
+                   WHERE c.work_request_id=r.request_id AND r.run_id=$1
+                     AND c.instance_id=r.instance_id AND c.attempt_id=r.attempt_id
+                     AND c.source_timeline_id=r.source_timeline_id
+                     AND c.status IN ('waiting_work','waiting_configuration','waiting_evidence')""", run_id,
+            )
             action_status = {"interrupted": "timed_out", "finished": "succeeded"}.get(
                 status, status
             )

@@ -89,3 +89,51 @@ async def test_review_payload_cannot_cross_into_new_retry_attempt(monkeypatch):
         'goal_attempt_id':uuid4(),'input':{'attempt_id':str(uuid4())}})
     stale.assert_awaited_once()
     assert 'attempt changed' in stale.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_receipt_review_includes_attributed_report_without_requiring_new_chat(monkeypatch):
+    from aios_app.agent.reminder_continuation import report_revision
+
+    instance, goal, attempt, operation, timeline, node, transaction = [uuid4() for _ in range(7)]
+    reports = [{"id": "workspace:test", "revision": "v1", "goal_linked": True,
+                "summary": "Worker located a chapter.", "limitations": ["Full text was unavailable."]}]
+    db = SimpleNamespace(fetch=AsyncMock(return_value=[]), execute=AsyncMock())
+    create = AsyncMock(return_value=transaction)
+    monkeypatch.setattr("aios_app.agent.work_evidence.WorkEvidence.planning", AsyncMock(return_value=reports))
+    monkeypatch.setattr("aios_app.agent.transactions.InternalCognitionTransactions.create", create)
+    monkeypatch.setattr("aios_app.agent.cognitive_operations.enqueue_job", AsyncMock(return_value=uuid4()))
+    await CognitiveOperationEngine(db)._create_decision_transaction({
+        "instance_id": instance, "operation_id": operation, "operation_type": "planning.review",
+        "goal_attempt_id": attempt, "source_timeline_id": timeline, "source_node_id": node,
+        "input": {"goal": "Research glaciation", "goal_id": str(goal), "attempt_id": str(attempt),
+                  "reminder_receipt_revision": report_revision(reports), "recent_source_events": []},
+    })
+    context = create.call_args.kwargs["review_context"]
+    assert context["worker_reports"] == reports
+    from aios_app.agent.goal_review import review_prompt
+    prompt = review_prompt(context, [])
+    assert "Worker located a chapter." in prompt
+    assert "Full text was unavailable." in prompt
+    assert "attributed" in prompt
+
+
+@pytest.mark.asyncio
+async def test_changed_worker_report_invalidates_review_before_goal_side_effects(monkeypatch):
+    instance, goal, attempt, operation, timeline, node = [uuid4() for _ in range(6)]
+    op = {
+        "instance_id": instance, "operation_id": operation, "operation_type": "planning.review",
+        "status": "waiting_inference", "source_timeline_id": timeline, "source_node_id": node,
+        "source_state_version": 1, "input": {"goal_id": str(goal), "attempt_id": str(attempt),
+                                           "reminder_receipt_revision": "old-revision"},
+    }
+    engine = CognitiveOperationEngine(SimpleNamespace(fetchrow=AsyncMock(return_value=op)))
+    engine._stale = AsyncMock()
+    ctx = SimpleNamespace(source_timeline_id=timeline, source_head_node_id=node, state_version=1)
+    monkeypatch.setattr("aios_app.hud.context.HUDContextResolver.resolve", AsyncMock(return_value=ctx))
+    monkeypatch.setattr("aios_app.agent.work_evidence.WorkEvidence.planning", AsyncMock(return_value=[
+        {"id": "workspace:test", "revision": "new-revision", "goal_linked": True},
+    ]))
+    assert not await engine.accept_choice(operation, {"option_index": 2})
+    engine._stale.assert_awaited_once()
+    assert "worker report evidence changed" in engine._stale.call_args.args[1]

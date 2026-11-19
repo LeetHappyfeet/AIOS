@@ -108,7 +108,7 @@ class CognitiveOpportunityService:
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
                        limit:int=8, focus_override:str|None=None,
-                       reminder_review: tuple[UUID, str, str | None] | None = None) -> OpportunityBatch:
+                       reminder_review: tuple | None = None) -> OpportunityBatch:
         context=await self.contexts.resolve(instance_id)
         raw=await self.db.fetchrow(
             "SELECT * FROM aios.character_runtime_state WHERE instance_id=$1",instance_id)
@@ -400,6 +400,8 @@ class CognitiveOpportunityService:
                         reminder_review[2] and str(coordinate["attempt_id"]) != reminder_review[2]):
                     continue
                 revision = f"{revision}:reminder:{reminder_review[1]}"
+                if len(reminder_review) > 3 and reminder_review[3]:
+                    revision += f":receipt:{reminder_review[3]}:{reminder_review[4]}"
             if revision in attempted_revisions:
                 continue
             overlap=len(goal_words & set(re.findall(r"[a-z0-9']+",g.lower())))
@@ -424,6 +426,9 @@ class CognitiveOpportunityService:
                 "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
                 "attempt_id":str(attempt_id),"review_revision":revision,
                 **({"reminder_trigger_id": reminder_review[1]} if reminder_review else {}),
+                **({"reminder_receipt_revision": reminder_review[3],
+                    "reminder_review_attempt": reminder_review[4]}
+                   if reminder_review and len(reminder_review) > 3 and reminder_review[3] else {}),
                 "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
                 "recent_source_events":recent_source_events,
                 "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),
@@ -440,7 +445,7 @@ class CognitiveOpportunityService:
                 goal_affinity=max(.35,affinity)+(.15 if starvation else 0),recency=1,
                 evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g,
                            "last_reviewed_at":str(reviewed) if reviewed else None}],
-                key=(f"goal:{goal_id}:reminder:{reminder_review[1]}" if reminder_review
+                key=(f"goal:{goal_id}:reminder:{reminder_review[1]}:{reminder_review[3:]}" if reminder_review
                      else f"goal:{goal_id or g.lower()[:100]}"), freshness="strict",
                 subject_id=goal_subject.subject_id if goal_subject else
                            (primary_subject.subject_id if primary_subject else None)))

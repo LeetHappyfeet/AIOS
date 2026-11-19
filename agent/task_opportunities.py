@@ -25,7 +25,8 @@ class TaskOpportunityPlanner:
         focus=' '.join(x for x in (task.retrieval_focus,task.objective,dependency_focus) if x).strip()
         reminder = next((event["payload"] for event in task.meta.get("events", [])
                          if event.get("source_type") == "reminder_review"), None)
-        reminder_review = ((UUID(reminder["goal_id"]), reminder["trigger_id"], reminder.get("attempt_id")) if reminder else None)
+        reminder_review = ((UUID(reminder["goal_id"]), reminder["trigger_id"], reminder.get("attempt_id"),
+                            reminder.get("receipt_revision"), reminder.get("review_attempt")) if reminder else None)
         batch=await self.opportunities.generate(
             instance_id=task.instance_id,
             source_node_id=task.source_through_node_id or task.source_node_id,

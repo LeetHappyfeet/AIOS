@@ -183,6 +183,24 @@ async def environment_migration(db, url):
         await db.execute(memory_sql)
         await db.execute(task_sql)
 
+async def reminder_migrations(db, *, con=None, url=None):
+    setup = "CREATE TABLE aios.character_cognitive_task(task_id uuid PRIMARY KEY);"
+    files = (
+        "20260927_01_agent_temporal_scheduler.sql", "20260929_04_goal_temporal_triggers.sql",
+        "20261117_02_reminder_continuation.sql", "20261119_01_reminder_resumption.sql",
+    )
+    scripts = [setup] + [
+        (Path(__file__).parents[1] / "migrations/current" / filename).read_text() for filename in files
+    ]
+    for script in scripts:
+        if con:
+            await con.query(script, exec=True)
+        elif url:
+            await db.raw(script, exec=True)
+        else:
+            await db.execute(script)
+
+
 @pytest_asyncio.fixture
 async def db():
     url = os.environ.get("AIOS_WORKSPACE_PGLITE_URL")
@@ -200,6 +218,7 @@ async def db():
             await con.query(BASE, exec=True)
             for filename in ("20261027_01_workspace_client.sql", "20261028_01_workspace_verification.sql", "20261028_02_character_environments.sql", "20261029_01_work_admission.sql", "20261030_02_workspace_attachment.sql", "20261031_01_workspace_registrations.sql", "20261106_01_shared_environments.sql", "20261108_01_workspace_memory.sql", "20261116_01_workspace_tasks.sql"):
                 await con.query((Path(__file__).parents[1] / "migrations/current" / filename).read_text(), exec=True)
+            await reminder_migrations(database, con=con)
             yield database
         finally:
             process.stdin.close()
@@ -223,6 +242,7 @@ async def db():
         else:
             await db.execute(migration)
         await environment_migration(db, url)
+        await reminder_migrations(db, url=url)
         yield db
         await db.client.aclose()
     elif dsn:
@@ -248,6 +268,7 @@ async def db():
         else:
             await db.execute(migration)
         await environment_migration(db, url)
+        await reminder_migrations(db, url=url)
         yield db
         await db.close()
     else:

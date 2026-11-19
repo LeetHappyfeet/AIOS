@@ -205,7 +205,7 @@ class TemporalTriggerStore:
                     """UPDATE aios.character_temporal_trigger
                        SET status='cancelled',cancelled_at=now(),
                            last_evaluated_at=now(),last_outcome='cancelled_by_request',updated_at=now()
-                       WHERE trigger_id=$1 AND instance_id=$2 AND status='scheduled'
+                       WHERE trigger_id=$1 AND instance_id=$2 AND status IN ('scheduled','timeline_inactive')
                        RETURNING *""",
                     trigger_id, instance_id,
                 )

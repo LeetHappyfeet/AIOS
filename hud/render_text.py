@@ -396,6 +396,8 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
             note = " ".join(str(project.get("note") or "").split())[:80]
             revision = f" (plan {project['plan_revision']})" if project.get("plan_revision") else ""
             lines.append(f"- {goal}{revision} [{project['status']}]" + (f" {note}" if note else ""))
+            if project.get("work_status"):
+                lines.append(f"  Work: {project['work_status']}")
             if project.get("next_reminder_at"):
                 lines.append(f"  Next reminder: {project['next_reminder_at']}")
             if project.get("worker_report"):

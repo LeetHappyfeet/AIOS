@@ -421,7 +421,7 @@ class WorkAdmission:
                WHERE trigger_id=$1 AND instance_id=$2 AND status='pending' FOR UPDATE""",
             trigger_id, instance_id,
         )
-        if (not origin or req.request_id != request_id(trigger_id) or req.goal_ref != origin["goal_id"]
+        if (not origin or req.request_id != request_id(trigger_id, origin["generation"]) or req.goal_ref != origin["goal_id"]
                 or req.source_node_id != origin["source_node_id"]
                 or req.model_dump(mode="json") != decode(origin["intent"])):
             raise HTTPException(409, "Invalid reminder work origin")

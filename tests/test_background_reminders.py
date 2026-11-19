@@ -161,11 +161,11 @@ async def test_continuation_requests_planning_for_its_own_goal():
     continuation_row = {
         "instance_id": instance_id, "goal_id": goal_id, "attempt_id": attempt_id,
         "trigger_id": trigger_id, "source_timeline_id": timeline_id,
-        "active_timeline": timeline_id, "intent": None,
+        "active_timeline": timeline_id, "intent": None, "status": "pending", "work_request_id": None,
     }
     db = MagicMock()
-    db.fetchrow = AsyncMock(side_effect=[continuation_row, None])
-    db.fetchval = AsyncMock(side_effect=[True, None])
+    db.fetchrow = AsyncMock(side_effect=[continuation_row, None, None])
+    db.fetchval = AsyncMock(side_effect=[True, True])
     db.execute = AsyncMock()
     service = ReminderContinuation(db)
     service.planner.snapshot = AsyncMock(return_value={
@@ -174,10 +174,10 @@ async def test_continuation_requests_planning_for_its_own_goal():
     })
     service.planner.schedule = AsyncMock()
 
-    with pytest.raises(JobDeferred, match="reviewed goal"):
-        await service.run(trigger_id)
+    await service.run(trigger_id)
 
     service.planner.schedule.assert_awaited_once_with(instance_id, goal_id)
+    assert db.execute.call_args.args[2] == "waiting_plan"
 
 
 @pytest.mark.asyncio
@@ -201,4 +201,20 @@ async def test_continuation_reuses_persisted_intent(monkeypatch):
     args = submit.call_args
     assert args.args[1].request_id == request_id(trigger_id)
     assert args.kwargs["reminder_trigger_id"] == trigger_id
-    assert db.execute.call_args.args[1:] == (trigger_id, "submitted", "waiting_client", canonical)
+    assert db.execute.call_args.args[1:4] == (trigger_id, canonical, "waiting_client")
+    assert "status='waiting_work'" in db.execute.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_invalid_response_is_preserved_when_a_later_provider_is_busy():
+    from aios_app.inference.broker import (
+        InferenceBroker, InferenceProviderBusy, InferenceRequest, InferenceUnavailable,
+    )
+    from aios_app.inference.protocol import StructuredResponseError
+
+    broker = InferenceBroker(MagicMock())
+    broker.providers.routable = AsyncMock(return_value=[object(), object()])
+    broker._attempt = AsyncMock(side_effect=[StructuredResponseError("malformed JSON"), InferenceProviderBusy("busy")])
+    with pytest.raises(InferenceUnavailable) as error:
+        await broker.infer(InferenceRequest(instance_id=uuid4(), worker_class="executive", prompt="decide"))
+    assert error.value.invalid_response is True

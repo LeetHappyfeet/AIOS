@@ -438,7 +438,17 @@ class CognitiveOperationEngine:
                 original.get(t["node_id"]) != t["source_hash"] for t in payload["recent_source_events"])):
                 await self._stale(op,"review source evidence changed before inference")
                 return
-            if not payload["recent_source_events"]:
+            if payload.get("reminder_receipt_revision"):
+                from .work_evidence import WorkEvidence
+                from .reminder_continuation import report_revision
+                reports = await WorkEvidence(self.db).planning(
+                    op["instance_id"], UUID(payload["goal_id"]), UUID(payload["attempt_id"]),
+                )
+                if report_revision(reports) != payload["reminder_receipt_revision"]:
+                    await self._stale(op, "worker report evidence changed before review")
+                    return
+                payload["worker_reports"] = [report for report in reports if report["goal_linked"]]
+            if not payload["recent_source_events"] and not payload.get("worker_reports"):
                 await self._stale(op,"review source evidence unavailable before inference")
                 return
             review_context=payload
@@ -513,6 +523,16 @@ class CognitiveOperationEngine:
         ):
             await self._stale(op,"strict operation context advanced while inference was running")
             return False
+        payload = self._mapping(op.get("input"))
+        if payload.get("reminder_receipt_revision"):
+            from .work_evidence import WorkEvidence
+            from .reminder_continuation import report_revision
+            reports = await WorkEvidence(self.db).planning(
+                op["instance_id"], UUID(payload["goal_id"]), UUID(payload["attempt_id"]),
+            )
+            if report_revision(reports) != payload["reminder_receipt_revision"]:
+                await self._stale(op, "worker report evidence changed during review")
+                return False
         result={"kind":"choice","option_index":selected.get("option_index"),
                 "label":selected.get("label")}
         changed=await self.db.execute_returning_row(
