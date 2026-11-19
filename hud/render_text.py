@@ -480,7 +480,15 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         lines.append("WORK UNAVAILABLE: " + str(work["unavailable_reason"])[:300])
     if work.get("request_error"):
         lines.append("WORK REQUEST NEEDS CLARIFICATION: " + str(work["request_error"]["reason"])[:300])
-    section("work_results", 5, 0.18)
+    tasks = frame.get("remote_tasks") or []
+    latest_work = next((task for task in tasks
+                        if task.get("status") not in {"queued", "running"}), None)
+    retrieved = work.get("retrieved_result")
+    historical = bool(latest_work and retrieved and retrieved.get("run_id")
+                      and str(retrieved["run_id"]) != str(latest_work.get("run_id"))
+                      and any(str(task.get("run_id")) == str(retrieved["run_id"])
+                              for task in tasks[ tasks.index(latest_work) + 1: ]))
+    section("work_results", 1, 0.36)
     from aios_app.hud.work import render_work_results
     lines.extend(render_work_results(work, frame.get("remote_tasks") or [], compact_mode=total is not None))
     if frame.get("workspace_memory"):
@@ -488,12 +496,31 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
 
         section("workspace_memory", 5, 0.12)
         lines.append("\nRELEVANT WORK MEMORY (historical evidence and ideas)")
-        lines.extend("- " + note_line(note, with_ref=True) for note in frame["workspace_memory"])
+        for note in frame["workspace_memory"]:
+            lines.append("- " + note_line(note, with_ref=True))
+            if latest_work and str(note.get("run_id")) != str(latest_work.get("run_id")):
+                view = latest_work.get("result_summary") or {}
+                if view.get("research_lines"):
+                    lines.append("  Later research result "
+                                 + short_reference(latest_work["run_id"], "r")
+                                 + " is shown above. Reassess this historical note against its findings.")
     section("work_retrieval", 2, 0.12, atomic=True)
     if work.get("result_tool"):
         lines.append('RETAINED WORK EVIDENCE: Use read_work_result with one run_id or request_id. Fallback: <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. For more, use next_cursor and revision.')
         lines.append('When findings is empty, read the retained evidence, research_progress and search_log sections before requesting new work. Empty findings are not evidence of no research.')
-    section("retrieved_result", 2, 0.24, atomic=True)
-    if work.get("retrieved_result"):
-        lines.append(result_page(work["retrieved_result"], None if total is None else int(total * 4 * 0.24)))
+    section("retrieved_result", 7 if historical else 2,
+            0.08 if historical else 0.24, atomic=True)
+    if retrieved:
+        page = dict(retrieved)
+        if historical:
+            page["historical"] = True
+            page["latest_run_id"] = latest_work["run_id"]
+            text = page.get("text")
+            if isinstance(text, str) and len(text) > 160:
+                page["text"] = text[:160]
+                page["next_cursor"] = int(page.get("cursor") or 0) + 160
+                page["hud_truncated"] = True
+        cap = (800 if total is None else min(800, int(total * 4 * 0.08))) if historical else (
+            None if total is None else int(total * 4 * 0.24))
+        lines.append(result_page(page, cap))
     return lines.render()

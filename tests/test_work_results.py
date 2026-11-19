@@ -222,6 +222,61 @@ def test_research_hud_prefers_receipts_and_labels_retrieved_older_run(budget):
     assert "Conodonts (page:9); Ichnofacies (page:5)" in text
     assert "GLG-123 — response_too_large (download limit 12 MiB)" in text
     assert "moraine [http_status_404]" in text
-    assert "zero results" not in text and "No write/shell" not in text
+    assert "Worker answer: moraine returned zero results" in text
+    assert "No write/shell" not in text
     assert "Earlier run old-run" in text and "STALE INLINE PROSE" not in text
-    assert "RETRIEVED WORK RESULT (run old-run, reported 2026-11-16;" in text
+    assert "RETRIEVED WORK RESULT (historical run old-run, reported 2026-11-16;" in text
+
+
+@pytest.mark.parametrize("budget", [1600, 2400, None])
+def test_latest_answer_reaches_prompt_ahead_of_large_historical_failure(budget):
+    import json
+
+    new = task({"result_summary": {
+        "outcome": "partial", "summary": "Retrieved evidence supports a regional overview.",
+        "findings": [json.dumps({
+            "observation": f"Survey observation {i} identifies a regional formation.",
+            "interpretation": "The source supports this limited regional claim.",
+            "source_id": "library", "evidence_id": "a" * 24, "section": f"page:{i}",
+        }) for i in range(1, 6)],
+        "research_progress": {"verified_passages": [{
+            "title": "Regional survey", "section": "page:1",
+            "passage_excerpt": "A formation was identified at the locality.",
+        }]},
+    }})
+    old = task({"result_summary": {"outcome": "blocked", "summary": "Old failure"}})
+    old["run_id"] = "old-run"
+    page = {"run_id": "old-run", "section": "findings", "revision": "b" * 64,
+            "text": "OUTDATED FAILURE " * 200, "cursor": 0, "next_cursor": None}
+    frame = {"remote_tasks": [new, old], "work": {"result_tool": True, "retrieved_result": page},
+             "workspace_memory": [{
+                 "run_id": "old-run", "kind": "idea", "text": "Try another access method.",
+                 "execution_status": "finished", "verification_status": "passed",
+             }]}
+    if budget:
+        frame["hud"] = {"token_budget": budget}
+    rendered = render_hud_text(frame)
+    assert "Worker answer: Retrieved evidence supports a regional overview." in rendered
+    for i in (1, 2, 3):
+        assert f"Survey observation {i}" in rendered
+        assert f"page:{i}" in rendered
+    assert "historical run old-run" in rendered
+    assert rendered.count("OUTDATED FAILURE") < 12
+    assert rendered.index("Survey observation 1") < rendered.index("historical run old-run")
+    assert page["next_cursor"] is None  # Rendering does not mutate the retained read.
+    if budget:
+        assert len(rendered) <= budget * 4
+    else:
+        assert "Reassess this historical note" in rendered
+
+
+def test_empty_research_findings_deliver_excerpts_instead_of_page_numbers_only():
+    latest = task({"result_summary": {
+        "outcome": "partial", "findings": [],
+        "research_progress": {"verified_passages": [{
+            "title": "Survey", "section": "page:7", "passage_excerpt": "Measured sediment thickness is 12 m.",
+        }]},
+    }})
+    text = render_hud_text({"remote_tasks": [latest], "hud": {"token_budget": 1600}})
+    assert "Retrieved excerpt: Measured sediment thickness is 12 m." in text
+    assert "Survey / page:7" in text

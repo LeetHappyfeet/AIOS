@@ -64,6 +64,51 @@ def _report_only(checks):
     return False
 
 
+def _finding_line(value):
+    """Read both structured findings and older JSON-encoded finding strings."""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return compact(value, 300)
+        if not isinstance(parsed, Mapping):
+            return compact(value, 300)
+        value = parsed
+    if not isinstance(value, Mapping):
+        return ""
+    observation = compact(value.get("observation"), 260)
+    interpretation = compact(value.get("interpretation"), 160)
+    section = compact(value.get("section"), 45)
+    source = compact(value.get("source_id"), 35)
+    evidence = compact(value.get("evidence_id"), 48)
+    parts = [observation]
+    if interpretation:
+        parts.append("Interpretation: " + interpretation)
+    citation = " / ".join(part for part in (source, evidence, section) if part)
+    if citation:
+        parts.append("[" + citation + "]")
+    return " ".join(part for part in parts if part)
+
+
+def _research_answer(summary, passages):
+    lines = []
+    if statement := compact(summary.get("summary"), 340):
+        lines.append("  Worker answer: " + statement)
+    findings = summary.get("findings")
+    findings = findings if isinstance(findings, list) else []
+    for finding in findings[:3]:
+        if text := _finding_line(finding):
+            lines.append("  Worker-reported finding: " + text)
+    if not findings:
+        for passage in passages[:2]:
+            excerpt = compact(passage.get("passage_excerpt"), 260)
+            if excerpt:
+                lines.append("  Retrieved excerpt: " + excerpt + " ["
+                             + compact(passage.get("title"), 70) + " / "
+                             + compact(passage.get("section"), 45) + "]")
+    return lines
+
+
 def _research_lines(summary):
     def records(value):
         return [row for row in value[:24] if isinstance(row, Mapping)] if isinstance(value, list) else []
@@ -86,7 +131,7 @@ def _research_lines(summary):
             section = compact(location, 35)
             if title and section and section not in pages.setdefault(key, []):
                 pages[key].append(section)
-    lines = []
+    lines = _research_answer(summary, passages)
     if pages:
         refs = [f"{title} ({', '.join(sections[:4])})"
                 for (title, _, _), sections in list(pages.items())[:2]]
