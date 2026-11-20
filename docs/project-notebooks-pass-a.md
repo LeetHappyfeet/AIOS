@@ -102,7 +102,7 @@ After a successful new note insertion, AIOS checks how many notebook entries
 are not yet covered by the latest curated summary. At least **5** new entries
 queues maintenance. A duplicate source replay does not schedule maintenance.
 One active job per notebook is permitted; each job processes up to 12 batches
-of 8 notes. Further backlogs can be explicitly queued again.
+of 4 notes. Further backlogs can be explicitly queued again.
 
 The client-facing native API, restricted to the same running project work
 request and active goal attempt as Pass A, additionally supports:
@@ -120,7 +120,7 @@ supply `work_request_id` and a nested `query.goal_ref`. For example:
 ```
 
 Each inference receives the prior curated summary (if present) plus a bounded
-batch of 8 raw entries, retaining source note IDs and author kinds. The model
+batch of 4 raw entries, retaining source note IDs and author kinds. The model
 returns a summary, note-referenced working findings, open questions, and
 next steps. Only existing note references owned by that notebook are accepted.
 The output is labeled curated/derived **not verified evidence**. Every accepted
