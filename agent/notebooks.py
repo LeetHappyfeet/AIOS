@@ -138,12 +138,19 @@ class NotebookStore:
                     if previous != text:
                         raise HTTPException(409, "Source note already exists with different contents")
         if created_new:
-            # Background only; storage success is independent of model availability.
+            # Both operations are background-only, and may fail independently.
             try:
                 from .notebook_consolidation import NotebookConsolidator
                 await NotebookConsolidator(self.db).queue(instance_id, notebook_id)
             except Exception:
                 log.exception("Notebook consolidation enqueue failed notebook=%s", notebook_id)
+            try:
+                from aios_app.pipeline.jobs import enqueue_job
+                await enqueue_job(self.db, job_type="notebook_index", priority=170,
+                                  payload={"instance_id": str(instance_id),
+                                           "notebook_id": str(notebook_id)})
+            except Exception:
+                log.exception("Notebook index enqueue failed notebook=%s", notebook_id)
         return {"status": "stored", "notebook_id": str(notebook_id),
                 "note_ref": str(row["entry_id"]), "goal_ref": str(req.goal_ref),
                 "created_at": row["created_at"].isoformat()}
@@ -288,5 +295,18 @@ def install_notebook_routes(app, db):
         await store._work_scope(instance_id, req.work_request_id,
                                 req.query.goal_ref, scope["source_timeline_id"], scope["attempt_id"])
         return await store.list(instance_id, req.query)
+
+    @router.post("/{instance_id}/notebook/search")
+    async def search_notes(instance_id: UUID, req: WorkerNotebookRead):
+        from .notebook_recall import ProjectNoteRecall
+        scope = await store._scope(instance_id, req.query.goal_ref)
+        await store._work_scope(instance_id, req.work_request_id,
+                                req.query.goal_ref, scope["source_timeline_id"], scope["attempt_id"])
+        if not req.query.query:
+            raise HTTPException(422, "Hybrid search requires a query")
+        return await ProjectNoteRecall(db).retrieve(
+            instance_id, req.query.goal_ref, scope["source_timeline_id"],
+            req.query.query, limit=min(req.query.limit, 8),
+            max_chars=min(req.query.max_chars, 4000))
 
     app.include_router(router)
