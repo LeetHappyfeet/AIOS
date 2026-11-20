@@ -74,6 +74,7 @@ async def test_hybrid_recall_deduplicates_and_bounds_excerpts():
     instance_id, goal_id, timeline_id, notebook_id, entry_a, entry_b = (uuid4() for _ in range(6))
     db = MagicMock()
     db.fetchrow = AsyncMock(return_value={"notebook_id": notebook_id})
+    db.fetchval = AsyncMock(return_value=1)
     db.fetch = AsyncMock(return_value=[
         {"entry_id": entry_a, "content": "a" * 2000,
          "entry_type": "note", "author_kind": "character"}

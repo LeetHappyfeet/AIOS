@@ -74,9 +74,8 @@ Omit `query` for recent notes. Search uses scoped PostgreSQL full-text indexing,
 not Qdrant; `before_id` in a subsequent request pages backward in creation
 order. Requests are capped at 30 entries and at most 12,000 note-content characters (6,000 by default), via the optional `max_chars` field.
 
-The native endpoints are the AIOS-side contract for a future AIOS Client
-notebook tool adapter. This change does **not** automatically install tools
-into AIOS_Client's separate worker runtime.
+The native endpoints serve callers using the work-request credential.
+AIOS Client uses the workspace lease endpoints below.
 
 ## Scope and follow-up passes
 
@@ -132,10 +131,6 @@ No Qdrant indexing, automatic claim promotion to RDF, or permanent HUD injection
 occurs in Pass B. This is deliberately an opt-in **project maintenance** path,
 not a general memory consolidation service. Its output is a convenience index,
 not a replacement for the raw notes or a verified source archive.
-
-Note: The native routes are on the AIOS server. The separate AIOS_Client
-worker runtime still requires a tool adapter to call them. Running DB and
-live inference integration tests remains necessary before production use.
 
 ## Pass C: project-private hybrid retrieval (2026-11-20)
 
@@ -208,5 +203,19 @@ executed in this coding session.
 Notebook isolation applies to *current instance, active timeline and
 managed goal*. Branch-resolving old entries after SillyTavern swipe
 replacement remains a separate consideration; raw notes are intentionally
-append-only. The separate AIOS_Client runtime still needs a native tool
-adapter to call these server-side API endpoints.
+append-only.
+
+## AIOS Client workspaces
+
+When the server advertises `workspace-notebook-v1`, AIOS Client can read and
+search the notebook and append a checkpoint during a delegated v3 run linked
+to an active managed goal. Install the three notebook migrations above before
+using upgraded server and client versions together.
+
+The workspace endpoints are POST requests under
+`/workspace-client/v3/{binding_id}/runs/{run_id}/notebook/`. The operations are
+`brief`, `recent`, `search`, and `append`. They use the workspace API key,
+worker key, and current claim token. The server resolves the project from the
+originating work request and checks the goal attempt on every call. Inspection
+assignments can read and search. An append returns a stable note reference for
+identical checkpoint content retried in the same work request.

@@ -32,6 +32,10 @@ from .workspace_contract import Assignment, verification_status
 from .work_admission import WorkAdmission, WorkRequestIn, ProfileIn, WorkDecision, WorkDismissal
 from .work_evidence import WorkEvidence, WorkResultQuery
 from .work_history import WorkerWorkHistoryQuery, WorkerWorkResultQuery, worker_work
+from .workspace_notebooks import (
+    CAPABILITY as WORKSPACE_NOTEBOOK, NotebookAppend, NotebookLease, NotebookRecent,
+    NotebookSearch, WorkspaceNotebooks,
+)
 from .research_discovery import ResearchNominationIn
 from .workspace_memory import (
     CAPABILITY as WORKSPACE_MEMORY, candidates_from_result, relevant_notes, render_brief, save_notes,
@@ -763,6 +767,7 @@ def install_workspace_routes(app, db, hud_handler):
 
     router = APIRouter(prefix="/workspace-client", dependencies=[Depends(authorize)])
     store = WorkspaceStore(db)
+    notebooks = WorkspaceNotebooks(store)
 
     @router.get("/protocol")
     async def protocol():
@@ -787,6 +792,7 @@ def install_workspace_routes(app, db, hud_handler):
                 "delegated-runs-v3",
                 "character-recall-v3",
                 "work-evidence-v1",
+                WORKSPACE_NOTEBOOK,
                 "research-discovery-v1",
                 WORKSPACE_MEMORY,
                 "character-activity-v1",
@@ -976,6 +982,22 @@ def install_workspace_routes(app, db, hud_handler):
     @router.post("/v3/{binding_id}/runs/{run_id}/work-result")
     async def worker_result(binding_id: UUID, run_id: UUID, req: WorkerWorkResultQuery):
         return await worker_work(db, binding_id, run_id, req, read=True)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/notebook/brief")
+    async def notebook_brief(binding_id: UUID, run_id: UUID, req: NotebookLease):
+        return await notebooks.recent(binding_id, run_id, req, brief=True)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/notebook/recent")
+    async def notebook_recent(binding_id: UUID, run_id: UUID, req: NotebookRecent):
+        return await notebooks.recent(binding_id, run_id, req)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/notebook/search")
+    async def notebook_search(binding_id: UUID, run_id: UUID, req: NotebookSearch):
+        return await notebooks.search(binding_id, run_id, req)
+
+    @router.post("/v3/{binding_id}/runs/{run_id}/notebook/append")
+    async def notebook_append(binding_id: UUID, run_id: UUID, req: NotebookAppend):
+        return await notebooks.append(binding_id, run_id, req)
 
     @router.post("/v3/{binding_id}/runs/{run_id}/progress")
     async def progress(binding_id: UUID, run_id: UUID, req: ProgressIn):

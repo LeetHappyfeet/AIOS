@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -17,13 +17,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from .work_admission import extract_work_action
 
 log = logging.getLogger(__name__)
-ENTRY_TYPES = ("note", "observation", "question", "decision", "next_step", "worker_report")
+NoteType = Literal["note", "observation", "question", "decision", "next_step", "worker_report"]
+# FastAPI parses JSON before model validation. Permit UUID strings only for
+# UUID fields while preserving strict validation for the rest of the body.
+WireUUID = Annotated[UUID, Field(strict=False)]
 
 
 class NoteAppend(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    goal_ref: UUID
-    entry_type: Literal["note", "observation", "question", "decision", "next_step", "worker_report"] = "note"
+    goal_ref: WireUUID
+    entry_type: NoteType = "note"
     content: str = Field(min_length=1, max_length=4000)
 
     @classmethod
@@ -39,11 +42,11 @@ class NoteAppend(BaseModel):
 
 class NoteQuery(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    goal_ref: UUID
+    goal_ref: WireUUID
     query: str | None = Field(default=None, max_length=200)
     limit: int = Field(default=10, ge=1, le=30)
     max_chars: int = Field(default=6000, ge=200, le=12000)
-    before_id: UUID | None = None
+    before_id: WireUUID | None = None
 
 
 class NotebookStore:
@@ -146,29 +149,31 @@ class NotebookStore:
                 log.exception("Notebook consolidation enqueue failed notebook=%s", notebook_id)
             try:
                 from aios_app.pipeline.jobs import enqueue_job
-                await enqueue_job(self.db, job_type="notebook_index", priority=170,
-                                  payload={"instance_id": str(instance_id),
-                                           "notebook_id": str(notebook_id)})
+                async with self.db.atomic():
+                    await enqueue_job(self.db, job_type="notebook_index", priority=170,
+                                      payload={"instance_id": str(instance_id),
+                                               "notebook_id": str(notebook_id)})
             except Exception:
                 log.exception("Notebook index enqueue failed notebook=%s", notebook_id)
         return {"status": "stored", "notebook_id": str(notebook_id),
                 "note_ref": str(row["entry_id"]), "goal_ref": str(req.goal_ref),
                 "created_at": row["created_at"].isoformat()}
 
-    async def _work_scope(self, instance_id, request_id, goal_id, timeline, attempt_id):
+    async def _work_scope(self, instance_id, request_id, goal_id, timeline, attempt_id, *, run_id=None):
         allowed = await self.db.fetchval(
             """SELECT 1 FROM aios.character_work_request r
                JOIN aios.workspace_run w ON w.run_id=r.run_id
                WHERE r.instance_id=$1 AND r.request_id=$2 AND r.goal_id=$3
                  AND r.source_timeline_id=$4 AND r.attempt_id=$5 AND w.status='running'
+                 AND ($6::uuid IS NULL OR w.run_id=$6)
                  AND r.status NOT IN ('denied','invalidated','dismissed')
                LIMIT 1""",
-            instance_id, request_id, goal_id, timeline, attempt_id,
+            instance_id, request_id, goal_id, timeline, attempt_id, run_id,
         )
         if not allowed:
             raise HTTPException(403, "No running authorized project work for this notebook")
 
-    async def list(self, instance_id: UUID, req: NoteQuery) -> dict:
+    async def list(self, instance_id: UUID, req: NoteQuery, *, max_note_chars=None) -> dict:
         scope = await self._scope(instance_id, req.goal_ref, require_active=False)
         if req.query is not None and not req.query.strip():
             raise HTTPException(422, "Search query cannot be empty")
@@ -192,7 +197,7 @@ class NotebookStore:
         for r in rows:
             if remaining <= 0:
                 break
-            excerpt = r["content"][:remaining]
+            excerpt = r["content"][:min(remaining, max_note_chars or remaining)]
             remaining -= len(excerpt)
             notes.append({
                 "note_ref": str(r["entry_id"]), "type": r["entry_type"],
@@ -202,7 +207,7 @@ class NotebookStore:
                 "work_request_id": str(r["work_request_id"]) if r["work_request_id"] else None,
                 "created_at": r["created_at"].isoformat(),
             })
-            if len(excerpt) < len(r["content"]):
+            if remaining == 0:
                 break
         return {
             "goal_ref": str(req.goal_ref),
@@ -229,13 +234,13 @@ async def ingest_notebook_action(db, instance_ids, node_id):
 
 class WorkerNotebookAppend(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    work_request_id: UUID
+    work_request_id: WireUUID
     note: NoteAppend
 
 
 class WorkerNotebookRead(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    work_request_id: UUID
+    work_request_id: WireUUID
     query: NoteQuery
 
 
@@ -302,7 +307,7 @@ def install_notebook_routes(app, db):
         scope = await store._scope(instance_id, req.query.goal_ref)
         await store._work_scope(instance_id, req.work_request_id,
                                 req.query.goal_ref, scope["source_timeline_id"], scope["attempt_id"])
-        if not req.query.query:
+        if not req.query.query or not req.query.query.strip():
             raise HTTPException(422, "Hybrid search requires a query")
         return await ProjectNoteRecall(db).retrieve(
             instance_id, req.query.goal_ref, scope["source_timeline_id"],

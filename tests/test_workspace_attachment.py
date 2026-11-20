@@ -280,3 +280,124 @@ async def test_out_of_scope_finish_retains_result_without_memory(db, lost_scope)
     ])))
     assert finished["result"]["result_summary"]["summary"] == "TLS handshake blocked"
     assert await db.fetchval("SELECT count(*) FROM aios.workspace_memory_note") == 0
+
+
+@pytest.mark.asyncio
+async def test_workspace_notebook_resumes_across_attempts_and_checks_lease(db, monkeypatch):
+    from pathlib import Path
+
+    from aios_app.agent.notebook_consolidation import NotebookConsolidator
+    from aios_app.agent.notebooks import ingest_notebook_action, install_notebook_routes
+    from aios_app.pipeline import jobs
+
+    store, work, origin, bid, _, state = await attached(db)
+    await db.execute("ALTER TABLE aios.character_goal_attempt ADD COLUMN started_at timestamptz DEFAULT now()")
+    await db.execute("CREATE TABLE aios.pipeline_job(job_type text, status text, payload jsonb)")
+    migrations = Path(__file__).parents[1] / "migrations/current"
+    for migration in sorted(migrations.glob("20261120_0*_notebook*.sql")):
+        await db.execute(migration.read_text())
+    monkeypatch.setattr(NotebookConsolidator, "queue", AsyncMock())
+    monkeypatch.setattr(jobs, "enqueue_job", AsyncMock())
+    monkeypatch.setenv("AIOS_WORKSPACE_API_KEY", "private-workspace")
+    monkeypatch.setenv("AIOS_WORK_REQUEST_API_KEY", "private-native-work")
+
+    app = FastAPI()
+    install_workspace_routes(app, db, None)
+    install_notebook_routes(app, db)
+    timeline = state["source_timeline_id"]
+    goal, attempt = uuid4(), uuid4()
+    await db.execute(
+        "INSERT INTO aios.character_agent_goal(goal_id,instance_id,status,goal_text) VALUES($1,$2,'active','Michigan geology')",
+        goal, origin.instance_id,
+    )
+
+    async def open_attempt(goal_id, attempt_id):
+        await db.execute(
+            """INSERT INTO aios.character_goal_attempt(attempt_id,goal_id,instance_id,source_timeline_id)
+               VALUES($1,$2,$3,$4)""", attempt_id, goal_id, origin.instance_id, timeline,
+        )
+
+    async def assign(goal_id, objective):
+        req = WorkRequestIn(
+            request_id=uuid4(), source_node_id=state["source_head_node_id"], goal_ref=goal_id,
+            capability="workspace_test", purpose="hello", objective=objective,
+        )
+        receipt = await work.request(origin.instance_id, req, character_source=True)
+        assert receipt["status"] == "awaiting_approval"
+        await work.decide(origin.instance_id, req.request_id, WorkDecision(
+            accept=True, reviewer="operator", reason="Notebook test",
+        ))
+        claimed = await store.claim(bid, "worker", 3)
+        return claimed["run_id"], {"worker_key": "worker", "claim_token": claimed["claim_token"]}, req.request_id
+
+    await open_attempt(goal, attempt)
+    action = {"op": "notebook.append", "goal_ref": str(goal), "entry_type": "question",
+              "content": "Does GLG-123 have Michigan evidence?"}
+    await db.execute(
+        "UPDATE aios.dag_node SET message_text=$2 WHERE node_id=$1",
+        state["source_head_node_id"], "<aios_action>" + json.dumps(action) + "</aios_action>",
+    )
+    await ingest_notebook_action(db, [origin.instance_id], state["source_head_node_id"])
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://aios") as client:
+        async def call(run, lease, op, **data):
+            return await client.post(f"/workspace-client/v3/{bid}/runs/{run}/notebook/{op}",
+                                     json={**lease, **data},
+                                     headers={"Authorization": "Bearer private-workspace"})
+
+        first, lease, first_request = await assign(goal, "Locate the slides")
+        assert (await call(first, lease, "brief")).json()["notes"][0]["author"] == "character"
+        await db.execute(
+            """INSERT INTO aios.character_notebook_summary(notebook_id,revision,covered_count,summary)
+               SELECT notebook_id,1,1,$1::jsonb FROM aios.character_notebook WHERE goal_id=$2""",
+            json.dumps({"summary": "The notes identify GLG-123 as a lead.",
+                        "findings": [], "open_questions": ["Check the slides."], "next_steps": []}),
+            goal,
+        )
+        checkpoint = {"entry_type": "next_step", "content": "Read slide 12 for drumlins."}
+        saved = await call(first, lease, "append", **checkpoint)
+        assert saved.status_code == 200, saved.text
+        assert (await call(first, lease, "append", **checkpoint)).json() == saved.json()
+        native = await client.post(f"/agent/instance/{origin.instance_id}/notebook/read",
+                                   json={"work_request_id": str(first_request), "query": {"goal_ref": str(goal)}},
+                                   headers={"Authorization": "Bearer private-native-work"})
+        assert native.status_code == 200, native.text
+        assert len(native.json()["notes"]) == 2
+        await store.finish(bid, UUID(first), FinishIn(**lease, status="failed"))
+        assert (await call(first, lease, "brief")).status_code == 409
+
+        await db.execute("UPDATE aios.character_goal_attempt SET closed_at=now() WHERE attempt_id=$1", attempt)
+        await open_attempt(goal, uuid4())
+        second, lease, _ = await assign(goal, "Resume the slides investigation")
+        resumed = (await call(second, lease, "brief")).json()
+        assert resumed["summary"]["revision"] == 1
+        assert resumed["summary"]["summary"] == "The notes identify GLG-123 as a lead."
+        assert resumed["notes"][0]["note_ref"] == saved.json()["note_ref"]
+        assert resumed["notes"][0]["work_request_id"] == str(first_request)
+        found = (await call(second, lease, "search", query="drumlins")).json()
+        assert [n["note_ref"] for n in found["notes"]] == [saved.json()["note_ref"]]
+        assert (await call(second, lease, "recent", goal_ref=str(uuid4()))).status_code == 422
+        assert (await call(second, {**lease, "claim_token": str(uuid4())}, "recent")).status_code == 409
+
+        await db.execute("UPDATE aios.workspace_run SET lease_expires_at=now() WHERE run_id=$1", UUID(second))
+        assert (await call(second, lease, "recent")).status_code == 409
+        await db.execute(
+            """UPDATE aios.workspace_run SET lease_expires_at=now()+interval '1 minute',
+                   cancel_requested=true WHERE run_id=$1""", UUID(second),
+        )
+        assert (await call(second, lease, "append", **checkpoint)).status_code == 409
+        await store.finish(bid, UUID(second), FinishIn(**lease, status="cancelled"))
+
+        other_goal = uuid4()
+        await db.execute(
+            "INSERT INTO aios.character_agent_goal(goal_id,instance_id,status,goal_text) VALUES($1,$2,'active','Other goal')",
+            other_goal, origin.instance_id,
+        )
+        await open_attempt(other_goal, uuid4())
+        other, lease, _ = await assign(other_goal, "Start an unrelated project")
+        assert (await call(other, lease, "recent")).json()["notes"] == []
+        await db.execute(
+            "UPDATE aios.character_runtime_state SET source_timeline_id=$2 WHERE instance_id=$1",
+            origin.instance_id, uuid4(),
+        )
+        assert (await call(other, lease, "recent")).status_code == 409
