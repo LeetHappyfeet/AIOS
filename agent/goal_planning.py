@@ -441,6 +441,17 @@ class GoalPlanningService:
             knowledge, snap["requirements"],
             previous.get("proposal", {}) if previous else {}, snap["receipts"],
             knowledge_status=knowledge_status, work_receipts=snap["work_receipts"])
+        # Optional project-private recall only during actual planning inference,
+        # never while rendering ordinary chat or assembling a general HUD.
+        try:
+            from .notebook_recall import ProjectNoteRecall
+            notes = await ProjectNoteRecall(self.db).retrieve(
+                op["instance_id"], goal_id, ctx.source_timeline_id,
+                snap["goal_text"][:200], limit=3, max_chars=950)
+            if notes.get("status") == "retrieved":
+                prompt += "\\nPROJECT NOTEBOOK (attributed working notes, NOT verified facts):\\n" + json.dumps(notes, default=str)
+        except Exception:
+            logger.exception("Project notebook recall unavailable in planning")
         logger.info("Goal planning context instance=%s source_messages=%d linked_knowledge=%d "
                     "knowledge_status=%s elapsed_ms=%.1f", op["instance_id"], len(messages),
                     len(knowledge), knowledge_status, (time.perf_counter()-started)*1000)
