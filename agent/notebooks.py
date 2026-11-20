@@ -200,6 +200,18 @@ async def ingest_notebook_action(db, instance_ids, node_id):
         except Exception:
             log.exception("Notebook action rejected: instance=%s node=%s", instance_id, node_id)
 
+class WorkerNotebookAppend(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    work_request_id: UUID
+    note: NoteAppend
+
+
+class WorkerNotebookRead(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    work_request_id: UUID
+    query: NoteQuery
+
+
 def install_notebook_routes(app, db):
     """Native client interface; only the running linked work request can use it."""
     import hmac
@@ -217,23 +229,13 @@ def install_notebook_routes(app, db):
     router = APIRouter(prefix="/agent/instance", dependencies=[Depends(authorize)])
     store = NotebookStore(db)
 
-    class WorkerAppend(BaseModel):
-        model_config = ConfigDict(extra="forbid", strict=True)
-        work_request_id: UUID
-        note: NoteAppend
-
-    class WorkerRead(BaseModel):
-        model_config = ConfigDict(extra="forbid", strict=True)
-        work_request_id: UUID
-        query: NoteQuery
-
     @router.post("/{instance_id}/notebook/append")
-    async def append_note(instance_id: UUID, req: WorkerAppend):
+    async def append_note(instance_id: UUID, req: WorkerNotebookAppend):
         return await store.append(instance_id, req.note, origin="worker",
                                   work_request_id=req.work_request_id)
 
     @router.post("/{instance_id}/notebook/read")
-    async def read_notes(instance_id: UUID, req: WorkerRead):
+    async def read_notes(instance_id: UUID, req: WorkerNotebookRead):
         scope = await store._scope(instance_id, req.query.goal_ref)
         await store._work_scope(instance_id, req.work_request_id,
                                 req.query.goal_ref, scope["source_timeline_id"])
