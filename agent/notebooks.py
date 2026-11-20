@@ -60,7 +60,7 @@ class NotebookStore:
                  WHERE a.instance_id=g.instance_id AND a.goal_id=g.goal_id
                    AND a.source_timeline_id=rs.source_timeline_id
                    AND a.closed_at IS NULL
-                 ORDER BY a.created_at DESC LIMIT 1
+                 ORDER BY a.started_at DESC LIMIT 1
                ) a ON true
                WHERE rs.instance_id=$1 AND g.goal_id=$2""",
             instance_id, goal_id,
