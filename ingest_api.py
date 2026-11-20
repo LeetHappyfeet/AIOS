@@ -461,6 +461,13 @@ async def ingest_message(db, req: IngestIn) -> IngestOut:
             and any(op in message_text for op in ('request_work', 'read_work_result'))):
         from aios_app.agent.work_admission import ingest_work_request
         await ingest_work_request(db, affected_instance_ids, node_id)
+    # Notebook markup is character-authored, never promoted to memory or world facts.
+    # Admission is independent of chat ingestion success.
+    if (disposition is IngestEventDisposition.NEW and req.speaker_type == "character"
+            and req.speaker_id == req.character_id and "<aios_action>" in message_text.lower()
+            and "notebook.append" in message_text):
+        from aios_app.agent.notebooks import ingest_notebook_action
+        await ingest_notebook_action(db, affected_instance_ids, node_id)
     return _ingest_out(
         event_id=event_id,
         node_id=node_id,
