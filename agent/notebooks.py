@@ -42,6 +42,7 @@ class NoteQuery(BaseModel):
     goal_ref: UUID
     query: str | None = Field(default=None, max_length=200)
     limit: int = Field(default=10, ge=1, le=30)
+    max_chars: int = Field(default=6000, ge=200, le=12000)
     before_id: UUID | None = None
 
 
@@ -171,16 +172,27 @@ class NotebookStore:
             instance_id, scope["source_timeline_id"], req.goal_ref,
             req.query, req.before_id, req.limit,
         )
-        return {
-            "goal_ref": str(req.goal_ref),
-            "notes": [{
+        notes = []
+        remaining = req.max_chars
+        for r in rows:
+            if remaining <= 0:
+                break
+            excerpt = r["content"][:remaining]
+            remaining -= len(excerpt)
+            notes.append({
                 "note_ref": str(r["entry_id"]), "type": r["entry_type"],
-                "content": r["content"], "author": r["author_kind"],
+                "content": excerpt, "truncated": len(excerpt) < len(r["content"]),
+                "author": r["author_kind"],
                 "source_node_id": str(r["source_node_id"]) if r["source_node_id"] else None,
                 "work_request_id": str(r["work_request_id"]) if r["work_request_id"] else None,
                 "created_at": r["created_at"].isoformat(),
-            } for r in rows],
-            "next_before_id": str(rows[-1]["entry_id"]) if len(rows) == req.limit else None,
+            })
+            if len(excerpt) < len(r["content"]):
+                break
+        return {
+            "goal_ref": str(req.goal_ref),
+            "notes": notes,
+            "next_before_id": str(notes[-1]["note_ref"]) if notes and len(rows) >= len(notes) else None,
         }
 
 
