@@ -7,6 +7,8 @@ DAG, runtime-cursor, HUD-dirty, and downstream pipeline side effects.
 
 from aios_app.main_legacy import app, db
 from aios_app.ingest_api import ingest_message
+from aios_app.agent.notebooks import install_notebook_routes
+install_notebook_routes(app, db)
 from aios_app.ingest_sync import IngestSyncIn, validate_ingest_receipts
 from uuid import UUID
 from aios_app.models import IngestIn, IngestOut, CorpusDocumentIn, CorpusConsumeIn, CorpusSourceProfileIn, CorpusFacetRouteIn, CharacterKnowledgeDomainsIn, KnowledgeDomainIn, KnowledgeDomainIdentifierIn
