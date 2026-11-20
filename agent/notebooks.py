@@ -162,7 +162,10 @@ class NotebookStore:
                FROM aios.character_notebook_entry e
                WHERE e.instance_id=$1 AND e.source_timeline_id=$2 AND e.goal_id=$3
                  AND ($4::text IS NULL OR e.search_vector @@ plainto_tsquery('english',$4))
-                 AND ($5::uuid IS NULL OR e.entry_id < $5)
+                 AND ($5::uuid IS NULL OR (e.created_at,e.entry_id) <
+                     (SELECT c.created_at,c.entry_id FROM aios.character_notebook_entry c
+                      WHERE c.entry_id=$5 AND c.instance_id=$1
+                        AND c.source_timeline_id=$2 AND c.goal_id=$3))
                ORDER BY e.created_at DESC,e.entry_id DESC
                LIMIT $6""",
             instance_id, scope["source_timeline_id"], req.goal_ref,
@@ -196,3 +199,44 @@ async def ingest_notebook_action(db, instance_ids, node_id):
                 )
         except Exception:
             log.exception("Notebook action rejected: instance=%s node=%s", instance_id, node_id)
+
+def install_notebook_routes(app, db):
+    """Native client interface; only the running linked work request can use it."""
+    import hmac
+    import os
+    from fastapi import APIRouter, Depends, Header
+
+    async def authorize(authorization: str = Header(default="")):
+        from aios_app.agent.workspaces import get_workspace_api_key
+        key = os.environ.get("AIOS_WORK_REQUEST_API_KEY", "")
+        if not key or key in (os.environ.get("AIOS_WORKSPACE_REVIEW_KEY"), get_workspace_api_key()):
+            raise HTTPException(503, "Configure a distinct AIOS_WORK_REQUEST_API_KEY")
+        if not hmac.compare_digest(authorization, "Bearer " + key):
+            raise HTTPException(401, "Invalid notebook API key")
+
+    router = APIRouter(prefix="/agent/instance", dependencies=[Depends(authorize)])
+    store = NotebookStore(db)
+
+    class WorkerAppend(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        work_request_id: UUID
+        note: NoteAppend
+
+    class WorkerRead(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        work_request_id: UUID
+        query: NoteQuery
+
+    @router.post("/{instance_id}/notebook/append")
+    async def append_note(instance_id: UUID, req: WorkerAppend):
+        return await store.append(instance_id, req.note, origin="worker",
+                                  work_request_id=req.work_request_id)
+
+    @router.post("/{instance_id}/notebook/read")
+    async def read_notes(instance_id: UUID, req: WorkerRead):
+        scope = await store._scope(instance_id, req.query.goal_ref)
+        await store._work_scope(instance_id, req.work_request_id,
+                                req.query.goal_ref, scope["source_timeline_id"])
+        return await store.list(instance_id, req.query)
+
+    app.include_router(router)
