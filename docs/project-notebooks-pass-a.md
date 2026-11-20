@@ -183,12 +183,19 @@ a compact version of the latest curated project summary. Notes and summaries
 are marked *working material*, not independently verified facts. No global
 memory or RDF promotion occurs.
 
+Internal AIOS agents can also request `notebook.search` through the
+existing action registry (executive, planning, or research classes) when the
+host explicitly admits that tool. This uses the active managed goal and
+timeline rather than granting global notebook access.
+
 Active-goal planning and due-reminder continuation may retrieve these
 private notes when actually executing their background decision path.
 Ordinary chat / HUD construction does not query notebooks, load vectors,
 or invoke an additional LLM. The optional Qdrant lookup is skipped until
 the notebook has indexed vector receipts and falls back to FTS if the vector
-service is unavailable.
+service is unavailable. Failed indexing logs a warning rather than retrying
+the same unavailable Qdrant endpoint indefinitely. A later note write or
+explicit operator reindex may trigger a new attempt.
 
 ### Testing and operational notes
 
