@@ -449,7 +449,7 @@ class GoalPlanningService:
                 op["instance_id"], goal_id, ctx.source_timeline_id,
                 snap["goal_text"][:200], limit=3, max_chars=950)
             if notes.get("status") == "retrieved":
-                prompt += "\\nPROJECT NOTEBOOK (attributed working notes, NOT verified facts):\\n" + json.dumps(notes, default=str)
+                prompt += "\nPROJECT NOTEBOOK (attributed working notes, NOT verified facts):\n" + json.dumps(notes, default=str)
         except Exception:
             logger.exception("Project notebook recall unavailable in planning")
         logger.info("Goal planning context instance=%s source_messages=%d linked_knowledge=%d "
