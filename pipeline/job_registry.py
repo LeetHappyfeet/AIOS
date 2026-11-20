@@ -60,6 +60,7 @@ JOB_SPECS: Mapping[str, JobSpec] = {
     "assign_narratives": JobSpec(ResourceClass.GLOBAL, "global", True),
     "goal_plan_continuation": JobSpec(ResourceClass.LOOKUP, "instance_id", True),
     "reminder_continue": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
+    "notebook_consolidate": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
     "character_reminder_due": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
     "reminder_schedule_inference": JobSpec(ResourceClass.GLOBAL, "instance_id", True, isolate_blocking=True),
     "agent_wake": JobSpec(ResourceClass.GLOBAL, "instance_id", True),
@@ -84,7 +85,7 @@ def job_spec(job_type: str) -> JobSpec:
 def scheduling_lane(job_type: str, payload: Mapping[str, object] | None = None) -> SchedulingLane:
     payload = payload or {}
     if job_type in {"goal_plan_continuation", "goal_planning_inference", "message_cognition_catchup","character_inquiry_shadow",
-                    "character_inquiry_inference", "character_reminder_due", "reminder_schedule_inference", "reminder_continue"}:
+                    "character_inquiry_inference", "character_reminder_due", "reminder_schedule_inference", "reminder_continue", "notebook_consolidate"}:
         return SchedulingLane.BACKGROUND
     if job_type in {"agent_wake", "cognitive_operation", "internal_cognition_inference", "goal_formulation_inference", "message_cognition_enrichment"}:
         return SchedulingLane.LIVE
