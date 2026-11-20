@@ -197,6 +197,15 @@ class ReminderContinuation:
                 or hud.state_version != ctx.state_version):
             await self._park(row, "pending", "Character context changed.", "context_changed", 30)
             return
+        # Retrieve only for a concrete reminder-continuation decision.
+        project_notes = None
+        try:
+            from .notebook_recall import ProjectNoteRecall
+            project_notes = await ProjectNoteRecall(self.db).retrieve(
+                row["instance_id"], row["goal_id"], ctx.source_timeline_id,
+                snap["goal_text"][:200], limit=3, max_chars=700)
+        except Exception:
+            project_notes = None  # Work admission must not depend on Qdrant.
         try:
             response = await InferenceBroker(self.db).infer(InferenceRequest(
                 instance_id=row["instance_id"], worker_class="executive", source_node_id=ctx.source_head_node_id,
@@ -204,6 +213,7 @@ class ReminderContinuation:
                 prompt=PROMPT + "\nCHARACTER CONTEXT\n" + hud.prompt + "\nINPUT (JSON)\n" + json.dumps({
                     "goal": snap["goal_text"], "plan": decode(plan["proposal"]),
                     "capabilities": [dict(p) for p in profiles], "work_reports": snap["work_receipts"],
+                    "project_notes": project_notes if project_notes and project_notes.get("status") == "retrieved" else None,
                 }, default=str),
                 allowed_actions={}, output_schema={"type": "object"}, max_tokens=350,
             ))
