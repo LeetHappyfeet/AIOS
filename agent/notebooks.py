@@ -97,7 +97,7 @@ class NotebookStore:
                 if not source:
                     raise HTTPException(403, "Source node is not a current character message")
             if origin == "worker":
-                await self._work_scope(instance_id, work_request_id, req.goal_ref, timeline)
+                await self._work_scope(instance_id, work_request_id, req.goal_ref, timeline, scope["attempt_id"])
             notebook_id = await self.db.fetchval(
                 """INSERT INTO aios.character_notebook(instance_id,source_timeline_id,goal_id)
                    VALUES($1,$2,$3)
@@ -139,15 +139,15 @@ class NotebookStore:
                 "note_ref": str(row["entry_id"]), "goal_ref": str(req.goal_ref),
                 "created_at": row["created_at"].isoformat()}
 
-    async def _work_scope(self, instance_id, request_id, goal_id, timeline):
+    async def _work_scope(self, instance_id, request_id, goal_id, timeline, attempt_id):
         allowed = await self.db.fetchval(
             """SELECT 1 FROM aios.character_work_request r
                JOIN aios.workspace_run w ON w.run_id=r.run_id
                WHERE r.instance_id=$1 AND r.request_id=$2 AND r.goal_id=$3
-                 AND r.source_timeline_id=$4 AND w.status='running'
+                 AND r.source_timeline_id=$4 AND r.attempt_id=$5 AND w.status='running'
                  AND r.status NOT IN ('denied','invalidated','dismissed')
                LIMIT 1""",
-            instance_id, request_id, goal_id, timeline,
+            instance_id, request_id, goal_id, timeline, attempt_id,
         )
         if not allowed:
             raise HTTPException(403, "No running authorized project work for this notebook")
@@ -238,7 +238,7 @@ def install_notebook_routes(app, db):
     async def read_notes(instance_id: UUID, req: WorkerNotebookRead):
         scope = await store._scope(instance_id, req.query.goal_ref)
         await store._work_scope(instance_id, req.work_request_id,
-                                req.query.goal_ref, scope["source_timeline_id"])
+                                req.query.goal_ref, scope["source_timeline_id"], scope["attempt_id"])
         return await store.list(instance_id, req.query)
 
     app.include_router(router)
