@@ -49,7 +49,10 @@ class ProjectNoteRecall:
             notebook_id, instance_id, timeline_id, goal_id, query, limit,
         )
         rows = [dict(r) for r in lexical]
-        if semantic and len(rows) < limit:
+        if semantic and len(rows) < limit and await self.db.fetchval(
+            """SELECT 1 FROM aios.character_notebook_vector_state
+               WHERE notebook_id=$1 LIMIT 1""", notebook_id,
+        ):
             more = await semantic_candidates(
                 self.db, instance_id=instance_id, timeline_id=timeline_id,
                 goal_id=goal_id, notebook_id=notebook_id, query=query, limit=limit)
