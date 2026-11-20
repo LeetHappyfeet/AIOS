@@ -70,3 +70,61 @@ async def test_latest_summary_is_private_to_instance():
     result = await NotebookConsolidator(db).latest(instance_id, notebook_id)
     assert result == {"status": "unconsolidated"}
     assert db.fetchrow.call_args.args[1:] == (notebook_id, instance_id)
+
+
+@pytest.mark.asyncio
+async def test_run_persists_version_without_modifying_raw_notes():
+    notebook_id, instance_id, note_id = uuid4(), uuid4(), uuid4()
+    db = MagicMock()
+    db.atomic = transaction
+    db.fetchrow = AsyncMock(return_value={"notebook_id": notebook_id})
+    db.fetch = AsyncMock(side_effect=[
+        [{"entry_id": note_id, "entry_type": "question",
+          "author_kind": "character", "content": "Unverified observation"}],
+        [{"entry_id": note_id}],
+    ])
+    db.fetchval = AsyncMock(side_effect=[notebook_id, None, 1])
+    db.execute = AsyncMock()
+    curated = {
+        "summary": "Research still needs verification.",
+        "findings": [{"text": "An observation was recorded.",
+                      "note_refs": [str(note_id)]}],
+        "open_questions": ["Can the source be verified?"], "next_steps": [],
+    }
+    worker = NotebookConsolidator(db)
+    worker.latest = AsyncMock(return_value={"status": "unconsolidated"})
+    inference = MagicMock()
+    inference.infer = AsyncMock(return_value=MagicMock(response=MagicMock(raw=curated)))
+    with patch("aios_app.agent.notebook_consolidation.InferenceBroker",
+               return_value=inference):
+        result = await worker.run(instance_id, notebook_id)
+    assert result == {"status": "curated", "revision": 1, "remaining": 0}
+    assert "INSERT INTO aios.character_notebook_summary" in db.execute.call_args.args[0]
+    assert "UPDATE aios.character_notebook_entry" not in db.execute.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_summary_revision_is_not_overwritten():
+    from aios_app.pipeline.jobs import JobDeferred
+    notebook_id, instance_id, note_id = uuid4(), uuid4(), uuid4()
+    db = MagicMock()
+    db.atomic = transaction
+    db.fetchrow = AsyncMock(return_value={"notebook_id": notebook_id})
+    db.fetch = AsyncMock(return_value=[
+        {"entry_id": note_id, "entry_type": "note",
+         "author_kind": "worker", "content": "Still investigating"}
+    ])
+    db.fetchval = AsyncMock(side_effect=[notebook_id, 8])
+    db.execute = AsyncMock()
+    worker = NotebookConsolidator(db)
+    worker.latest = AsyncMock(return_value={"status": "unconsolidated"})
+    inference = MagicMock()
+    inference.infer = AsyncMock(return_value=MagicMock(response=MagicMock(raw={
+        "summary": "Work in progress", "findings": [],
+        "open_questions": [], "next_steps": [],
+    })))
+    with patch("aios_app.agent.notebook_consolidation.InferenceBroker",
+               return_value=inference):
+        with pytest.raises(JobDeferred):
+            await worker.run(instance_id, notebook_id)
+    db.execute.assert_not_awaited()
