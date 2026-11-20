@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from functools import lru_cache
 from uuid import UUID
 
 from aios_app.semantic_index.config import SemanticIndexConfig
@@ -17,11 +18,21 @@ from aios_app.semantic_index.store import QdrantStore
 COLLECTION = os.getenv("AIOS_QDRANT_NOTEBOOK_COLLECTION", "project_notebooks_v1")
 
 
+@lru_cache(maxsize=1)
 def _backend():
     cfg = SemanticIndexConfig()
     embedder = _get_embedder(cfg)
     store = QdrantStore(cfg.qdrant_url, cfg.qdrant_api_key, COLLECTION, embedder.dim)
     store.ensure_collection()
+    from qdrant_client.http import models as qm
+    for field in ("notebook_id", "goal_id"):
+        try:
+            store.client.create_payload_index(
+                collection_name=COLLECTION, field_name=field,
+                field_schema=qm.PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass
     return embedder, store
 
 
