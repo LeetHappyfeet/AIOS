@@ -72,7 +72,7 @@ Example bounded read/search body:
 
 Omit `query` for recent notes. Search uses scoped PostgreSQL full-text indexing,
 not Qdrant; `before_id` in a subsequent request pages backward in creation
-order. Requests are capped at 30 returned entries.
+order. Requests are capped at 30 entries and at most 12,000 note-content characters (6,000 by default), via the optional `max_chars` field.
 
 The native endpoints are the AIOS-side contract for a future AIOS Client
 notebook tool adapter. This change does **not** automatically install tools
