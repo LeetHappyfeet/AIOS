@@ -121,6 +121,7 @@ class NotebookStore:
                 notebook_id, instance_id, timeline, req.goal_ref, origin,
                 req.entry_type, text, source_node_id, work_request_id, receipt_key,
             )
+            created_new = row is not None
             if row is None:
                 row = await self.db.fetchrow(
                     """SELECT entry_id,created_at FROM aios.character_notebook_entry
@@ -136,6 +137,13 @@ class NotebookStore:
                     )
                     if previous != text:
                         raise HTTPException(409, "Source note already exists with different contents")
+        if created_new:
+            # Background only; storage success is independent of model availability.
+            try:
+                from .notebook_consolidation import NotebookConsolidator
+                await NotebookConsolidator(self.db).queue(instance_id, notebook_id)
+            except Exception:
+                log.exception("Notebook consolidation enqueue failed notebook=%s", notebook_id)
         return {"status": "stored", "notebook_id": str(notebook_id),
                 "note_ref": str(row["entry_id"]), "goal_ref": str(req.goal_ref),
                 "created_at": row["created_at"].isoformat()}
@@ -245,6 +253,34 @@ def install_notebook_routes(app, db):
     async def append_note(instance_id: UUID, req: WorkerNotebookAppend):
         return await store.append(instance_id, req.note, origin="worker",
                                   work_request_id=req.work_request_id)
+
+    @router.post("/{instance_id}/notebook/summary")
+    async def curated_summary(instance_id: UUID, req: WorkerNotebookRead):
+        scope = await store._scope(instance_id, req.query.goal_ref)
+        await store._work_scope(instance_id, req.work_request_id,
+                                req.query.goal_ref, scope["source_timeline_id"], scope["attempt_id"])
+        notebook_id = await db.fetchval(
+            """SELECT notebook_id FROM aios.character_notebook
+               WHERE instance_id=$1 AND source_timeline_id=$2 AND goal_id=$3""",
+            instance_id, scope["source_timeline_id"], req.query.goal_ref)
+        if not notebook_id:
+            return {"status": "unconsolidated"}
+        from .notebook_consolidation import NotebookConsolidator
+        return await NotebookConsolidator(db).latest(instance_id, notebook_id)
+
+    @router.post("/{instance_id}/notebook/consolidate")
+    async def consolidate_notes(instance_id: UUID, req: WorkerNotebookRead):
+        scope = await store._scope(instance_id, req.query.goal_ref)
+        await store._work_scope(instance_id, req.work_request_id,
+                                req.query.goal_ref, scope["source_timeline_id"], scope["attempt_id"])
+        notebook_id = await db.fetchval(
+            """SELECT notebook_id FROM aios.character_notebook
+               WHERE instance_id=$1 AND source_timeline_id=$2 AND goal_id=$3""",
+            instance_id, scope["source_timeline_id"], req.query.goal_ref)
+        if not notebook_id:
+            return {"status": "unchanged", "pending_notes": 0}
+        from .notebook_consolidation import NotebookConsolidator
+        return await NotebookConsolidator(db).queue(instance_id, notebook_id, explicit=True)
 
     @router.post("/{instance_id}/notebook/read")
     async def read_notes(instance_id: UUID, req: WorkerNotebookRead):
