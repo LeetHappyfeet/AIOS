@@ -310,3 +310,32 @@ def install_notebook_routes(app, db):
             max_chars=min(req.query.max_chars, 4000))
 
     app.include_router(router)
+
+
+def register_notebook_actions(db, registry):
+    """Explicit opt-in internal project retrieval; never a blanket HUD injection."""
+    from .actions import ActionSpec
+    from .notebook_recall import ProjectNoteRecall
+
+    async def search(instance_id, arguments):
+        goal_id = UUID(str(arguments["goal_ref"]))
+        scope = await NotebookStore(db)._scope(instance_id, goal_id)
+        return await ProjectNoteRecall(db).retrieve(
+            instance_id, goal_id, scope["source_timeline_id"],
+            str(arguments["query"]), limit=int(arguments.get("limit", 4)),
+            max_chars=int(arguments.get("max_chars", 1600)))
+
+    registry.register(ActionSpec(
+        name="notebook.search",
+        schema={"type": "object", "required": ["goal_ref", "query"],
+                "properties": {
+                    "goal_ref": {"type": "string", "format": "uuid"},
+                    "query": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 8},
+                    "max_chars": {"type": "integer", "minimum": 200, "maximum": 4000},
+                }, "additionalProperties": False},
+        side_effect_class="read_only",
+        allowed_worker_classes=frozenset({"executive", "planning", "research"}),
+        handler=search, result_mode="final", capability_class="memory",
+        description="Search private notes for one current managed project. Notes are attributed working material.",
+    ))
