@@ -49,7 +49,7 @@ async def test_worker_request_must_be_running_and_goal_scoped():
     db.fetchval = AsyncMock(return_value=None)
     store = NotebookStore(db)
     with pytest.raises(HTTPException) as exc:
-        await store._work_scope(uuid4(), uuid4(), uuid4(), uuid4())
+        await store._work_scope(uuid4(), uuid4(), uuid4(), uuid4(), uuid4())
     assert exc.value.status_code == 403
 
 
