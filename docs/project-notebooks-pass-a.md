@@ -136,3 +136,70 @@ not a replacement for the raw notes or a verified source archive.
 Note: The native routes are on the AIOS server. The separate AIOS_Client
 worker runtime still requires a tool adapter to call them. Running DB and
 live inference integration tests remains necessary before production use.
+
+## Pass C: project-private hybrid retrieval (2026-11-20)
+
+Apply `migrations/current/20261120_03_notebook_retrieval.sql` after
+Pass A and Pass B migrations. Restart the API and `runner_v2` worker.
+The optional notebook vector collection is
+`AIOS_QDRANT_NOTEBOOK_COLLECTION` (default `project_notebooks_v1`),
+separate from world, character, and corpus collections. It uses AIOS's
+configured semantic embedding model, without adding a second embedding model.
+
+A newly stored raw notebook entry enqueues a `notebook_index` job in the
+**BACKGROUND** lane. A bounded background worker embeds raw entries and
+upserts the ID and private scope metadata in Qdrant. The authoritative text
+remains in Postgres. The receipt table
+`aios.character_notebook_vector_state` records indexed entry IDs.
+Vector backend failures do not block raw notebook writes or the lexical
+full-text index from Pass A.
+
+### Demand-driven retrieval
+
+`POST /agent/instance/{instance_id}/notebook/search` uses the same
+authorized `WorkerNotebookRead` body as Pass A, with a required
+`query.query` string:
+
+```json
+{
+  "work_request_id": "WORK-REQUEST-UUID",
+  "query": {
+    "goal_ref": "GOAL-UUID",
+    "query": "which glaciation claims need verification",
+    "limit": 4,
+    "max_chars": 1600
+  }
+}
+```
+
+The server validates the live work request and goal attempt, resolves the
+current source timeline, searches PostgreSQL FTS, optionally adds semantic
+candidates, and **rehydrates all vector hits through an exact Postgres
+instance/timeline/goal/notebook filter**. Qdrant payloads are *never*
+directly trusted as authorization or returned as note content.
+
+Results contain bounded note excerpts, note IDs, author attribution, and
+a compact version of the latest curated project summary. Notes and summaries
+are marked *working material*, not independently verified facts. No global
+memory or RDF promotion occurs.
+
+Active-goal planning and due-reminder continuation may retrieve these
+private notes when actually executing their background decision path.
+Ordinary chat / HUD construction does not query notebooks, load vectors,
+or invoke an additional LLM. The optional Qdrant lookup is skipped until
+the notebook has indexed vector receipts and falls back to FTS if the vector
+service is unavailable.
+
+### Testing and operational notes
+
+Run `pytest tests/test_project_notebooks.py tests/test_notebook_consolidation.py
+tests/test_notebook_retrieval.py` in the provisioned AIOS runtime and perform
+a database migration / end-to-end search smoke test before production use.
+The repository code was updated through GitHub; live DB/vector tests were not
+executed in this coding session.
+
+Notebook isolation applies to *current instance, active timeline and
+managed goal*. Branch-resolving old entries after SillyTavern swipe
+replacement remains a separate consideration; raw notes are intentionally
+append-only. The separate AIOS_Client runtime still needs a native tool
+adapter to call these server-side API endpoints.
