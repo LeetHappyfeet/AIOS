@@ -126,11 +126,17 @@ async def handle_notebook_index(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
     from aios_app.agent.notebook_vectors import index_notebook
     payload = job["payload"]
-    for _ in range(8):
-        result = await index_notebook(
-            db, UUID(payload["notebook_id"]), UUID(payload["instance_id"]))
-        if not result["indexed"]:
-            break
+    try:
+        for _ in range(8):
+            result = await index_notebook(
+                db, UUID(payload["notebook_id"]), UUID(payload["instance_id"]))
+            if not result["indexed"]:
+                break
+    except Exception:
+        # Semantic service is optional. Do not retry a broken Qdrant endpoint
+        # indefinitely; lexical search remains authoritative and available.
+        logger.warning("Notebook semantic index unavailable notebook=%s",
+                       payload.get("notebook_id"), exc_info=True)
 
 
 base.JOB_HANDLERS["notebook_index"] = handle_notebook_index
