@@ -636,6 +636,11 @@ async def _prepare_hud_response(
         state = await world_runtime.get_state(instance_id)
         timeline = state.get("source_timeline_id")
     timeline = UUID(str(timeline)) if timeline is not None else None
+    if frame.get("timeline") and not (frame.get("hud", {}).get("freshness") or {}).get("replayed_snapshot"):
+        from aios_app.hud.temporal import timeline_hud
+        frame["timeline"] = await timeline_hud(
+            db, instance_id, timeline, frame.get("recent_events") or [], frame.get("memories") or [],
+        )
     from aios_app.agent.work_admission import WorkAdmission
     work = WorkAdmission(db)
     frame["work"] = await work.overlay(instance_id, timeline)
@@ -654,6 +659,9 @@ async def _prepare_hud_response(
         frame["workspace_memory"] = await relevant_notes(
             db, instance_id, timeline, UUID(str(source_head)), focus,
         )
+    if timeline and frame.get("timeline") and not (frame.get("hud", {}).get("freshness") or {}).get("replayed_snapshot"):
+        from aios_app.agent.reminder_continuation import ReminderContinuation
+        frame["projects"] = await ReminderContinuation(db).projects(instance_id, timeline)
     frame.setdefault("hud", {})["task_event_watermark"] = max(
         (task.get("sequence") or 0 for task in frame["remote_tasks"]), default=0)
     # Cursor/cognition can change while fresh work overlays are being read.

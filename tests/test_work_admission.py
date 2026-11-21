@@ -368,6 +368,31 @@ async def test_malformed_source_receipt_is_visible_without_launching_work(db):
 
 
 @pytest.mark.asyncio
+async def test_rejected_goal_scope_remains_visible_after_next_turn(db):
+    work, origin, _, _, _, source, req, _ = await setup(db)
+    await db.execute(
+        "UPDATE aios.dag_node SET message_text=$2 WHERE node_id=$1", source,
+        '<aios_action>' + json.dumps({
+            "op": "request_work", "capability": req.capability, "purpose": req.purpose,
+            "objective": "Read the notebook", "goal_ref": str(uuid4()),
+        }) + '</aios_action>',
+    )
+    result = await work.from_source(origin.instance_id, source)
+    assert result["status"] == "needs_clarification"
+    assert "goal_ref must identify an active goal" in result["reason"]
+    timeline = (await work.source(origin.instance_id, source))["source_timeline_id"]
+    head = uuid4()
+    await db.execute("INSERT INTO aios.ingest_event VALUES(2,'Cortana',NULL)")
+    await db.execute("INSERT INTO aios.dag_node(node_id,timeline_id,event_id) VALUES($1,$2,2)", head, timeline)
+    await db.execute("INSERT INTO aios.dag_edge VALUES($1,$2,$3)", timeline, head, source)
+    await db.execute("UPDATE aios.character_runtime_state SET source_head_node_id=$2 WHERE instance_id=$1",
+                     origin.instance_id, head)
+    assert (await work.overlay(origin.instance_id, timeline))["request_error"] == result
+    await db.execute("UPDATE aios.ingest_event SET superseded_at=now() WHERE event_id=1")
+    assert (await work.overlay(origin.instance_id, timeline))["request_error"] is None
+
+
+@pytest.mark.asyncio
 async def test_alias_retry_keeps_original_receipt_after_execution_finishes(db):
     work, origin, execution, bid, lid, source, req, profile = await setup(db)
     first = await work.request(origin.instance_id, req)

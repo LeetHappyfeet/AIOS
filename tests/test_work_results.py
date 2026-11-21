@@ -7,8 +7,8 @@ from fastapi import HTTPException
 import test_workspace_client as workspace_tests
 from test_work_admission import setup, scene
 from aios_app.agent.environment_links import task_overlay, append_event
-from aios_app.agent.work_admission import WorkDismissal
-from aios_app.agent.work_profiles import experimental_profile, expand_request_template
+from aios_app.agent.work_admission import WorkDismissal, extract_work_action
+from aios_app.agent.work_profiles import workspace_task_profile, expand_request_template
 from aios_app.hud.work_results import result_view
 from aios_app.agent.workspaces import WorkspaceStore, FinishIn, LeaseIn
 from aios_app.agent.workspace_contract import Assignment
@@ -25,18 +25,18 @@ def task(result, assignment=None, **extra):
 
 
 def test_structured_limitations_survive_long_report_and_keep_association():
-    template = expand_request_template(experimental_profile().assignment_template, uuid4())
+    template = expand_request_template(workspace_task_profile().assignment_template, uuid4())
     result = {'report': 'Everything done!\n| Check | Command | Result |\n' + '| value |' * 100,
               'result_summary': {'outcome': 'blocked', 'findings': ['rg unavailable'],
                                  'limitations': ['Network isolation was not verified']},
-              'evidence': {'checks': [{'id': 'experiment_report', 'exit_code': 0}]}}
+              'evidence': {'checks': [{'id': 'work_report', 'exit_code': 0}]}}
     t = task(result, template)
     frame = {'remote_tasks': [t], 'work': {'requests': [dict(request_id='request-1', run_id='run-1', status='finished')]}}
     text = render_hud_text(frame)
     assert 'Worker-reported outcome: blocked' in text
     assert 'Network isolation was not verified' in text
     assert 'Report structure only; task success is not established' in text
-    assert 'Check experiment_report: exit 0' in text
+    assert 'Check work_report: exit 0' in text
     assert 'run-1; request: request-1' in text
     assert '| Check | Command | Result |' in text  # Latest report preserves tables.
     assert 'WORK REQUESTS' not in text  # A single connected receipt, not duplicated entries.
@@ -44,7 +44,7 @@ def test_structured_limitations_survive_long_report_and_keep_association():
 
 
 def test_worker_scope_cannot_upgrade_authority_and_id_alone_is_not_scope():
-    assignment = {'required_checks': [{'id': 'experiment_report', 'command': 'echo not-a-report-check'}]}
+    assignment = {'required_checks': [{'id': 'work_report', 'command': 'echo not-a-report-check'}]}
     view = result_view({'verification_scope': 'All behavior independently verified'}, assignment)
     assert view['verification_scope'].startswith('Configured checks only')
     assert view['worker_verification_scope'] == 'All behavior independently verified'
@@ -82,7 +82,7 @@ def test_untrusted_malformed_optional_fields_are_bounded():
     assert len(view['limitations']) == 5
     result['result_summary'].update(findings=['f' * 1000] * 10, artifacts=['a' * 1000] * 10)
     text = render_hud_text({'remote_tasks': [task(result) for _ in range(8)]})
-    assert len(text) < 13000 and 'Earlier result:' in text
+    assert len(text) < 13000 and 'Earlier run' in text
 
 
 @pytest.mark.asyncio
@@ -122,7 +122,7 @@ async def test_dismissed_configuration_request_never_reconsidered(db):
     closed = await work.dismiss(origin.instance_id, req.request_id, dismiss)
     assert closed['status'] == 'invalidated'
     assert await work.dismiss(origin.instance_id, req.request_id, dismiss) == closed
-    await work.configure(bid, lid, experimental_profile().model_copy(update={
+    await work.configure(bid, lid, workspace_task_profile().model_copy(update={
         'capability': missing.capability, 'purpose': missing.purpose}))
     await work.reconsider(instance_id=origin.instance_id)
     assert await db.fetchval('SELECT count(*) FROM aios.workspace_run') == 0
@@ -192,3 +192,125 @@ def test_repeated_configuration_blockers_share_one_explanation():
     assert '5 request(s)' in text
     assert text.count('Missing profile') == 1
     assert '2 additional configuration blockers' in text
+
+
+@pytest.mark.parametrize("budget", [None, 2000])
+def test_research_hud_prefers_receipts_and_labels_retrieved_older_run(budget):
+    latest = task({"report": "Research report excerpt", "report_truncated": True, "result_summary": {
+        "outcome": "partial",
+        "summary": "moraine returned zero results",
+        "limitations": ["No write/shell tool was exposed"],
+        "research_progress": {
+            "verified_passages": [{"title": "Conodonts", "section": "page:9"}],
+            "acquisition_errors": [{"title": "GLG-123", "error": "response_too_large",
+                                    "limit_bytes": 12 * 1048576}],
+        },
+        "research_citations": [{"title": "Ichnofacies", "section": "page:5"}],
+        "search_log": [{"query": "moraine", "status": "source_error",
+                        "errors": {"calibre": "http_status_404"}},
+                       {"query": "negative mass", "status": "read_recommended",
+                        "full_text_error": "response_too_large"}],
+    }}, reported_at="2026-11-18 08:11:45+00:00")
+    old = task({"report": "STALE INLINE PROSE"})
+    old["run_id"] = "old-run"
+    frame = {"remote_tasks": [latest, old], "work": {"retrieved_result": {
+        "run_id": "old-run", "reported_at": "2026-11-16 13:12:53+00:00",
+        "section": "findings", "text": "Older selected evidence",
+    }}}
+    if budget is not None:
+        frame["hud"] = {"token_budget": budget}
+    text = render_hud_text(frame)
+    assert "research outcome: partial" in text
+    assert "Conodonts (page:9); Ichnofacies (page:5)" in text
+    assert "GLG-123 — response_too_large (download limit 12 MiB)" in text
+    assert "moraine [http_status_404]" in text
+    assert "negative mass [response_too_large]" in text
+    assert "Report excerpt retained" in text
+    assert "Full report retained" not in text
+    assert "Worker answer: moraine returned zero results" in text
+    assert "No write/shell" not in text
+    assert "Earlier run old-run" in text and "STALE INLINE PROSE" not in text
+    assert "RETRIEVED WORK RESULT (historical run old-run, reported 2026-11-16;" in text
+
+
+def test_notebook_only_result_uses_worker_outcome_despite_empty_research_metadata():
+    latest = task({"result_summary": {
+        "outcome": "completed", "summary": "Retrieved one project note.",
+        "research_progress": {"searches": 0, "passages": 0, "verified_passages": []},
+        "search_log": [],
+    }})
+    text = render_hud_text({"hud": {"token_budget": 1800}, "remote_tasks": [latest]})
+    assert "worker outcome: completed" in text
+    assert "research outcome" not in text
+    assert "Search status log" not in text
+
+
+def test_notebook_read_example_sets_explicit_goal_and_inspection_fields():
+    goal = uuid4()
+    reason = "goal_ref must identify an active goal with an open attempt in this conversation"
+    text = render_hud_text({
+        "hud": {"token_budget": 1800},
+        "scene": {"working_state": {"immediate_goal": {"goal_id": str(goal), "text": "Open a document"}}},
+        "work": {"capabilities": [{"capability": "workspace", "purpose": "task",
+                                   "description": "Inspect files", "online": True}],
+                 "request_error": {"reason": reason}},
+    })
+    action = extract_work_action(next(line for line in text.splitlines() if "aios_notebook_recent" in line))
+    assert action["goal_ref"] == short_reference(goal, "g")
+    assert action["execution_mode"] == "inspection_only"
+    assert action["report_mode"] == "inline"
+    assert reason in text
+
+
+@pytest.mark.parametrize("budget", [1600, 2400, None])
+def test_latest_answer_reaches_prompt_ahead_of_large_historical_failure(budget):
+    import json
+
+    new = task({"result_summary": {
+        "outcome": "partial", "summary": "Retrieved evidence supports a regional overview.",
+        "findings": [json.dumps({
+            "observation": f"Survey observation {i} identifies a regional formation.",
+            "interpretation": "The source supports this limited regional claim.",
+            "source_id": "library", "evidence_id": "a" * 24, "section": f"page:{i}",
+        }) for i in range(1, 6)],
+        "research_progress": {"verified_passages": [{
+            "title": "Regional survey", "section": "page:1",
+            "passage_excerpt": "A formation was identified at the locality.",
+        }]},
+    }})
+    old = task({"result_summary": {"outcome": "blocked", "summary": "Old failure"}})
+    old["run_id"] = "old-run"
+    page = {"run_id": "old-run", "section": "findings", "revision": "b" * 64,
+            "text": "OUTDATED FAILURE " * 200, "cursor": 0, "next_cursor": None}
+    frame = {"remote_tasks": [new, old], "work": {"result_tool": True, "retrieved_result": page},
+             "workspace_memory": [{
+                 "run_id": "old-run", "kind": "idea", "text": "Try another access method.",
+                 "execution_status": "finished", "verification_status": "passed",
+             }]}
+    if budget:
+        frame["hud"] = {"token_budget": budget}
+    rendered = render_hud_text(frame)
+    assert "Worker answer: Retrieved evidence supports a regional overview." in rendered
+    for i in (1, 2, 3):
+        assert f"Survey observation {i}" in rendered
+        assert f"page:{i}" in rendered
+    assert "historical run old-run" in rendered
+    assert rendered.count("OUTDATED FAILURE") < 12
+    assert rendered.index("Survey observation 1") < rendered.index("historical run old-run")
+    assert page["next_cursor"] is None  # Rendering does not mutate the retained read.
+    if budget:
+        assert len(rendered) <= budget * 4
+    else:
+        assert "Reassess this historical note" in rendered
+
+
+def test_empty_research_findings_deliver_excerpts_instead_of_page_numbers_only():
+    latest = task({"result_summary": {
+        "outcome": "partial", "findings": [],
+        "research_progress": {"verified_passages": [{
+            "title": "Survey", "section": "page:7", "passage_excerpt": "Measured sediment thickness is 12 m.",
+        }]},
+    }})
+    text = render_hud_text({"remote_tasks": [latest], "hud": {"token_budget": 1600}})
+    assert "Retrieved excerpt: Measured sediment thickness is 12 m." in text
+    assert "Survey / page:7" in text

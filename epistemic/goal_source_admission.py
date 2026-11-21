@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-ADMISSION_VERSION = "goal-source-admission-v4"
+ADMISSION_VERSION = "goal-source-admission-v5"
 
 # Narrator interpretations containing an embedded first-person construction
 # are not assertions made by that grammatical first person.
@@ -99,6 +99,47 @@ _EMBEDDED_TOPIC = re.compile(
 )
 
 
+_REPORTING_POLICY = re.compile(
+    r"^(?:keep|leave)\b.*\b(?:impressions?|opinions?|assumptions?)\b.*\b(?:out|separate)\b.*"
+    r"\b(?:findings?|reports?|evidence)\b|"
+    r"^(?:have|want)\b.*\b(?:recorded|named|reported)\b.*\blimitation\b|"
+    r"^(?:record|report|name)\b.*\bas (?:a |an )?limitation\b|"
+    r"^(?:this|that|it) (?:be )?recorded as (?:a |an )?limitation\b|"
+    r"^if\b.*\bI(?:'ll| will) say so\b.*\b(?:assumption|gap)\b|"
+    r"^need (?:the )?scope (?:spelled|set|defined)\b|"
+    r"^say so rather than\b|^keep\b.*\b(?:findings|observations)\b.*\b(?:interpretations|assumptions)\b",
+    re.I,
+)
+_INTERPRETIVE_REACTION = re.compile(
+    r"^take\b.*\bas (?:meaning|evidence|confirmation)\b", re.I,
+)
+_RESEARCH_METHOD = re.compile(
+    r"^take (?:the )?(?:shorter|short|single)[- ]quer(?:y|ies) route\b|"
+    r"^start (?:the )?(?:search|sweep) with (?:single|short) terms\b|"
+    r"^open\b.*\bas an? experimental task\b",
+    re.I,
+)
+NON_GOAL_REASONS = frozenset({"reporting_constraint", "interpretive_reaction", "research_method_step"})
+
+
+def non_goal_reason(objective: str) -> str | None:
+    """Identify procedural policies and reactions without discarding report tasks."""
+    action = _action_text(str(objective or "")).replace("’", "'")
+    action = re.sub(
+        r"^(?:I(?:'ll| will| intend to| want to)|[\w-]+ (?:intends|wants|plans)(?: to)?)\s+",
+        "", action, flags=re.I,
+    )
+    action = re.sub(r"^to\s+", "", action, flags=re.I)
+    for pattern, reason in (
+        (_REPORTING_POLICY, "reporting_constraint"),
+        (_INTERPRETIVE_REACTION, "interpretive_reaction"),
+        (_RESEARCH_METHOD, "research_method_step"),
+    ):
+        if pattern.search(action):
+            return reason
+    return None
+
+
 @dataclass(frozen=True)
 class GoalAdmission:
     decision: str
@@ -164,6 +205,9 @@ def review_goal_source(
         return GoalAdmission("insufficient_commitment", "embedded_future_clause", "source")
     if re.match(r"(?i)^no\s+", action):
         return GoalAdmission("insufficient_commitment", "constraint_without_action", "source")
+    procedural = non_goal_reason(action)
+    if procedural:
+        return GoalAdmission("context_only", procedural, "source")
     if _INCOMPLETE_OBJECTIVE.search(action):
         return GoalAdmission("insufficient_commitment", "incomplete_objective", "source")
     if _FIGURATIVE_OBJECTIVE.search(action):

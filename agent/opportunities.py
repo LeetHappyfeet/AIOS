@@ -107,7 +107,8 @@ class CognitiveOpportunityService:
         self.cognitive_operations=CognitiveOperationRegistry()
 
     async def generate(self, *, instance_id:UUID, source_node_id:UUID|None=None,
-                       limit:int=8, focus_override:str|None=None) -> OpportunityBatch:
+                       limit:int=8, focus_override:str|None=None,
+                       reminder_review: tuple | None = None) -> OpportunityBatch:
         context=await self.contexts.resolve(instance_id)
         raw=await self.db.fetchrow(
             "SELECT * FROM aios.character_runtime_state WHERE instance_id=$1",instance_id)
@@ -394,6 +395,13 @@ class CognitiveOpportunityService:
             revision=review_revision(g,coordinate["attempt_id"],context.source_timeline_id,
                 source_node_id or context.source_head_node_id,recent_source_events,
                 coordinate["evidence_revision"])
+            if reminder_review:
+                if goal.goal_id != reminder_review[0] or (len(reminder_review) > 2 and
+                        reminder_review[2] and str(coordinate["attempt_id"]) != reminder_review[2]):
+                    continue
+                revision = f"{revision}:reminder:{reminder_review[1]}"
+                if len(reminder_review) > 3 and reminder_review[3]:
+                    revision += f":receipt:{reminder_review[3]}:{reminder_review[4]}"
             if revision in attempted_revisions:
                 continue
             overlap=len(goal_words & set(re.findall(r"[a-z0-9']+",g.lower())))
@@ -417,6 +425,10 @@ class CognitiveOpportunityService:
                 "goal_review",f"Consider whether what just happened changes my goal: {g}",
                 "planning.review",{"goal_id":goal_id,"goal":g,"focus":focus,
                 "attempt_id":str(attempt_id),"review_revision":revision,
+                **({"reminder_trigger_id": reminder_review[1]} if reminder_review else {}),
+                **({"reminder_receipt_revision": reminder_review[3],
+                    "reminder_review_attempt": reminder_review[4]}
+                   if reminder_review and len(reminder_review) > 3 and reminder_review[3] else {}),
                 "goal_state":goal_states.get(goal.goal_id,{}) if goal.goal_id else {},
                 "recent_source_events":recent_source_events,
                 "origin_scene":dict((goal.meta or {}).get("origin_scene") or {}),
@@ -433,9 +445,37 @@ class CognitiveOpportunityService:
                 goal_affinity=max(.35,affinity)+(.15 if starvation else 0),recency=1,
                 evidence=[{"kind":"active_goal","goal_id":goal_id,"text":g,
                            "last_reviewed_at":str(reviewed) if reviewed else None}],
-                key=f"goal:{goal_id or g.lower()[:100]}",freshness="strict",
+                key=(f"goal:{goal_id}:reminder:{reminder_review[1]}:{reminder_review[3:]}" if reminder_review
+                     else f"goal:{goal_id or g.lower()[:100]}"), freshness="strict",
                 subject_id=goal_subject.subject_id if goal_subject else
                            (primary_subject.subject_id if primary_subject else None)))
+
+        # Offer one reminder decision for a goal relevant to the latest source.
+        # Creating the reminder requires a separately selected background operation.
+        reminder_candidate = next((item for item in review_candidates if item[1]), None)
+        reminder_goal = reminder_candidate[6] if reminder_candidate else None
+        if not reminder_review and delta_focus and reminder_goal and reminder_goal.goal_id:
+            goal_id = str(reminder_goal.goal_id)
+            pending = await self.db.fetchval(
+                """SELECT 1 FROM aios.character_temporal_trigger
+                   WHERE instance_id=$1 AND payload->>'reminder_goal_id'=$2
+                     AND payload->>'source_timeline_id'=$3
+                     AND (status IN ('scheduled','firing','fired','timeline_inactive')
+                          OR (payload->>'attempt_id'=$4 AND payload->>'evidence_revision'=$5)) LIMIT 1""",
+                instance_id, goal_id, str(context.source_timeline_id),
+                str(reminder_candidate[10]), str(review_coordinates[reminder_goal.goal_id]["evidence_revision"]),
+            )
+            if not pending:
+                proposals.append(self._p(
+                    "reflection", f"Consider setting a reminder to revisit my goal: {reminder_goal.text}",
+                    "reflection.schedule_reminder", {
+                        "goal_id": goal_id, "attempt_id": str(reminder_candidate[10]),
+                        "evidence_revision": str(review_coordinates[reminder_goal.goal_id]["evidence_revision"]),
+                    },
+                    source_node_id, context, relevance=.85, goal_affinity=.7, recency=1,
+                    key=f"reminder:{goal_id}:{source_node_id}",
+                    evidence=[{"kind": "active_goal", "goal_id": goal_id}],
+                ))
 
         # Scene transitions are explicit deterministic evidence for immediate/reflection needs.
         if context.source_head_node_id:
@@ -463,6 +503,11 @@ class CognitiveOpportunityService:
                     key=f"scene:{slot}:{after.lower()[:80]}",
                     subject_id=primary_subject.subject_id if primary_subject else None))
 
+        if reminder_review:
+            return await self._persist_proposals(
+                instance_id, [row for row in proposals if row["opportunity_type"] == "goal_review"],
+            )
+
         # A completed/closed dossier should not generate the same source-gap
         # operation indefinitely on every later conversation turn.
         from aios_app.topic_atlas.research_dossier import ProgressiveResearchService
@@ -488,7 +533,9 @@ class CognitiveOpportunityService:
             (p for p in proposals if p["opportunity_type"]=="goal_review"),None)
         due_formation=next(
             (p for p in proposals if p["opportunity_type"]=="goal_formation"),None)
-        reserved=[p for p in (due_review,due_formation) if p is not None]
+        reminder = next((p for p in proposals
+                         if p["operation_type"] == "reflection.schedule_reminder"), None)
+        reserved = [p for p in (due_review, due_formation, reminder) if p is not None]
         budgeted=([p for p in proposals if p not in reserved][
                     :max(0,budget-len(reserved))] + reserved)
         return await self._persist_proposals(instance_id, budgeted)

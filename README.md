@@ -4,64 +4,76 @@
 
 <h1 align="center">AIOS</h1>
 
-<p align="center"><strong>Persistent memory and world state for AI agents.</strong></p>
+<p align="center"><strong>Persistent memory, world state, and work for AI characters and agents.</strong></p>
 <p align="center">
-  Give an existing LLM continuity beyond a single prompt or chat.
-  AIOS maintains identity, experience, individual knowledge and belief, scene state,
-  and world state outside the language model, then prepares relevant context for its next turn.
+  AIOS is a self-hosted backend that gives characters a history they can draw on and projects
+  they can pick up again. Use SillyTavern through MemoryVaultIngest or connect your own app.
+  With AIOS Client, characters can request research and computer tasks in an authorized workspace.
 </p>
 
 <p align="center">
   <a href="#what-can-you-build">What can you build?</a> ·
+  <a href="#use-aios-with-sillytavern">SillyTavern</a> ·
+  <a href="#run-tasks-with-aios-client">AIOS Client</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#connect-your-application">Connect an app</a> ·
   <a href="docs/README.md">Developer docs</a> ·
-  <a href="#how-aios-works">How it works</a>
+  <a href="https://discord.gg/ysNrNBFj7">Developer Discord</a> ·
+  <a href="#dependencies">Dependencies</a>
 </p>
 
-> **Development status:** Experimental and under active development; interfaces may change.
-> **License:** Source-available under the [AIOS Personal Use License 1.0](LICENSE).
-> Personal use by natural persons is permitted; commercial and organizational use requires a separate written license.
-
 ## What can you build?
-
-AIOS can act as the persistent-state component behind a chat application, game, simulation,
-or agent project. You keep control of the interface and model; AIOS tracks continuity.
 
 <table>
   <tr>
     <td width="50%" valign="top">
       <img src="docs/media/persistent-characters.svg" alt="Illustration of a character connected to durable memory events" width="100%" />
       <h3>Persistent characters and companions</h3>
-      <p>Give an agent an enduring identity and a history of interactions. Record events, resume conversations, and retrieve relevant experience instead of treating every generation as a clean slate.</p>
+      <p>Resume a roleplay scene or a long-running conversation with the same character identity and relevant prior experiences. AIOS tracks those experiences alongside the current scene.</p>
     </td>
     <td width="50%" valign="top">
       <img src="docs/media/separate-knowledge.svg" alt="Two distinct characters observing the same world while retaining different knowledge" width="100%" />
       <h3>Separate perspectives in one world</h3>
-      <p>Run multiple characters in a shared world without automatically assigning everyone the same memories or beliefs. Track individual experiences alongside shared world information.</p>
+      <p>Give characters in the same game or simulation different experiences and beliefs. A character’s context follows its own timeline and knowledge, alongside the world information available to it.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <img src="docs/media/knowledge-acquisition.svg" alt="Documents, an open book, and a selected item of acquired knowledge" width="100%" />
-      <h3>Knowledge-aware agents <em>(experimental)</em></h3>
-      <p>Import documents into a searchable corpus and intentionally acquire selected material into an actor's knowledge path, with source information retained. Importing a document is not the same as making every agent know it.</p>
+      <h3>Research projects with sources</h3>
+      <p>Build a shared corpus from documents or lorebooks, or use AIOS Client to search approved sources such as local documents, Calibre OPDS, and SearXNG. Keep source references, open questions, and notes tied to a project goal so an agent can pick up the investigation in a later run.</p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/media/application-integration.svg" alt="Three-prong integration: your app talks directly to your chosen LLM for generation, and separately to AIOS for events and its memory HUD. Internal small-model processing in AIOS is not a proxy for the customer model." width="100%" />
-      <h3>Stateful application integrations</h3>
-      <p>Your application calls its chosen LLM directly and connects independently to AIOS for persistent memory and a prepared HUD. AIOS can use smaller inference workers for its own internal cognitive processing; it is not a proxy for your primary model.</p>
+      <img src="docs/media/persistent-agents.webp" alt="An agent at a workstation with a notebook, clock, and completed task" width="100%" />
+      <h3>Persistent agents</h3>
+      <p>Give an agent goals and plans it can revisit between conversations. With background inference configured, a due reminder can bring a goal back for review while the chat client is closed. An authorized AIOS Client can run a workspace task and return reports and checks that inform the agent’s next step.</p>
     </td>
   </tr>
 </table>
 
-<sub>Illustrations are conceptual, not screenshots of tested application scenarios.</sub>
+The AIOS toolkit includes project notes and research familiar from ChatGPT Projects and
+Grok, along with persistent memory, scheduling, and computer tools found in Hermes Agent.
+These tools build on the timeline, knowledge, and goals AIOS already tracks for each character.
+
+## Use AIOS with SillyTavern
+
+Install [MemoryVaultIngest](https://github.com/LeetHappyfeet/extension-MemoryVaultIngest/tree/development)
+in SillyTavern and set its **AIOS URL**. The extension syncs chat events and adds the
+character’s current **HUD** to the model prompt. SillyTavern remains the chat interface
+and calls your chosen model.
+
+## Run tasks with AIOS Client
+
+Install [AIOS Client](https://github.com/LeetHappyfeet/AIOS_Client/tree/development) on the
+machine that will run computer or research tasks. Start its listener and authorize the
+workspace in AIOS under **Workspace Delegation**. With automatic routing set up, matching
+chats can attach to the workspace and see task results in the character’s HUD. See
+[workspace setup](docs/workspace-client.md) for pairing and approvals.
 
 ## See the integration work
 
-AIOS already includes a dependency-free Python example that creates or resumes a session,
-sets up two participants, ingests a message, and prints an up-to-date **HUD** (the context
-package intended for the next model generation).
+The dependency-free Python example creates or resumes a session, sets up two participants,
+ingests a message, and prints the **HUD** for the next model call.
 
 With AIOS running, execute from the repository root:
 
@@ -70,7 +82,7 @@ python3 examples/live_client.py --conversation readme-demo-001 --turn 1 \
   --message 'The brass key is on the kitchen table.'
 ```
 
-To also record a model response, supply its actual text:
+Supply `--reply` to record a model response:
 
 ```bash
 python3 examples/live_client.py --conversation readme-demo-002 --turn 1 \
@@ -78,27 +90,22 @@ python3 examples/live_client.py --conversation readme-demo-002 --turn 1 \
   --reply 'I will look for the brass key on the kitchen table.'
 ```
 
-This example exercises the AIOS HTTP lifecycle; **it does not invoke an LLM on your behalf**.
-Replace its marked model-call section with your preferred provider. Keep the conversation key
-stable across reconnects, and advance `--turn` for each new exchange. A complete two-agent
-continuity demonstration and clean-host end-to-end validation remain release work.
+Add your provider call at the marked point. Reuse the conversation key across reconnects
+and advance `--turn` for each new exchange.
 
-See the [full integration walkthrough](docs/integration.md) for copy-paste curl commands and
-the [Python client source](examples/live_client.py) for readiness, retry, and conflict handling.
-The [MemoryVaultIngest SillyTavern extension](https://github.com/LeetHappyfeet/extension-MemoryVaultIngest)
-is an example of a live AIOS client.
+See the [curl walkthrough](docs/integration.md) and [Python client](examples/live_client.py).
 
 ## Quick start
 
 **Requirements:** Linux/Bash environment, Python 3.10+, Git, and Docker with Compose v2.
-The provided scripts target Linux; on Windows use a Linux environment such as WSL with Docker access.
-The installer starts PostgreSQL, Qdrant, and Apache Jena Fuseki and prepares the Python environment.
+On Windows, use WSL with Docker access. Setup prepares Python and starts PostgreSQL, Qdrant,
+and Apache Jena Fuseki.
 
 ```bash
 git clone --branch AIOS-development https://github.com/LeetHappyfeet/AIOS.git
 cd AIOS
 bash setup.sh
-bash run.sh
+AIOS_API_HOST=127.0.0.1 AIOS_UI_HOST=127.0.0.1 bash run.sh
 ```
 
 Wait for the launcher to report:
@@ -115,7 +122,7 @@ Wait for the launcher to report:
 | Interactive API reference | `http://127.0.0.1:8000/docs` |
 | OpenAPI schema | `http://127.0.0.1:8000/openapi.json` |
 
-Check API health:
+Check API health.
 
 ```bash
 curl --fail-with-body http://127.0.0.1:8000/healthz
@@ -126,8 +133,8 @@ Then run the example above. To stop native processes, press `Ctrl+C`; to also st
 the Compose services, run `bash stop.sh`. Persistent volumes are preserved.
 **Do not run `docker compose down -v` unless you intend to delete the databases.**
 
-See [installation and troubleshooting](docs/installation.md) for the complete setup contract,
-existing-installation cautions, and configuration options. The [Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing)
+See [installation and troubleshooting](docs/installation.md) for setup and upgrades.
+The [Colab demo](https://colab.research.google.com/drive/1c-eaLVuAu76JSgD4-rr65WvPFwzXA1zK?usp=sharing)
 is an alternative experimental introduction.
 
 ## Connect your application
@@ -136,11 +143,11 @@ is an alternative experimental introduction.
   <img src="docs/media/integration-flow.svg" alt="Three-prong architecture: the app communicates directly with its customer-provided LLM and independently exchanges events and a memory HUD with AIOS. AIOS may use small-model inference internally but never serves as the main model proxy." width="100%" />
 </p>
 
-AIOS is an independent HTTP JSON **memory pipeline**, not an LLM proxy. Your application owns its
-UI, turn ordering, and direct calls to the customer-provided model. Separately, it sends observations
-and generated replies to AIOS and retrieves the memory HUD to include in its own model prompt.
-Optional small-model inference workers inside AIOS support its internal cognitive/semantic work;
-they do not replace or sit in front of the application’s primary LLM.
+Your application controls its UI, turn order, and calls to its primary LLM. It sends events
+to AIOS over HTTP and retrieves a **HUD**, a view of the relevant character and timeline for
+the next model call. The HUD can include memories, beliefs, scene state, active goals, and
+available work capabilities. Configured inference providers handle background decisions
+such as goal planning and reminder review separately from your application's model calls.
 
 The normal live-agent sequence is:
 
@@ -169,7 +176,7 @@ For example, once the [tutorial's participant setup](docs/integration.md) has su
 }
 ```
 
-Its response includes `node_id`. Pass that exact coordinate to the HUD endpoint:
+Pass the returned `node_id` to the HUD endpoint.
 
 ```bash
 curl --fail-with-body -sS -X POST \
@@ -182,40 +189,13 @@ A stale-coordinate HTTP 409 is a state conflict, not a reason to silently fall b
 The [complete, executable curl walkthrough](docs/integration.md) fills in the setup and identifiers;
 the [API guide](docs/api.md) documents requests, responses, and error handling.
 
-**Network safety:** The current development API has no common authentication scheme and
-its application-host default binds to `0.0.0.0`. For same-machine use, explicitly set
-`AIOS_API_HOST=127.0.0.1`. Put an authenticated access boundary in place before exposing
-the service to another device or network. CORS is not authentication.
+**Network access.** The development API has no common authentication scheme. Use the
+loopback bindings above for a local install. Configure an authenticated access boundary
+before exposing the service beyond the local machine.
 
-## How AIOS works
+## Dependencies
 
-AIOS stores more than similar passages of text. It distinguishes **who an agent is**,
-**what happened**, **what each participant knows or believes**, **what belongs to the world**,
-and **what is happening in the current scene**. The **HUD** assembles the portion needed for
-the next generation while the larger state remains persistent.
-
-A conventional retrieval-augmented generation (RAG) system primarily retrieves similar
-stored text. Similarity alone cannot determine chronological order, identity, source authority,
-or whether one character has actually learned information known to another. AIOS uses vector
-search as one component of a broader state and evidence pipeline.
-
-<details>
-<summary><strong>Architecture and storage responsibilities</strong></summary>
-
-- **PostgreSQL:** Durable memory, source provenance, timelines, experiences, knowledge and belief state, runtime and pipeline state.
-- **Apache Jena Fuseki:** RDF representations of world and character knowledge.
-- **Qdrant:** Semantic candidate discovery and retrieval acceleration.
-- **AIOS runtime:** Ingestion, semantic processing, HUD preparation, world and character state, agent tasks, actions, and inference coordination.
-
-Identity is maintained separately from ordinary conversational memory. Accepted material
-contributes to a provenance-backed Identity Kernel rather than letting a transient
-utterance silently redefine the character. The shared corpus can hold documents without
-automatically making them part of every actor's knowledge.
-
-Agent cognition, inference workers, and external knowledge acquisition are experimental.
-Persistent state does not require your application to surrender control of its model calls.
-
-</details>
+AIOS uses PostgreSQL, Apache Jena Fuseki, and Qdrant.
 
 ## Documentation
 
@@ -224,6 +204,8 @@ Persistent state does not require your application to surrender control of its m
 | Install or troubleshoot AIOS | [Installation](docs/installation.md) |
 | Connect a chatbot, game, or external program | [First integration tutorial](docs/integration.md) and [example client](examples/live_client.py) |
 | Look up HTTP requests, responses, and errors | [API guide](docs/api.md) or the running `/docs` endpoint |
+| Delegate computer or research tasks | [Workspace setup](docs/workspace-client.md), [Work admission](docs/work-admission.md), and [Client research sources](https://github.com/LeetHappyfeet/AIOS_Client/blob/development/docs/research.md) |
+| Follow a project across runs | [Goal planning](docs/goal_planning_v1.md), [Reminders](docs/background-reminder-prompts.md), [Project notebooks](docs/project-notebooks-pass-a.md), and [Retained work evidence](docs/hud-work-evidence.md) |
 | Operate services or configure inference | [Runtime operations](docs/runtime.md) |
 | Inspect a message, missing memory, or failed job | [Inspection and troubleshooting](docs/inspection.md) |
 | Understand the internal design | [Architecture](docs/architecture.md), [Identity Kernel](docs/identity_kernel.md), [Belief Reconciliation](docs/belief_reconciliation.md), and [Causal Integrity](docs/causal_integrity.md) |
@@ -231,8 +213,9 @@ Persistent state does not require your application to surrender control of its m
 
 ## Development and license
 
-AIOS remains experimental. Internal schemas, APIs, memory and belief policies, and cognition
-components are actively evolving. Pin the commit used by your integration and export that
+**Development status.** AIOS is experimental and under active development. Internal schemas,
+APIs, memory and belief policies, and cognition components may change. Pin the commit used by
+your integration and export that
 server's `/openapi.json` before upgrading. Reports accompanied by logs and a reproducible
 source interaction are welcome.
 

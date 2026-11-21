@@ -51,16 +51,131 @@ def _report_only(checks):
     # or a check ID alone. UUID substitution is the only template expansion.
     if not checks:
         return False
-    from aios_app.agent.work_profiles import experimental_profile
-    expected = experimental_profile().assignment_template["required_checks"][0]
-    pattern = re.escape(expected["command"]).replace(
-        re.escape("{request_id}"), r"(?:\{request_id\}|[0-9a-fA-F-]{36})"
-    )
-    return bool(checks) and all(
-        isinstance(c, Mapping) and c.get("id") == expected["id"]
-        and re.fullmatch(pattern, str(c.get("command") or ""))
-        for c in checks
-    )
+    from aios_app.agent.work_profiles import workspace_task_profile
+
+    for legacy_report in (False, True):
+        expected = workspace_task_profile(legacy_report=legacy_report).assignment_template["required_checks"][0]
+        pattern = re.escape(expected["command"]).replace(
+            re.escape("{request_id}"), r"(?:\{request_id\}|[0-9a-fA-F-]{36})"
+        )
+        if all(isinstance(c, Mapping) and c.get("id") == expected["id"]
+               and re.fullmatch(pattern, str(c.get("command") or "")) for c in checks):
+            return True
+    return False
+
+
+def _finding_line(value):
+    """Read both structured findings and older JSON-encoded finding strings."""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return compact(value, 300)
+        if not isinstance(parsed, Mapping):
+            return compact(value, 300)
+        value = parsed
+    if not isinstance(value, Mapping):
+        return ""
+    observation = compact(value.get("observation"), 260)
+    interpretation = compact(value.get("interpretation"), 160)
+    section = compact(value.get("section"), 45)
+    source = compact(value.get("source_id"), 35)
+    evidence = compact(value.get("evidence_id"), 48)
+    parts = [observation]
+    if interpretation:
+        parts.append("Interpretation: " + interpretation)
+    citation = " / ".join(part for part in (source, evidence, section) if part)
+    if citation:
+        parts.append("[" + citation + "]")
+    return " ".join(part for part in parts if part)
+
+
+def _research_answer(summary, passages):
+    lines = []
+    if statement := compact(summary.get("summary"), 340):
+        lines.append("  Worker answer: " + statement)
+    findings = summary.get("findings")
+    findings = findings if isinstance(findings, list) else []
+    for finding in findings[:3]:
+        if text := _finding_line(finding):
+            lines.append("  Worker-reported finding: " + text)
+    if not findings:
+        for passage in passages[:2]:
+            excerpt = compact(passage.get("passage_excerpt"), 260)
+            if excerpt:
+                lines.append("  Retrieved excerpt: " + excerpt + " ["
+                             + compact(passage.get("title"), 70) + " / "
+                             + compact(passage.get("section"), 45) + "]")
+    return lines
+
+
+def _research_lines(summary):
+    def records(value):
+        return [row for row in value[:24] if isinstance(row, Mapping)] if isinstance(value, list) else []
+
+    progress = summary.get("research_progress")
+    progress = progress if isinstance(progress, Mapping) else {}
+    errors = records(progress.get("acquisition_errors"))
+    searches = records(summary.get("search_log"))
+    passages = records(progress.get("verified_passages")) + records(summary.get("research_citations"))
+    activity = any(progress.get(key) for key in (
+        "searches", "passage_scans", "acquisitions", "passages", "failed_acquisitions",
+        "blocked_operations", "pdf_coverage",
+    ))
+    if not (activity or errors or searches or passages):
+        return []
+    pages = {}
+    for row in passages:
+        title = compact(row.get("title"), 78)
+        source = compact(row.get("source_id"), 30)
+        key = (title, source, compact(row.get("evidence_id"), 48))
+        sections = row.get("sections_read")
+        sections = sections[:8] if isinstance(sections, list) else []
+        for location in [row.get("section"), *sections]:
+            section = compact(location, 35)
+            if title and section and section not in pages.setdefault(key, []):
+                pages[key].append(section)
+    lines = _research_answer(summary, passages)
+    if pages:
+        refs = [f"{title} ({', '.join(sections[:4])})"
+                for (title, _, _), sections in list(pages.items())[:2]]
+        lines.append("  Retained passage receipts: " + "; ".join(refs))
+    else:
+        lines.append("  No page or section receipts in the retained preview.")
+    if errors:
+        row = next((r for r in errors if r.get("error") == "response_too_large"), errors[0])
+        limit = row.get("limit_bytes")
+        size = f" (download limit {limit / 1048576:g} MiB)" if type(limit) is int and 0 < limit <= 2**40 else ""
+        lines.append("  Acquisition blocked: " + compact(row.get("title"), 100)
+                     + " — " + compact(row.get("error"), 60) + size)
+    else:
+        # Earlier clients sometimes retained the blocker only in worker prose.
+        findings = summary.get("findings")
+        if isinstance(findings, list):
+            blocker = next((row for row in findings[:6] if isinstance(row, str)
+                            and row.startswith("ACQUISITION FAILURE:")), "")
+            if blocker:
+                lines.append("  Worker-reported acquisition blocker: "
+                             + compact(blocker.removeprefix("ACQUISITION FAILURE:"), 185))
+    failures = []
+    for row in searches:
+        errors = row.get("errors")
+        status = compact(row.get("status"), 40)
+        full_text_error = compact(row.get("full_text_error"), 38)
+        if not (errors or full_text_error or status in {
+            "source_error", "source_unhealthy", "partial_results", "query_rejected", "read_recommended",
+        }):
+            continue
+        details = [compact(v, 38) for v in list(errors.values())[:2]] if isinstance(errors, Mapping) else []
+        if full_text_error:
+            details.append(full_text_error)
+        detail = ", ".join(dict.fromkeys(filter(None, details)))
+        failures.append(f"{compact(row.get('query'), 48)} [{detail or status}]")
+    if failures:
+        lines.append("  Search coverage incomplete: " + "; ".join(failures[:3]))
+    elif not searches:
+        lines.append("  Search status log unavailable in the retained preview.")
+    return lines
 
 
 def result_view(result, assignment):
@@ -130,6 +245,7 @@ def result_view(result, assignment):
                               "open_threads": threads}
     return {
         "character_report": character_view,
+        "research_lines": _research_lines(summary),
         "model_response": "; ".join(response_details),
         "requested_content": sections,
         "content_sections_omitted": max(0, len(content) - 4) + (

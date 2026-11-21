@@ -5,7 +5,7 @@ import pytest
 import test_workspace_client as workspace_tests
 from test_workspace_attachment import attached, scene
 from aios_app.agent.work_admission import WorkRequestIn, WorkDecision
-from aios_app.agent.work_profiles import experimental_profile, reporting_template
+from aios_app.agent.work_profiles import workspace_task_profile, reporting_template
 from aios_app.agent.workspaces import decode
 from aios_app.hud.work_results import result_view
 from aios_app.hud.work import render_work_results
@@ -14,7 +14,7 @@ db = workspace_tests.db
 
 
 def test_builtin_readonly_reporting_has_no_file_or_shell_requirements():
-    template = experimental_profile().assignment_template
+    template = workspace_task_profile().assignment_template
     before = deepcopy(template)
     readonly, guidance = reporting_template(template, inline=True)
     assert readonly['expected_outputs'] == [] and readonly['required_checks'] == []
@@ -25,7 +25,7 @@ def test_builtin_readonly_reporting_has_no_file_or_shell_requirements():
 
 
 def test_readonly_cannot_bypass_custom_operator_checks():
-    template = experimental_profile().assignment_template
+    template = workspace_task_profile().assignment_template
     template['required_checks'][0]['command'] = 'custom operator check'
     with pytest.raises(ValueError, match='custom profile'):
         reporting_template(template, inline=True)
@@ -52,9 +52,9 @@ def test_failure_reason_and_response_diagnostics_precede_partial_findings():
 @pytest.mark.asyncio
 async def test_readonly_request_gets_consistent_immutable_assignment(db):
     store, work, origin, bid, lid, state = await attached(db)
-    await work.configure(bid, lid, experimental_profile())
+    await work.configure(bid, lid, workspace_task_profile())
     req = WorkRequestIn(request_id=uuid4(), source_node_id=state['source_head_node_id'],
-        capability='workspace', purpose='experimental_task', objective='Survey the local environment',
+        capability='workspace', purpose='task', objective='Survey the local environment',
         constraints=['read-only inspection only', 'no file creation or modification'])
     pending = await work.request(origin.instance_id, req, character_source=True)
     assert pending['status'] == 'awaiting_approval'
@@ -72,10 +72,10 @@ async def test_readonly_request_gets_consistent_immutable_assignment(db):
 @pytest.mark.parametrize("report_mode", [None, "inline"])
 async def test_read_only_docker_checks_keep_command_access(db, report_mode):
     store, work, origin, bid, lid, state = await attached(db)
-    await work.configure(bid, lid, experimental_profile())
+    await work.configure(bid, lid, workspace_task_profile())
     req = WorkRequestIn(
         request_id=uuid4(), source_node_id=state['source_head_node_id'],
-        capability='workspace', purpose='experimental_task', report_mode=report_mode,
+        capability='workspace', purpose='task', report_mode=report_mode,
         objective='Use read-only checks such as `docker --version` and `systemctl is-active docker`. '
                   'Do not start, stop, or install anything.',
     )
@@ -94,12 +94,12 @@ async def test_read_only_docker_checks_keep_command_access(db, report_mode):
 @pytest.mark.asyncio
 async def test_inspection_profile_rejects_command_request_before_queueing(db):
     store, work, origin, bid, lid, state = await attached(db)
-    profile = experimental_profile()
+    profile = workspace_task_profile()
     profile.assignment_template = {"execution_mode": "inspection_only"}
     await work.configure(bid, lid, type(profile).model_validate(profile.model_dump()))
     req = WorkRequestIn(
         request_id=uuid4(), source_node_id=state['source_head_node_id'],
-        capability='workspace', purpose='experimental_task', objective='Run `docker --version`.',
+        capability='workspace', purpose='task', objective='Run `docker --version`.',
     )
     await work.request(origin.instance_id, req, character_source=True)
     accepted = await work.decide(origin.instance_id, req.request_id,

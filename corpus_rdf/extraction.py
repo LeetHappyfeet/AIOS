@@ -9,7 +9,8 @@ from urllib.parse import urlparse
 
 from aios_app.entity_memory.extraction import anchor_id, extract_memory, normalized
 
-POLICY = "corpus-reference-v1"
+POLICY = "corpus-reference-v2"
+_IDENTITY_SCOPE = "corpus-reference-v1"
 MAX_PARSE_CHARS = 16000
 _ROLES = {"definition", "example", "quotation", "reference_description"}
 _ROLE_HEADING = re.compile(
@@ -96,7 +97,7 @@ def build_payload(row, doc):
     section_id = str(row["section_id"])
     # Names can repeat within a document. Cross-document and runtime identity
     # merges require explicit evidence, even if labels/namespaces are identical.
-    scope = json.dumps([POLICY, namespace, document_id], separators=(",", ":"))
+    scope = json.dumps([_IDENTITY_SCOPE, namespace, document_id], separators=(",", ":"))
     kind = reference_kind(row)
     spans = role_spans(
         doc.text,
@@ -104,7 +105,9 @@ def build_payload(row, doc):
         meta=object_value(row["section_meta"]),
         dictionary=kind == "dictionary",
     )
-    payload = extract_memory(doc, scope=scope, section_id=section_id)
+    payload = extract_memory(
+        doc, scope=scope, section_id=section_id, require_spatial_place_evidence=True
+    )
 
     def context(offset):
         for index, span in enumerate(spans):
@@ -149,20 +152,21 @@ def build_payload(row, doc):
         new_id = anchor_id(scope, key)
         remap[(eid, role, index)] = new_id
         mention["entity_id"] = new_id
-        anchors.setdefault(
-            new_id,
-            {
+        # An earlier ungrounded mention of a name must not hide its later place evidence.
+        if new_id not in anchors or (
+            anchors[new_id]["kind"] == "unknown" and anchor["kind"] == "place"
+        ):
+            anchors[new_id] = {
                 **anchor,
                 "entity_id": new_id,
                 "content_role": role,
                 "status": "provisional",
                 "character_id": None,
                 "participant_id": None,
-            },
-        )
+            }
     relations = []
     for relation in payload["relations"]:
-        role, index = context(relation["predicate_offset"])
+        role, index = context(doc[relation["predicate_offset"]].idx)
         subject = remap.get((relation["subject"], role, index))
         obj = remap.get((relation["object"], role, index))
         if subject and obj:

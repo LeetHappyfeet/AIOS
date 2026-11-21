@@ -20,12 +20,12 @@ from aios_app.inference.providers import InferenceProviderStore
 
 logger = logging.getLogger(__name__)
 KINDS = {"personal", "procedure", "environment"}
-NEXT = {"internal_lookup", "research", "request_information", "wait"}
+NEXT = {"internal_lookup", "research", "request_information", "wait", "workspace_work"}
 LINKED_KNOWLEDGE_TIMEOUT = 0.75
 INQUIRY_RETRY_SECONDS = 60
 CONTINUATION_SECONDS = 45.0
 CONTINUATION_CLEANUP_SECONDS = 5.0
-PLAN_CONTRACT_VERSION = "goal-plan-text-v4-attributed-reports"
+PLAN_CONTRACT_VERSION = "goal-plan-text-v5-work-routing"
 PLAN_STRATEGY_CHARACTERS = 600
 PLAN_STEP_CHARACTERS = 400
 PLAN_QUESTION_CHARACTERS = 180
@@ -124,6 +124,8 @@ def validate_plan(raw: Any, evidence_ids: set[str]) -> dict:
         next_step == "research" and checked and checked[0]["kind"] == "environment"
     ):
         raise ValueError("lookup cannot answer the first dependency")
+    if next_step == "workspace_work" and checked:
+        raise ValueError("workspace work cannot bypass open prerequisites")
     refs = raw["evidence_ids"]
     if (not isinstance(refs, list) or not refs or len(refs) > 8
             or any(not isinstance(r, str) or r not in evidence_ids for r in refs)):
@@ -191,9 +193,12 @@ def build_plan_prompt(goal: str, messages: list[dict], knowledge: list[dict],
         f"Text limits are CHARACTERS, not tokens: strategy 1-{PLAN_STRATEGY_CHARACTERS}; "
         f"each step 1-{PLAN_STEP_CHARACTERS}; each question 1-{PLAN_QUESTION_CHARACTERS}. "
         "Use one to three steps and zero to three questions. Keep well below these limits. "
+        "Choose workspace_work only when the next concrete step requires an authorized workspace worker "
+        "and no prerequisite question remains. AIOS separately admits any work request. "
+        "Choose wait or request_information when execution should wait. "
         'Return exactly {"strategy":"short approach","steps":["one to three tentative steps"],'
         '"open_questions":[{"kind":"personal|procedure|environment","question":"..."}],'
-        '"next":"internal_lookup|research|request_information|wait",'
+        '"next":"internal_lookup|research|request_information|wait|workspace_work",'
         '"evidence_ids":["goal or supplied evidence IDs"]}. No other fields.\n'
     )
     return contract + json.dumps(context, default=str, ensure_ascii=True), evidence
@@ -436,6 +441,17 @@ class GoalPlanningService:
             knowledge, snap["requirements"],
             previous.get("proposal", {}) if previous else {}, snap["receipts"],
             knowledge_status=knowledge_status, work_receipts=snap["work_receipts"])
+        # Optional project-private recall only during actual planning inference,
+        # never while rendering ordinary chat or assembling a general HUD.
+        try:
+            from .notebook_recall import ProjectNoteRecall
+            notes = await ProjectNoteRecall(self.db).retrieve(
+                op["instance_id"], goal_id, ctx.source_timeline_id,
+                snap["goal_text"][:200], limit=3, max_chars=950)
+            if notes.get("status") == "retrieved":
+                prompt += "\nPROJECT NOTEBOOK (attributed working notes, NOT verified facts):\n" + json.dumps(notes, default=str)
+        except Exception:
+            logger.exception("Project notebook recall unavailable in planning")
         logger.info("Goal planning context instance=%s source_messages=%d linked_knowledge=%d "
                     "knowledge_status=%s elapsed_ms=%.1f", op["instance_id"], len(messages),
                     len(knowledge), knowledge_status, (time.perf_counter()-started)*1000)
@@ -950,10 +966,10 @@ class GoalPlanningService:
                  AND p.status IN ('ready','waiting_information','queued')
                ORDER BY p.goal_id,(p.status<>'queued') DESC,p.revision DESC""", instance_id, goal_ids)
         from .work_evidence import WorkEvidence
-        work_rows = await WorkEvidence(self.db).rows(instance_id) if rows else []
+        evidence = WorkEvidence(self.db)
         current_work = {}
         for r in rows:
-            current_work[r["goal_id"]] = WorkEvidence.planning_from_rows(work_rows, r["goal_id"], r["attempt_id"])
+            current_work[r["goal_id"]] = await evidence.planning(instance_id, r["goal_id"], r["attempt_id"])
         return {r["goal_id"]: {"plan_id": str(r["plan_id"]), "status": r["status"],
                                "revision": r["revision"], "proposal": mapping(r["proposal"]),
                                "context_current": r["context_current"] and

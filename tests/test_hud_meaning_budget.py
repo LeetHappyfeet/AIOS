@@ -159,7 +159,7 @@ def test_budgeted_worker_result_keeps_answer_and_limits_before_logs():
 
 def test_action_contract_is_whole_or_omitted_under_budget():
     frame = {"hud": {"token_budget": 1600}, "work": {"capabilities": [{
-        "capability": "workspace", "purpose": "experimental_task", "online": True,
+        "capability": "workspace", "purpose": "task", "online": True,
         "description": "Perform an authorized task."}]}}
     text = render_hud_text(frame)
     assert "<aios_action>" in text and "</aios_action>" in text

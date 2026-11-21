@@ -5,6 +5,7 @@ import json
 import re
 from uuid import UUID, uuid5
 
+from aios_app.entity_memory.catalog import PLACE_TYPE_EVIDENCE, membership_status
 from aios_app.epistemic.epistemic_scope import classify_scope
 
 POLICY_VERSION = "entity-memory-v3-place-evidence"
@@ -48,7 +49,8 @@ def candidate_spans(doc):
     return sorted(spans, key=lambda s: (s.start_char, s.end_char))
 
 
-def extract_memory(doc, *, scope: str, section_id: str, identities=None, participants=None):
+def extract_memory(doc, *, scope: str, section_id: str, identities=None, participants=None,
+                   require_spatial_place_evidence=False):
     """Return evidence mentions and source-scoped provisional entity anchors.
 
     identities maps exact names/aliases to sets of registered character IDs.
@@ -246,5 +248,17 @@ def extract_memory(doc, *, scope: str, section_id: str, identities=None, partici
                     other = anchors.get(obj, {})
                     if other.get("place_head") == place and other.get("place_reference") in {"qualified", "named"}:
                         add_relation(source, "identifies_place", obj, token, prep, place_specific=True)
+    if require_spatial_place_evidence:
+        grounded = {destination["place_id"] for destination in destinations}
+        grounded.update(relation["object"] for relation in relations
+                        if relation["predicate"] in PLACE_TYPE_EVIDENCE
+                        and membership_status(relation) == "reported")
+        for eid, anchor in anchors.items():
+            if (anchor["kind"] == "place" and anchor["place_head"] not in _LOCATIONS
+                    and eid not in grounded):
+                anchor["kind"] = "unknown"
+                for field in ("place_head", "place_reference", "place_qualifier",
+                              "place_descriptors", "place_usable"):
+                    del anchor[field]
     return {"policy_version": POLICY_VERSION, "anchors": list(anchors.values()),
             "mentions": mentions, "relations": relations, "movement_destinations": destinations, "truncated": len(spans) > MAX_MENTIONS}

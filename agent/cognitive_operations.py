@@ -192,6 +192,13 @@ class CognitiveOperationEngine:
                                               "planner_status":"not_queued"})
                 else:
                     await self._finish(op,{"kind":"inquiry",**receipt})
+            elif kind == "reflection.schedule_reminder":
+                job_id = await enqueue_job(
+                    self.db, job_type="reminder_schedule_inference", priority=140,
+                    payload={"instance_id": str(op["instance_id"]), "operation_id": str(operation_id)},
+                )
+                if job_id is None:
+                    raise RuntimeError("could not enqueue reminder scheduling")
             elif kind in {"reflection.review","planning.review","executive.review"}:
                 await self._queue_decision(op)
             elif kind=="planning.propose":
@@ -378,6 +385,27 @@ class CognitiveOperationEngine:
             await self._fail(op,exc)
             raise
 
+    async def schedule_reminder(self, operation_id: UUID) -> None:
+        from .reminders import CharacterReminders
+
+        row = await self.db.fetchrow(
+            """SELECT * FROM aios.character_cognitive_operation
+               WHERE operation_id=$1 AND status='running'
+                 AND operation_type='reflection.schedule_reminder'""", operation_id,
+        )
+        if not row:
+            await self.reconcile_terminal(operation_id)
+            return
+        op = dict(row)
+        try:
+            result = await CharacterReminders(self.db).schedule(op, self._mapping(op["input"]))
+            await self._finish(op, result)
+        except JobDeferred:
+            raise
+        except Exception as exc:
+            await self._fail(op, exc)
+            raise
+
     async def _queue_decision(self, op: Mapping[str,Any]) -> None:
         async with self.db.atomic():
             await self._create_decision_transaction(op)
@@ -410,7 +438,17 @@ class CognitiveOperationEngine:
                 original.get(t["node_id"]) != t["source_hash"] for t in payload["recent_source_events"])):
                 await self._stale(op,"review source evidence changed before inference")
                 return
-            if not payload["recent_source_events"]:
+            if payload.get("reminder_receipt_revision"):
+                from .work_evidence import WorkEvidence
+                from .reminder_continuation import report_revision
+                reports = await WorkEvidence(self.db).planning(
+                    op["instance_id"], UUID(payload["goal_id"]), UUID(payload["attempt_id"]),
+                )
+                if report_revision(reports) != payload["reminder_receipt_revision"]:
+                    await self._stale(op, "worker report evidence changed before review")
+                    return
+                payload["worker_reports"] = [report for report in reports if report["goal_linked"]]
+            if not payload["recent_source_events"] and not payload.get("worker_reports"):
                 await self._stale(op,"review source evidence unavailable before inference")
                 return
             review_context=payload
@@ -485,6 +523,16 @@ class CognitiveOperationEngine:
         ):
             await self._stale(op,"strict operation context advanced while inference was running")
             return False
+        payload = self._mapping(op.get("input"))
+        if payload.get("reminder_receipt_revision"):
+            from .work_evidence import WorkEvidence
+            from .reminder_continuation import report_revision
+            reports = await WorkEvidence(self.db).planning(
+                op["instance_id"], UUID(payload["goal_id"]), UUID(payload["attempt_id"]),
+            )
+            if report_revision(reports) != payload["reminder_receipt_revision"]:
+                await self._stale(op, "worker report evidence changed during review")
+                return False
         result={"kind":"choice","option_index":selected.get("option_index"),
                 "label":selected.get("label")}
         changed=await self.db.execute_returning_row(

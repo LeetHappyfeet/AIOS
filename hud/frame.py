@@ -19,7 +19,7 @@ from aios_app.plugins.manager import PluginManager
 from aios_app.plugins.types import PluginRuntimeContext
 
 
-HUD_VERSION = "hud-v7"
+HUD_VERSION = "hud-v11"
 
 
 @dataclass(frozen=True)
@@ -406,6 +406,17 @@ class HUDAssembler:
                     "durable_knowledge":False,
                 }
 
+        from .temporal import attach_time_references, timeline_hud
+        event_items = [dict(item) for item in event_items]
+        memories = [dict(item) for item in memories]
+        await attach_time_references(
+            self.db, event_items, memories, timeline_id=context.source_timeline_id,
+            head_node_id=context.source_head_node_id,
+        )
+        timeline = await timeline_hud(
+            self.db, context.instance_id, context.source_timeline_id, event_items, memories,
+        )
+
         suppressed = cognitive_snapshot.firewall_suppressed
         return {
             "identity": identity,
@@ -423,6 +434,7 @@ class HUDAssembler:
                 "location_entity_id": context.location_entity_id,
             },
             "scene": scene,
+            "timeline": timeline,
             "entity_catalog": entity_catalog,
             "research_activity": research_activity,
             "retrieval_evidence": cognitive_snapshot.retrieval_evidence,
@@ -602,7 +614,6 @@ class HUDAssembler:
             item["tier"] = 0 if context.entity_is_active(item["entity_id"]) else 2
             item["relevance"] = score.as_dict()
             result.append(item)
-        result.sort(key=lambda x: (x["tier"], -x["relevance"]["total"]))
         return result
 
     async def _inventory(
@@ -633,7 +644,6 @@ class HUDAssembler:
             item["tier"] = 0 if item.get("equipped") else 1
             item["relevance"] = score.as_dict()
             result.append(item)
-        result.sort(key=lambda x: (x["tier"], -x["relevance"]["total"]))
         return result
 
     async def _rules(
@@ -685,6 +695,11 @@ class HUDAssembler:
         rows_newest_first: list[dict[str, Any]],
         scorer: HUDRelevanceScorer,
     ) -> list[dict[str, Any]]:
+        # Adoption IDs establish source sequence even for imported transcripts
+        # whose source timestamps precede newer runtime events.
+        rows_newest_first = sorted(
+            rows_newest_first, key=lambda item: item.get("event_id") or -1, reverse=True,
+        )
         result = []
         for distance, item in enumerate(rows_newest_first):
             score = scorer.score(
@@ -698,5 +713,4 @@ class HUDAssembler:
             event["tier"] = 0 if distance < 3 else 1
             event["relevance"] = score.as_dict()
             result.append(event)
-        result.sort(key=lambda x: (x["tier"], -x["relevance"]["total"]))
         return result

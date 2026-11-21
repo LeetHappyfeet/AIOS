@@ -121,7 +121,7 @@ async def test_listener_serializes_chats_and_disable_cancels_work(db):
     for origin, _ in origins:
         node = await db.fetchval('SELECT source_head_node_id FROM aios.character_runtime_state WHERE instance_id=$1', origin.instance_id)
         receipt = await WorkAdmission(db).request(origin.instance_id, WorkRequestIn(request_id=uuid4(), source_node_id=node,
-            capability='workspace', purpose='experimental_task', objective='Inspect Python runtime'))
+            capability='workspace', purpose='task', objective='Inspect Python runtime'))
         assert receipt['status'] == 'queued'
         receipts.append(receipt)
     claimed = await store.claim(rid, 'worker')
@@ -181,10 +181,10 @@ async def test_hud_auto_attaches_new_chat_and_pending_request_queues_when_listen
     # A request arriving before a HUD fetch provisions its own authorized attachment.
     result = await WorkAdmission(db).request(origin.instance_id, WorkRequestIn(
         request_id=uuid4(), source_node_id=state['source_head_node_id'],
-        capability='workspace', purpose='experimental_task', objective='Inspect the runtime'))
+        capability='workspace', purpose='task', objective='Inspect the runtime'))
     assert result['status'] == 'waiting_client'
     overlay = await WorkAdmission(db).overlay(origin.instance_id, state['source_timeline_id'])
-    assert overlay['capabilities'][0]['purpose'] == 'experimental_task'
+    assert overlay['capabilities'][0]['purpose'] == 'task'
     assert not overlay['capabilities'][0]['online']
     claimed = await store.claim(rid, 'worker')
     run_id = UUID(claimed['run']['run_id'])
@@ -224,7 +224,7 @@ async def shared_character_tasks(db, second_root='/project', admin=False, first_
         node = await db.fetchval('SELECT source_head_node_id FROM aios.character_runtime_state WHERE instance_id=$1', origin.instance_id)
         # Work admission resolves each new instance, without manual binding calls.
         receipt = await WorkAdmission(db).request(origin.instance_id, WorkRequestIn(request_id=uuid4(),
-            source_node_id=node, capability='workspace', purpose='experimental_task', objective='Inspect runtime'))
+            source_node_id=node, capability='workspace', purpose='task', objective='Inspect runtime'))
         assert receipt['status'] == 'queued'
         runs.append(UUID(receipt['run_id']))
         assert await db.fetchval('SELECT count(*) FROM aios.cognitive_evidence_instances($1)', origin.instance_id) == 1
@@ -341,7 +341,7 @@ async def test_chat_connection_reports_next_step_and_uses_existing_attachment_se
     summary, details, can_connect = await status()
     assert "Connected · Operator approval required" in summary
     assert "worker · /project" in summary
-    assert "workspace / experimental_task" in summary
+    assert "workspace / task" in summary
     assert details['ready']
     assert not can_connect
     assert (await store.details(registration_id))['active_link_count'] == 1

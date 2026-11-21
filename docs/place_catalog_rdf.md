@@ -117,7 +117,7 @@ The prompt includes `KNOWN PLACES & ENTITIES (EVIDENCE; NOT A LIVE MAP)`:
 ```text
 Place Kitchen @…: blue mug @… — in [reported; mentioned; @source…]
 Person Bob @… [mentioned; @source…; current location unverified]
-Person Obama @… [corpus exposure; @source…; current location unverified]
+Place Paris @…: museum @… — in [reported; acquired reference; @source…]
 ```
 
 References are stable opaque hashes of existing IDs, not merged names. Full IDs,
@@ -128,8 +128,11 @@ encounter records. These lines do not establish possession, present location,
 availability, or successful actions.
 
 Selection uses the former scene entity budget (approximately four characters per
-token), includes at most eight complete rows, and prioritizes exact known current
-location IDs and focus terms before source order. It does not resolve a reported
+token) and includes at most eight complete rows. It prioritizes non-corpus
+evidence, then exact known current location IDs and focus terms before source
+order. Corpus exposure remains visible in the operator catalog. The HUD can show
+one row per acquired corpus section when a reported spatial relation supports the
+place and an endpoint matches the turn's focus. It does not resolve a reported
 place to a runtime place by name. A profile with zero scene budget skips the read.
 Catalog access has a 500 ms deadline and performs no LLM or Fuseki request. A
 failed read is shown as unavailable, while an empty selection explicitly does

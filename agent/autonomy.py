@@ -315,6 +315,11 @@ class AutonomyScheduler:
             await self.runtime.finish_semantic_turn(instance_id,semantic=False)
             return False
 
+        # A reminder review has a specific goal and revision. Leave any other
+        # pending reminders in the inbox for their own goal review.
+        reminder = next((e for e in events if e["source_type"] == "reminder_review"), None)
+        if reminder:
+            events = [reminder]
         ids = [str(e["wake_id"]) for e in events]
         summaries = [
             {

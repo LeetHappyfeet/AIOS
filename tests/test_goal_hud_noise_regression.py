@@ -58,7 +58,7 @@ def test_other_goals_hide_internal_retrieval_status_and_opaque_references():
     assert "[goal_ref:" not in hud
 
     frame["work"] = {"capabilities": [{
-        "capability": "workspace", "purpose": "experimental_task",
+        "capability": "workspace", "purpose": "task",
         "description": "Work on a task", "online": True,
     }]}
     hud = render_hud_text(frame)

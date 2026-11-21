@@ -205,7 +205,7 @@ class TemporalTriggerStore:
                     """UPDATE aios.character_temporal_trigger
                        SET status='cancelled',cancelled_at=now(),
                            last_evaluated_at=now(),last_outcome='cancelled_by_request',updated_at=now()
-                       WHERE trigger_id=$1 AND instance_id=$2 AND status='scheduled'
+                       WHERE trigger_id=$1 AND instance_id=$2 AND status IN ('scheduled','timeline_inactive')
                        RETURNING *""",
                     trigger_id, instance_id,
                 )
@@ -244,6 +244,12 @@ class TemporalTriggerStore:
         )
         return [self._public(dict(row)) for row in rows]
 
+    @staticmethod
+    def payload_object(value: Any) -> dict:
+        if isinstance(value, str):
+            value = json.loads(value)
+        return dict(value) if isinstance(value, Mapping) else {}
+
     async def emit_due(self, limit: int = 100) -> int:
         # Claim first. A crashed process leaves 'firing' rows recoverable by
         # reset_stale_firing(); normal retries cannot double-claim them.
@@ -251,7 +257,16 @@ class TemporalTriggerStore:
             """WITH due AS (
                    SELECT trigger_id
                    FROM aios.character_temporal_trigger
-                   WHERE status='scheduled' AND clock_type='wall' AND due_at <= now()
+                   WHERE clock_type='wall' AND due_at <= now()
+                     AND (status='scheduled' OR (status='timeline_inactive' AND EXISTS (
+                         SELECT 1 FROM aios.character_runtime_state rs
+                         WHERE rs.instance_id=character_temporal_trigger.instance_id
+                           AND rs.source_timeline_id::text=character_temporal_trigger.payload->>'source_timeline_id'
+                     ) AND NOT EXISTS (
+                         SELECT 1 FROM aios.pipeline_job j WHERE j.job_type='character_reminder_due'
+                           AND j.payload->>'trigger_id'=character_temporal_trigger.trigger_id::text
+                           AND j.status IN ('queued','running')
+                     )))
                    ORDER BY priority,due_at
                    FOR UPDATE SKIP LOCKED
                    LIMIT $1
@@ -267,18 +282,21 @@ class TemporalTriggerStore:
         for raw in rows:
             row = dict(raw)
             trigger_id = row["trigger_id"]
-            payload = dict(row.get("payload") or {})
-            payload.update({
-                "trigger_id": str(trigger_id),
-                "trigger_type": row["trigger_type"],
-                "reason": row.get("reason"),
-                "due_at": row["due_at"].isoformat(),
-                "window_end_at": row["window_end_at"].isoformat()
-                    if row.get("window_end_at") else None,
-                "timezone": row.get("timezone"),
-                "goal_id": str(row["goal_id"]) if row.get("goal_id") else None,
-            })
             try:
+                payload = self.payload_object(row.get("payload"))
+                payload.update({
+                    "trigger_id": str(trigger_id),
+                    "trigger_type": row["trigger_type"],
+                    "reason": row.get("reason"),
+                    "due_at": row["due_at"].isoformat(),
+                    "window_end_at": row["window_end_at"].isoformat()
+                        if row.get("window_end_at") else None,
+                    "timezone": row.get("timezone"),
+                    "goal_id": str(row["goal_id"]) if row.get("goal_id") else None,
+                })
+                if payload.get("reminder_goal_id"):
+                    emitted += int(await self._queue_reminder(row))
+                    continue
                 if row.get("goal_id"):
                     if await self._fire_goal_review(row, payload):
                         emitted += 1
@@ -294,10 +312,10 @@ class TemporalTriggerStore:
                 )
                 await self.db.execute(
                     """UPDATE aios.character_temporal_trigger
-                       SET status='fired',fired_at=now(),updated_at=now(),
+                       SET status='fired',fired_at=COALESCE(fired_at,now()),updated_at=now(),
                            payload=payload || jsonb_build_object('wake_id',$2::text)
                        WHERE trigger_id=$1 AND status='firing'""",
-                    trigger_id, wake_id,
+                    trigger_id, str(wake_id),
                 )
                 emitted += 1
             except Exception:
@@ -309,6 +327,26 @@ class TemporalTriggerStore:
                 )
                 raise
         return emitted
+
+    async def _queue_reminder(self, row: Mapping[str, Any]) -> bool:
+        from aios_app.pipeline.jobs import enqueue_job
+
+        async with self.db.atomic():
+            claimed = await self.db.fetchval(
+                """UPDATE aios.character_temporal_trigger
+                   SET status='fired',fired_at=COALESCE(fired_at,now()),updated_at=now()
+                   WHERE trigger_id=$1 AND status='firing' RETURNING trigger_id""",
+                row["trigger_id"],
+            )
+            if not claimed:
+                return False
+            job = await enqueue_job(
+                self.db, job_type="character_reminder_due", priority=int(row["priority"]),
+                payload={"instance_id": str(row["instance_id"]), "trigger_id": str(claimed)},
+            )
+            if job is None:
+                raise RuntimeError("could not enqueue reminder decision")
+        return True
 
     async def _fire_goal_review(
         self, trigger: Mapping[str, Any], payload: Mapping[str, Any]

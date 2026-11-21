@@ -7,7 +7,7 @@ import hashlib
 import logging
 import re
 
-from aios_app.entity_memory.catalog import world_entity_iri
+from aios_app.entity_memory.catalog import PLACE_TYPE_EVIDENCE, SPATIAL, world_entity_iri
 from aios_app.entity_memory.catalog_service import EntityCatalogService
 from aios_app.entity_memory.retrieval import terms_for
 
@@ -21,6 +21,9 @@ MODES = {
     "corpus_reference_exposure": "corpus exposure",
     "acquired_corpus_reference": "acquired reference",
 }
+CORPUS_MODES = {"corpus_reference_exposure", "acquired_corpus_reference"}
+CORPUS_SOURCE_PREFIX = "urn:aios:corpus:section:"
+GROUNDED_SPATIAL_RELATIONS = {SPATIAL[predicate] for predicate in PLACE_TYPE_EVIDENCE}
 
 
 def _text(value, limit=64):
@@ -66,34 +69,46 @@ def present_catalog(catalog, *, token_cap=280, focus_text="", location_id=None):
         place = group["place"]
         prefix = f"Place {_text(place.get('label'))} {_ref(place['id'])}"
         edges = group.get("contents", []) + group.get("other_evidence", [])
-        if not edges:
-            for entry in familiarity.get(place["id"], [])[:1]:
-                add(
-                    place,
-                    f"{prefix} [{MODES.get(entry['mode'], 'reference')}; {_ref(entry['source'])}]",
-                    [entry["source"]],
-                )
+        eligible_edge = False
         for edge in edges:
             member = edge["entity"]
             status = edge["status"]
             source = edge["source"]
+            source_modes = {
+                entry["mode"] for entry in familiarity.get(place["id"], [])
+                if entry["source"] == source
+            }
+            if source.startswith(CORPUS_SOURCE_PREFIX):
+                labels = f"{place.get('label', '')} {member.get('label', '')}"
+                label_words = set(re.findall(r"[\w-]+", labels.casefold()))
+                if not (
+                    "acquired_corpus_reference" in source_modes
+                    and status == "reported"
+                    and edge["relation"] in GROUNDED_SPATIAL_RELATIONS
+                    and terms & label_words
+                ):
+                    continue
+            eligible_edge = True
             # Denials/conditions/quotes must remain visible in the same row.
             qualifier = ""
             if status in {"qualified", "denied", "illustrative"}:
                 qualifier = f"; evidence: {_text(edge.get('source_text'), 100)}"
-            modes = sorted(
-                {
-                    MODES.get(e["mode"], "reference")
-                    for e in familiarity.get(place["id"], [])
-                    if e["source"] == source
-                }
-            )
+            modes = sorted({MODES.get(mode, "reference") for mode in source_modes})
             tags = "; ".join([status, *modes, _ref(source)])
             text = (
                 f"{prefix}: {_text(member.get('label'))} {_ref(member['id'])} "
                 f"— {_text(edge['relation'], 24)} [{tags}{qualifier}]"
             )
             add(place, text, [source], related=[member["id"]], evidence=edge)
+        if not eligible_edge:
+            entries = [entry for entry in familiarity.get(place["id"], [])
+                       if entry["mode"] not in CORPUS_MODES]
+            for entry in entries[:1]:
+                add(
+                    place,
+                    f"{prefix} [{MODES.get(entry['mode'], 'reference')}; {_ref(entry['source'])}]",
+                    [entry["source"]],
+                )
 
     # People and unlocated objects remain references; never implied co-location.
     seen = set()
@@ -101,7 +116,9 @@ def present_catalog(catalog, *, token_cap=280, focus_text="", location_id=None):
         if entity["id"] in seen:
             continue
         seen.add(entity["id"])
-        for entry in familiarity.get(entity["id"], [])[:2]:
+        entries = [entry for entry in familiarity.get(entity["id"], [])
+                   if entry["mode"] not in CORPUS_MODES]
+        for entry in entries[:2]:
             kind = "Person" if entity in catalog.get("people", []) else "Entity"
             add(
                 entity,
@@ -111,8 +128,10 @@ def present_catalog(catalog, *, token_cap=280, focus_text="", location_id=None):
             )
 
     # Keep input order for ties (the service supplies recent sections first).
-    candidates.sort(key=lambda row: -row["priority"])
-    selected, seen_rows = [], set()
+    candidates.sort(key=lambda row: (
+        row["sources"][0].startswith(CORPUS_SOURCE_PREFIX), -row["priority"]
+    ))
+    selected, seen_rows, corpus_sources = [], set(), set()
     remaining = max(0, int(token_cap) * 4 - len(TITLE) - len(NOTICE) - 4)
     for row in candidates:
         key = row["text"]
@@ -120,9 +139,12 @@ def present_catalog(catalog, *, token_cap=280, focus_text="", location_id=None):
             continue
         seen_rows.add(key)
         cost = len(key) + 3
-        if cost > remaining or len(selected) >= 8:
+        source = row["sources"][0]
+        if cost > remaining or len(selected) >= 8 or source in corpus_sources:
             continue
         selected.append(row)
+        if source.startswith(CORPUS_SOURCE_PREFIX):
+            corpus_sources.add(source)
         remaining -= cost
     return {
         "status": "ready",

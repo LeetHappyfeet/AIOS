@@ -165,6 +165,7 @@ async def environment_migration(db, url):
     registry_sql = (Path(__file__).parents[1] / "migrations/current/20261031_01_workspace_registrations.sql").read_text()
     shared_sql = (Path(__file__).parents[1] / 'migrations/current/20261106_01_shared_environments.sql').read_text()
     memory_sql = (Path(__file__).parents[1] / 'migrations/current/20261108_01_workspace_memory.sql').read_text()
+    task_sql = (Path(__file__).parents[1] / 'migrations/current/20261116_01_workspace_tasks.sql').read_text()
     if url:
         await db.raw(sql, exec=True)
         await db.raw(work_sql, exec=True)
@@ -172,6 +173,7 @@ async def environment_migration(db, url):
         await db.raw(registry_sql, exec=True)
         await db.raw(shared_sql, exec=True)
         await db.raw(memory_sql, exec=True)
+        await db.raw(task_sql, exec=True)
     else:
         await db.execute(sql)
         await db.execute(work_sql)
@@ -179,6 +181,25 @@ async def environment_migration(db, url):
         await db.execute(registry_sql)
         await db.execute(shared_sql)
         await db.execute(memory_sql)
+        await db.execute(task_sql)
+
+async def reminder_migrations(db, *, con=None, url=None):
+    setup = "CREATE TABLE aios.character_cognitive_task(task_id uuid PRIMARY KEY);"
+    files = (
+        "20260927_01_agent_temporal_scheduler.sql", "20260929_04_goal_temporal_triggers.sql",
+        "20261117_02_reminder_continuation.sql", "20261119_01_reminder_resumption.sql",
+    )
+    scripts = [setup] + [
+        (Path(__file__).parents[1] / "migrations/current" / filename).read_text() for filename in files
+    ]
+    for script in scripts:
+        if con:
+            await con.query(script, exec=True)
+        elif url:
+            await db.raw(script, exec=True)
+        else:
+            await db.execute(script)
+
 
 @pytest_asyncio.fixture
 async def db():
@@ -195,8 +216,9 @@ async def db():
         database.pool = PGPool(con)
         try:
             await con.query(BASE, exec=True)
-            for filename in ("20261027_01_workspace_client.sql", "20261028_01_workspace_verification.sql", "20261028_02_character_environments.sql", "20261029_01_work_admission.sql", "20261030_02_workspace_attachment.sql", "20261031_01_workspace_registrations.sql", "20261106_01_shared_environments.sql", "20261108_01_workspace_memory.sql"):
+            for filename in ("20261027_01_workspace_client.sql", "20261028_01_workspace_verification.sql", "20261028_02_character_environments.sql", "20261029_01_work_admission.sql", "20261030_02_workspace_attachment.sql", "20261031_01_workspace_registrations.sql", "20261106_01_shared_environments.sql", "20261108_01_workspace_memory.sql", "20261116_01_workspace_tasks.sql"):
                 await con.query((Path(__file__).parents[1] / "migrations/current" / filename).read_text(), exec=True)
+            await reminder_migrations(database, con=con)
             yield database
         finally:
             process.stdin.close()
@@ -220,6 +242,7 @@ async def db():
         else:
             await db.execute(migration)
         await environment_migration(db, url)
+        await reminder_migrations(db, url=url)
         yield db
         await db.client.aclose()
     elif dsn:
@@ -245,6 +268,7 @@ async def db():
         else:
             await db.execute(migration)
         await environment_migration(db, url)
+        await reminder_migrations(db, url=url)
         yield db
         await db.close()
     else:

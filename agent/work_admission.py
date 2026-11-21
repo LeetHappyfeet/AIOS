@@ -21,6 +21,17 @@ from .work_evidence import WorkEvidence, WorkResultQuery, result_tool_schema
 from .references import expand_reference
 
 
+LEGACY_TASK_PURPOSE = "experimental_task"
+WORKSPACE_TASK = ("workspace", "task")
+RESEARCH_SEARCH = ("research", "search")
+
+
+def canonical_purpose(capability, purpose):
+    if (capability, purpose) == ("workspace", LEGACY_TASK_PURPOSE):
+        return WORKSPACE_TASK[1]
+    return purpose
+
+
 class WorkIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     capability: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
@@ -256,6 +267,7 @@ class WorkAdmission:
         from .environment_links import EnvironmentStore
         from .workspaces import WorkspaceStore, public
 
+        purpose = canonical_purpose(req.capability, req.purpose)
         async with self.db.atomic():
             await WorkspaceStore(self.db).binding(binding_id, lock=True)
             await EnvironmentStore(self.db).link(binding_id, link_id)
@@ -264,7 +276,7 @@ class WorkAdmission:
                 "SELECT * FROM aios.workspace_work_profile WHERE link_id=$1 AND capability=$2 AND purpose=$3 FOR UPDATE",
                 link_id,
                 req.capability,
-                req.purpose,
+                purpose,
             )
             if old:
                 if decode(old["assignment_template"]) != req.assignment_template:
@@ -286,16 +298,20 @@ class WorkAdmission:
                    VALUES($1,$2,$3,$4,$5::jsonb,$6) RETURNING *""",
                     link_id,
                     req.capability,
-                    req.purpose,
+                    purpose,
                     req.description,
                     json.dumps(req.assignment_template),
                     req.enabled,
                 )
             )
 
-    async def request(self, instance_id, req, *, character_source=False):
+    async def request(self, instance_id, req, *, character_source=False, reminder_trigger_id=None):
         intent = req.intent().model_dump(mode="json", exclude_none=True)
+        intent["purpose"] = canonical_purpose(intent["capability"], intent["purpose"])
         digest = fingerprint(intent)
+        digests = [digest]
+        if (intent["capability"], intent["purpose"]) == WORKSPACE_TASK:
+            digests.append(fingerprint({**intent, "purpose": LEGACY_TASK_PURPOSE}))
         async with self.db.atomic():
             # Resolve retries first; later chat turns must not duplicate an admitted job.
             await self.db.execute(
@@ -310,7 +326,7 @@ class WorkAdmission:
                 if (
                     alias["instance_id"] != instance_id
                     or alias["source_node_id"] != req.source_node_id
-                    or alias["intent_hash"] != digest
+                    or alias["intent_hash"] not in digests
                 ):
                     raise HTTPException(
                         409, "Request ID reused with different work or identity"
@@ -324,18 +340,25 @@ class WorkAdmission:
                 "SELECT * FROM aios.character_work_request WHERE request_id=$1 FOR UPDATE",
                 req.request_id,
             )
+            continuation = None
+            if old is None and reminder_trigger_id is not None:
+                continuation = await self._validate_reminder_origin(instance_id, req, reminder_trigger_id)
             if old is None:
                 old = await self.db.fetchrow(
-                    "SELECT * FROM aios.character_work_request WHERE instance_id=$1 AND source_node_id=$2 AND intent_hash=$3 FOR UPDATE",
+                    """SELECT * FROM aios.character_work_request
+                       WHERE instance_id=$1 AND source_node_id=$2 AND intent_hash=ANY($3::text[])
+                       ORDER BY (intent_hash=($3::text[])[1]) DESC LIMIT 1 FOR UPDATE""",
                     instance_id,
                     req.source_node_id,
-                    digest,
+                    digests,
                 )
             if old:
+                if continuation and old["attempt_id"] != continuation["attempt_id"]:
+                    raise HTTPException(409, "Identical work was already requested at this source on a different attempt")
                 if (
                     old["instance_id"] != instance_id
                     or old["source_node_id"] != req.source_node_id
-                    or old["intent_hash"] != digest
+                    or old["intent_hash"] not in digests
                 ):
                     raise HTTPException(
                         409, "Request ID reused with different work or identity"
@@ -349,15 +372,15 @@ class WorkAdmission:
             await RegistrationStore(self.db).ensure_available(instance_id)
             duplicate = await self.db.fetchrow(
                 """SELECT r.* FROM aios.character_work_request r LEFT JOIN aios.workspace_run w USING(run_id)
-                   WHERE r.instance_id=$1 AND r.source_timeline_id=$2 AND r.intent_hash=$3
+                   WHERE r.instance_id=$1 AND r.source_timeline_id=$2 AND r.intent_hash=ANY($3::text[])
                      AND r.status NOT IN ('denied','invalidated')
                      AND (r.run_id IS NULL OR w.status IN ('queued','running'))
                    ORDER BY r.created_at LIMIT 1 FOR UPDATE OF r""",
                 instance_id,
                 source["source_timeline_id"],
-                digest,
+                digests,
             )
-            if duplicate:
+            if duplicate and (not continuation or duplicate["attempt_id"] == continuation["attempt_id"]):
                 await self.alias(req, instance_id, digest, duplicate["request_id"])
                 return self.receipt(duplicate)
             goals = await self.db.fetch(
@@ -372,9 +395,11 @@ class WorkAdmission:
             if req.goal_ref is not None and len(goals) != 1:
                 raise HTTPException(409, "goal_ref must identify an active goal with an open attempt in this conversation")
             goal = dict(goals[0]) if len(goals) == 1 else {}
+            if continuation and goal.get("attempt_id") != continuation["attempt_id"]:
+                raise HTTPException(409, "Original reminder attempt changed")
             row = await self.db.execute_returning_row(
-                """INSERT INTO aios.character_work_request(request_id,instance_id,source_timeline_id,source_node_id,intent,intent_hash,goal_id,attempt_id)
-                   VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8) RETURNING *""",
+                """INSERT INTO aios.character_work_request(request_id,instance_id,source_timeline_id,source_node_id,intent,intent_hash,goal_id,attempt_id,reminder_trigger_id)
+                   VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9) RETURNING *""",
                 req.request_id,
                 instance_id,
                 source["source_timeline_id"],
@@ -383,8 +408,45 @@ class WorkAdmission:
                 digest,
                 goal.get("goal_id"),
                 goal.get("attempt_id"),
+                reminder_trigger_id,
             )
             return await self.advance(row)
+
+    async def _validate_reminder_origin(self, instance_id, req, trigger_id):
+        from .goal_planning import GoalPlanningService
+        from .reminder_continuation import request_id
+
+        origin = await self.db.fetchrow(
+            """SELECT * FROM aios.character_reminder_continuation
+               WHERE trigger_id=$1 AND instance_id=$2 AND status='pending' FOR UPDATE""",
+            trigger_id, instance_id,
+        )
+        if (not origin or req.request_id != request_id(trigger_id, origin["generation"]) or req.goal_ref != origin["goal_id"]
+                or req.source_node_id != origin["source_node_id"]
+                or req.model_dump(mode="json") != decode(origin["intent"])):
+            raise HTTPException(409, "Invalid reminder work origin")
+        await self.db.fetchval(
+            "SELECT goal_id FROM aios.character_agent_goal WHERE goal_id=$1 FOR UPDATE", origin["goal_id"],
+        )
+        plan = await self.db.fetchval(
+            """SELECT 1 FROM aios.character_goal_plan WHERE plan_id=$1 AND status='ready'
+                 AND input_fingerprint=$2 AND attempt_id=$3 FOR SHARE""",
+            origin["plan_id"], origin["input_fingerprint"], origin["attempt_id"],
+        )
+        snap = await GoalPlanningService(self.db).snapshot(instance_id, origin["goal_id"])
+        if (not plan or not snap or snap["attempt_id"] != origin["attempt_id"]
+                or snap["fingerprint"] != origin["input_fingerprint"]
+                or snap["context"].source_timeline_id != origin["source_timeline_id"]):
+            raise HTTPException(409, "Reminder plan or original goal attempt changed")
+        if await self.db.fetchval(
+            """SELECT 1 FROM aios.character_work_request r LEFT JOIN aios.workspace_run w USING(run_id)
+               WHERE r.instance_id=$1 AND r.attempt_id=$2
+                 AND r.status NOT IN ('denied','invalidated','dismissed')
+                 AND (r.run_id IS NULL OR w.status IN ('queued','running')) LIMIT 1""",
+            instance_id, origin["attempt_id"],
+        ):
+            raise HTTPException(409, "Existing work is pending on this attempt")
+        return origin
 
     async def alias(self, req, instance_id, digest, canonical):
         await self.db.execute(
@@ -403,6 +465,7 @@ class WorkAdmission:
             "reason": row["reason"],
             "run_id": str(row["run_id"]) if row["run_id"] else None,
             "completed": False,
+            **({"reminder_trigger_id": str(row["reminder_trigger_id"])} if row.get("reminder_trigger_id") else {}),
             "goal_ref": str(row["goal_id"]) if row.get("goal_id") else None,
             "goal_association": "linked" if row.get("goal_id") else "unlinked; select goal_ref when multiple goals are active",
         }
@@ -431,18 +494,22 @@ class WorkAdmission:
         if row["run_id"] or row["status"] in {"denied", "invalidated"}:
             return self.receipt(row)
         intent = WorkIntent.model_validate(decode(row["intent"]))
+        purpose = canonical_purpose(intent.capability, intent.purpose)
+        research = (intent.capability, purpose) == RESEARCH_SEARCH
         profiles = await self.db.fetch(
-            """SELECT p.*,b.instance_id AS execution_instance_id,b.last_seen_at,
+            """SELECT p.*,b.instance_id AS execution_instance_id,
                       l.execution_binding_id,l.origin_source_timeline_id
                FROM aios.workspace_work_profile p JOIN aios.character_environment_link l USING(link_id)
                JOIN aios.workspace_binding b ON b.binding_id=l.execution_binding_id
                WHERE l.origin_instance_id=$1 AND l.enabled AND p.enabled AND p.capability=$2 AND p.purpose=$3
                  AND l.origin_source_timeline_id=$4
-               ORDER BY b.last_seen_at DESC NULLS LAST,p.profile_id""",
+               ORDER BY ($5 AND b.research_ready AND COALESCE(b.last_seen_at>now()-interval '45 seconds',false)) DESC,
+                        b.last_seen_at DESC NULLS LAST,p.profile_id""",
             row["instance_id"],
             intent.capability,
-            intent.purpose,
+            purpose,
             row["source_timeline_id"],
+            research,
         )
         if row["profile_id"]:
             profiles = [p for p in profiles if p["profile_id"] == row["profile_id"]]
@@ -450,7 +517,10 @@ class WorkAdmission:
             available = await self.db.fetch(
                 """SELECT DISTINCT p.capability,p.purpose
                    FROM aios.workspace_work_profile p JOIN aios.character_environment_link l USING(link_id)
+                   JOIN aios.workspace_binding b ON b.binding_id=l.execution_binding_id
                    WHERE l.origin_instance_id=$1 AND l.origin_source_timeline_id=$2 AND l.enabled AND p.enabled
+                     AND ((p.capability,p.purpose) <> ('research','search')
+                          OR (b.research_ready AND b.last_seen_at>now()-interval '45 seconds'))
                    ORDER BY p.capability,p.purpose LIMIT 12""",
                 row['instance_id'], row['source_timeline_id'])
             names = ', '.join(f"{p['capability']} / {p['purpose']}" for p in available)
@@ -524,6 +594,16 @@ class WorkAdmission:
                 row, "invalidated", "Accepted profile criteria changed"
             )
         pinned = {"profile_id": p["profile_id"], "profile_snapshot": template}
+        online = await self.db.fetchval(
+            "SELECT last_seen_at>now()-interval '45 seconds' AND (NOT $2 OR research_ready) FROM aios.workspace_binding WHERE binding_id=$1",
+            p["execution_binding_id"],
+            research,
+        )
+        if research and not online:
+            return await self.state(
+                row, "waiting_client", "Waiting for a research worker with authorized sources",
+                **(pinned if row["profile_id"] else {}),
+            )
         if "require_approval" in decisions and not (approved or row["approved_by"]):
             return await self.state(
                 row,
@@ -531,10 +611,6 @@ class WorkAdmission:
                 "Work requires operator authorization",
                 **pinned,
             )
-        online = await self.db.fetchval(
-            "SELECT last_seen_at>now()-interval '45 seconds' FROM aios.workspace_binding WHERE binding_id=$1",
-            p["execution_binding_id"],
-        )
         if not online:
             return await self.state(
                 row,
@@ -564,12 +640,12 @@ class WorkAdmission:
                 "- " + c for c in intent.constraints
             )
         from .work_profiles import (
-            EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE, INLINE_GUIDANCE,
+            INLINE_GUIDANCE,
             expand_request_template, reporting_template,
         )
         try:
             mode, inline = execution_settings(intent, template, objective)
-            if (p['capability'], p['purpose']) == (EXPERIMENT_CAPABILITY, EXPERIMENT_PURPOSE):
+            if (p['capability'], p['purpose']) in (WORKSPACE_TASK, RESEARCH_SEARCH):
                 template, guidance = reporting_template(template, inline=inline)
                 objective += guidance
             elif inline:
@@ -600,6 +676,7 @@ class WorkAdmission:
             spec,
             environment=link,
             operator_assignment=bool(approved or row["approved_by"]),
+            requires_research=research,
         )
         return await self.state(
             row,
@@ -782,6 +859,8 @@ class WorkAdmission:
                JOIN aios.character_instance ei ON ei.instance_id=b.instance_id
                JOIN aios.character_instance oi ON oi.instance_id=l.origin_instance_id
                WHERE l.origin_instance_id=$1 AND l.origin_source_timeline_id=$2 AND l.enabled AND p.enabled
+                 AND ((p.capability,p.purpose) <> ('research','search')
+                      OR (b.research_ready AND b.last_seen_at>now()-interval '45 seconds'))
                  AND ((b.attached AND b.instance_id=l.origin_instance_id AND b.timeline_id=l.origin_source_timeline_id)
                       OR (NOT b.attached AND b.instance_id<>l.origin_instance_id AND b.timeline_id<>l.origin_source_timeline_id
                           AND COALESCE(ei.current_world_id,ei.world_id)<>COALESCE(oi.current_world_id,oi.world_id)))
@@ -811,9 +890,21 @@ class WorkAdmission:
                WHERE instance_id=$1 AND source_timeline_id=$2
                  AND status IN ('denied','invalidated')""", instance_id, timeline_id)
         error = await self.db.fetchval(
-            """SELECT s.result FROM aios.work_source_receipt s JOIN aios.character_runtime_state rs ON rs.instance_id=s.instance_id
-               WHERE s.instance_id=$1 AND s.source_node_id=rs.source_head_node_id
-                 AND rs.source_timeline_id=$2 AND s.result->>'status'='needs_clarification'""",
+            """SELECT CASE WHEN s.result->>'status'='needs_clarification' THEN s.result END
+               FROM aios.character_runtime_state rs
+               CROSS JOIN LATERAL (
+                 SELECT rs.source_head_node_id AS node_id
+                 UNION
+                 SELECT e.parent_node_id FROM aios.dag_edge e
+                 WHERE e.timeline_id=$2 AND e.child_node_id=rs.source_head_node_id
+               ) recent
+               JOIN aios.work_source_receipt s ON s.instance_id=rs.instance_id
+                 AND s.source_node_id=recent.node_id
+               JOIN aios.dag_node src ON src.node_id=s.source_node_id AND src.timeline_id=$2
+               JOIN aios.ingest_event ie ON ie.event_id=src.event_id AND ie.superseded_at IS NULL
+               WHERE rs.instance_id=$1 AND rs.source_timeline_id=$2
+               ORDER BY (s.source_node_id=rs.source_head_node_id) DESC, src.event_id DESC
+               LIMIT 1""",
             instance_id,
             timeline_id,
         )

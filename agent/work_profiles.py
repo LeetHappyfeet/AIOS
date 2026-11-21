@@ -8,12 +8,12 @@ from __future__ import annotations
 from copy import deepcopy
 from uuid import UUID
 
-from .work_admission import ProfileIn
+from .work_admission import ProfileIn, RESEARCH_SEARCH, WORKSPACE_TASK
 
-EXPERIMENT_CAPABILITY = 'workspace'
-EXPERIMENT_PURPOSE = 'experimental_task'
-REPORT_PATH = 'aios-experiment-{request_id}.json'
-EXPERIMENT_GUIDANCE = (
+REPORT_PATH = 'aios-work-report-{request_id}.json'
+LEGACY_REPORT_PATH = 'aios-experiment-{request_id}.json'
+TASK_DESCRIPTION = 'Inspect, edit, or run checks in the workspace.'
+TASK_REPORT_GUIDANCE = (
     '\nExecution reporting requirement: write the expected JSON report file with '
     'objective (string), outcome (completed, partial, or blocked), evidence (list), '
     'and limitations (list). Include a substantive summary (string), artifacts (actual output paths), '
@@ -25,24 +25,35 @@ EXPERIMENT_GUIDANCE = (
 )
 
 
-def experimental_profile() -> ProfileIn:
+def workspace_task_profile(*, legacy_report=False) -> ProfileIn:
+    report_path = LEGACY_REPORT_PATH if legacy_report else REPORT_PATH
+    check_id = 'experiment_report' if legacy_report else 'work_report'
     command = (
         'python3 -c "import json; from pathlib import Path; '
-        f"r=json.loads(Path('{REPORT_PATH}').read_text()); "
+        f"r=json.loads(Path('{report_path}').read_text()); "
         "assert isinstance(r,dict); assert isinstance(r.get('objective'),str) and r['objective'].strip(); "
         "assert r.get('outcome') in ('completed','partial','blocked'); "
         "assert isinstance(r.get('evidence'),list); assert isinstance(r.get('limitations'),list)\""
     )
     return ProfileIn(
-        capability=EXPERIMENT_CAPABILITY,
-        purpose=EXPERIMENT_PURPOSE,
-        description='Perform a bounded experimental task in the authorized workspace. Put the task in objective; report actual outcome, evidence and limitations in JSON. Report checks do not prove task success.',
+        capability=WORKSPACE_TASK[0],
+        purpose=WORKSPACE_TASK[1],
+        description=TASK_DESCRIPTION,
         assignment_template={
-            'expected_outputs': [{'path': REPORT_PATH, 'kind': 'file'}],
-            'required_checks': [{'id': 'experiment_report', 'command': command, 'timeout_seconds': 15}],
+            'expected_outputs': [{'path': report_path, 'kind': 'file'}],
+            'required_checks': [{'id': check_id, 'command': command, 'timeout_seconds': 15}],
             'budgets': {'model_steps': 60, 'wall_seconds': 1800, 'context_chars': 100000},
         },
     )
+
+
+def research_search_profile() -> ProfileIn:
+    task = workspace_task_profile()
+    return task.model_copy(update={
+        "capability": RESEARCH_SEARCH[0],
+        "purpose": RESEARCH_SEARCH[1],
+        "description": "Search authorized sources and report findings.",
+    })
 
 
 def expand_request_template(template: dict, request_id: UUID) -> dict:
@@ -70,12 +81,15 @@ INLINE_GUIDANCE = (
 def reporting_template(template: dict, *, inline: bool):
     """Replace only the built-in file report and its matching format check."""
     if not inline:
-        return deepcopy(template), EXPERIMENT_GUIDANCE
+        return deepcopy(template), TASK_REPORT_GUIDANCE
     value = deepcopy(template)
-    standard = experimental_profile().assignment_template
     criteria = ("expected_outputs", "required_checks")
     has_criteria = any(value.get(k) for k in criteria)
-    if has_criteria and any(value.get(k, []) != standard.get(k, []) for k in criteria):
+    if has_criteria and not any(
+        all(value.get(k, []) == standard[k] for k in criteria)
+        for standard in (workspace_task_profile().assignment_template,
+                         workspace_task_profile(legacy_report=True).assignment_template)
+    ):
         raise ValueError("Inline reporting conflicts with custom profile outputs/checks")
     value["expected_outputs"] = []
     value["required_checks"] = []

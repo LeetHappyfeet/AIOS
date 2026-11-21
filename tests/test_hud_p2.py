@@ -34,7 +34,7 @@ def test_short_references_are_lossless_and_canonical(kind):
     "g_AAAAAAAAAAAAAAAAAAAAA=", "g_AAAAAAAAAAAAAAAAAAAAAB"])
 def test_wrong_kind_or_noncanonical_reference_is_rejected(reference):
     with pytest.raises((ValueError, ValidationError)):
-        WorkIntent(capability="workspace", purpose="experimental_task", objective="Build a journal", goal_ref=reference)
+        WorkIntent(capability="workspace", purpose="task", objective="Build a journal", goal_ref=reference)
 
 
 @pytest.mark.asyncio

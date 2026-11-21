@@ -92,13 +92,49 @@ def test_same_named_people_keep_distinct_identity_and_knowledge_modes():
         )
     ]
     result = present_catalog(data, token_cap=500)
-    assert len({e["entity_id"] for e in result["entries"]}) == 3
+    assert len({e["entity_id"] for e in result["entries"]}) == 2
     text = render_hud_text({"entity_catalog": result})
     assert (
         "mentioned" in text
         and "encounter recorded" in text
-        and "corpus exposure" in text
+        and "corpus exposure" not in text
     )
+
+
+def test_corpus_entities_require_acquired_spatial_evidence_and_focus():
+    data = catalog()
+    source = "urn:aios:corpus:section:test"
+    for label in ("Takato", "Romance"):
+        place = {"id": label, "label": label, "kind": "place"}
+        data["places"].append({"place": place, "contents": []})
+        data["familiarity"].append({
+            "entity_id": place["id"], "mode": "acquired_corpus_reference", "source": source,
+        })
+
+    paris = {"id": "paris", "label": "Paris", "kind": "place"}
+    members = [{"id": label, "label": label, "kind": "object"} for label in ("museum", "monument")]
+    data["places"].append({
+        "place": paris,
+        "contents": [
+            {"entity": member, "relation": "in", "status": "reported", "source": source}
+            for member in members
+        ],
+    })
+    paris_reference = {"entity_id": paris["id"], "mode": "corpus_reference_exposure", "source": source}
+    data["familiarity"].append(paris_reference)
+    focus = "Takato Romance Paris"
+    exposed = present_catalog(data, focus_text=focus)["entries"]
+    assert [row["label"] for row in exposed] == ["Kitchen", "Bob"]
+
+    paris_reference["mode"] = "acquired_corpus_reference"
+    assert [row["label"] for row in present_catalog(data)["entries"]] == ["Kitchen", "Bob"]
+    acquired = present_catalog(data, focus_text=focus)["entries"]
+    assert [row["label"] for row in acquired] == ["Kitchen", "Bob", "Paris"]
+    assert "acquired reference" in acquired[-1]["text"]
+
+    for edge in data["places"][-1]["contents"]:
+        edge["status"] = "illustrative"
+    assert all(row["label"] != "Paris" for row in present_catalog(data, focus_text=focus)["entries"])
 
 
 def test_focus_ranks_whole_rows_within_budget_and_keeps_opaque_references():

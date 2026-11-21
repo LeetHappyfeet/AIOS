@@ -76,6 +76,71 @@ async def handle_cognitive_operation(db: Database, job: Dict[str, Any]) -> None:
 
 base.JOB_HANDLERS["cognitive_operation"] = handle_cognitive_operation
 
+
+async def handle_reminder_schedule(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.cognitive_operations import CognitiveOperationEngine
+
+    await CognitiveOperationEngine(db).schedule_reminder(UUID(job["payload"]["operation_id"]))
+
+
+async def handle_reminder_due(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.reminders import CharacterReminders
+
+    payload = job["payload"]
+    await CharacterReminders(db).handle_due(UUID(payload["instance_id"]), UUID(payload["trigger_id"]))
+
+
+base.JOB_HANDLERS["reminder_schedule_inference"] = handle_reminder_schedule
+base.JOB_HANDLERS["character_reminder_due"] = handle_reminder_due
+
+
+async def handle_reminder_continuation(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.reminder_continuation import ReminderContinuation
+
+    await ReminderContinuation(db).run(UUID(job["payload"]["trigger_id"]))
+
+
+base.JOB_HANDLERS["reminder_continue"] = handle_reminder_continuation
+
+
+async def handle_notebook_consolidation(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.notebook_consolidation import NotebookConsolidator
+    payload = job["payload"]
+    worker = NotebookConsolidator(db)
+    # Bounded chunks, no chat-path inference; leave exceptional backlogs for
+    # later explicit maintenance or newly admitted note-triggered jobs.
+    for _ in range(12):
+        result = await worker.run(UUID(payload["instance_id"]), UUID(payload["notebook_id"]))
+        if not result or result["remaining"] <= 0:
+            break
+
+
+base.JOB_HANDLERS["notebook_consolidate"] = handle_notebook_consolidation
+
+
+async def handle_notebook_index(db: Database, job: Dict[str, Any]) -> None:
+    from uuid import UUID
+    from aios_app.agent.notebook_vectors import index_notebook
+    payload = job["payload"]
+    try:
+        for _ in range(8):
+            result = await index_notebook(
+                db, UUID(payload["notebook_id"]), UUID(payload["instance_id"]))
+            if not result["indexed"]:
+                break
+    except Exception:
+        # Semantic service is optional. Do not retry a broken Qdrant endpoint
+        # indefinitely; lexical search remains authoritative and available.
+        logger.warning("Notebook semantic index unavailable notebook=%s",
+                       payload.get("notebook_id"), exc_info=True)
+
+
+base.JOB_HANDLERS["notebook_index"] = handle_notebook_index
+
 async def handle_internal_cognition_inference(db: Database, job: Dict[str, Any]) -> None:
     from uuid import UUID
     from aios_app.agent.transactions import InternalCognitionTransactions
@@ -242,7 +307,7 @@ _original_resolve_partition_key = base._resolve_partition_key
 async def _resolve_partition_key(db: Database, job: Dict[str, Any]) -> str:
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "")
-    if job_type in {"goal_plan_continuation", "goal_planning_inference","agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference"} and payload.get("instance_id"):
+    if job_type in {"goal_plan_continuation", "goal_planning_inference","agent_wake","cognitive_operation","internal_cognition_inference","goal_formulation_inference","message_cognition_enrichment", "message_cognition_catchup", "character_inquiry_shadow", "character_inquiry_inference", "character_reminder_due", "reminder_schedule_inference", "reminder_continue", "notebook_consolidate", "notebook_index"} and payload.get("instance_id"):
         return "instance:" + str(payload["instance_id"])
     if job_type == "project_semantic_scope" and payload.get("scope_key"):
         return str(payload["scope_key"])

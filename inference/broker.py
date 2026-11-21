@@ -45,7 +45,9 @@ class CompletionText(str):
 
 
 class InferenceUnavailable(RuntimeError):
-    pass
+    def __init__(self, message: str, *, invalid_response: bool = False):
+        super().__init__(message)
+        self.invalid_response = invalid_response
 
 
 class InferenceProviderBusy(RuntimeError):
@@ -267,10 +269,15 @@ class InferenceBroker:
                 f"No donated inference provider available for '{request.worker_class}'"
             )
         last_error: Exception | None = None
+        invalid_response = False
         for provider in providers:
             try:
                 return await self._attempt(provider, request)
-            except (StructuredResponseError, InferenceProviderBusy) as exc:
+            except StructuredResponseError as exc:
+                invalid_response = True
+                last_error = exc
+                continue
+            except InferenceProviderBusy as exc:
                 last_error = exc
                 continue
             except InferenceProviderExecutionError as exc:
@@ -287,8 +294,9 @@ class InferenceBroker:
                 # of an unhealthy donated inference provider. Preserve traceback.
                 raise
         raise InferenceUnavailable(
-            f"All inference providers failed for '{request.worker_class}': {last_error}"
-        )
+            f"All inference providers failed for '{request.worker_class}': {last_error}",
+            invalid_response=invalid_response,
+        ) from last_error
 
     async def _attempt(
         self, provider: InferenceProvider, request: InferenceRequest

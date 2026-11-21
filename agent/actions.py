@@ -242,6 +242,8 @@ def default_action_registry(db: Database) -> ActionRegistry:
     ))
     from .work_admission import register_work_action
     register_work_action(db, registry)
+    from .notebooks import register_notebook_actions
+    register_notebook_actions(db, registry)
     register_cognitive_actions(db, registry)
     register_agent_capabilities(db, registry)
     register_external_actions(db, registry)
