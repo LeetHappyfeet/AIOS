@@ -1,6 +1,7 @@
 """Pass A notebook boundary tests; no database server required."""
 from unittest.mock import AsyncMock, MagicMock
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -64,3 +65,27 @@ async def test_list_only_reads_active_instance_timeline_goal():
     assert result["notes"] == []
     assert db.fetch.call_args.args[1:4] == (instance_id, timeline_id, goal_id)
     assert "plainto_tsquery" in db.fetch.call_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count,limit,max_chars,has_more", [
+    (1, 8, 6000, False),
+    (2, 2, 6000, False),
+    (3, 2, 6000, True),
+    (2, 8, 200, True),
+])
+async def test_notebook_cursor_only_when_an_older_entry_remains(count, limit, max_chars, has_more):
+    db = MagicMock()
+    db.fetchrow = AsyncMock(return_value={"source_timeline_id": uuid4()})
+    db.fetch = AsyncMock(return_value=[
+        {"entry_id": uuid4(), "entry_type": "note", "content": "x" * 200,
+         "author_kind": "character", "source_node_id": uuid4(), "work_request_id": None,
+         "created_at": datetime.now(timezone.utc)}
+        for _ in range(count)
+    ])
+    result = await NotebookStore(db).list(
+        uuid4(), NoteQuery(goal_ref=uuid4(), limit=limit, max_chars=max_chars)
+    )
+    assert db.fetch.call_args.args[-1] == limit + 1
+    assert len(result["notes"]) == min(count, limit, max_chars // 200)
+    assert result["next_before_id"] == (result["notes"][-1]["note_ref"] if has_more else None)

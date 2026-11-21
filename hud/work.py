@@ -50,6 +50,8 @@ def render_work_results(work, tasks, *, compact_mode=False):
         if not isinstance(view, dict):
             view = result_view({("error" if task["status"] in {"failed", "interrupted", "cancelled"} else "report"): task.get("summary")}, {})
         run_ref = short_reference(task["run_id"], "r")
+        report_notice = ("  Report excerpt retained. See the worker report or journal for the full text."
+                         if view.get("report_body_truncated") else "  Report retained.")
         if task is not latest and task["status"] not in ACTIVE:
             lines.append(f"- Earlier run {run_ref}: {task['status']}; goal review: "
                          f"{task.get('goal_review') or 'not linked'} — {compact(title, 80)}{reported}")
@@ -62,7 +64,7 @@ def render_work_results(work, tasks, *, compact_mode=False):
             lines.extend(view["research_lines"])
             lines.append("  Checks: " + str(task.get("verification_status") or "not reported")
                          + " — " + view["verification_scope"])
-            lines.append("  Full report retained.")
+            lines.append(report_notice)
             continue
         character_report = view.get("character_report")
         if character_report and task is latest:
@@ -77,7 +79,8 @@ def render_work_results(work, tasks, *, compact_mode=False):
             # The final HUD has a shared budget. Offer complete short records
             # instead of one giant report entry that cannot fit at all. Keep
             # failure/limitations ahead of optional findings and raw logs.
-            lines.append(f"- Run {short_reference(task['run_id'], 'r')}: {task['status']}; goal review: {task.get('goal_review') or 'not linked'} — {compact(title, 100)}{reported}")
+            outcome = f"; worker outcome: {view['worker_outcome']}" if view["worker_outcome"] != "not supplied" else ""
+            lines.append(f"- Run {run_ref}: {task['status']}{outcome}; goal review: {task.get('goal_review') or 'not linked'} — {compact(title, 100)}{reported}")
             if request_id:
                 lines.append(f"  Request: {short_reference(request_id, 'q')}")
             if view["error"]:
@@ -95,8 +98,9 @@ def render_work_results(work, tasks, *, compact_mode=False):
             for finding in view["findings"][:2]:
                 lines.append("  Worker-reported finding: " + compact(finding, 180))
             if task is latest and not view["findings"]:
-                lines.append("  No authored findings; retained passage evidence may still exist. Read section evidence, then search_log or report. Do not infer no research was done.")
-            lines.append("  Full report retained.")
+                lines.append("  No authored findings. Inspect the retained report for details.")
+            if view.get("report_body"):
+                lines.append(report_notice)
             continue
         entry = [f"- {title or 'Workspace task'}",
                  f"  Run: {short_reference(task['run_id'], 'r')}" + (f"; request: {short_reference(request_id, 'q')}" if request_id else ""),
@@ -122,7 +126,7 @@ def render_work_results(work, tasks, *, compact_mode=False):
                 entry.append("  Worker summary: " + view["summary"])
             findings = view["findings"]
             if not findings:
-                entry.append("  No authored findings; inspect retained section evidence, then search_log or report for research receipts. Empty findings do not prove no research was done.")
+                entry.append("  No authored findings. Inspect the retained report for details.")
             if view.get("requested_content"):
                 # Requested text takes precedence over a long evidence recital.
                 for finding in findings[:3]:
@@ -168,6 +172,8 @@ def render_work_results(work, tasks, *, compact_mode=False):
                     omitted += 1
             if omitted or view.get("transport_truncated"):
                 entry.append("  Content omitted/truncated by budget; omission is not task failure. Inspect the submitted result or worker source report/journal for more; do not rerun execution just to retrieve it.")
+            if view.get("report_body_truncated"):
+                entry.append(report_notice)
             entry.append("  Full submitted result and check evidence remain in operator request inspection.")
         size = sum(len(line) + 1 for line in entry)
         if spent + size > 12000:

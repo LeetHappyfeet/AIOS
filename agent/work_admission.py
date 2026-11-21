@@ -890,9 +890,21 @@ class WorkAdmission:
                WHERE instance_id=$1 AND source_timeline_id=$2
                  AND status IN ('denied','invalidated')""", instance_id, timeline_id)
         error = await self.db.fetchval(
-            """SELECT s.result FROM aios.work_source_receipt s JOIN aios.character_runtime_state rs ON rs.instance_id=s.instance_id
-               WHERE s.instance_id=$1 AND s.source_node_id=rs.source_head_node_id
-                 AND rs.source_timeline_id=$2 AND s.result->>'status'='needs_clarification'""",
+            """SELECT CASE WHEN s.result->>'status'='needs_clarification' THEN s.result END
+               FROM aios.character_runtime_state rs
+               CROSS JOIN LATERAL (
+                 SELECT rs.source_head_node_id AS node_id
+                 UNION
+                 SELECT e.parent_node_id FROM aios.dag_edge e
+                 WHERE e.timeline_id=$2 AND e.child_node_id=rs.source_head_node_id
+               ) recent
+               JOIN aios.work_source_receipt s ON s.instance_id=rs.instance_id
+                 AND s.source_node_id=recent.node_id
+               JOIN aios.dag_node src ON src.node_id=s.source_node_id AND src.timeline_id=$2
+               JOIN aios.ingest_event ie ON ie.event_id=src.event_id AND ie.superseded_at IS NULL
+               WHERE rs.instance_id=$1 AND rs.source_timeline_id=$2
+               ORDER BY (s.source_node_id=rs.source_head_node_id) DESC, src.event_id DESC
+               LIMIT 1""",
             instance_id,
             timeline_id,
         )

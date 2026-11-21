@@ -118,7 +118,11 @@ def _research_lines(summary):
     errors = records(progress.get("acquisition_errors"))
     searches = records(summary.get("search_log"))
     passages = records(progress.get("verified_passages")) + records(summary.get("research_citations"))
-    if not (progress or searches or passages):
+    activity = any(progress.get(key) for key in (
+        "searches", "passage_scans", "acquisitions", "passages", "failed_acquisitions",
+        "blocked_operations", "pdf_coverage",
+    ))
+    if not (activity or errors or searches or passages):
         return []
     pages = {}
     for row in passages:
@@ -157,9 +161,15 @@ def _research_lines(summary):
     for row in searches:
         errors = row.get("errors")
         status = compact(row.get("status"), 40)
-        if not errors and status not in {"source_error", "source_unhealthy", "partial_results", "query_rejected"}:
+        full_text_error = compact(row.get("full_text_error"), 38)
+        if not (errors or full_text_error or status in {
+            "source_error", "source_unhealthy", "partial_results", "query_rejected", "read_recommended",
+        }):
             continue
-        detail = ", ".join(dict.fromkeys(compact(v, 38) for v in list(errors.values())[:2])) if isinstance(errors, Mapping) else ""
+        details = [compact(v, 38) for v in list(errors.values())[:2]] if isinstance(errors, Mapping) else []
+        if full_text_error:
+            details.append(full_text_error)
+        detail = ", ".join(dict.fromkeys(filter(None, details)))
         failures.append(f"{compact(row.get('query'), 48)} [{detail or status}]")
     if failures:
         lines.append("  Search coverage incomplete: " + "; ".join(failures[:3]))

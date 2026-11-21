@@ -169,6 +169,8 @@ class WorkEvidence:
             "cursor": query.cursor, "next_cursor": end if end < len(text) else None,
             "revision": revision, "total_characters": len(text),
             "evidence_source": view["evidence_source"], "not_goal_completion": True,
+            **({"report_truncated": True}
+               if query.section == "report" and result.get("report_truncated") is True else {}),
             **({"next_recommended_sections": [
                 "evidence", "research_progress", "search_log", "report"
             ], "note": "No authored findings; inspect retained passage receipts and search statuses. Retrieval is not verification."}

@@ -7,7 +7,7 @@ from fastapi import HTTPException
 import test_workspace_client as workspace_tests
 from test_work_admission import setup, scene
 from aios_app.agent.environment_links import task_overlay, append_event
-from aios_app.agent.work_admission import WorkDismissal
+from aios_app.agent.work_admission import WorkDismissal, extract_work_action
 from aios_app.agent.work_profiles import workspace_task_profile, expand_request_template
 from aios_app.hud.work_results import result_view
 from aios_app.agent.workspaces import WorkspaceStore, FinishIn, LeaseIn
@@ -196,7 +196,7 @@ def test_repeated_configuration_blockers_share_one_explanation():
 
 @pytest.mark.parametrize("budget", [None, 2000])
 def test_research_hud_prefers_receipts_and_labels_retrieved_older_run(budget):
-    latest = task({"result_summary": {
+    latest = task({"report": "Research report excerpt", "report_truncated": True, "result_summary": {
         "outcome": "partial",
         "summary": "moraine returned zero results",
         "limitations": ["No write/shell tool was exposed"],
@@ -207,7 +207,9 @@ def test_research_hud_prefers_receipts_and_labels_retrieved_older_run(budget):
         },
         "research_citations": [{"title": "Ichnofacies", "section": "page:5"}],
         "search_log": [{"query": "moraine", "status": "source_error",
-                        "errors": {"calibre": "http_status_404"}}],
+                        "errors": {"calibre": "http_status_404"}},
+                       {"query": "negative mass", "status": "read_recommended",
+                        "full_text_error": "response_too_large"}],
     }}, reported_at="2026-11-18 08:11:45+00:00")
     old = task({"report": "STALE INLINE PROSE"})
     old["run_id"] = "old-run"
@@ -222,10 +224,42 @@ def test_research_hud_prefers_receipts_and_labels_retrieved_older_run(budget):
     assert "Conodonts (page:9); Ichnofacies (page:5)" in text
     assert "GLG-123 — response_too_large (download limit 12 MiB)" in text
     assert "moraine [http_status_404]" in text
+    assert "negative mass [response_too_large]" in text
+    assert "Report excerpt retained" in text
+    assert "Full report retained" not in text
     assert "Worker answer: moraine returned zero results" in text
     assert "No write/shell" not in text
     assert "Earlier run old-run" in text and "STALE INLINE PROSE" not in text
     assert "RETRIEVED WORK RESULT (historical run old-run, reported 2026-11-16;" in text
+
+
+def test_notebook_only_result_uses_worker_outcome_despite_empty_research_metadata():
+    latest = task({"result_summary": {
+        "outcome": "completed", "summary": "Retrieved one project note.",
+        "research_progress": {"searches": 0, "passages": 0, "verified_passages": []},
+        "search_log": [],
+    }})
+    text = render_hud_text({"hud": {"token_budget": 1800}, "remote_tasks": [latest]})
+    assert "worker outcome: completed" in text
+    assert "research outcome" not in text
+    assert "Search status log" not in text
+
+
+def test_notebook_read_example_sets_explicit_goal_and_inspection_fields():
+    goal = uuid4()
+    reason = "goal_ref must identify an active goal with an open attempt in this conversation"
+    text = render_hud_text({
+        "hud": {"token_budget": 1800},
+        "scene": {"working_state": {"immediate_goal": {"goal_id": str(goal), "text": "Open a document"}}},
+        "work": {"capabilities": [{"capability": "workspace", "purpose": "task",
+                                   "description": "Inspect files", "online": True}],
+                 "request_error": {"reason": reason}},
+    })
+    action = extract_work_action(next(line for line in text.splitlines() if "aios_notebook_recent" in line))
+    assert action["goal_ref"] == short_reference(goal, "g")
+    assert action["execution_mode"] == "inspection_only"
+    assert action["report_mode"] == "inline"
+    assert reason in text
 
 
 @pytest.mark.parametrize("budget", [1600, 2400, None])

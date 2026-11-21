@@ -190,11 +190,11 @@ class NotebookStore:
                ORDER BY e.created_at DESC,e.entry_id DESC
                LIMIT $6""",
             instance_id, scope["source_timeline_id"], req.goal_ref,
-            req.query, req.before_id, req.limit,
+            req.query, req.before_id, req.limit + 1,
         )
         notes = []
         remaining = req.max_chars
-        for r in rows:
+        for r in rows[:req.limit]:
             if remaining <= 0:
                 break
             excerpt = r["content"][:min(remaining, max_note_chars or remaining)]
@@ -212,7 +212,7 @@ class NotebookStore:
         return {
             "goal_ref": str(req.goal_ref),
             "notes": notes,
-            "next_before_id": str(notes[-1]["note_ref"]) if notes and len(rows) >= len(notes) else None,
+            "next_before_id": notes[-1]["note_ref"] if notes and len(rows) > len(notes) else None,
         }
 
 

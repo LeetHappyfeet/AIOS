@@ -475,13 +475,25 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
         example = capabilities[0]
         action = {"op": "request_work", "capability": example["capability"],
                   "purpose": example["purpose"], "objective": "Describe the task and desired result"}
-        lines.append("Use request_work with a listed pair and concrete objective. Include goal_ref when working on the displayed goal. Wait for results before claiming completion or retrying.")
+        lines.append("Use request_work with a listed pair and concrete objective. Set goal_ref as a top-level field when working on a managed goal. Wait for results before claiming completion or retrying.")
         lines.append("Without a native tool, emit one action block outside code fences: <aios_action>"
                      + json.dumps(action, separators=(",", ":")) + "</aios_action>")
     elif work.get("unavailable_reason"):
         lines.append("WORK UNAVAILABLE: " + str(work["unavailable_reason"])[:300])
+    section("work_admission_error", 1, 0.12, atomic=True)
     if work.get("request_error"):
         lines.append("WORK REQUEST NEEDS CLARIFICATION: " + str(work["request_error"]["reason"])[:300])
+    section("notebook_actions", 3, 0.25, atomic=True)
+    if immediate_goal_id and _scene_text(immediate_goal) and any(
+        (item["capability"], item["purpose"]) == ("workspace", "task")
+        for item in capabilities
+    ):
+        action = {"op": "request_work", "capability": "workspace", "purpose": "task",
+                  "goal_ref": short_reference(immediate_goal_id, "g"),
+                  "execution_mode": "inspection_only", "report_mode": "inline",
+                  "objective": "Call aios_notebook_recent and return the requested entries inline."}
+        lines.append("For an inspection-only read of this goal's notebook, use request_work with these fields: <aios_action>"
+                     + json.dumps(action, separators=(",", ":")) + "</aios_action>")
     tasks = frame.get("remote_tasks") or []
     latest_work = next((task for task in tasks
                         if task.get("status") not in {"queued", "running"}), None)
@@ -509,7 +521,7 @@ def render_hud_text(frame: Mapping[str, Any]) -> str:
     section("work_retrieval", 2, 0.12, atomic=True)
     if work.get("result_tool"):
         lines.append('RETAINED WORK EVIDENCE: Use read_work_result with one run_id or request_id. Fallback: <aios_action>{"op":"read_work_result","run_id":"COPY_RUN_ID","section":"findings","cursor":0,"limit":3000}</aios_action> block. For more, use next_cursor and revision.')
-        lines.append('When findings is empty, read the retained evidence, research_progress and search_log sections before requesting new work. Empty findings are not evidence of no research.')
+        lines.append('No authored findings can mean research synthesis was incomplete. For research runs, inspect the retained evidence, research_progress and search_log before requesting new work.')
     section("retrieved_result", 7 if historical else 2,
             0.08 if historical else 0.24, atomic=True)
     if retrieved:
