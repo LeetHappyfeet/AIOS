@@ -18,6 +18,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#connect-your-application">Connect an app</a> ·
   <a href="docs/README.md">Developer docs</a> ·
+  <a href="https://discord.gg/ysNrNBFj7">Developer Discord</a> ·
   <a href="#dependencies">Dependencies</a>
 </p>
 
@@ -39,19 +40,19 @@
   <tr>
     <td width="50%" valign="top">
       <img src="docs/media/knowledge-acquisition.svg" alt="Documents, an open book, and a selected item of acquired knowledge" width="100%" />
-      <h3>Research with sources <em>(experimental)</em></h3>
-      <p>Import documents or lorebooks into a shared corpus and let individual agents acquire selected material with source references. With AIOS Client and explicit grants, an agent can request research using local documents, Calibre OPDS, or SearXNG and revisit the returned evidence and limitations.</p>
+      <h3>Research projects with sources</h3>
+      <p>Build a shared corpus from documents or lorebooks, or use AIOS Client to search approved sources such as local documents, Calibre OPDS, and SearXNG. Keep source references, open questions, and notes tied to a project goal so an agent can pick up the investigation in a later run.</p>
     </td>
     <td width="50%" valign="top">
-      <h3>Projects that carry over between runs <em>(experimental)</em></h3>
-      <p>Keep a managed goal, an advisory plan, and a private project notebook. A due reminder can bring the goal back for review while the chat client is closed. An authorized AIOS Client can inspect files, run configured workspace tasks, and return checks and reports for later review.</p>
+      <img src="docs/media/persistent-agents.webp" alt="An agent at a workstation with a notebook, clock, and completed task" width="100%" />
+      <h3>Persistent agents</h3>
+      <p>Give an agent goals and plans it can revisit between conversations. With background inference configured, a due reminder can bring a goal back for review while the chat client is closed. An authorized AIOS Client can run a workspace task and return reports and checks that inform the agent’s next step.</p>
     </td>
   </tr>
 </table>
 
-The AIOS toolkit includes project notes and research familiar from [ChatGPT Projects](https://help.openai.com/en/articles/10169521-projects-in-chatgpt)
-and [Grok](https://docs.x.ai/grok/overview), along with persistent memory, scheduling, and
-computer tools found in [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/overview).
+The AIOS toolkit includes project notes and research familiar from ChatGPT Projects and
+Grok, along with persistent memory, scheduling, and computer tools found in Hermes Agent.
 These tools build on the timeline, knowledge, and goals AIOS already tracks for each character.
 
 ## Use AIOS with SillyTavern
